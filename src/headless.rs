@@ -246,15 +246,17 @@ pub async fn run(
     let session_id = persist_session(
         session,
         store,
-        final_messages,
-        &goal,
-        &tasks,
-        &compaction,
-        &ralph,
-        &config.profile,
-        &config.model,
-        provider.tokens_used(),
-        started.elapsed().as_secs(),
+        PersistedRun {
+            messages: final_messages,
+            goal: &goal,
+            tasks: &tasks,
+            compaction: &compaction,
+            ralph: &ralph,
+            profile: &config.profile,
+            model: &config.model,
+            tokens_used: provider.tokens_used(),
+            active_secs: started.elapsed().as_secs(),
+        },
     )?;
     if let Err(error) = services
         .run_hooks(
@@ -322,18 +324,22 @@ pub async fn run(
     Ok(())
 }
 
+struct PersistedRun<'a> {
+    messages: Vec<Value>,
+    goal: &'a GoalState,
+    tasks: &'a TaskList,
+    compaction: &'a CompactionState,
+    ralph: &'a Option<RalphLoop>,
+    profile: &'a str,
+    model: &'a str,
+    tokens_used: u64,
+    active_secs: u64,
+}
+
 fn persist_session(
     mut session: Option<Session>,
     store: Option<SessionStore>,
-    messages: Vec<Value>,
-    goal: &GoalState,
-    tasks: &TaskList,
-    compaction: &CompactionState,
-    ralph: &Option<RalphLoop>,
-    profile: &str,
-    model: &str,
-    tokens_used: u64,
-    active_secs: u64,
+    run: PersistedRun<'_>,
 ) -> Result<Option<String>> {
     let Some(store) = store else {
         return Ok(None);
@@ -341,15 +347,19 @@ fn persist_session(
     let mut session_value = if let Some(session_value) = session.take() {
         session_value
     } else {
-        store.create(profile.to_owned(), model.to_owned(), messages.clone())?
+        store.create(
+            run.profile.to_owned(),
+            run.model.to_owned(),
+            run.messages.clone(),
+        )?
     };
-    session_value.update_messages(messages);
-    session_value.goal = goal.snapshot();
-    session_value.tasks = tasks.snapshot();
-    session_value.compaction = Some(compaction.clone());
-    session_value.ralph_loop = ralph.clone();
-    session_value.tokens_used = tokens_used;
-    session_value.active_secs = session_value.active_secs.saturating_add(active_secs);
+    session_value.update_messages(run.messages);
+    session_value.goal = run.goal.snapshot();
+    session_value.tasks = run.tasks.snapshot();
+    session_value.compaction = Some(run.compaction.clone());
+    session_value.ralph_loop = run.ralph.clone();
+    session_value.tokens_used = run.tokens_used;
+    session_value.active_secs = session_value.active_secs.saturating_add(run.active_secs);
     store.save(&session_value)?;
     Ok(Some(session_value.id.to_string()))
 }
@@ -380,6 +390,22 @@ fn turn_options(
     }
 }
 
+fn latest_assistant_text(messages: &[Value]) -> String {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "assistant" && message["content"].is_string())
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn emit(value: Value) -> Result<()> {
+    println!("{}", serde_json::to_string(&value)?);
+    io::stdout().flush()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,15 +431,17 @@ mod tests {
         let id = persist_session(
             None,
             Some(store.clone()),
-            messages,
-            &GoalState::default(),
-            &TaskList::default(),
-            &CompactionState::default(),
-            &None,
-            "local",
-            "model",
-            150_000_000,
-            42,
+            PersistedRun {
+                messages,
+                goal: &GoalState::default(),
+                tasks: &TaskList::default(),
+                compaction: &CompactionState::default(),
+                ralph: &None,
+                profile: "local",
+                model: "model",
+                tokens_used: 150_000_000,
+                active_secs: 42,
+            },
         )
         .unwrap()
         .unwrap();
@@ -447,18 +475,20 @@ mod tests {
         let id = persist_session(
             Some(session),
             Some(store.clone()),
-            vec![
-                json!({"role":"system","content":"x"}),
-                json!({"role":"user","content":"continue"}),
-            ],
-            &GoalState::default(),
-            &TaskList::default(),
-            &CompactionState::default(),
-            &None,
-            "ignored",
-            "ignored",
-            15_500,
-            10,
+            PersistedRun {
+                messages: vec![
+                    json!({"role":"system","content":"x"}),
+                    json!({"role":"user","content":"continue"}),
+                ],
+                goal: &GoalState::default(),
+                tasks: &TaskList::default(),
+                compaction: &CompactionState::default(),
+                ralph: &None,
+                profile: "ignored",
+                model: "ignored",
+                tokens_used: 15_500,
+                active_secs: 10,
+            },
         )
         .unwrap()
         .unwrap();
@@ -469,20 +499,4 @@ mod tests {
         assert_eq!(loaded.profile, "local");
         assert_eq!(loaded.model, "old-model");
     }
-}
-
-fn latest_assistant_text(messages: &[Value]) -> String {
-    messages
-        .iter()
-        .rev()
-        .find(|message| message["role"] == "assistant" && message["content"].is_string())
-        .and_then(|message| message["content"].as_str())
-        .unwrap_or_default()
-        .to_owned()
-}
-
-fn emit(value: Value) -> Result<()> {
-    println!("{}", serde_json::to_string(&value)?);
-    io::stdout().flush()?;
-    Ok(())
 }
