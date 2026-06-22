@@ -1,0 +1,6 @@
+/target
+.DS_Store
+.env
+.abacus/
+.claude/settings.local.json
+

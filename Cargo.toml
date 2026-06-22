@@ -1,0 +1,48 @@
+[package]
+name = "abacus-agent"
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.88"
+description = "A fast, focused terminal coding agent"
+documentation = "https://docs.rs/abacus-agent"
+repository = "https://github.com/empero-org/abacus"
+homepage = "https://empero.org"
+license-file = "LICENSE"
+keywords = ["ai", "agent", "coding", "tui", "terminal"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "abacus"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
+cron = "0.16"
+crossterm = "0.29"
+futures-util = "0.3"
+globset = "0.4"
+ignore = "0.4"
+pulldown-cmark = "0.13"
+ratatui = "0.30.2"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+rpassword = "7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+similar = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+toml = "0.8"
+unicode-width = "0.2"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
