@@ -1,5 +1,8 @@
 use std::io::{self, Write};
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64},
+};
 use std::time::Instant;
 
 use anyhow::{Result, bail};
@@ -30,7 +33,11 @@ pub async fn run(
     loop_config: Option<RalphLoop>,
     reporter: Option<ActivityReporter>,
 ) -> Result<()> {
-    let provider = Provider::new(&config)?;
+    let initial_tokens = session
+        .as_ref()
+        .map(|session| session.tokens_used)
+        .unwrap_or(0);
+    let provider = Provider::with_tokens(&config, Arc::new(AtomicU64::new(initial_tokens)))?;
     let session_id = session.as_ref().map(|session| session.id.to_string());
     services
         .run_hooks(
@@ -244,6 +251,10 @@ pub async fn run(
         &tasks,
         &compaction,
         &ralph,
+        &config.profile,
+        &config.model,
+        provider.tokens_used(),
+        started.elapsed().as_secs(),
     )?;
     if let Err(error) = services
         .run_hooks(
@@ -319,18 +330,27 @@ fn persist_session(
     tasks: &TaskList,
     compaction: &CompactionState,
     ralph: &Option<RalphLoop>,
+    profile: &str,
+    model: &str,
+    tokens_used: u64,
+    active_secs: u64,
 ) -> Result<Option<String>> {
-    let Some(mut session_value) = session.take() else {
+    let Some(store) = store else {
         return Ok(None);
+    };
+    let mut session_value = if let Some(session_value) = session.take() {
+        session_value
+    } else {
+        store.create(profile.to_owned(), model.to_owned(), messages.clone())?
     };
     session_value.update_messages(messages);
     session_value.goal = goal.snapshot();
     session_value.tasks = tasks.snapshot();
     session_value.compaction = Some(compaction.clone());
     session_value.ralph_loop = ralph.clone();
-    if let Some(store) = store {
-        store.save(&session_value)?;
-    }
+    session_value.tokens_used = tokens_used;
+    session_value.active_secs = session_value.active_secs.saturating_add(active_secs);
+    store.save(&session_value)?;
     Ok(Some(session_value.id.to_string()))
 }
 
@@ -357,6 +377,97 @@ fn turn_options(
         compaction_budget: config.model_limits.compaction_budget(),
         allow_subagents: true,
         web_search: config.web_search.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AbacusPaths;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    #[test]
+    fn headless_persistence_creates_session_with_usage_totals() {
+        let directory = tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = SessionStore::new(
+            &AbacusPaths::under(directory.path().join("home")),
+            workspace.canonicalize().unwrap(),
+        );
+        let messages = vec![
+            json!({"role":"system","content":"x"}),
+            json!({"role":"user","content":"count this"}),
+            json!({"role":"assistant","content":"done"}),
+        ];
+
+        let id = persist_session(
+            None,
+            Some(store.clone()),
+            messages,
+            &GoalState::default(),
+            &TaskList::default(),
+            &CompactionState::default(),
+            &None,
+            "local",
+            "model",
+            150_000_000,
+            42,
+        )
+        .unwrap()
+        .unwrap();
+
+        let loaded = store.load(&id[..8]).unwrap();
+        assert_eq!(loaded.tokens_used, 150_000_000);
+        assert_eq!(loaded.active_secs, 42);
+        assert_eq!(loaded.title, "count this");
+    }
+
+    #[test]
+    fn headless_persistence_keeps_resumed_usage_cumulative() {
+        let directory = tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = SessionStore::new(
+            &AbacusPaths::under(directory.path().join("home")),
+            workspace.canonicalize().unwrap(),
+        );
+        let mut session = store
+            .create(
+                "local".into(),
+                "old-model".into(),
+                vec![json!({"role":"system","content":"x"})],
+            )
+            .unwrap();
+        session.tokens_used = 12_000;
+        session.active_secs = 30;
+        store.save(&session).unwrap();
+
+        let id = persist_session(
+            Some(session),
+            Some(store.clone()),
+            vec![
+                json!({"role":"system","content":"x"}),
+                json!({"role":"user","content":"continue"}),
+            ],
+            &GoalState::default(),
+            &TaskList::default(),
+            &CompactionState::default(),
+            &None,
+            "ignored",
+            "ignored",
+            15_500,
+            10,
+        )
+        .unwrap()
+        .unwrap();
+
+        let loaded = store.load(&id[..8]).unwrap();
+        assert_eq!(loaded.tokens_used, 15_500);
+        assert_eq!(loaded.active_secs, 40);
+        assert_eq!(loaded.profile, "local");
+        assert_eq!(loaded.model, "old-model");
     }
 }
 

@@ -15,7 +15,7 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             binary: abacus
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             binary: abacus
           - os: macos-14
