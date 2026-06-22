@@ -45,6 +45,7 @@ fn headless_json_runs_without_prior_setup() {
     let output = Command::new(env!("CARGO_BIN_EXE_abacus"))
         .current_dir(directory.path())
         .env("ABACUS_HOME", directory.path().join("home"))
+        .env("ABACUS_NO_ACTIVITY", "1")
         .args([
             "--base-url",
             &format!("http://{address}/v1"),
@@ -114,6 +115,7 @@ fn headless_loop_stops_when_promise_appears() {
     let output = Command::new(env!("CARGO_BIN_EXE_abacus"))
         .current_dir(directory.path())
         .env("ABACUS_HOME", directory.path().join("home"))
+        .env("ABACUS_NO_ACTIVITY", "1")
         .args([
             "--base-url",
             &format!("http://{address}/v1"),
