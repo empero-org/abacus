@@ -149,6 +149,8 @@ command = "bin/audit-hook"
 timeout_seconds = 30
 ```
 
+See the [plugin authoring guide](docs/plugin_guide.md) for the complete manifest reference, examples for every contribution type, hook payloads, discovery rules, trust, and testing guidance.
+
 Manage installed plugins with:
 
 ```sh
