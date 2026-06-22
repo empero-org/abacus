@@ -2019,7 +2019,29 @@ pub async fn run(
         session_store,
         services.clone(),
     )?;
+    // Heartbeat the open session so the dashboard shows live tokens and so a
+    // session that is killed (terminal closed) drops off "active" instead of
+    // lingering. The shared token counter survives model switches.
+    let heartbeat = reporter.clone().map(|reporter| {
+        let tokens = app.tokens.clone();
+        let session = activity_session.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(
+                crate::activity::HEARTBEAT_INTERVAL_SECS,
+            ));
+            ticker.tick().await; // the first tick fires immediately; skip it
+            loop {
+                ticker.tick().await;
+                reporter
+                    .report_heartbeat(&session, tokens.load(std::sync::atomic::Ordering::Relaxed))
+                    .await;
+            }
+        })
+    });
     let result = event_loop(&mut terminal, &mut app).await;
+    if let Some(handle) = heartbeat {
+        handle.abort();
+    }
     let end_services = app.services.clone();
     let end_session_id = app.session.as_ref().map(|session| session.id.to_string());
     let tokens_used = app.provider.tokens_used();

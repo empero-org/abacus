@@ -55,6 +55,24 @@ pub async fn run(
             .report_start(&activity_session, &config.model)
             .await;
     }
+    // Keep long-running headless sessions (e.g. loops) visible with live tokens,
+    // and let them drop off "active" if the process is killed.
+    let heartbeat = reporter.clone().map(|reporter| {
+        let provider = provider.clone();
+        let session = activity_session.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
+                crate::activity::HEARTBEAT_INTERVAL_SECS,
+            ));
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                reporter
+                    .report_heartbeat(&session, provider.tokens_used())
+                    .await;
+            }
+        })
+    });
     let (events, mut receiver) = mpsc::unbounded_channel();
     let allow = Arc::new(AtomicBool::new(config.yes));
     let goal = GoalState::new(session.as_ref().and_then(|session| session.goal.clone()));
@@ -271,6 +289,9 @@ pub async fn run(
         .await
     {
         eprintln!("warning: session_end hook failed: {error:#}");
+    }
+    if let Some(handle) = heartbeat {
+        handle.abort();
     }
     if let Some(reporter) = &reporter {
         reporter

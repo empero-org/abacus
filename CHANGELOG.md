@@ -15,7 +15,7 @@
 - `web_search` and `read_page` tools: keyless DuckDuckGo by default, configurable Brave / Tavily backends via `[search]` + an API-key env var, HTML-to-text extraction, and an SSRF guard that refuses non-HTTP and private/loopback hosts
 - `/usage` panel with a local activity heatmap, usage totals, and per-model breakdown; `Up`/`Down` recall earlier prompts in the composer
 - Per-model context limits: added GPT-5, Gemini, Claude, DeepSeek V4, GLM-5.x, Kimi K2, and Qwen3-Coder to the family heuristic, and `/models` auto-detection now never shrinks a recognized family below its published window (guards Ollama's small default `num_ctx`)
-- Anonymous, best-effort activity reporting (open/close pings with model, coarse location, duration, and an approximate token total) plus feedback submission, both sent to the Empero activity service at `abacus.empero.org` (maintained as a separate project, outside this repo); opt out with `[activity] enabled = false` or `ABACUS_NO_ACTIVITY=1`
+- Anonymous, best-effort activity reporting (open/close events plus 45-second heartbeats with model, coarse location, duration, and an approximate token total) plus feedback submission, both sent to the Empero activity service at `abacus.empero.org` (maintained as a separate project, outside this repo); opt out with `[activity] enabled = false` or `ABACUS_NO_ACTIVITY=1`
 - Workspace-confinement, secret-path, patch-check, mode-enforcement, compact-layout, and renderer regression coverage
 
 ## 0.4.0

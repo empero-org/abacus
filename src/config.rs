@@ -578,7 +578,7 @@ impl Default for FeedbackSettings {
     }
 }
 
-/// Anonymous open/close activity reporting (see [`crate::activity`]).
+/// Anonymous session activity reporting (see [`crate::activity`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ActivitySettings {

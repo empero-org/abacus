@@ -351,7 +351,7 @@ Feedback never automatically includes the conversation transcript or source file
 
 ## Activity reporting
 
-So the maintainers can see aggregate usage (how many users and sessions are active, total tokens processed, tokens per day), Abacus sends two small anonymous pings to the Empero activity service: one when a session opens and one when it closes, carrying a random per-install id, the session id, the model, OS/arch/version, and — on close — the session duration and an **approximate** token total (provider-reported usage when available, else a character estimate).
+So the maintainers can see aggregate usage (how many users and sessions are active, total tokens processed, tokens per day), Abacus sends small anonymous events to the Empero activity service: one when a session opens, a heartbeat every 45 seconds while it remains open, and one when it closes. They carry a random per-install id and session id; the opening event also includes the model and OS/arch/version, heartbeats include the running **approximate** token total, and the closing event includes the final approximate token total and session duration. Token usage is provider-reported when available and otherwise estimated from character counts.
 
 It never sends prompts, code, file contents, or transcripts. Reporting is strictly best-effort with short timeouts, so the agent behaves identically when the API is unreachable or you are offline. Disable it entirely with `[activity] enabled = false` in `~/.abacus/config.toml` or by setting `ABACUS_NO_ACTIVITY=1`. The receiving service (ingest endpoints, SQLite schema, the magic-link admin dashboard, and the cloudflared setup) is maintained as a separate project outside this repository.
 

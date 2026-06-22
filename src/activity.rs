@@ -1,7 +1,8 @@
 //! Best-effort, anonymous activity reporting. Abacus pings the Empero activity
-//! API once when a session opens and once when it closes (with the session's
-//! approximate token total and duration), so the dashboard can show how many
-//! users and sessions are active. It never sends prompts, code, or transcripts.
+//! API when a session opens, periodically while it remains active, and when it
+//! closes (with the session's approximate token total and duration), so the
+//! dashboard can show how many users and sessions are active. It never sends
+//! prompts, code, or transcripts.
 //!
 //! It is strictly best-effort: every request has a short timeout and failures
 //! are ignored, so the agent works identically offline or with the API down.
@@ -15,6 +16,10 @@ use uuid::Uuid;
 use crate::config::AbacusPaths;
 
 pub const DEFAULT_ACTIVITY_ENDPOINT: &str = "https://abacus.empero.org/v1/activity";
+
+/// How often an open session pings the API. Must stay well under the server's
+/// active-session window so a live session is never mistaken for a stale one.
+pub const HEARTBEAT_INTERVAL_SECS: u64 = 45;
 
 #[derive(Clone)]
 pub struct ActivityReporter {
@@ -62,6 +67,21 @@ impl ActivityReporter {
                 "app_version": env!("CARGO_PKG_VERSION"),
                 "os": std::env::consts::OS,
                 "arch": std::env::consts::ARCH,
+            }),
+        )
+        .await;
+    }
+
+    /// Periodic liveness + running token count while a session is open, so the
+    /// dashboard can show live tokens and drop sessions that were killed (and so
+    /// never sent `end`) instead of leaving them "active".
+    pub async fn report_heartbeat(&self, session_id: &str, tokens: u64) {
+        self.post(
+            "heartbeat",
+            json!({
+                "install_id": self.install_id,
+                "session_id": session_id,
+                "tokens": tokens,
             }),
         )
         .await;
