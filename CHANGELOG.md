@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1 — 2026-06-22
+
+### Minor fixes
+
+- Keep active-session token counts fresh with best-effort activity heartbeats
+- Disable activity reporting during tests and CI
+- Add a complete plugin authoring guide covering skills, commands, hooks, MCP servers, discovery, and trust
+
 ## 0.5.0 — 2026-06-22
 
 - Full CommonMark/GFM transcript renderer with styled headings, emphasis, links, quotes, lists, tasks, code blocks, and tables
