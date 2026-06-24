@@ -177,11 +177,7 @@ async fn run_turn_inner(
         // re-hit the provider; compaction and delta-forwarding happen once.
         const EMPTY_COMPLETION_RETRY_LIMIT: usize = 2;
         let mut empty_retries: usize = 0;
-        let mut provider_messages = build_provider_messages(
-            &messages,
-            &options,
-            active_mode,
-        );
+        let mut provider_messages = build_provider_messages(&messages, &options, active_mode);
         let completion = loop {
             let completion = match provider
                 .complete(&provider_messages, &specs, delta_tx.clone())
@@ -210,10 +206,8 @@ async fn run_turn_inner(
                 // Brief backoff before retrying so the provider has a moment
                 // to recover from a transient stream hiccup, then rebuild the
                 // message list in case compaction or context state changed.
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    500 * empty_retries as u64,
-                ))
-                .await;
+                tokio::time::sleep(std::time::Duration::from_millis(500 * empty_retries as u64))
+                    .await;
                 provider_messages = build_provider_messages(&messages, &options, active_mode);
                 continue;
             }
@@ -265,15 +259,12 @@ async fn run_turn_inner(
                     Ok(answer) => {
                         let mut parts = Vec::new();
                         if !answer.selected_labels.is_empty() {
-                            parts.push(format!(
-                                "Selected: {}",
-                                answer.selected_labels.join(", ")
-                            ));
+                            parts.push(format!("Selected: {}", answer.selected_labels.join(", ")));
                         }
-                        if let Some(custom) = &answer.custom_text {
-                            if !custom.is_empty() {
-                                parts.push(format!("Custom answer: {custom}"));
-                            }
+                        if let Some(custom) = &answer.custom_text
+                            && !custom.is_empty()
+                        {
+                            parts.push(format!("Custom answer: {custom}"));
                         }
                         if parts.is_empty() {
                             "User skipped the question.".to_owned()
@@ -612,13 +603,17 @@ async fn request_user_question(
     let request = UserQuestionRequest {
         question: args.question,
         header: args.header,
-        options: args.options.iter().map(|opt| {
-            if opt.description.is_empty() {
-                opt.label.clone()
-            } else {
-                format!("{} — {}", opt.label, opt.description)
-            }
-        }).collect(),
+        options: args
+            .options
+            .iter()
+            .map(|opt| {
+                if opt.description.is_empty() {
+                    opt.label.clone()
+                } else {
+                    format!("{} — {}", opt.label, opt.description)
+                }
+            })
+            .collect(),
         multi_select: args.multi_select,
         respond,
     };
@@ -635,7 +630,9 @@ async fn request_user_question(
         });
     }
 
-    receive.await.context("user question was cancelled before answer")
+    receive
+        .await
+        .context("user question was cancelled before answer")
 }
 
 fn assistant_message(content: &str, calls: &[ToolCall]) -> Value {

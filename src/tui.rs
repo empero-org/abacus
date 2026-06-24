@@ -37,8 +37,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     activity::ActivityReporter,
     agent::{
-        AgentEvent, AgentMode, ApprovalDecision, ApprovalRequest, TurnOptions,
-        UserQuestionRequest, compact_messages, initial_messages, message_chars, run_turn,
+        AgentEvent, AgentMode, ApprovalDecision, ApprovalRequest, TurnOptions, UserQuestionRequest,
+        compact_messages, initial_messages, message_chars, run_turn,
     },
     compaction::CompactionState,
     config::{Config, Credentials, PermissionMode, ProviderProtocol, SETTINGS_VERSION, Settings},
@@ -190,7 +190,10 @@ impl PendingUserQuestion {
             if *on {
                 // Strip the trailing " — description" added for display, keeping
                 // just the option label so the LLM sees clean identifiers.
-                let raw = self.options[index].split(" — ").next().unwrap_or(&self.options[index]);
+                let raw = self.options[index]
+                    .split(" — ")
+                    .next()
+                    .unwrap_or(&self.options[index]);
                 selected_labels.push(raw.to_owned());
             }
         }
@@ -3935,7 +3938,9 @@ fn draw_feedback(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn draw_user_question(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let Some(question) = &app.question else { return };
+    let Some(question) = &app.question else {
+        return;
+    };
     // Sizing: 80 cols wide, with a sensible height based on content.
     let opts = question.options.len() as u16;
     let option_rows = opts.max(2); // reserve at least 2 lines even when 0 options
@@ -3967,12 +3972,12 @@ fn draw_user_question(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),    // question label + value
-            Constraint::Length(1),    // spacer
-            Constraint::Min(3),       // options
-            Constraint::Length(1),    // spacer
-            Constraint::Length(3),    // custom prompt
-            Constraint::Length(2),    // footer hints
+            Constraint::Length(2), // question label + value
+            Constraint::Length(1), // spacer
+            Constraint::Min(3),    // options
+            Constraint::Length(1), // spacer
+            Constraint::Length(3), // custom prompt
+            Constraint::Length(2), // footer hints
         ])
         .split(inner);
 
@@ -3984,7 +3989,10 @@ fn draw_user_question(frame: &mut Frame<'_>, area: Rect, app: &App) {
         )),
         Line::from(question.question.as_str()),
     ]);
-    frame.render_widget(Paragraph::new(question_text).wrap(Wrap { trim: false }), chunks[0]);
+    frame.render_widget(
+        Paragraph::new(question_text).wrap(Wrap { trim: false }),
+        chunks[0],
+    );
 
     // Options list.
     let option_entries: Vec<Line> = if question.options.is_empty() {
@@ -4036,12 +4044,12 @@ fn draw_user_question(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let value = question.custom.text();
     let custom_line = if value.is_empty() {
         Line::from(vec![
-            Span::styled(format!("{custom_label}"), Style::default().fg(custom_color)),
+            Span::styled(custom_label.to_string(), Style::default().fg(custom_color)),
             Span::styled(placeholder, Style::default().fg(muted())),
         ])
     } else {
         Line::from(vec![
-            Span::styled(format!("{custom_label}"), Style::default().fg(custom_color)),
+            Span::styled(custom_label.to_string(), Style::default().fg(custom_color)),
             Span::styled(value.as_str(), Style::default().fg(custom_color)),
         ])
     };
@@ -4049,14 +4057,8 @@ fn draw_user_question(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(custom_color))
-        .title(Span::styled(
-            " custom ",
-            Style::default().fg(custom_color),
-        ));
-    frame.render_widget(
-        Paragraph::new(custom_line).block(custom_block),
-        chunks[2],
-    );
+        .title(Span::styled(" custom ", Style::default().fg(custom_color)));
+    frame.render_widget(Paragraph::new(custom_line).block(custom_block), chunks[2]);
 
     // Footer hints.
     let hint_switch = if question.editing_custom {
