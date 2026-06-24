@@ -37,8 +37,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     activity::ActivityReporter,
     agent::{
-        AgentEvent, AgentMode, ApprovalDecision, ApprovalRequest, TurnOptions, compact_messages,
-        initial_messages, message_chars, run_turn,
+        AgentEvent, AgentMode, ApprovalDecision, ApprovalRequest, TurnOptions,
+        UserQuestionRequest, compact_messages, initial_messages, message_chars, run_turn,
     },
     compaction::CompactionState,
     config::{Config, Credentials, PermissionMode, ProviderProtocol, SETTINGS_VERSION, Settings},
@@ -141,6 +141,70 @@ struct PendingApproval {
 enum ApprovalView {
     Unified,
     Raw,
+}
+
+/// Open modal for an `ask_user` tool call. The user navigates the options with
+/// arrow keys (and toggles each with `space` when multi-select), then confirms
+/// with `enter`. They can edit the custom text field with character input and
+/// append it on `enter` if no option was selected.
+struct PendingUserQuestion {
+    header: String,
+    question: String,
+    options: Vec<String>,
+    multi_select: bool,
+    /// One `bool` per option; `true` means toggled on (multi-select only).
+    selected: Vec<bool>,
+    cursor: usize,
+    custom: InputBuffer,
+    /// Whether the user is currently editing the custom text field rather than
+    /// navigating options.
+    editing_custom: bool,
+    respond: tokio::sync::oneshot::Sender<crate::agent::UserAnswer>,
+}
+
+impl PendingUserQuestion {
+    fn new(
+        header: String,
+        question: String,
+        options: Vec<String>,
+        multi_select: bool,
+        respond: tokio::sync::oneshot::Sender<crate::agent::UserAnswer>,
+    ) -> Self {
+        let selected = vec![false; options.len()];
+        Self {
+            header,
+            question,
+            options,
+            multi_select,
+            selected,
+            cursor: 0,
+            custom: InputBuffer::new(),
+            editing_custom: false,
+            respond,
+        }
+    }
+
+    fn resolve_answer(&self) -> crate::agent::UserAnswer {
+        let mut selected_labels = Vec::new();
+        for (index, on) in self.selected.iter().enumerate() {
+            if *on {
+                // Strip the trailing " — description" added for display, keeping
+                // just the option label so the LLM sees clean identifiers.
+                let raw = self.options[index].split(" — ").next().unwrap_or(&self.options[index]);
+                selected_labels.push(raw.to_owned());
+            }
+        }
+        let custom_text = self.custom.text();
+        let custom = if custom_text.trim().is_empty() {
+            None
+        } else {
+            Some(custom_text)
+        };
+        crate::agent::UserAnswer {
+            selected_labels,
+            custom_text: custom,
+        }
+    }
 }
 
 struct Picker {
@@ -286,6 +350,7 @@ struct App {
     approval: Option<PendingApproval>,
     approval_scroll: u16,
     approval_horizontal: u16,
+    question: Option<PendingUserQuestion>,
     picker: Option<Picker>,
     usage_panel: Option<UsagePanel>,
     config_panel: Option<ConfigPanel>,
@@ -427,6 +492,7 @@ impl App {
             approval: None,
             approval_scroll: 0,
             approval_horizontal: 0,
+            question: None,
             picker: None,
             usage_panel: None,
             config_panel: None,
@@ -482,6 +548,7 @@ impl App {
                     self.status = "thinking".to_owned();
                 }
                 AgentEvent::Approval(request) => self.set_approval(request),
+                AgentEvent::UserQuestion(request) => self.set_user_question(request),
                 AgentEvent::ToolStarted { name, summary } => {
                     self.receiving_delta = false;
                     self.entries.push(Entry {
@@ -600,6 +667,27 @@ impl App {
         });
         self.approval_scroll = 0;
         self.approval_horizontal = 0;
+    }
+
+    fn set_user_question(&mut self, request: UserQuestionRequest) {
+        self.status = format!("waiting for answer: {}", request.header);
+        self.question = Some(PendingUserQuestion::new(
+            request.header,
+            request.question,
+            request.options,
+            request.multi_select,
+            request.respond,
+        ));
+    }
+
+    /// Resolve an open user question and return the oneshot to the agent loop.
+    /// Dropping the pending state implicitly cancels the question.
+    fn answer_user_question(&mut self) {
+        if let Some(question) = self.question.take() {
+            let answer = question.resolve_answer();
+            let _ = question.respond.send(answer);
+            self.status = "ready".to_owned();
+        }
     }
 
     fn decide(&mut self, decision: ApprovalDecision) {
@@ -2201,6 +2289,122 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // ask_user modal: navigate options, toggle selected (multi-select),
+    // type a custom answer, confirm with Enter, cancel with Esc.
+    if let Some(question) = &mut app.question {
+        if question.editing_custom {
+            match key.code {
+                KeyCode::Esc => {
+                    question.editing_custom = false;
+                }
+                KeyCode::Enter => {
+                    // Confirm: submit whatever is in the custom field,
+                    // merging in any toggled options.
+                    app.answer_user_question();
+                }
+                KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    question.custom.delete_word_backward()
+                }
+                KeyCode::Backspace => question.custom.backspace(),
+                KeyCode::Delete => question.custom.delete(),
+                KeyCode::Left
+                    if key
+                        .modifiers
+                        .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) =>
+                {
+                    question.custom.move_word_backward()
+                }
+                KeyCode::Right
+                    if key
+                        .modifiers
+                        .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) =>
+                {
+                    question.custom.move_word_forward()
+                }
+                KeyCode::Left => question.custom.move_left(),
+                KeyCode::Right => question.custom.move_right(),
+                KeyCode::Home => question.custom.move_start(),
+                KeyCode::End => question.custom.move_end(),
+                KeyCode::Up => question.custom.move_up(),
+                KeyCode::Down => question.custom.move_down(),
+                KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    question.custom.delete_word_backward()
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    question.custom.delete_to_start()
+                }
+                KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    question.custom.delete_to_end()
+                }
+                KeyCode::Char(ch)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    question.custom.insert(ch)
+                }
+                _ => {}
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                // Cancelling sends the current state — whatever is
+                // toggled/typed. If nothing's set, the agent sees the
+                // "User skipped the question" message above.
+                app.answer_user_question();
+            }
+            KeyCode::Enter => app.answer_user_question(),
+            KeyCode::Up | KeyCode::Char('k') => {
+                if question.cursor == 0 && !question.options.is_empty() {
+                    question.cursor = question.options.len() - 1;
+                } else {
+                    question.cursor = question.cursor.saturating_sub(1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if question.options.is_empty() {
+                    question.cursor = 0;
+                } else {
+                    question.cursor = (question.cursor + 1) % question.options.len();
+                }
+            }
+            KeyCode::Char(' ') => {
+                if !question.options.is_empty() && question.multi_select {
+                    let idx = question.cursor;
+                    if let Some(slot) = question.selected.get_mut(idx) {
+                        *slot = !*slot;
+                    }
+                }
+            }
+            KeyCode::Char('x') => {
+                if !question.options.is_empty() {
+                    if question.multi_select {
+                        if let Some(slot) = question.selected.get_mut(question.cursor) {
+                            *slot = !*slot;
+                        }
+                    } else {
+                        // Single-select: clear all and toggle this one on,
+                        // then confirm immediately.
+                        for slot in question.selected.iter_mut() {
+                            *slot = false;
+                        }
+                        if let Some(slot) = question.selected.get_mut(question.cursor) {
+                            *slot = true;
+                        }
+                        app.answer_user_question();
+                    }
+                }
+            }
+            KeyCode::Char('t') => {
+                // Tab to the custom text field.
+                question.editing_custom = true;
+            }
+            _ => {}
+        }
+        return;
+    }
+
     if app.raw_config.is_some() {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
             app.save_raw_config();
@@ -2542,6 +2746,8 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         draw_help(frame, area);
     } else if app.approval.is_some() {
         draw_approval(frame, area, app);
+    } else if app.question.is_some() {
+        draw_user_question(frame, area, app);
     } else if app.picker.is_some() {
         draw_picker(frame, area, app);
     }
@@ -3724,6 +3930,179 @@ fn draw_feedback(frame: &mut Frame<'_>, area: Rect, app: &App) {
         frame.set_cursor_position((
             (sections[1].x + 1 + column as u16).min(sections[1].right().saturating_sub(2)),
             (sections[1].y + 1 + row as u16).min(sections[1].bottom().saturating_sub(2)),
+        ));
+    }
+}
+
+fn draw_user_question(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let Some(question) = &app.question else { return };
+    // Sizing: 80 cols wide, with a sensible height based on content.
+    let opts = question.options.len() as u16;
+    let option_rows = opts.max(2); // reserve at least 2 lines even when 0 options
+    let custom_rows: u16 = 3; // border + 1 inner line + border
+    let height = (8 + option_rows + custom_rows + 3).min(area.height.saturating_sub(2));
+    let width = 96u16.min(area.width.saturating_sub(4));
+    let popup = centered_rect(width, height, area);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(secondary()))
+        .title(Span::styled(
+            if question.header.is_empty() {
+                " Question ".to_owned()
+            } else {
+                format!(" {} ", question.header)
+            },
+            Style::default()
+                .fg(inverse())
+                .bg(secondary())
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    // Inner layout: question text, spacer, option list, spacer, custom input.
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),    // question label + value
+            Constraint::Length(1),    // spacer
+            Constraint::Min(3),       // options
+            Constraint::Length(1),    // spacer
+            Constraint::Length(3),    // custom prompt
+            Constraint::Length(2),    // footer hints
+        ])
+        .split(inner);
+
+    // Question text.
+    let question_text = Text::from(vec![
+        Line::from(Span::styled(
+            "QUESTION",
+            Style::default().fg(muted()).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(question.question.as_str()),
+    ]);
+    frame.render_widget(Paragraph::new(question_text).wrap(Wrap { trim: false }), chunks[0]);
+
+    // Options list.
+    let option_entries: Vec<Line> = if question.options.is_empty() {
+        vec![Line::from(Span::styled(
+            "(no options — type a custom answer and press Enter)",
+            Style::default().fg(muted()),
+        ))]
+    } else {
+        let mut lines = Vec::with_capacity(question.options.len());
+        for (idx, opt) in question.options.iter().enumerate() {
+            let is_cursor = idx == question.cursor && !question.editing_custom;
+            let is_on = question.selected.get(idx).copied().unwrap_or(false);
+            let marker = if question.multi_select {
+                if is_on { "[x]" } else { "[ ]" }
+            } else if is_on {
+                "(•)"
+            } else {
+                "( )"
+            };
+            let arrow = if is_cursor { "▶" } else { " " };
+            let style = if is_cursor {
+                Style::default().fg(primary()).add_modifier(Modifier::BOLD)
+            } else if is_on {
+                Style::default().fg(success())
+            } else {
+                Style::default().fg(text())
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{}{} ", arrow, marker), style),
+                Span::styled(opt.as_str(), style),
+            ]));
+        }
+        lines
+    };
+    frame.render_widget(Paragraph::new(option_entries), chunks[1]);
+
+    // Custom-answer field.
+    let custom_label = if question.editing_custom { "> " } else { "  " };
+    let custom_focused = question.editing_custom;
+    let custom_color = if custom_focused { primary() } else { muted() };
+    let placeholder = if custom_focused {
+        String::new()
+    } else if question.options.is_empty() {
+        // Free-text-only mode: tell the user to focus this with `t`.
+        "(press t to type an answer)".to_owned()
+    } else {
+        "(optional — type to add a custom answer)".to_owned()
+    };
+    let value = question.custom.text();
+    let custom_line = if value.is_empty() {
+        Line::from(vec![
+            Span::styled(format!("{custom_label}"), Style::default().fg(custom_color)),
+            Span::styled(placeholder, Style::default().fg(muted())),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(format!("{custom_label}"), Style::default().fg(custom_color)),
+            Span::styled(value.as_str(), Style::default().fg(custom_color)),
+        ])
+    };
+    let custom_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(custom_color))
+        .title(Span::styled(
+            " custom ",
+            Style::default().fg(custom_color),
+        ));
+    frame.render_widget(
+        Paragraph::new(custom_line).block(custom_block),
+        chunks[2],
+    );
+
+    // Footer hints.
+    let hint_switch = if question.editing_custom {
+        Line::from(vec![
+            Span::styled("Esc", Style::default().fg(primary())),
+            Span::raw(" leave field  "),
+            Span::styled("Enter", Style::default().fg(primary())),
+            Span::raw(" submit"),
+        ])
+    } else if question.multi_select {
+        Line::from(vec![
+            Span::styled("↑↓", Style::default().fg(primary())),
+            Span::raw(" navigate  "),
+            Span::styled("space/x", Style::default().fg(primary())),
+            Span::raw(" toggle  "),
+            Span::styled("t", Style::default().fg(primary())),
+            Span::raw(" custom  "),
+            Span::styled("Enter", Style::default().fg(primary())),
+            Span::raw(" submit  "),
+            Span::styled("Esc", Style::default().fg(primary())),
+            Span::raw(" cancel"),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("↑↓", Style::default().fg(primary())),
+            Span::raw(" navigate  "),
+            Span::styled("x", Style::default().fg(primary())),
+            Span::raw(" choose & submit  "),
+            Span::styled("t", Style::default().fg(primary())),
+            Span::raw(" custom  "),
+            Span::styled("Esc", Style::default().fg(primary())),
+            Span::raw(" cancel"),
+        ])
+    };
+    frame.render_widget(Paragraph::new(hint_switch), chunks[3]);
+
+    // Place the cursor inside the custom-answer field when it's focused, so
+    // typing actually inserts at the right position.
+    if question.editing_custom {
+        let (row, col) = question.custom.cursor_position();
+        let inner_width = chunks[2].width.saturating_sub(2).max(1);
+        let h = row.min(chunks[2].height.saturating_sub(2).max(1) as usize);
+        let v = col.min(inner_width as usize);
+        frame.set_cursor_position((
+            (chunks[2].x + 1 + v as u16).min(chunks[2].right().saturating_sub(2)),
+            (chunks[2].y + 1 + h as u16).min(chunks[2].bottom().saturating_sub(2)),
         ));
     }
 }

@@ -484,9 +484,12 @@ fn finish_completion(
             }
         })
         .collect::<Result<Vec<_>>>()?;
-    if content.is_empty() && tool_calls.is_empty() {
-        bail!("provider returned an empty completion; verify model tool-calling compatibility");
-    }
+    // Don't bail on an empty completion. An empty stream happens for benign
+    // reasons (post-compaction empty request, transient stream hiccup, model
+    // that emits a final empty chunk) and a tool-compatible model is not at
+    // fault. Return an empty Completion so the agent's loop can end the turn
+    // cleanly instead of firing a misleading "verify model tool-calling
+    // compatibility" error that kills the session.
     Ok(Completion {
         content,
         tool_calls,

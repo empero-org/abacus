@@ -1631,6 +1631,36 @@ pub fn tool_specs() -> Vec<Value> {
                 }
             }),
         ),
+        // ask_user is exposed alongside the regular tool specs but has special
+        // dispatch in the TUI: it pops a modal asking the user a multi-choice
+        // or free-text question, returning the answer as the tool output.
+        function(
+            "ask_user",
+            "Ask the user a question when a decision, clarification, or sign-off is needed before continuing. Provide 2-4 mutually exclusive options; the user can pick one or type a custom answer. Use sparingly — only when the answer genuinely blocks progress or a major preference is at stake.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "The question to ask the user; shown at the top of the prompt."},
+                    "header": {"type": "string", "description": "Short topic label shown on the modal border (e.g. \"Test framework\")."},
+                    "options": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string", "description": "1-5 word choice label shown to the user."},
+                                "description": {"type": "string", "description": "One sentence explaining the option."},
+                                "preview": {"type": "string", "description": "Optional longer preview of what the option implies."}
+                            },
+                            "required": ["label"]
+                        },
+                        "minItems": 2,
+                        "maxItems": 4
+                    },
+                    "multi_select": {"type": "boolean", "description": "Allow picking multiple options (default false)."}
+                },
+                "required": ["question", "options"]
+            }),
+        ),
     ]
 }
 

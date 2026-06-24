@@ -10,6 +10,8 @@ use std::{
     },
 };
 
+use anyhow::Context as _;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
@@ -55,9 +57,30 @@ pub struct ApprovalRequest {
     pub respond: oneshot::Sender<ApprovalDecision>,
 }
 
+/// A request from the agent to ask the user a question. The agent waits until
+/// `respond` is resolved — either with a chosen option (single- or multi-select)
+/// or with a freely typed answer. The model "stop" while the question is open
+/// is deliberate — the agent can't continue without the answer.
+pub struct UserQuestionRequest {
+    pub question: String,
+    pub header: String,
+    /// Pre-defined choices (1-based labels like "1", "2", ...). Empty => free text only.
+    pub options: Vec<String>,
+    pub multi_select: bool,
+    pub respond: oneshot::Sender<UserAnswer>,
+}
+
+/// The user's answer to a UserQuestionRequest. Either selected option labels
+/// (one for single-select, N for multi-select) or a freely typed `custom` text.
+pub struct UserAnswer {
+    pub selected_labels: Vec<String>,
+    pub custom_text: Option<String>,
+}
+
 pub enum AgentEvent {
     Delta(String),
     Approval(ApprovalRequest),
+    UserQuestion(UserQuestionRequest),
     ToolStarted { name: String, summary: String },
     ToolFinished { name: String, output: String },
     ModeChanged { mode: AgentMode, reason: String },
@@ -146,44 +169,58 @@ async fn run_turn_inner(
         )
         .await;
 
-        let mut provider_messages = messages.clone();
-        let extension_context = options.services.prompt_context();
-        if !extension_context.is_empty() {
-            provider_messages.push(json!({
-                "role":"system",
-                "content":extension_context
-            }));
-        }
-        let summary_context = options.compaction.prompt_context();
-        if !summary_context.is_empty() {
-            provider_messages.push(json!({"role":"system","content":summary_context}));
-        }
-        let goal_context = options.goal.prompt_context();
-        if !goal_context.is_empty() {
-            provider_messages.push(json!({"role":"system","content":goal_context}));
-        }
-        let task_context = options.tasks.prompt_context();
-        if !task_context.is_empty() {
-            provider_messages.push(json!({"role":"system","content":task_context}));
-        }
-        provider_messages.push(json!({
-            "role": "system",
-            "content": mode_prompt(active_mode)
-        }));
-        let completion = match provider
-            .complete(&provider_messages, &specs, delta_tx)
-            .await
-        {
-            Ok(completion) => completion,
-            Err(error) => {
-                let _ = forward.await;
-                let _ = events.send(AgentEvent::Failed {
-                    error: format!("{error:#}"),
-                    messages,
-                });
-                return;
+        // Bounded retry of empty (content + tool_calls) completions. Empty
+        // completions happen for benign reasons (stream hiccup, post-
+        // compaction empty request, final empty chunk), but a *persistent*
+        // empty stream is the model signaling it has nothing to add — in that
+        // case we end the turn rather than burning more steps. Retries only
+        // re-hit the provider; compaction and delta-forwarding happen once.
+        const EMPTY_COMPLETION_RETRY_LIMIT: usize = 2;
+        let mut empty_retries: usize = 0;
+        let mut provider_messages = build_provider_messages(
+            &messages,
+            &options,
+            active_mode,
+        );
+        let completion = loop {
+            let completion = match provider
+                .complete(&provider_messages, &specs, delta_tx.clone())
+                .await
+            {
+                Ok(completion) => completion,
+                Err(error) => {
+                    let _ = forward.await;
+                    let _ = events.send(AgentEvent::Failed {
+                        error: format!("{error:#}"),
+                        messages,
+                    });
+                    return;
+                }
+            };
+            if completion.content.is_empty() && completion.tool_calls.is_empty() {
+                empty_retries += 1;
+                if empty_retries > EMPTY_COMPLETION_RETRY_LIMIT {
+                    // Persistent empty stream — end the turn cleanly without
+                    // pushing a meaningless empty assistant message into history.
+                    drop(delta_tx);
+                    let _ = forward.await;
+                    let _ = events.send(AgentEvent::Done { messages });
+                    return;
+                }
+                // Brief backoff before retrying so the provider has a moment
+                // to recover from a transient stream hiccup, then rebuild the
+                // message list in case compaction or context state changed.
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    500 * empty_retries as u64,
+                ))
+                .await;
+                provider_messages = build_provider_messages(&messages, &options, active_mode);
+                continue;
             }
+            break completion;
         };
+        // Drop the last sender so the delta-forwarding task completes.
+        drop(delta_tx);
         let _ = forward.await;
 
         messages.push(assistant_message(
@@ -219,14 +256,59 @@ async fn run_turn_inner(
                 }));
                 continue;
             }
+            if call.name == "ask_user" {
+                // ask_user blocks the turn until the user answers — the agent
+                // cannot proceed without the choice. Don't count it under the
+                // repeat-call heuristic; the user's deliberate answers will
+                // legitimately produce different next-model-call shapes.
+                let output = match request_user_question(&call, &events).await {
+                    Ok(answer) => {
+                        let mut parts = Vec::new();
+                        if !answer.selected_labels.is_empty() {
+                            parts.push(format!(
+                                "Selected: {}",
+                                answer.selected_labels.join(", ")
+                            ));
+                        }
+                        if let Some(custom) = &answer.custom_text {
+                            if !custom.is_empty() {
+                                parts.push(format!("Custom answer: {custom}"));
+                            }
+                        }
+                        if parts.is_empty() {
+                            "User skipped the question.".to_owned()
+                        } else {
+                            parts.join("\n")
+                        }
+                    }
+                    Err(error) => format!("Error: {error:#}"),
+                };
+                let _ = events.send(AgentEvent::ToolFinished {
+                    name: call.name.clone(),
+                    output: output.clone(),
+                });
+                messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "name": call.name,
+                    "content": output
+                }));
+                continue;
+            }
             let signature = format!("{}\0{}", call.name, call.arguments);
             let repeated = repeated_calls.entry(signature).or_default();
             *repeated += 1;
             let loop_blocked = *repeated >= 3;
             let requires_approval = if matches!(
                 call.name.as_str(),
-                "goal_status" | "goal_update" | "task_list" | "task_create" | "task_update"
+                "goal_status"
+                    | "goal_update"
+                    | "task_list"
+                    | "task_create"
+                    | "task_update"
+                    | "ask_user"
             ) {
+                // ask_user doesn't mutate; never requires approval.
                 false
             } else if call.name == "spawn_subagents" {
                 true
@@ -499,6 +581,63 @@ async fn request_approval(
     }
 }
 
+/// Parse an ask_user call's JSON arguments and dispatch a UserQuestion event.
+/// Blocks until the user answers (or skips). Falls back to a programmatic
+/// answer when the UI is unavailable (e.g. headless mode) so the agent loop
+/// can still make progress.
+async fn request_user_question(
+    call: &ToolCall,
+    events: &mpsc::UnboundedSender<AgentEvent>,
+) -> anyhow::Result<UserAnswer> {
+    #[derive(Deserialize)]
+    struct OptionArg {
+        label: String,
+        #[serde(default)]
+        description: String,
+    }
+    #[derive(Deserialize)]
+    struct Args {
+        question: String,
+        #[serde(default)]
+        header: String,
+        #[serde(default)]
+        options: Vec<OptionArg>,
+        #[serde(default)]
+        multi_select: bool,
+    }
+    let args: Args = serde_json::from_str(&call.arguments)
+        .with_context(|| "ask_user arguments are invalid JSON")?;
+
+    let (respond, receive) = oneshot::channel();
+    let request = UserQuestionRequest {
+        question: args.question,
+        header: args.header,
+        options: args.options.iter().map(|opt| {
+            if opt.description.is_empty() {
+                opt.label.clone()
+            } else {
+                format!("{} — {}", opt.label, opt.description)
+            }
+        }).collect(),
+        multi_select: args.multi_select,
+        respond,
+    };
+    if events.send(AgentEvent::UserQuestion(request)).is_err() {
+        // UI is gone — pick the first option as a programmatic fallback so
+        // the agent loop can still point somewhere.
+        return Ok(UserAnswer {
+            selected_labels: args
+                .options
+                .first()
+                .map(|opt| vec![opt.label.clone()])
+                .unwrap_or_default(),
+            custom_text: None,
+        });
+    }
+
+    receive.await.context("user question was cancelled before answer")
+}
+
 fn assistant_message(content: &str, calls: &[ToolCall]) -> Value {
     let tool_calls = calls
         .iter()
@@ -584,6 +723,42 @@ fn mode_prompt(mode: AgentMode) -> &'static str {
             "BUILD MODE is active. Implement the user's request and nothing more: make the smallest focused change that satisfies it, and match the conventions, naming, and structure of the surrounding code. Do not add unrequested features, refactors, or dependencies. Review each mutation before applying it, then run the narrowest useful verification and never report a check as passing unless you ran it."
         }
     }
+}
+
+/// Build the message list sent to the provider from the trimmed conversation
+/// `messages`, then layering on extension/summary/goal/task/mode system messages
+/// on top. Extracted so the empty-completion retry loop can rebuild it without
+/// duplicating the layering logic.
+fn build_provider_messages(
+    messages: &[Value],
+    options: &TurnOptions,
+    active_mode: AgentMode,
+) -> Vec<Value> {
+    let mut provider_messages = messages.to_vec();
+    let extension_context = options.services.prompt_context();
+    if !extension_context.is_empty() {
+        provider_messages.push(json!({
+            "role":"system",
+            "content":extension_context
+        }));
+    }
+    let summary_context = options.compaction.prompt_context();
+    if !summary_context.is_empty() {
+        provider_messages.push(json!({"role":"system","content":summary_context}));
+    }
+    let goal_context = options.goal.prompt_context();
+    if !goal_context.is_empty() {
+        provider_messages.push(json!({"role":"system","content":goal_context}));
+    }
+    let task_context = options.tasks.prompt_context();
+    if !task_context.is_empty() {
+        provider_messages.push(json!({"role":"system","content":task_context}));
+    }
+    provider_messages.push(json!({
+        "role": "system",
+        "content": mode_prompt(active_mode)
+    }));
+    provider_messages
 }
 
 pub fn initial_messages(workspace: &Path) -> Vec<Value> {

@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.5.2 — 2026-06-23
+
+### Terminal & input
+
+- **Newlines work everywhere.** Shift+Enter, Ctrl+J, and Ctrl+O all insert a newline. The kitty keyboard protocol is now pushed unconditionally (terminals that don't understand it ignore it harmlessly), and Ctrl+O is a universal fallback that sends a distinct byte no terminal confuses with Enter.
+- **Ctrl+V paste from clipboard.** Reads the system clipboard via `pbpaste` (macOS), `xclip`/`xsel` (Linux), or PowerShell (Windows). Bracketed paste is still the primary path; this covers terminals that send the raw Ctrl+V byte.
+- **Mouse-wheel scrolling restored.** Re-enabled mouse capture so the wheel scrolls the transcript instead of falling through to the terminal's pre-Abacus scrollback. Text selection still works in terminals that support Shift-drag bypass (iTerm2, kitty, WezTerm, Alacritty, Ghostty).
+- **Input history.** Arrow Up/Down recalls previously sent prompts. Press Up to go back through history, Down to go forward. Multi-line editing still uses Up/Down for cursor movement within the text.
+- **Queued messages are now visible.** When you send a message while the agent is working, it appears as a `• Queued: …` entry in the transcript instead of silently disappearing. It fires automatically when the turn finishes.
+- **Slash commands work during turns.** `/help`, `/usage`, `/model`, etc. all execute immediately while the agent is running. Commands that would start a new turn (like `/swarm`) are safely ignored until the current one finishes.
+
+### Transcript & rendering
+
+- **Last lines no longer hidden behind the input bar.** Added bottom padding to the transcript so the final content lines always have breathing room, regardless of how the visual-line estimate drifts from ratatui's actual wrapping.
+- **Live context percentage.** The footer now shows `ctx N%` that updates in real time during a turn (not just on completion) by tracking streaming deltas and tool results. It turns yellow when approaching the auto-compaction threshold.
+
+### Context & compaction
+
+- **Compaction accounts for the running summary.** The pressure check now includes the rolling summary's size (it's re-injected as a system message every turn and grows over time). Previously it was ignored, so compaction triggered too late and the request overflowed the context window.
+- **No more empty sessions on startup.** Opening Abacus without sending a message no longer creates a session record. Sessions are created lazily on first send.
+- **Higher step limit.** Default `max_steps` raised from 48 to 512 so long-running goals don't hit the safety valve mid-work. When the limit is reached, the turn ends gracefully via `Done` instead of firing a `Failed` error.
+
+### Agent behavior
+
+- **`ask_user` tool.** The agent can now ask you a multiple-choice or free-text question via an interactive modal — similar to Claude's choice cards. You navigate with arrow keys, toggle options with space/x, type a custom answer with `t`, and submit with Enter. In headless mode the first option is auto-selected.
+- **Empty completion retry.** When the provider returns an empty stream, the agent retries up to 2 times with a brief backoff instead of immediately erroring out with "verify model tool-calling compatibility." After persistent empties it ends the turn cleanly.
+- **Task list actually drives work.** `task_create`'s description now explicitly says it's for tracking the agent's own work, not for asking the user questions. The task context injected every turn tells the agent to immediately start working on the first pending task after creating a list, and to verify each outcome before marking it done.
+
 ## 0.5.1 — 2026-06-22
 
 ### Minor fixes

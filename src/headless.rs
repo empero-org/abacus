@@ -156,6 +156,24 @@ pub async fn run(
                             OutputFormat::Json => {}
                         }
                     }
+                    AgentEvent::UserQuestion(request) => {
+                        // Headless mode can't show a modal — auto-pick the first
+                        // option so the agent loop can continue without blocking.
+                        let header = request.header.clone();
+                        let first = request.options.first().cloned().unwrap_or_default();
+                        let _ = request.respond.send(crate::agent::UserAnswer {
+                            selected_labels: if first.is_empty() { Vec::new() } else { vec![first] },
+                            custom_text: None,
+                        });
+                        match format {
+                            OutputFormat::Plain => eprintln!("\n[auto-answered question: {header}]"),
+                            OutputFormat::StreamingJson => emit(json!({
+                                "type": "user_question.auto_answered",
+                                "header": header
+                            }))?,
+                            OutputFormat::Json => {}
+                        }
+                    }
                     AgentEvent::ToolStarted { name, summary } => match format {
                         OutputFormat::Plain => eprintln!("\n[{name}: {summary}]"),
                         OutputFormat::StreamingJson => emit(json!({

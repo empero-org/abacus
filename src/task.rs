@@ -91,9 +91,16 @@ impl TaskList {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        let pending_count = tasks.iter().filter(|task| !task.done).count();
         format!(
             "<task_list>\n{rendered}\n</task_list>\n\
-             Track multi-step work here. Create tasks with task_create and mark each one complete with task_update as you finish it. Keep the list honest — do not mark a task done until it is verified."
+             Track multi-step work here.\n\n\
+             Behavior:\n\
+             - Create concrete action items with task_create at the start of a multi-step task. Tasks describe work *you* will complete, not questions for the user — ask the user in plain text.\n\
+             - As soon as you create a task list, immediately begin working on the first pending task (the first one with [ ]). Do not stop after task_create.\n\
+             - After each step, mark the task done with task_update *only after verifying the outcome* (test passed, file written, build green, etc.), then start the next pending task.\n\
+             - When all {pending_count} pending task(s) are done, stop task tracking for that goal and respond to the user.\n\
+             - Never mark a task done before its outcome is actually verified."
         )
     }
 
@@ -101,14 +108,14 @@ impl TaskList {
         vec![
             function(
                 "task_create",
-                "Add one or more tasks to the session task list for tracking multi-step work.",
+                "Add one or more tasks to the session task list for tracking multi-step work the agent will complete itself. NOT for asking the user questions — respond in plain text for that. Each entry is a concrete action item with a verifiable outcome.",
                 json!({
                     "type": "object",
                     "properties": {
                         "tasks": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Task descriptions to add",
+                            "description": "Action items the agent will complete. Each must describe concrete work with a verifiable outcome, not a question for the user.",
                             "minItems": 1,
                             "maxItems": 50
                         }
@@ -118,12 +125,12 @@ impl TaskList {
             ),
             function(
                 "task_update",
-                "Mark a task complete or pending by its 1-based index in the task list.",
+                "Mark a task complete or pending by its 1-based index in the task list. Mark a task done only after its outcome is verified (test passed, file written, build green, etc.).",
                 json!({
                     "type": "object",
                     "properties": {
                         "index": {"type": "integer", "description": "1-based position from task_list"},
-                        "done": {"type": "boolean", "description": "true to mark complete, false to reopen"}
+                        "done": {"type": "boolean", "description": "true to mark complete after verifying the outcome, false to reopen"}
                     },
                     "required": ["index", "done"]
                 }),
