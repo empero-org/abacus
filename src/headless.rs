@@ -162,11 +162,17 @@ pub async fn run(
                         let header = request.header.clone();
                         let first = request.options.first().cloned().unwrap_or_default();
                         let _ = request.respond.send(crate::agent::UserAnswer {
-                            selected_labels: if first.is_empty() { Vec::new() } else { vec![first] },
+                            selected_labels: if first.is_empty() {
+                                Vec::new()
+                            } else {
+                                vec![first]
+                            },
                             custom_text: None,
                         });
                         match format {
-                            OutputFormat::Plain => eprintln!("\n[auto-answered question: {header}]"),
+                            OutputFormat::Plain => {
+                                eprintln!("\n[auto-answered question: {header}]")
+                            }
                             OutputFormat::StreamingJson => emit(json!({
                                 "type": "user_question.auto_answered",
                                 "header": header
