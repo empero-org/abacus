@@ -1,6 +1,6 @@
 //! Web search and page-reading tools.
 //!
-//! `web_search` defaults to DuckDuckGo's keyless HTML endpoint (zero config),
+//! `web_search` defaults to DuckDuckGo's keyless Instant Answer JSON API (zero config),
 //! and can be pointed at API-key backends (Brave, Tavily) via `[search]` in the
 //! config. `read_page` fetches a URL and converts it to readable text. Both are
 //! read-only and bounded; `read_page` refuses non-HTTP schemes and private /
@@ -250,7 +250,15 @@ fn render_results(query: &str, results: &[SearchResult]) -> String {
     out
 }
 
-// ---- DuckDuckGo (keyless HTML endpoint) ----
+// ---- DuckDuckGo (keyless Instant Answer JSON API) ----
+//
+// The legacy `html.duckduckgo.com/html/` endpoint now serves an anti-bot
+// challenge page instead of result markup, so parsing it reliably yields
+// nothing. DuckDuckGo's official keyless Instant Answer API
+// (`api.duckduckgo.com`, JSON) returns structured data without a key, so we
+// query that instead. It surfaces a single abstract plus `Results` and
+// `RelatedTopics` lists; we flatten the most relevant entries into the common
+// `SearchResult` shape.
 
 async fn duckduckgo_search(
     client: &reqwest::Client,
@@ -258,63 +266,122 @@ async fn duckduckgo_search(
     max_results: usize,
 ) -> Result<Vec<SearchResult>> {
     let response = client
-        .get("https://html.duckduckgo.com/html/")
-        .query(&[("q", query)])
+        .get("https://api.duckduckgo.com/")
+        .query(&[
+            ("q", query),
+            ("format", "json"),
+            ("no_html", "1"),
+            ("skip_disambig", "1"),
+        ])
         .send()
         .await
         .map_err(|error| anyhow!("DuckDuckGo request failed: {error}"))?;
     if !response.status().is_success() {
         bail!("DuckDuckGo returned HTTP {}", response.status().as_u16());
     }
-    let body = response
-        .text()
+    let value: Value = response
+        .json()
         .await
-        .map_err(|error| anyhow!("could not read DuckDuckGo response: {error}"))?;
-    Ok(parse_duckduckgo_html(&body, max_results))
+        .map_err(|error| anyhow!("invalid DuckDuckGo response: {error}"))?;
+    Ok(parse_duckduckgo_json(&value, max_results))
 }
 
-/// Parse the DuckDuckGo HTML result list. Result anchors carry a redirect URL in
-/// a `uddg` query parameter; we decode it back to the real destination.
-fn parse_duckduckgo_html(body: &str, max_results: usize) -> Vec<SearchResult> {
-    use regex::Regex;
-    // `result__a` anchors hold the title + (redirect) URL; snippets follow.
-    let anchor =
-        Regex::new(r#"(?s)<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#)
-            .expect("valid regex");
-    let snippet =
-        Regex::new(r#"(?s)class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>"#).expect("valid regex");
-    let snippets: Vec<String> = snippet
-        .captures_iter(body)
-        .map(|cap| html_to_text(&cap[1]))
-        .collect();
+/// Parse the DuckDuckGo Instant Answer JSON. The API surfaces a single
+/// abstract (when it has a direct answer) plus `Results` and `RelatedTopics`
+/// lists, which may themselves contain nested `Topics` groups. We flatten the
+/// most relevant entries into the common `SearchResult` shape.
+fn parse_duckduckgo_json(value: &Value, max_results: usize) -> Vec<SearchResult> {
     let mut results = Vec::new();
-    for (index, cap) in anchor.captures_iter(body).enumerate() {
-        if results.len() >= max_results {
-            break;
-        }
-        let raw_href = &cap[1];
-        let url = extract_uddg(raw_href).unwrap_or_else(|| raw_href.to_owned());
-        let title = html_to_text(&cap[2]);
-        if title.is_empty() || url.is_empty() {
-            continue;
-        }
-        let snippet = snippets.get(index).cloned().unwrap_or_default();
+
+    // The abstract is the canonical answer: lead with it when present.
+    let abstract_text = value["AbstractText"].as_str().unwrap_or("").trim();
+    let abstract_url = value["AbstractURL"].as_str().unwrap_or("").trim();
+    let heading = value["Heading"].as_str().unwrap_or("").trim();
+    if !abstract_text.is_empty() && !abstract_url.is_empty() {
         results.push(SearchResult {
-            title,
-            url,
-            snippet,
+            title: if heading.is_empty() {
+                truncate_for_title(abstract_text)
+            } else {
+                heading.to_owned()
+            },
+            url: abstract_url.to_owned(),
+            snippet: abstract_text.to_owned(),
         });
     }
+
+    // `Results` are the top "official" links (e.g. official site).
+    if let Some(items) = value["Results"].as_array() {
+        for item in items.iter() {
+            if results.len() >= max_results {
+                break;
+            }
+            if let Some(result) = ddg_topic_to_result(item) {
+                results.push(result);
+            }
+        }
+    }
+
+    // `RelatedTopics` is the broader list; entries may be flat topics or
+    // grouped under a `Topics` key with a `Name`.
+    if let Some(items) = value["RelatedTopics"].as_array() {
+        for item in items.iter() {
+            if results.len() >= max_results {
+                break;
+            }
+            if let Some(group) = item["Topics"].as_array() {
+                for sub in group.iter() {
+                    if results.len() >= max_results {
+                        break;
+                    }
+                    if let Some(result) = ddg_topic_to_result(sub) {
+                        results.push(result);
+                    }
+                }
+            } else if let Some(result) = ddg_topic_to_result(item) {
+                results.push(result);
+            }
+        }
+    }
+
     results
 }
 
-/// DuckDuckGo wraps result links as `//duckduckgo.com/l/?uddg=<percent-encoded>`.
-fn extract_uddg(href: &str) -> Option<String> {
-    let marker = "uddg=";
-    let start = href.find(marker)? + marker.len();
-    let rest = &href[start..];
-    let encoded = rest.split('&').next().unwrap_or(rest);
-    Some(percent_decode(encoded))
+/// Convert a DuckDuckGo topic object (flat or nested) into a `SearchResult`.
+/// Topic objects carry `Text` (already plain text via `no_html=1`),
+/// `FirstURL`, and optionally an HTML `Result` anchor whose inner text we
+/// fall back to when `Text` is empty.
+fn ddg_topic_to_result(item: &Value) -> Option<SearchResult> {
+    let text = item["Text"].as_str().unwrap_or("").trim();
+    let url = item["FirstURL"].as_str().unwrap_or("").trim();
+    let result_html = item["Result"].as_str().unwrap_or("").trim();
+    let title = if !text.is_empty() {
+        truncate_for_title(text)
+    } else if !result_html.is_empty() {
+        // `no_html=1` strips tags, but guard against stray markup anyway.
+        truncate_for_title(&html_to_text(result_html))
+    } else {
+        String::new()
+    };
+    if title.is_empty() || url.is_empty() {
+        return None;
+    }
+    Some(SearchResult {
+        title,
+        url: url.to_owned(),
+        snippet: text.to_owned(),
+    })
+}
+
+/// Collapse a long snippet into a compact title (first sentence, capped).
+fn truncate_for_title(text: &str) -> String {
+    let text = text.trim();
+    // Prefer the first sentence; otherwise cap at a reasonable length.
+    let end = text
+        .find(". ")
+        .filter(|&pos| pos < 78)
+        .map(|pos| pos + 1)
+        .unwrap_or_else(|| text.len().min(80));
+    text[..end].trim().to_owned()
 }
 
 // ---- Brave Search API ----
@@ -541,35 +608,6 @@ fn decode_entities(input: &str) -> String {
     out
 }
 
-fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
-                if let Some(byte) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
-                    out.push(byte);
-                    i += 3;
-                } else {
-                    out.push(b'%');
-                    i += 1;
-                }
-            }
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            other => {
-                out.push(other);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 fn truncate_chars(value: &str, max: usize) -> String {
     if value.chars().count() <= max {
         return value.to_owned();
@@ -601,23 +639,75 @@ mod tests {
     }
 
     #[test]
-    fn extracts_real_url_from_ddg_redirect() {
-        let href = "//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa%3Fb%3D1&rut=abc";
-        assert_eq!(
-            extract_uddg(href),
-            Some("https://example.com/a?b=1".to_owned())
-        );
+    fn parses_duckduckgo_abstract_and_related_topics() {
+        // Mirrors the shape of api.duckduckgo.com (no_html=1, JSON).
+        let value = serde_json::json!({
+            "Heading": "Rust (programming language)",
+            "AbstractText": "Rust is a general-purpose programming language.",
+            "AbstractURL": "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+            "Results": [
+                {
+                    "Text": "Official site",
+                    "FirstURL": "https://www.rust-lang.org/",
+                    "Result": "Official site"
+                }
+            ],
+            "RelatedTopics": [
+                {
+                    "Text": "Outline of the Rust programming language - The following outline is provided as an overview of and topical guide to Rust.",
+                    "FirstURL": "https://duckduckgo.com/Outline_of_the_Rust_programming_language",
+                    "Result": "<a href=\"x\">Outline of the Rust programming language</a>"
+                },
+                {
+                    "Name": "Categories",
+                    "Topics": [
+                        {
+                            "Text": "Systems programming languages",
+                            "FirstURL": "https://duckduckgo.com/c/Systems_programming_languages",
+                            "Result": "Systems programming languages"
+                        },
+                        {
+                            "Text": "Multi-paradigm programming languages",
+                            "FirstURL": "https://duckduckgo.com/c/Multi-paradigm_programming_languages",
+                            "Result": "Multi-paradigm programming languages"
+                        }
+                    ]
+                }
+            ]
+        });
+        let results = parse_duckduckgo_json(&value, 10);
+        assert_eq!(results.len(), 5);
+        // Abstract leads.
+        assert_eq!(results[0].title, "Rust (programming language)");
+        assert_eq!(results[0].url, "https://en.wikipedia.org/wiki/Rust_(programming_language)");
+        assert!(results[0].snippet.contains("general-purpose"));
+        // Official site from Results.
+        assert_eq!(results[1].url, "https://www.rust-lang.org/");
+        assert_eq!(results[1].title, "Official site");
+        // RelatedTopics entry: title is collapsed to the first 80 chars.
+        assert_eq!(results[2].url, "https://duckduckgo.com/Outline_of_the_Rust_programming_language");
+        assert_eq!(results[2].title, "Outline of the Rust programming language - The following outline is provided as");
+        // Nested group topics, in order.
+        assert_eq!(results[3].url, "https://duckduckgo.com/c/Systems_programming_languages");
+        assert_eq!(results[3].title, "Systems programming languages");
+        assert_eq!(results[4].url, "https://duckduckgo.com/c/Multi-paradigm_programming_languages");
+        assert_eq!(results[4].title, "Multi-paradigm programming languages");
     }
 
     #[test]
-    fn parses_duckduckgo_result_block() {
-        let body = r##"<div class="result"><a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Frust-lang.org%2F">The Rust Language</a>
-            <a class="result__snippet" href="x">A systems language.</a></div>"##;
-        let results = parse_duckduckgo_html(body, 5);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].url, "https://rust-lang.org/");
-        assert_eq!(results[0].title, "The Rust Language");
-        assert!(results[0].snippet.contains("systems language"));
+    fn ddg_skips_empty_abstract_and_empty_topics() {
+        let value = serde_json::json!({
+            "Heading": "",
+            "AbstractText": "",
+            "AbstractURL": "",
+            "Results": [],
+            "RelatedTopics": [
+                { "Text": "", "FirstURL": "", "Result": "" },
+                { "Name": "Empty", "Topics": [] }
+            ]
+        });
+        let results = parse_duckduckgo_json(&value, 10);
+        assert!(results.is_empty());
     }
 
     #[test]

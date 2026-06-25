@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.3 — 2026-06-23
+
+### Search
+
+- **DuckDuckGo search fixed.** The keyless backend was scraping `html.duckduckgo.com/html/`, which now serves an anti-bot captcha challenge instead of result markup — so every search returned "No results found." It now queries DuckDuckGo's official keyless Instant Answer JSON API (`api.duckduckgo.com`) and parses the structured `AbstractText`/`Results`/`RelatedTopics` response, including nested topic groups. The HTML-scraping parser, redirect-URL decoder (`extract_uddg`), and `percent_decode` helper were removed. The `[search]` config surface is unchanged; DuckDuckGo remains the keyless default.
+
 ## 0.5.2 — 2026-06-23
 
 ### Terminal & input
