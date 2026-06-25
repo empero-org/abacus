@@ -679,18 +679,33 @@ mod tests {
         assert_eq!(results.len(), 5);
         // Abstract leads.
         assert_eq!(results[0].title, "Rust (programming language)");
-        assert_eq!(results[0].url, "https://en.wikipedia.org/wiki/Rust_(programming_language)");
+        assert_eq!(
+            results[0].url,
+            "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+        );
         assert!(results[0].snippet.contains("general-purpose"));
         // Official site from Results.
         assert_eq!(results[1].url, "https://www.rust-lang.org/");
         assert_eq!(results[1].title, "Official site");
         // RelatedTopics entry: title is collapsed to the first 80 chars.
-        assert_eq!(results[2].url, "https://duckduckgo.com/Outline_of_the_Rust_programming_language");
-        assert_eq!(results[2].title, "Outline of the Rust programming language - The following outline is provided as");
+        assert_eq!(
+            results[2].url,
+            "https://duckduckgo.com/Outline_of_the_Rust_programming_language"
+        );
+        assert_eq!(
+            results[2].title,
+            "Outline of the Rust programming language - The following outline is provided as"
+        );
         // Nested group topics, in order.
-        assert_eq!(results[3].url, "https://duckduckgo.com/c/Systems_programming_languages");
+        assert_eq!(
+            results[3].url,
+            "https://duckduckgo.com/c/Systems_programming_languages"
+        );
         assert_eq!(results[3].title, "Systems programming languages");
-        assert_eq!(results[4].url, "https://duckduckgo.com/c/Multi-paradigm_programming_languages");
+        assert_eq!(
+            results[4].url,
+            "https://duckduckgo.com/c/Multi-paradigm_programming_languages"
+        );
         assert_eq!(results[4].title, "Multi-paradigm programming languages");
     }
 
