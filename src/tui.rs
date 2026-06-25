@@ -2827,6 +2827,13 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn draw_transcript(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+    // Reserve one line at the bottom so the last content line always sits a
+    // little above the input bar, avoiding visual overlap when the visual-line
+    // estimate drifts from ratatui's actual wrapping.
+    let area = Rect {
+        height: area.height.saturating_sub(1),
+        ..area
+    };
     app.transcript_height = area.height;
     if app.entries.is_empty() {
         draw_welcome(frame, area, app);
