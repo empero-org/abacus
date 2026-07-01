@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -97,6 +97,7 @@ impl WebConfig {
         reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .timeout(REQUEST_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| anyhow!("could not build HTTP client: {error}"))
     }
@@ -144,27 +145,48 @@ impl WebConfig {
 
     /// Fetch a URL and return its readable text content.
     pub async fn read_page(&self, url: &str, max_chars: usize) -> Result<String> {
-        let url = validate_public_url(url)?;
         let max_chars = if max_chars == 0 {
             MAX_PAGE_CHARS
         } else {
             max_chars.clamp(1_000, 200_000)
         };
         let client = self.client()?;
-        let response = client
-            .get(url.clone())
-            .header(reqwest::header::ACCEPT, "text/html,text/plain,*/*")
-            .send()
-            .await
-            .map_err(|error| anyhow!("request failed: {error}"))?;
+        let mut current = validate_public_url(url)?;
+        ensure_public_resolved(&current).await?;
+        let response = {
+            let mut hops = 0usize;
+            loop {
+                hops += 1;
+                if hops > 10 {
+                    bail!("too many redirects");
+                }
+                let response = client
+                    .get(current.clone())
+                    .header(reqwest::header::ACCEPT, "text/html,text/plain,*/*")
+                    .send()
+                    .await
+                    .map_err(|error| anyhow!("request failed: {error}"))?;
+                if !response.status().is_redirection() {
+                    break response;
+                }
+                let location = response
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .context("redirect response has no Location header")?;
+                let resolved = current
+                    .join(location)
+                    .map_err(|_| anyhow!("invalid redirect Location: {location}"))?;
+                current = validate_public_url(resolved.as_str())?;
+                ensure_public_resolved(&current).await?;
+            }
+        };
         let status = response.status();
         if !status.is_success() {
             bail!("fetch returned HTTP {}", status.as_u16());
         }
         let final_url = response.url().clone();
-        // A redirect could land on a private host even when the original URL was
-        // public; re-check before reading the body.
-        validate_public_url(final_url.as_str())?;
+        ensure_public_resolved(&final_url).await?;
         let content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
@@ -494,14 +516,34 @@ fn validate_public_url(raw: &str) -> Result<reqwest::Url> {
     Ok(url)
 }
 
+async fn ensure_public_resolved(url: &reqwest::Url) -> Result<()> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow!("URL has no host"))?
+        .to_ascii_lowercase();
+    let port = url.port_or_known_default().unwrap_or(80);
+    let resolved = tokio::net::lookup_host((url.host_str().unwrap(), port))
+        .await
+        .with_context(|| format!("could not resolve host: {host}"))?;
+    for addr in resolved {
+        if is_private_ip(&addr.ip()) {
+            bail!("refusing to fetch a private or loopback address: {host}");
+        }
+    }
+    Ok(())
+}
+
 fn is_private_host(host: &str) -> bool {
-    use std::net::IpAddr;
     let candidate = host.trim_start_matches('[').trim_end_matches(']');
-    let Ok(ip) = candidate.parse::<IpAddr>() else {
+    let Ok(ip) = candidate.parse::<std::net::IpAddr>() else {
         return false;
     };
+    is_private_ip(&ip)
+}
+
+fn is_private_ip(ip: &std::net::IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => {
+        std::net::IpAddr::V4(v4) => {
             v4.is_loopback()
                 || v4.is_private()
                 || v4.is_link_local()
@@ -510,7 +552,7 @@ fn is_private_host(host: &str) -> bool {
                 // 169.254.169.254 (cloud metadata) is link-local, already covered.
                 || v4.octets()[0] == 0
         }
-        IpAddr::V6(v6) => {
+        std::net::IpAddr::V6(v6) => {
             v6.is_loopback()
                 || v6.is_unspecified()
                 // Unique-local (fc00::/7) and link-local (fe80::/10).
@@ -735,6 +777,23 @@ mod tests {
         assert!(validate_public_url("http://10.0.0.5").is_err());
         assert!(validate_public_url("file:///etc/passwd").is_err());
         assert!(validate_public_url("https://metadata.google.internal/").is_err());
+    }
+
+    #[test]
+    fn is_private_ip_classifies_addresses() {
+        assert!(is_private_ip(&"127.0.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"10.1.2.3".parse().unwrap()));
+        assert!(is_private_ip(&"192.168.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"172.16.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"169.254.169.254".parse().unwrap()));
+        assert!(is_private_ip(&"0.0.0.0".parse().unwrap()));
+        assert!(is_private_ip(&"::1".parse().unwrap()));
+        assert!(is_private_ip(&"fc00::1".parse().unwrap()));
+        assert!(is_private_ip(&"fe80::1".parse().unwrap()));
+        assert!(!is_private_ip(&"8.8.8.8".parse().unwrap()));
+        assert!(!is_private_ip(&"2606:4700:4700::1111".parse().unwrap()));
+        assert!(is_private_host("127.0.0.1"));
+        assert!(!is_private_host("example.com"));
     }
 
     #[test]
