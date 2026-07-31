@@ -79,6 +79,9 @@ pub struct UserAnswer {
 
 pub enum AgentEvent {
     Delta(String),
+    /// The model's reasoning, streamed apart from its answer so the transcript
+    /// can style it differently or leave it out.
+    Reasoning(String),
     Approval(ApprovalRequest),
     UserQuestion(UserQuestionRequest),
     ToolStarted {
@@ -190,8 +193,12 @@ async fn run_turn_inner(
         let (delta_tx, mut delta_rx) = mpsc::unbounded_channel();
         let event_forwarder = events.clone();
         let forward = tokio::spawn(async move {
-            while let Some(delta) = delta_rx.recv().await {
-                if event_forwarder.send(AgentEvent::Delta(delta)).is_err() {
+            while let Some(chunk) = delta_rx.recv().await {
+                let event = match chunk {
+                    crate::provider::Chunk::Text(text) => AgentEvent::Delta(text),
+                    crate::provider::Chunk::Reasoning(text) => AgentEvent::Reasoning(text),
+                };
+                if event_forwarder.send(event).is_err() {
                     break;
                 }
             }

@@ -81,6 +81,8 @@ Assistant responses render as terminal-native Markdown, including headings, emph
 | `/cancel-loop` | Cancel the active Ralph loop |
 | `/swarm <objective>` | Delegate an objective to parallel subagents |
 | `/config` / `/config raw` | Change common or advanced settings live; switch profiles, add a provider from the preset list, or store an API key |
+| `Show thinking` (in `/config`) | Show the model's reasoning above its answer, where the provider streams it separately. On by default |
+| `Show tokens/second` (in `/config`) | Live generation rate while a turn runs. Off by default; estimated from characters |
 | `Training traces` (in `/config`) | Append every model call to `~/.abacus/traces/<session>.jsonl`. On by default |
 | `Draft next message` (in `/config`) | Predict a likely follow-up in the empty composer; `Tab` accepts it. On by default; one short call per turn |
 | `/theme [auto\|dark\|light]` | Switch the Empero-derived palette; `auto` detects the terminal |
@@ -92,6 +94,8 @@ Assistant responses render as terminal-native Markdown, including headings, emph
 The status bar reports two separate figures: `used` is the running total of tokens billed this session, and `ctx` is how full the model's window is right now — taken from the provider's own prompt count when it reports one, since a character estimate ignores the system prompt and tool schemas sent with every request.
 
 The prompt starts in insert mode. `Enter` sends; `Ctrl+J` (or `Shift+Enter` where the terminal supports it) inserts a newline. `Up`/`Down` recall earlier prompts. Scroll the transcript with the mouse wheel, a trackpad, or `PageUp`/`PageDown` — a dense burst of scroll events is read as a trackpad and moves a line at a time, while a discrete wheel notch moves three; once you scroll away from the tail a `↓ latest` marker appears and `G` returns to live output.
+
+Reasoning, where a model exposes it apart from the answer (DeepSeek R1, Qwen thinking builds, GLM, OpenAI reasoning summaries), streams into its own dimmed block above the reply rather than mixed into it. It is recorded in training traces either way — the toggle governs display, not capture.
 
 `Esc` (or `i`/`a`/`A`/`I` to come back) enters normal mode, where the transcript gains a cursor: `j`/`k` step between blocks and `o`, `space`, or `Enter` folds and unfolds a tool result to reveal its full output — a `▸` beside the duration marks a row with more behind it. `Ctrl+u`/`Ctrl+d` scroll half a page, `Ctrl+y`/`Ctrl+e` one line, `gg`/`G` jump to the top or back to live, and `Esc` drops the selection. Clicking works too: a click selects a row, a second click on the same row unfolds it, and rows in the suggestion list, settings, and session picker respond the same way.
 
@@ -261,7 +265,7 @@ Subagents require a git repository. Worker commits are temporary and never modif
 
 Long loops and goals accumulate context until the model window fills. Abacus compacts automatically in two tiers so a long run stays coherent instead of degrading: cheap **microcompaction** replaces stale, re-derivable tool output (old `read_file`/`grep`/`run_command` bodies) with a placeholder once the conversation outgrows a recent window — keeping the most recent results verbatim — and a one-call **rolling summary** condenses the dropped middle as you near the context ceiling. Both thresholds scale with the model's real context window. `/compact` forces an immediate shrink.
 
-See **[docs/context-compaction.md](docs/context-compaction.md)** for the full two-tier design, the model-limit resolution order (override → `/models` detection → per-family heuristic → default), and the heuristic table.
+Thresholds resolve most-authoritative-first: an explicit `--context-window` / `--max-output-tokens` override, then best-effort detection from the provider's `/models` endpoint, then a per-family heuristic table, then a conservative 128k/8k default. `abacus doctor` prints which one your run landed on.
 
 ## Scheduled jobs
 

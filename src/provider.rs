@@ -38,13 +38,23 @@ pub struct Provider {
     context_tokens: Arc<AtomicU64>,
 }
 
+/// A piece of streamed output. Reasoning is kept separate from the answer all
+/// the way to the UI so it can be styled — or withheld — without the renderer
+/// having to guess which is which.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Chunk {
+    Text(String),
+    Reasoning(String),
+}
+
 #[derive(Debug, Clone)]
 pub struct Completion {
     pub content: String,
     /// Chain-of-thought the model exposed separately from its answer
     /// (`reasoning_content` on DeepSeek R1 and Qwen thinking builds,
-    /// `reasoning` elsewhere). Not shown in the transcript, but kept so a
-    /// training trace can record how the answer was reached.
+    /// `reasoning` elsewhere). Streamed to the UI as [`Chunk::Reasoning`] so it
+    /// can be shown or withheld, and kept here so a training trace can record
+    /// how the answer was reached.
     pub reasoning: String,
     pub tool_calls: Vec<ToolCall>,
     /// True when the caller cancelled mid-stream. The content and calls
@@ -144,7 +154,7 @@ impl Provider {
         &self,
         messages: &[Value],
         tools: &[Value],
-        deltas: mpsc::UnboundedSender<String>,
+        deltas: mpsc::UnboundedSender<Chunk>,
         cancel: &AtomicBool,
     ) -> Result<Completion> {
         match self.protocol {
@@ -162,7 +172,7 @@ impl Provider {
         &self,
         messages: &[Value],
         tools: &[Value],
-        deltas: mpsc::UnboundedSender<String>,
+        deltas: mpsc::UnboundedSender<Chunk>,
         cancel: &AtomicBool,
     ) -> Result<Completion> {
         let mut body = json!({
@@ -295,7 +305,7 @@ impl Provider {
         &self,
         messages: &[Value],
         tools: &[Value],
-        deltas: mpsc::UnboundedSender<String>,
+        deltas: mpsc::UnboundedSender<Chunk>,
         cancel: &AtomicBool,
     ) -> Result<Completion> {
         let mut body = json!({
@@ -422,7 +432,7 @@ fn apply_chat_delta(
     content: &mut String,
     reasoning: &mut String,
     calls: &mut BTreeMap<usize, PartialToolCall>,
-    deltas: &mpsc::UnboundedSender<String>,
+    deltas: &mpsc::UnboundedSender<Chunk>,
     format: ToolFormat,
     stream: &mut TextStream,
 ) -> Result<()> {
@@ -442,6 +452,7 @@ fn apply_chat_delta(
         .and_then(Value::as_str)
     {
         reasoning.push_str(piece);
+        let _ = deltas.send(Chunk::Reasoning(piece.to_owned()));
     }
     if let Some(piece) = delta.get("content").and_then(Value::as_str) {
         content.push_str(piece);
@@ -457,7 +468,7 @@ fn apply_chat_delta(
                 None => content.len(),
             };
             if cut > stream.emitted {
-                let _ = deltas.send(content[stream.emitted..cut].to_owned());
+                let _ = deltas.send(Chunk::Text(content[stream.emitted..cut].to_owned()));
                 stream.emitted = cut;
             }
         }
@@ -534,7 +545,7 @@ fn apply_responses_event(
     content: &mut String,
     reasoning: &mut String,
     calls: &mut BTreeMap<usize, PartialToolCall>,
-    deltas: &mpsc::UnboundedSender<String>,
+    deltas: &mpsc::UnboundedSender<Chunk>,
 ) -> Result<()> {
     let value: Value = serde_json::from_str(data).context("invalid JSON in provider stream")?;
     let event_type = value["type"].as_str().unwrap_or_default();
@@ -553,12 +564,13 @@ fn apply_responses_event(
         "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
             if let Some(piece) = value["delta"].as_str() {
                 reasoning.push_str(piece);
+                let _ = deltas.send(Chunk::Reasoning(piece.to_owned()));
             }
         }
         "response.output_text.delta" => {
             if let Some(piece) = value["delta"].as_str() {
                 content.push_str(piece);
-                let _ = deltas.send(piece.to_owned());
+                let _ = deltas.send(Chunk::Text(piece.to_owned()));
             }
         }
         "response.output_item.added" | "response.output_item.done"
@@ -859,8 +871,10 @@ mod tests {
         }
         drop(tx);
         let mut seen = Vec::new();
-        while let Ok(piece) = rx.try_recv() {
-            seen.push(piece);
+        while let Ok(chunk) = rx.try_recv() {
+            if let Chunk::Text(piece) = chunk {
+                seen.push(piece);
+            }
         }
         (content, calls, seen)
     }
@@ -941,8 +955,10 @@ mod tests {
         }
         drop(tx);
         let mut seen = String::new();
-        while let Ok(piece) = rx.try_recv() {
-            seen.push_str(&piece);
+        while let Ok(chunk) = rx.try_recv() {
+            if let Chunk::Text(piece) = chunk {
+                seen.push_str(&piece);
+            }
         }
         assert_eq!(seen, "Let me read it.\n");
         assert!(content.contains("read_file"), "history keeps the raw text");
@@ -978,7 +994,7 @@ mod tests {
             &tx,
         )
         .unwrap();
-        assert_eq!(rx.try_recv().unwrap(), "hello");
+        assert_eq!(rx.try_recv().unwrap(), Chunk::Text("hello".to_owned()));
         assert_eq!(content, "hello");
         assert_eq!(calls[&1].id, "call_7");
         assert_eq!(calls[&1].arguments, r#"{"query":"todo"}"#);

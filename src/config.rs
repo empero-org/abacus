@@ -560,6 +560,15 @@ pub struct UiSettings {
     pub animations: bool,
     pub show_tooltips: bool,
     pub theme: crate::theme::ThemeChoice,
+    /// Show the model's reasoning in the transcript, where the provider streams
+    /// it apart from the answer.
+    #[serde(default = "default_true")]
+    pub show_thinking: bool,
+    /// Show a live generation rate while a turn runs. Off by default — it is a
+    /// diagnostic, and a number that moves every frame is a distraction when
+    /// you are reading.
+    #[serde(default)]
+    pub show_token_rate: bool,
     /// Draft a likely next message in the empty composer once a turn finishes.
     /// Costs one short model call per turn, so it is a setting rather than
     /// always-on behaviour.
@@ -593,6 +602,8 @@ impl Default for UiSettings {
             animations: true,
             show_tooltips: true,
             theme: crate::theme::ThemeChoice::Auto,
+            show_thinking: true,
+            show_token_rate: false,
             draft_replies: true,
         }
     }

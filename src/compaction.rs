@@ -425,7 +425,7 @@ async fn summarize_range(
 
         // Drain streaming deltas silently — the summary is internal memory, not
         // assistant output to show the user.
-        let (delta_tx, mut delta_rx) = mpsc::unbounded_channel::<String>();
+        let (delta_tx, mut delta_rx) = mpsc::unbounded_channel::<crate::provider::Chunk>();
         let drain = tokio::spawn(async move { while delta_rx.recv().await.is_some() {} });
         let result = provider.complete(&messages, &[], delta_tx, cancel).await;
         let _ = drain.await;

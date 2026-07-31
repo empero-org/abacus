@@ -277,6 +277,8 @@ pub async fn run(
                         }
                         break;
                     }
+                    // Headless output is the answer, not the deliberation.
+                    AgentEvent::Reasoning(_) => {}
                     AgentEvent::TraceFailed { error } => {
                         eprintln!("warning: training trace disabled — {error}");
                     }

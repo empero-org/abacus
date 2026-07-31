@@ -498,6 +498,8 @@ fn wrap_plain(spans: &[Span<'static>], width: usize, indent: usize) -> Vec<Line<
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
     User,
+    /// The model's reasoning, kept visually subordinate to its answer.
+    Thinking,
     Assistant,
     Tool,
     System,
@@ -609,6 +611,7 @@ pub fn transcript(
         let selected = cursor == Some(index);
         match entry.kind {
             EntryKind::User => lines.extend(user_block(&entry.text, width)),
+            EntryKind::Thinking => lines.extend(thinking_block(&entry.text, width)),
             EntryKind::Assistant => lines.extend(assistant_block(&entry.text, width)),
             EntryKind::Tool => {
                 if let Some(call) = &entry.tool {
@@ -652,6 +655,31 @@ fn user_block(body: &str, width: usize) -> Vec<Line<'static>> {
             Style::default().fg(text_color()),
         )];
         lines.extend(wrap(&spans, width, &bar, &bar));
+    }
+    lines
+}
+
+/// The model thinking aloud. Dimmed and italic behind a quiet rail, so it reads
+/// as working-out rather than as the answer — it sits above the reply it led to
+/// and must not compete with it.
+fn thinking_block(body: &str, width: usize) -> Vec<Line<'static>> {
+    let quiet = rail();
+    let marker = vec![Span::styled(
+        format!("{} ", glyphs().quote_rail),
+        Style::default().fg(quiet),
+    )];
+    let style = Style::default().fg(quiet).add_modifier(Modifier::ITALIC);
+    let mut lines = Vec::new();
+    for paragraph in body.split('\n') {
+        if paragraph.trim().is_empty() {
+            continue;
+        }
+        lines.extend(wrap(
+            &[Span::styled(paragraph.to_owned(), style)],
+            width,
+            &marker,
+            &marker,
+        ));
     }
     lines
 }

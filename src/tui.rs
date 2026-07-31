@@ -331,6 +331,8 @@ enum ConfigKey {
     ApiKey,
     Permission,
     VimMode,
+    ShowThinking,
+    TokenRate,
     Animations,
     Tooltips,
     DraftReplies,
@@ -366,6 +368,8 @@ const CONFIG_ROWS: &[ConfigRow] = &[
     ConfigRow::Key(ConfigKey::ProjectTrust),
     ConfigRow::Heading("INTERFACE"),
     ConfigRow::Key(ConfigKey::VimMode),
+    ConfigRow::Key(ConfigKey::ShowThinking),
+    ConfigRow::Key(ConfigKey::TokenRate),
     ConfigRow::Key(ConfigKey::Animations),
     ConfigRow::Key(ConfigKey::Tooltips),
     ConfigRow::Key(ConfigKey::DraftReplies),
@@ -394,6 +398,10 @@ fn config_help(key: ConfigKey) -> &'static str {
         }
         ConfigKey::Permission => "Ask before every mutation, or allow them for the session.",
         ConfigKey::VimMode => "Esc enters normal mode in the composer instead of clearing it.",
+        ConfigKey::ShowThinking => {
+            "Show the model's reasoning, where the provider streams it apart from the answer."
+        }
+        ConfigKey::TokenRate => "Show a live generation rate while a turn runs. Estimated.",
         ConfigKey::Animations => "Spinners and the wave on running tool calls.",
         ConfigKey::Tooltips => "The guidance block on the welcome screen.",
         ConfigKey::DraftReplies => {
@@ -433,6 +441,8 @@ const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey::ToolOutputLimit,
     ConfigKey::ProjectTrust,
     ConfigKey::VimMode,
+    ConfigKey::ShowThinking,
+    ConfigKey::TokenRate,
     ConfigKey::Animations,
     ConfigKey::Tooltips,
     ConfigKey::DraftReplies,
@@ -512,6 +522,11 @@ struct App {
     tool_started: Option<Instant>,
     /// When the current turn started, for the footer's live elapsed readout.
     turn_started: Option<Instant>,
+    /// Characters generated this turn — answer and reasoning both — behind the
+    /// optional tokens-per-second readout.
+    turn_output_chars: usize,
+    /// Whether the open block is reasoning rather than the answer.
+    receiving_thinking: bool,
     /// How the previous turn ended, or `None` if it completed cleanly.
     last_outcome: Option<TurnOutcome>,
     /// Clickable regions from the last frame. `RefCell` because the draw
@@ -701,6 +716,8 @@ impl App {
             receiving_delta: false,
             tool_started: None,
             turn_started: None,
+            turn_output_chars: 0,
+            receiving_thinking: false,
             last_outcome: None,
             trace: None,
             last_scroll: None,
@@ -809,6 +826,8 @@ impl App {
             changed = true;
             match event {
                 AgentEvent::Delta(delta) => {
+                    self.turn_output_chars = self.turn_output_chars.saturating_add(delta.len());
+                    self.receiving_thinking = false;
                     if !self.receiving_delta {
                         self.push_entry(Entry::new(EntryKind::Assistant, String::new()));
                         self.receiving_delta = true;
@@ -832,6 +851,24 @@ impl App {
                         EntryKind::Error,
                         format!("Training trace disabled — {error}"),
                     ));
+                }
+                AgentEvent::Reasoning(piece) => {
+                    self.turn_output_chars = self.turn_output_chars.saturating_add(piece.len());
+                    if !self.settings.ui.show_thinking {
+                        continue;
+                    }
+                    // Reasoning accumulates into its own block, so a later
+                    // answer starts a fresh one rather than appending to it.
+                    if !self.receiving_thinking {
+                        self.push_entry(Entry::new(EntryKind::Thinking, String::new()));
+                        self.receiving_thinking = true;
+                        self.receiving_delta = false;
+                    }
+                    if let Some(entry) = self.entries.last_mut() {
+                        entry.text.push_str(&piece);
+                    }
+                    self.entries_rev = self.entries_rev.wrapping_add(1);
+                    self.status = "thinking".to_owned();
                 }
                 AgentEvent::Approval(request) => self.set_approval(request),
                 AgentEvent::UserQuestion(request) => self.set_user_question(request),
@@ -948,6 +985,7 @@ impl App {
                     self.tool_started = None;
                     self.resolved_agent_mode = None;
                     self.receiving_delta = false;
+                    self.receiving_thinking = false;
                     if reason == DoneReason::Complete && !continue_loop {
                         self.start_draft();
                     }
@@ -1101,6 +1139,8 @@ impl App {
             return;
         }
         self.turn_started = Some(Instant::now());
+        self.turn_output_chars = 0;
+        self.receiving_thinking = false;
         self.last_outcome = None;
         self.clear_draft();
         self.cancel.store(false, Ordering::Relaxed);
@@ -1992,6 +2032,12 @@ impl App {
                     };
             }
             ConfigKey::VimMode => self.settings.ui.vim_mode = !self.settings.ui.vim_mode,
+            ConfigKey::ShowThinking => {
+                self.settings.ui.show_thinking = !self.settings.ui.show_thinking
+            }
+            ConfigKey::TokenRate => {
+                self.settings.ui.show_token_rate = !self.settings.ui.show_token_rate
+            }
             ConfigKey::Animations => self.settings.ui.animations = !self.settings.ui.animations,
             ConfigKey::Tooltips => self.settings.ui.show_tooltips = !self.settings.ui.show_tooltips,
             ConfigKey::DraftReplies => {
@@ -2166,6 +2212,8 @@ impl App {
             }
             ConfigKey::Permission => format!("{:?}", self.settings.ui.permission_mode),
             ConfigKey::VimMode => on_off(self.settings.ui.vim_mode),
+            ConfigKey::ShowThinking => on_off(self.settings.ui.show_thinking),
+            ConfigKey::TokenRate => on_off(self.settings.ui.show_token_rate),
             ConfigKey::Animations => on_off(self.settings.ui.animations),
             ConfigKey::Tooltips => on_off(self.settings.ui.show_tooltips),
             ConfigKey::DraftReplies => on_off(self.settings.ui.draft_replies),
@@ -2652,6 +2700,22 @@ impl App {
     /// treated as a trackpad and moves one line. The first event after a pause
     /// keeps the wheel's larger step, which is what makes a single notch still
     /// feel responsive.
+    /// Generation rate for the running turn, or `None` before there is enough
+    /// to measure.
+    ///
+    /// Estimated from characters, since the provider only reports token counts
+    /// once the reply is finished and the point of this readout is to move
+    /// while it is being produced. The same 4:1 ratio compaction uses.
+    fn token_rate(&self) -> Option<f64> {
+        let elapsed = self.turn_started?.elapsed().as_secs_f64();
+        // Below half a second the divisor is small enough to produce wild
+        // numbers that say nothing.
+        if elapsed < 0.5 || self.turn_output_chars == 0 {
+            return None;
+        }
+        Some((self.turn_output_chars as f64 / 4.0) / elapsed)
+    }
+
     fn scroll_step(&mut self) -> u16 {
         const TRACKPAD_GAP: Duration = Duration::from_millis(80);
         let now = Instant::now();
@@ -4364,7 +4428,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .turn_started
             .map(|started| started.elapsed())
             .unwrap_or_default();
-        vec![
+        let mut spans = vec![
             Span::styled(
                 format!(
                     " {} ",
@@ -4377,7 +4441,16 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 format!("  {}", ui::format_elapsed(elapsed.as_millis() as u64)),
                 Style::default().fg(muted()),
             ),
-        ]
+        ];
+        if app.settings.ui.show_token_rate
+            && let Some(rate) = app.token_rate()
+        {
+            spans.push(Span::styled(
+                format!("  {rate:.0} tok/s"),
+                Style::default().fg(rail()),
+            ));
+        }
+        spans
     } else {
         let set = ui::glyphs();
         let (glyph, color) = match app.last_outcome {
@@ -5855,6 +5928,8 @@ fn config_label(key: ConfigKey) -> &'static str {
         ConfigKey::ApiKey => "API key",
         ConfigKey::Permission => "Permission mode",
         ConfigKey::VimMode => "Vim keybindings",
+        ConfigKey::ShowThinking => "Show thinking",
+        ConfigKey::TokenRate => "Show tokens/second",
         ConfigKey::Animations => "Animations",
         ConfigKey::Tooltips => "Welcome tips",
         ConfigKey::DraftReplies => "Draft next message",
@@ -6499,6 +6574,99 @@ mod tests {
         app.cycle_config_value(ConfigKey::TraceLogging).unwrap();
         assert!(app.settings.trace.enabled);
         assert!(app.trace.is_some(), "re-enabling reopens it");
+    }
+
+    /// Push a reasoning chunk through the real event path.
+    fn reasoning(app: &mut App, piece: &str) {
+        let _ = app
+            .event_tx
+            .send(crate::agent::AgentEvent::Reasoning(piece.to_owned()));
+        app.drain_agent_events();
+    }
+
+    #[test]
+    fn thinking_is_shown_by_default_and_kept_apart_from_the_answer() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        assert!(app.settings.ui.show_thinking, "on by default");
+
+        reasoning(&mut app, "let me check the parser");
+        let _ = app
+            .event_tx
+            .send(crate::agent::AgentEvent::Delta("Here is the fix.".into()));
+        app.drain_agent_events();
+
+        let kinds: Vec<EntryKind> = app.entries.iter().map(|entry| entry.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![EntryKind::Thinking, EntryKind::Assistant],
+            "reasoning must not be appended to the answer"
+        );
+        assert_eq!(app.entries[0].text, "let me check the parser");
+        assert_eq!(app.entries[1].text, "Here is the fix.");
+    }
+
+    #[test]
+    fn thinking_off_leaves_no_block_but_still_counts_the_output() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.settings.ui.show_thinking = false;
+        reasoning(&mut app, "a long private deliberation");
+        assert!(
+            app.entries.is_empty(),
+            "nothing should be rendered: {:?}",
+            app.entries
+        );
+        // It was still generated and billed, so the rate must account for it.
+        assert_eq!(app.turn_output_chars, "a long private deliberation".len());
+    }
+
+    #[test]
+    fn the_token_rate_waits_for_something_worth_measuring() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        assert_eq!(app.token_rate(), None, "no turn running");
+
+        app.turn_started = Some(Instant::now());
+        assert_eq!(app.token_rate(), None, "no output yet");
+
+        // A fraction of a second in, the divisor is small enough to produce a
+        // meaningless number.
+        app.turn_output_chars = 400;
+        assert_eq!(app.token_rate(), None, "too early to be meaningful");
+
+        app.turn_started = Some(Instant::now() - Duration::from_secs(10));
+        let rate = app.token_rate().expect("measurable");
+        // 400 chars ≈ 100 tokens over 10s.
+        assert!((rate - 10.0).abs() < 1.0, "got {rate}");
+    }
+
+    #[tokio::test]
+    async fn the_rate_is_off_by_default_and_only_shows_while_running() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        assert!(!app.settings.ui.show_token_rate, "off by default");
+
+        app.settings.ui.show_token_rate = true;
+        app.turn_started = Some(Instant::now() - Duration::from_secs(10));
+        app.turn_output_chars = 4_000;
+        app.entries = vec![Entry::new(EntryKind::User, "go")];
+
+        // Not running: the status bar has no rate to report.
+        let backend = TestBackend::new(110, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(!buffer_text(terminal.backend().buffer(), 110, 16).contains("tok/s"));
+
+        // Running with the toggle on, it appears beside the elapsed time.
+        app.start_turn("go".into(), "go".into(), false);
+        app.turn_started = Some(Instant::now() - Duration::from_secs(10));
+        app.turn_output_chars = 4_000;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let rendered = buffer_text(terminal.backend().buffer(), 110, 16);
+        assert!(rendered.contains("tok/s"), "{rendered}");
+        assert!(rendered.contains("100 tok/s"), "4000 chars / 4 / 10s");
+
+        // And stays hidden when the toggle is off, even mid-turn.
+        app.settings.ui.show_token_rate = false;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(!buffer_text(terminal.backend().buffer(), 110, 16).contains("tok/s"));
     }
 
     #[test]

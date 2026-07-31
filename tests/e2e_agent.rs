@@ -307,7 +307,10 @@ async fn responses_protocol_uses_responses_endpoint_and_stream_format() {
         .await
         .unwrap();
     assert_eq!(completion.content, "ready");
-    assert_eq!(rx.try_recv().unwrap(), "ready");
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        abacus_agent::provider::Chunk::Text("ready".to_owned())
+    );
     server.await.unwrap();
 }
 
