@@ -78,6 +78,25 @@ impl Session {
     }
 }
 
+/// A session read for listing: everything but the transcript itself. The
+/// messages deserialize into `IgnoredAny`, so they are counted without being
+/// built.
+#[derive(Deserialize)]
+struct SessionHeader {
+    version: u32,
+    id: Uuid,
+    workspace: PathBuf,
+    title: String,
+    model: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    messages: Vec<serde::de::IgnoredAny>,
+    #[serde(default)]
+    tokens_used: u64,
+    #[serde(default)]
+    active_secs: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionSummary {
     pub id: Uuid,
@@ -149,34 +168,50 @@ impl SessionStore {
     }
 
     pub fn list(&self) -> Result<Vec<SessionSummary>> {
+        let mut sessions = self
+            .headers()?
+            .into_iter()
+            .map(|(header, _)| SessionSummary {
+                id: header.id,
+                title: header.title,
+                model: header.model,
+                updated_at: header.updated_at,
+                message_count: header.messages.len().saturating_sub(1),
+            })
+            .collect::<Vec<_>>();
+        sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+        Ok(sessions)
+    }
+
+    /// Read every session in this workspace as a header only.
+    ///
+    /// Listing used to deserialize each file in full — every message of every
+    /// past session — to show a title and a count. A long-lived workspace makes
+    /// that megabytes of `Value` trees built and dropped each time `/sessions`
+    /// or `/usage` opens. The messages are counted but never materialised.
+    fn headers(&self) -> Result<Vec<(SessionHeader, u64)>> {
         if !self.directory.exists() {
             return Ok(Vec::new());
         }
-        let mut sessions = Vec::new();
+        let mut headers = Vec::new();
         for entry in fs::read_dir(&self.directory)? {
             let entry = entry?;
             if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
                 continue;
             }
+            let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
             let Ok(content) = fs::read(entry.path()) else {
                 continue;
             };
-            let Ok(session) = serde_json::from_slice::<Session>(&content) else {
+            let Ok(header) = serde_json::from_slice::<SessionHeader>(&content) else {
                 continue;
             };
-            if session.workspace != self.workspace || session.version > SESSION_VERSION {
+            if header.workspace != self.workspace || header.version > SESSION_VERSION {
                 continue;
             }
-            sessions.push(SessionSummary {
-                id: session.id,
-                title: session.title,
-                model: session.model,
-                updated_at: session.updated_at,
-                message_count: session.messages.len().saturating_sub(1),
-            });
+            headers.push((header, size));
         }
-        sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
-        Ok(sessions)
+        Ok(headers)
     }
 
     /// Read the lightweight fields used by the local `/usage` dashboard.
@@ -186,40 +221,31 @@ impl SessionStore {
         if !self.directory.exists() {
             return Ok(Vec::new());
         }
-        let mut usage = Vec::new();
-        for entry in fs::read_dir(&self.directory)? {
-            let entry = entry?;
-            if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
-                continue;
-            }
-            let Ok(content) = fs::read(entry.path()) else {
-                continue;
-            };
-            let Ok(session) = serde_json::from_slice::<Session>(&content) else {
-                continue;
-            };
-            if session.workspace != self.workspace || session.version > SESSION_VERSION {
-                continue;
-            }
-            let tokens_estimated = session.tokens_used == 0 && session.messages.len() > 1;
-            let tokens_used = if tokens_estimated {
-                serde_json::to_vec(&session.messages)
-                    .map(|messages| messages.len() as u64 / 4)
-                    .unwrap_or(0)
-            } else {
-                session.tokens_used
-            };
-            usage.push(SessionUsage {
-                id: session.id,
-                model: session.model,
-                created_at: session.created_at,
-                updated_at: session.updated_at,
-                message_count: session.messages.len().saturating_sub(1),
-                tokens_used,
-                tokens_estimated,
-                active_secs: session.active_secs,
-            });
-        }
+        let mut usage = self
+            .headers()?
+            .into_iter()
+            .map(|(header, size)| {
+                let tokens_estimated = header.tokens_used == 0 && header.messages.len() > 1;
+                // Legacy sessions predate persisted totals. The file's size
+                // stands in for the transcript's size, which is what the old
+                // estimate measured anyway — without re-encoding it to find out.
+                let tokens_used = if tokens_estimated {
+                    size / 4
+                } else {
+                    header.tokens_used
+                };
+                SessionUsage {
+                    id: header.id,
+                    model: header.model,
+                    created_at: header.created_at,
+                    updated_at: header.updated_at,
+                    message_count: header.messages.len().saturating_sub(1),
+                    tokens_used,
+                    tokens_estimated,
+                    active_secs: header.active_secs,
+                }
+            })
+            .collect::<Vec<_>>();
         usage.sort_by_key(|record| record.created_at);
         Ok(usage)
     }

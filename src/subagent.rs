@@ -242,6 +242,10 @@ impl SubagentRuntime {
             self.provider.clone(),
             messages,
             TurnOptions {
+                // Subagent work is a different task shape from the main loop;
+                // mixing it into the same trace would blur the samples.
+                trace: None,
+                cancel: Arc::new(AtomicBool::new(false)),
                 workspace: worker_workspace,
                 max_steps: self.max_steps,
                 tool_output_limit: self.tool_output_limit,
@@ -292,7 +296,7 @@ fn capture_event(
         AgentEvent::Approval(request) => {
             let _ = request.respond.send(crate::agent::ApprovalDecision::Once);
         }
-        AgentEvent::Done { messages } => *final_messages = Some(messages),
+        AgentEvent::Done { messages, .. } => *final_messages = Some(messages),
         AgentEvent::Failed { error, messages } => {
             *failure = Some(error);
             *final_messages = Some(messages);

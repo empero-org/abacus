@@ -138,6 +138,13 @@ pub struct CompactionBudget {
     pub compact_at_chars: usize,
     /// Verbatim recent window kept after a full compaction (~30% of usable input).
     pub recent_budget_chars: usize,
+    /// Ceiling on the rolling summary (~15% of usable input).
+    ///
+    /// The summary is re-injected every turn and counted by `under_pressure`,
+    /// so an unbounded one eventually exceeds the trigger on its own: every
+    /// turn then fires a summariser call on an already-tiny history, which
+    /// extends the summary further. Capping it breaks that loop.
+    pub summary_budget_chars: usize,
 }
 
 impl Default for CompactionBudget {
@@ -156,6 +163,10 @@ impl CompactionBudget {
         Self {
             compact_at_chars: usable_chars.saturating_mul(4) / 5,
             recent_budget_chars: usable_chars.saturating_mul(3) / 10,
+            // Held well under the recent window so the two together stay
+            // comfortably below the trigger; otherwise summarising is what
+            // keeps the context over threshold.
+            summary_budget_chars: usable_chars.saturating_mul(3) / 20,
         }
     }
 }

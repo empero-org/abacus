@@ -3,6 +3,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
 };
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone, Copy)]
 pub struct MarkdownTheme {
@@ -14,6 +15,12 @@ pub struct MarkdownTheme {
     pub code_background: Color,
     pub quote: Color,
     pub link: Color,
+    /// Rail down the left of a fenced code block.
+    pub code_rail: &'static str,
+    /// Rail down the left of a block quote. Deliberately a different weight
+    /// from `code_rail` — quoted prose and code are different things and
+    /// should not share a marker.
+    pub quote_rail: &'static str,
 }
 
 impl Default for MarkdownTheme {
@@ -27,6 +34,8 @@ impl Default for MarkdownTheme {
             code_background: Color::Rgb(15, 23, 42),
             quote: Color::LightBlue,
             link: Color::LightCyan,
+            code_rail: "\u{2502}",
+            quote_rail: "\u{2503}",
         }
     }
 }
@@ -46,12 +55,23 @@ struct TableState {
     in_head: bool,
 }
 
+/// Render `markdown` without a known measure: code fences get no filled
+/// background, since there is no width to fill to.
 pub fn render(markdown: &str, theme: MarkdownTheme) -> Text<'static> {
-    Renderer::new(theme).render(markdown)
+    Renderer::new(theme, None).render(markdown)
+}
+
+/// Render `markdown` to a known measure. Code blocks become a filled slab
+/// exactly `width` columns wide, which is what lets a fenced block read as one
+/// object instead of as a ragged rule with text under it.
+pub fn render_at(markdown: &str, theme: MarkdownTheme, width: usize) -> Text<'static> {
+    Renderer::new(theme, Some(width.max(8))).render(markdown)
 }
 
 struct Renderer {
     theme: MarkdownTheme,
+    /// Render measure, when the caller knows one.
+    width: Option<usize>,
     lines: Vec<Line<'static>>,
     current: Vec<Span<'static>>,
     styles: Vec<Style>,
@@ -65,9 +85,10 @@ struct Renderer {
 }
 
 impl Renderer {
-    fn new(theme: MarkdownTheme) -> Self {
+    fn new(theme: MarkdownTheme, width: Option<usize>) -> Self {
         Self {
             theme,
+            width,
             lines: Vec::new(),
             current: Vec::new(),
             styles: vec![Style::default().fg(theme.text)],
@@ -169,11 +190,16 @@ impl Renderer {
                     CodeBlockKind::Fenced(value) => value.into_string(),
                     CodeBlockKind::Indented => String::new(),
                 };
-                let title = if language.is_empty() {
-                    "╭─ code".to_owned()
+                let label = if language.is_empty() {
+                    "code".to_owned()
                 } else {
-                    format!("╭─ {language}")
+                    language.clone()
                 };
+                let mut title = format!("╭─ {label} ");
+                if let Some(width) = self.width {
+                    let used = UnicodeWidthStr::width(title.as_str());
+                    title.push_str(&"─".repeat(width.saturating_sub(used)));
+                }
                 self.lines.push(Line::from(Span::styled(
                     title,
                     Style::default()
@@ -252,8 +278,10 @@ impl Renderer {
             }
             TagEnd::CodeBlock => {
                 self.flush_line(false);
+                let mut rule = "╰".to_owned();
+                rule.push_str(&"─".repeat(self.width.unwrap_or(2).saturating_sub(1)));
                 self.lines.push(Line::from(Span::styled(
-                    "╰─",
+                    rule,
                     Style::default()
                         .fg(self.theme.muted)
                         .bg(self.theme.code_background),
@@ -432,8 +460,10 @@ impl Renderer {
     fn ensure_prefix(&mut self) {
         if self.current.is_empty() {
             for _ in 0..self.quote_depth {
-                self.current
-                    .push(Span::styled("│ ", Style::default().fg(self.theme.quote)));
+                self.current.push(Span::styled(
+                    format!("{} ", self.theme.quote_rail),
+                    Style::default().fg(self.theme.quote),
+                ));
             }
             if let Some(prefix) = self.item_prefix_pending.take() {
                 self.current
@@ -445,7 +475,7 @@ impl Renderer {
     fn ensure_code_prefix(&mut self) {
         if self.current.is_empty() {
             self.current.push(Span::styled(
-                "│ ",
+                format!("{} ", self.theme.code_rail),
                 Style::default()
                     .fg(self.theme.muted)
                     .bg(self.theme.code_background),
@@ -462,10 +492,32 @@ impl Renderer {
     }
 
     fn flush_line(&mut self, force: bool) {
-        if !self.current.is_empty() || force {
-            self.lines
-                .push(Line::from(std::mem::take(&mut self.current)));
+        if self.current.is_empty() && !force {
+            return;
         }
+        // Inside a fenced block, pad the row out to the measure so the filled
+        // background forms a rectangle rather than tracking the ragged right
+        // edge of the code.
+        if self.code_block.is_some()
+            && let Some(width) = self.width
+        {
+            if self.current.is_empty() {
+                self.ensure_code_prefix();
+            }
+            let used: usize = self
+                .current
+                .iter()
+                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                .sum();
+            if used < width {
+                self.current.push(Span::styled(
+                    " ".repeat(width - used),
+                    Style::default().bg(self.theme.code_background),
+                ));
+            }
+        }
+        self.lines
+            .push(Line::from(std::mem::take(&mut self.current)));
     }
 
     fn blank_line(&mut self) {

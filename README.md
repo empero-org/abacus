@@ -26,7 +26,7 @@ cd your-project
 abacus
 ```
 
-Running `abacus` without a configuration starts a three-step onboarding flow for provider credentials, live model discovery, permissions, Vim bindings, welcome guidance, and the web-search backend. Setup supports OpenAI, xAI, OpenRouter, Ollama, and custom compatible endpoints. It writes:
+Running `abacus` without a configuration starts a three-step onboarding flow for provider credentials, live model discovery, permissions, Vim bindings, welcome guidance, and the web-search backend. Setup ships presets for OpenAI, xAI, OpenRouter, Groq, DeepSeek, Mistral, Together, Fireworks, Cerebras, Ollama, and local llama.cpp/vLLM servers, plus any custom OpenAI-compatible endpoint; the provider list marks which API keys it already found in your environment. It writes:
 
 ```text
 ~/.abacus/config.toml       provider profiles and preferences
@@ -35,6 +35,7 @@ Running `abacus` without a configuration starts a three-step onboarding flow for
 ~/.abacus/skills/           user Agent Skills
 ~/.abacus/plugins/          installed plugins
 ~/.abacus/cron/             scheduled jobs and bounded logs
+~/.abacus/traces/           per-session JSONL training traces
 ```
 
 Environment variables take precedence over stored credentials. The common variables are `OPENAI_API_KEY`, `XAI_API_KEY`, and `OPENROUTER_API_KEY`. `ABACUS_HOME` relocates Abacus state.
@@ -45,6 +46,7 @@ Environment variables take precedence over stored credentials. The common variab
 abacus                         # new persistent TUI session
 abacus --continue              # continue latest workspace session
 abacus --resume a1b2c3d4       # resume by unique ID prefix
+abacus --mode plan -p '...'    # headless run pinned to read-only PLAN
 abacus sessions
 ```
 
@@ -58,7 +60,7 @@ Typing `@` opens a live, gitignore-aware file picker; `Tab` completes the highli
 
 If the workspace root contains an `AGENTS.md`, Abacus reads it at startup and prepends it to the system prompt, so repository-specific conventions steer every turn. Content beyond 24,000 characters is truncated.
 
-Abacus starts in AUTO mode. The model must explicitly choose read-only PLAN or mutating BUILD for each turn before it can change files, run commands, or delegate work. Pin a mode with `/mode plan` or `/mode build`, return to autonomous selection with `/mode auto`, or cycle modes with `Shift+Tab`.
+Abacus starts in AUTO mode. The model must explicitly choose read-only PLAN or mutating BUILD for each turn before it can change files or delegate work. PLAN is not a shell lockout: commands that only inspect — builds, linters, test runs — are allowed, while anything that deletes, overwrites, moves, touches git history or a remote, installs software, or reaches the network is refused. Obvious cases are decided locally; the rest cost one short classification call, and anything unclear is refused. Pin a mode with `/mode plan` or `/mode build`, return to autonomous selection with `/mode auto`, or cycle modes with `Shift+Tab`.
 
 Assistant responses render as terminal-native Markdown, including headings, emphasis, links, quotes, task lists, fenced code, and tables. Before a mutation, Abacus opens a semantic review with per-file statistics, line numbers, and colored additions/deletions. Use `y` to allow once, `a` to allow mutations for the session, or `n` to reject; `j/k` scrolls, `h/l` pans, and `v` switches between semantic and raw diff views.
 
@@ -78,14 +80,56 @@ Assistant responses render as terminal-native Markdown, including headings, emph
 | `/loop "<prompt>" [options]` | Start a promise-driven Ralph loop |
 | `/cancel-loop` | Cancel the active Ralph loop |
 | `/swarm <objective>` | Delegate an objective to parallel subagents |
-| `/config` / `/config raw` | Change common or advanced settings live |
+| `/config` / `/config raw` | Change common or advanced settings live; switch profiles, add a provider from the preset list, or store an API key |
+| `Training traces` (in `/config`) | Append every model call to `~/.abacus/traces/<session>.jsonl`. On by default |
+| `Draft next message` (in `/config`) | Predict a likely follow-up in the empty composer; `Tab` accepts it. On by default; one short call per turn |
 | `/theme [auto\|dark\|light]` | Switch the Empero-derived palette; `auto` detects the terminal |
 | `/feedback` | Send product feedback to the configured Empero endpoint |
 | `/compact` | Compact old conversation context |
 | `/tools` / `/skills` / `/plugins` / `/mcps` | Inspect active capabilities |
 | `/help` / `/quit` (`/q`, `/exit`) | Show help or exit |
 
-The prompt starts in insert mode. `Enter` sends; `Ctrl+J` (or `Shift+Enter` where the terminal supports it) inserts a newline. `Up`/`Down` recall earlier prompts. Scroll the transcript with the mouse wheel or `PageUp`/`PageDown`. `Esc` enters normal mode; `i`, `a`, `A`, and `I` return to insert mode. Navigation supports `h/j/k/l`, `w/b`, `0/$`, `gg/G`, `Ctrl+u`, and `Ctrl+d`. `Ctrl+c` interrupts a turn or clears the prompt; pressing it twice in a row exits. `Ctrl+q` exits immediately.
+The status bar reports two separate figures: `used` is the running total of tokens billed this session, and `ctx` is how full the model's window is right now — taken from the provider's own prompt count when it reports one, since a character estimate ignores the system prompt and tool schemas sent with every request.
+
+The prompt starts in insert mode. `Enter` sends; `Ctrl+J` (or `Shift+Enter` where the terminal supports it) inserts a newline. `Up`/`Down` recall earlier prompts. Scroll the transcript with the mouse wheel, a trackpad, or `PageUp`/`PageDown` — a dense burst of scroll events is read as a trackpad and moves a line at a time, while a discrete wheel notch moves three; once you scroll away from the tail a `↓ latest` marker appears and `G` returns to live output.
+
+`Esc` (or `i`/`a`/`A`/`I` to come back) enters normal mode, where the transcript gains a cursor: `j`/`k` step between blocks and `o`, `space`, or `Enter` folds and unfolds a tool result to reveal its full output — a `▸` beside the duration marks a row with more behind it. `Ctrl+u`/`Ctrl+d` scroll half a page, `Ctrl+y`/`Ctrl+e` one line, `gg`/`G` jump to the top or back to live, and `Esc` drops the selection. Clicking works too: a click selects a row, a second click on the same row unfolds it, and rows in the suggestion list, settings, and session picker respond the same way.
+
+Typing `/` or `@` opens a suggestion list: `Up`/`Down` move the highlight, `Tab` or `Enter` inserts it, and `Esc` dismisses it. Once a command is complete the list closes, so `Enter` sends it. `Esc` otherwise stops a running turn, enters normal mode when Vim keybindings are on, or clears the draft. `Ctrl+c` (or `Esc`) asks a running turn to stop — it finishes its current tool and keeps everything it did in the conversation; pressing it again forces an immediate stop. With no turn running, `Ctrl+c` clears the prompt, and twice in a row exits. `Ctrl+q` exits immediately. `F1` (or `?` in normal mode) opens the key reference.
+
+Set `ABACUS_ASCII=1` to swap the box-drawing, braille, and block glyphs for ASCII stand-ins of the same width, for terminals whose fonts lack them. Colour depth is detected from `COLORTERM` and `TERM` and the palette is quantized to match — truecolor, 256, or a role-mapped sixteen — with `ABACUS_COLOR=none|16|256|truecolor` to override. `NO_COLOR` is honoured: the interface drops to the terminal's own palette and leans on structure, bold, and reverse video instead.
+
+## Training traces
+
+With `[trace] enabled` (the default), each session appends one JSON object per model call to `~/.abacus/traces/<session-id>.jsonl`:
+
+```json
+{"version":1,"session":"…","model":"…","step":1,"mode":"AUTO",
+ "messages":[{"role":"system",…},{"role":"user",…}],
+ "tools":["read_file","grep",…],
+ "completion":{"reasoning":"…","tool_calls":[{"name":"read_file","arguments":"{…}"}]}}
+```
+
+The request is captured *after* the system prompt, rolling compaction summary, and goal/task/mode context are layered on, so a record is the task the model was actually given — which is what makes the file usable for fine-tuning a model to drive Abacus rather than just a log of what happened. Reasoning is kept where the provider exposes it separately from the answer, and tool arguments are stored as the raw string the model emitted. One record per model call, so a turn with eight tool calls yields eight samples and an unfinished session still leaves usable data.
+
+Collect them for a training run with `abacus pull`:
+
+```sh
+mkdir sft && cd sft
+abacus pull            # or: abacus pull /path/to/dataset
+```
+
+It **copies** every non-empty trace into the target directory and leaves the originals untouched — a session may be appending to one while you run it, and the traces directory is this machine's running record. Pulling again is idempotent: a copy that already matches is left alone, and one that has since grown is refreshed. Pulling into the traces directory itself is refused.
+
+`abacus pull all` additionally rebuilds traces from **every saved session on the device**, including those from before tracing existed:
+
+```sh
+abacus pull all          # traces + every session; or: abacus pull --all ./dataset
+```
+
+A rebuilt record is thinner than a live capture — a session file stores the conversation, not the requests that produced it, so there is no reasoning, no list of tools offered, and no per-call mode. It carries `"source": "session"` so you can weight or drop those samples; a live capture carries `"source": "live"`. Where a session has both, the live capture wins and is never overwritten. (Records written before schema version 2 have no `source` field; they are all live.)
+
+Traces hold your prompts, your code, and your tool output. They never leave the machine, and deleting the directory is the whole cleanup. Turn them off with the `/config` row or `[trace] enabled = false`.
 
 ## Coding tools
 

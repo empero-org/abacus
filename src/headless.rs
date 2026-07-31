@@ -90,6 +90,37 @@ pub async fn run(
     let mut ralph = loop_config;
     let mut text = String::new();
     let mut final_messages = messages;
+
+    // A headless run normally has no session until it finishes, so there is no
+    // id to key a trace on while the turn is running. Since the run is going to
+    // save one anyway, create it up front when tracing — the alternative is
+    // recording nothing at all for exactly the runs most worth recording.
+    let mut session = session;
+    if config.trace_enabled
+        && session.is_none()
+        && let Some(store) = &store
+    {
+        match store.create(
+            config.profile.clone(),
+            config.model.clone(),
+            final_messages.clone(),
+        ) {
+            Ok(created) => session = Some(created),
+            Err(error) => eprintln!("warning: could not create session — {error:#}"),
+        }
+    }
+    let session_id = session.as_ref().map(|session| session.id.to_string());
+    let trace = match (config.trace_enabled, session_id.as_deref()) {
+        (true, Some(id)) => match crate::sft::TraceWriter::open(&config.paths.traces_dir, id) {
+            Ok(writer) => Some(writer),
+            Err(error) => {
+                eprintln!("warning: training trace disabled — {error:#}");
+                None
+            }
+        },
+        _ => None,
+    };
+
     let mut failure: Option<String> = None;
 
     // Loop mode drives its own prompt replay; non-loop mode expects the caller to
@@ -114,6 +145,7 @@ pub async fn run(
                 &tasks,
                 &compaction,
                 session_id.clone(),
+                trace.clone(),
             ),
             events.clone(),
         )))
@@ -207,7 +239,7 @@ pub async fn run(
                         }))?,
                         OutputFormat::Json => {}
                     },
-                    AgentEvent::Done { messages } => {
+                    AgentEvent::Done { messages, .. } => {
                         final_messages = messages;
                         if let Some(state) = ralph.as_mut() {
                             let completed =
@@ -245,6 +277,9 @@ pub async fn run(
                         }
                         break;
                     }
+                    AgentEvent::TraceFailed { error } => {
+                        eprintln!("warning: training trace disabled — {error}");
+                    }
                     AgentEvent::Failed { error, messages } => {
                         final_messages = messages;
                         failure = Some(error.clone());
@@ -272,6 +307,7 @@ pub async fn run(
                         &tasks,
                         &compaction,
                         session_id.clone(),
+                        trace.clone(),
                     ),
                     events.clone(),
                 )));
@@ -409,6 +445,7 @@ fn persist_session(
     Ok(Some(session_value.id.to_string()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn turn_options(
     config: &Config,
     allow: &Arc<AtomicBool>,
@@ -417,12 +454,17 @@ fn turn_options(
     tasks: &TaskList,
     compaction: &CompactionState,
     session_id: Option<String>,
+    trace: Option<crate::sft::TraceWriter>,
 ) -> TurnOptions {
     TurnOptions {
+        trace,
+        cancel: Arc::new(AtomicBool::new(false)),
         workspace: config.workspace.clone(),
         max_steps: config.max_steps,
         tool_output_limit: config.tool_output_limit,
-        mode: AgentMode::Auto,
+        // A headless run defaults to AUTO so the model chooses; `--mode`
+        // pins it, which is what makes a read-only CI check expressible.
+        mode: config.mode.unwrap_or(AgentMode::Auto),
         allow_mutations: allow.clone(),
         services: services.clone(),
         session_id,

@@ -21,6 +21,17 @@ fn parse_token_arg(input: &str) -> Result<usize, String> {
 }
 
 /// clap value parser for the tool-call text format.
+fn parse_agent_mode(input: &str) -> Result<crate::agent::AgentMode, String> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(crate::agent::AgentMode::Auto),
+        "plan" => Ok(crate::agent::AgentMode::Plan),
+        "build" => Ok(crate::agent::AgentMode::Build),
+        other => Err(format!(
+            "unknown mode `{other}` (expected auto, plan, or build)"
+        )),
+    }
+}
+
 fn parse_tool_format(input: &str) -> Result<ToolFormat, String> {
     ToolFormat::parse(input).ok_or_else(|| {
         format!(
@@ -103,6 +114,11 @@ pub struct Cli {
     #[arg(long, value_name = "FORMAT", value_parser = parse_tool_format)]
     pub tool_format: Option<ToolFormat>,
 
+    /// Pin the workflow mode for a headless run: auto, plan, or build.
+    /// Without this a headless run uses AUTO, letting the model choose.
+    #[arg(long, value_name = "MODE", value_parser = parse_agent_mode)]
+    pub mode: Option<crate::agent::AgentMode>,
+
     /// Drive a headless Ralph loop that replays the prompt until the completion promise appears or the iteration limit is reached
     #[arg(long = "loop")]
     pub loop_run: bool,
@@ -139,6 +155,18 @@ pub enum Command {
     Sessions,
     /// Print configuration and environment diagnostics
     Doctor,
+    /// Copy this machine's training traces into a directory for fine-tuning
+    Pull {
+        /// Where to copy them, or the literal word `all` to also rebuild traces
+        /// from every saved session on this device. Defaults to the current
+        /// directory. Use `--all ./all` to target a directory of that name.
+        #[arg(value_name = "DEST")]
+        destination: Option<PathBuf>,
+        /// Also rebuild traces from saved sessions that were never captured
+        /// live — everything on the device, not just what tracing recorded.
+        #[arg(long)]
+        all: bool,
+    },
     /// Generate shell completion definitions
     Completions {
         /// Shell to generate completions for
@@ -271,6 +299,10 @@ pub struct Config {
     pub no_session: bool,
     pub model_limits: ModelLimits,
     pub tool_format: ToolFormat,
+    /// Workflow mode pinned on the command line, if any.
+    pub mode: Option<crate::agent::AgentMode>,
+    /// Whether to append SFT training traces for this session.
+    pub trace_enabled: bool,
     pub web_search: crate::web::WebConfig,
     pub paths: AbacusPaths,
 }
@@ -351,6 +383,8 @@ impl Config {
             no_session: cli.no_session,
             model_limits,
             tool_format,
+            mode: cli.mode,
+            trace_enabled: settings.trace.enabled,
             web_search: settings.search.resolve(),
             paths,
         })
@@ -390,6 +424,8 @@ pub struct Settings {
     pub feedback: FeedbackSettings,
     pub activity: ActivitySettings,
     pub search: crate::web::SearchSettings,
+    #[serde(default)]
+    pub trace: TraceSettings,
 }
 
 impl Default for Settings {
@@ -407,6 +443,7 @@ impl Default for Settings {
             feedback: FeedbackSettings::default(),
             activity: ActivitySettings::default(),
             search: crate::web::SearchSettings::default(),
+            trace: TraceSettings::default(),
         }
     }
 }
@@ -523,6 +560,29 @@ pub struct UiSettings {
     pub animations: bool,
     pub show_tooltips: bool,
     pub theme: crate::theme::ThemeChoice,
+    /// Draft a likely next message in the empty composer once a turn finishes.
+    /// Costs one short model call per turn, so it is a setting rather than
+    /// always-on behaviour.
+    #[serde(default = "default_true")]
+    pub draft_replies: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Training-trace capture. On by default: the data is only useful if it exists
+/// by the time you want it, and it never leaves the machine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TraceSettings {
+    pub enabled: bool,
+}
+
+impl Default for TraceSettings {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 impl Default for UiSettings {
@@ -533,6 +593,7 @@ impl Default for UiSettings {
             animations: true,
             show_tooltips: true,
             theme: crate::theme::ThemeChoice::Auto,
+            draft_replies: true,
         }
     }
 }
@@ -636,6 +697,7 @@ pub struct AbacusPaths {
     pub config_file: PathBuf,
     pub credentials_file: PathBuf,
     pub sessions_dir: PathBuf,
+    pub traces_dir: PathBuf,
 }
 
 impl AbacusPaths {
@@ -655,6 +717,7 @@ impl AbacusPaths {
             config_file: root.join("config.toml"),
             credentials_file: root.join("credentials.toml"),
             sessions_dir: root.join("sessions"),
+            traces_dir: root.join("traces"),
             root,
         }
     }

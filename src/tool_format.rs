@@ -90,6 +90,36 @@ impl ToolFormat {
 
 /// Parse `raw` assistant text under `format`, returning the cleaned prose
 /// (tool-call blocks removed) and any tool calls found.
+/// Byte offset of the first tool-call marker in `text` for `format`, if any.
+///
+/// Used to stop streaming text to the transcript at the point the model starts
+/// emitting tool markup. Parsing only runs once the stream finishes, so without
+/// this the user watches raw `<tool_call>{…}` scroll past and the transcript
+/// ends up permanently different from the history that was saved.
+pub fn marker_index(format: ToolFormat, text: &str) -> Option<usize> {
+    const ALL: &[&str] = &[
+        HERMES_OPEN,
+        QWEN_OPEN,
+        FUNC_PREFIX,
+        PYTHON_TAG,
+        KIMI_SECTION_BEGIN,
+        DEEPSEEK_CALLS_BEGIN,
+        MISTRAL_MARKER,
+    ];
+    let markers: &[&str] = match format {
+        ToolFormat::None => return None,
+        ToolFormat::Auto => ALL,
+        ToolFormat::Hermes => &[HERMES_OPEN],
+        ToolFormat::Qwen | ToolFormat::Glm => &[QWEN_OPEN, FUNC_PREFIX],
+        ToolFormat::Llama3Json => &[PYTHON_TAG, HERMES_OPEN],
+        ToolFormat::Mistral => &[MISTRAL_MARKER],
+        ToolFormat::Kimi => &[KIMI_SECTION_BEGIN],
+        ToolFormat::DeepSeek => &[DEEPSEEK_CALLS_BEGIN],
+        ToolFormat::Json => &[HERMES_OPEN],
+    };
+    markers.iter().filter_map(|marker| text.find(marker)).min()
+}
+
 pub fn parse(format: ToolFormat, raw: &str) -> (String, Vec<ParsedToolCall>) {
     match format {
         ToolFormat::None => (raw.to_owned(), Vec::new()),
@@ -186,6 +216,13 @@ fn parse_json_call(body: &str, args_key: &str) -> Option<ParsedToolCall> {
 
 /// Repeatedly extract `<opener>...<closer>` blocks, apply `extract` to each
 /// body, strip matched blocks from the output, return cleaned text + calls.
+/// Strip every `opener`…`closer` block out of `raw` and hand each block body to
+/// `extract`.
+///
+/// `extract` returns a *list*: one block can legitimately hold several calls —
+/// GLM and Qwen emit parallel calls as sibling `<invoke>` elements inside a
+/// single wrapper — and the block has already been removed from `clean` by the
+/// time it is parsed, so anything the extractor drops is lost silently.
 fn extract_tag_blocks<F>(
     raw: &str,
     opener: &str,
@@ -193,7 +230,7 @@ fn extract_tag_blocks<F>(
     extract: F,
 ) -> (String, Vec<ParsedToolCall>)
 where
-    F: Fn(&str) -> Option<ParsedToolCall>,
+    F: Fn(&str) -> Vec<ParsedToolCall>,
 {
     let mut calls = Vec::new();
     let mut clean = String::new();
@@ -205,10 +242,7 @@ where
             clean.push_str(&rest[start..]);
             break;
         };
-        let body = &after[..end];
-        if let Some(call) = extract(body) {
-            calls.push(call);
-        }
+        calls.extend(extract(&after[..end]));
         rest = &after[end + closer.len()..];
     }
     clean.push_str(rest);
@@ -245,21 +279,25 @@ const DEEPSEEK_CALL_END: &str = "<\u{ff5c}tool\u{2581}call\u{2581}end\u{ff5c}>";
 
 // ----- Hermes: HERMES_OPEN{json}HERMES_CLOSE -----
 
+fn hermes_call(body: &str) -> Option<ParsedToolCall> {
+    let value: Value = serde_json::from_str(body.trim()).ok()?;
+    let name = value.get("name")?.as_str()?.to_owned();
+    let args = value
+        .get("arguments")
+        .or_else(|| value.get("parameters"))?
+        .clone();
+    if !args.is_object() {
+        return None;
+    }
+    Some(ParsedToolCall {
+        name,
+        arguments: serde_json::to_string(&args).ok()?,
+    })
+}
+
 fn parse_hermes(raw: &str) -> (String, Vec<ParsedToolCall>) {
     extract_tag_blocks(raw, HERMES_OPEN, HERMES_CLOSE, |body| {
-        let value: Value = serde_json::from_str(body.trim()).ok()?;
-        let name = value.get("name")?.as_str()?.to_owned();
-        let args = value
-            .get("arguments")
-            .or_else(|| value.get("parameters"))?
-            .clone();
-        if !args.is_object() {
-            return None;
-        }
-        Some(ParsedToolCall {
-            name,
-            arguments: serde_json::to_string(&args).ok()?,
-        })
+        hermes_call(body).into_iter().collect()
     })
 }
 
@@ -282,7 +320,10 @@ fn parse_llama3(raw: &str) -> (String, Vec<ParsedToolCall>) {
         rest = &after[end..];
     }
     let (c2, calls2) = extract_tag_blocks(rest, HERMES_OPEN, HERMES_CLOSE, |body| {
-        parse_json_call(body, "parameters").or_else(|| parse_json_call(body, "arguments"))
+        parse_json_call(body, "parameters")
+            .or_else(|| parse_json_call(body, "arguments"))
+            .into_iter()
+            .collect()
     });
     clean.push_str(&c2);
     calls.extend(calls2);
@@ -308,38 +349,36 @@ fn parse_mistral(raw: &str) -> (String, Vec<ParsedToolCall>) {
     let Some(idx) = raw.find(MISTRAL_MARKER) else {
         return (raw.to_owned(), Vec::new());
     };
-    let clean = format!("{}{}", &raw[..idx], &raw[idx + MISTRAL_MARKER.len()..]);
-    let payload = raw[idx + MISTRAL_MARKER.len()..].trim_start();
-    (clean, parse_json_call_array(payload))
+    let payload = &raw[idx + MISTRAL_MARKER.len()..];
+    let (calls, consumed) = parse_json_call_array(payload);
+    // Remove the marker *and* the array it introduces. Stripping only the
+    // marker left the whole JSON payload in the assistant's prose, where it was
+    // rendered to the user and written to history.
+    let clean = format!("{}{}", &raw[..idx], &payload[consumed.min(payload.len())..]);
+    (clean, calls)
 }
 
-fn parse_json_call_array(payload: &str) -> Vec<ParsedToolCall> {
+/// Parse a leading `[{...}, ...]` tool-call array, returning the calls and how
+/// many bytes of `payload` the array occupied.
+///
+/// Uses a real JSON reader rather than counting brackets: a byte-level scan
+/// closes the array at the first `]`, including one inside a string value. For
+/// a coding agent that fires constantly — `{"pattern":"[a-z]+"}` was enough to
+/// drop every call in the array.
+fn parse_json_call_array(payload: &str) -> (Vec<ParsedToolCall>, usize) {
     let Some(start) = payload.find('[') else {
-        return Vec::new();
+        return (Vec::new(), 0);
     };
-    let bytes = payload.as_bytes();
-    let mut depth = 0i32;
-    let mut end = None;
-    for (i, &b) in bytes.iter().enumerate().skip(start) {
-        match b {
-            b'[' => depth += 1,
-            b']' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = Some(i);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let Some(end) = end else {
-        return Vec::new();
+    let mut stream = serde_json::Deserializer::from_str(&payload[start..]).into_iter::<Value>();
+    let Some(Ok(value)) = stream.next() else {
+        return (Vec::new(), 0);
     };
-    let Ok(arr) = serde_json::from_str::<Vec<Value>>(&payload[start..=end]) else {
-        return Vec::new();
+    let consumed = start + stream.byte_offset();
+    let Some(arr) = value.as_array().cloned() else {
+        return (Vec::new(), consumed);
     };
-    arr.into_iter()
+    let calls = arr
+        .into_iter()
         .filter_map(|item| {
             let name = item.get("name")?.as_str()?.to_owned();
             let args = item
@@ -354,14 +393,15 @@ fn parse_json_call_array(payload: &str) -> Vec<ParsedToolCall> {
                 arguments: serde_json::to_string(&args).ok()?,
             })
         })
-        .collect()
+        .collect::<Vec<_>>();
+    (calls, consumed)
 }
 
 // ----- Qwen / Qwen3-coder: QWEN_OPEN FUNC_PREFIXname> PARAM_PREFIX_EQk>v PARAM_CLOSE FUNC_CLOSE QWEN_CLOSE -----
 
 fn parse_qwen(raw: &str) -> (String, Vec<ParsedToolCall>) {
     if raw.contains(QWEN_OPEN) {
-        let (clean, _) = extract_tag_blocks(raw, QWEN_OPEN, QWEN_CLOSE, |_| None);
+        let (clean, _) = extract_tag_blocks(raw, QWEN_OPEN, QWEN_CLOSE, |_| Vec::new());
         // Collect every function call across the whole text (a single QWEN_OPEN
         // block may hold several), then keep the cleaned prose.
         let calls = parse_all_function_blocks(raw);
@@ -420,6 +460,7 @@ fn parse_all_function_blocks(body: &str) -> Vec<ParsedToolCall> {
 
 fn parse_glm(raw: &str) -> (String, Vec<ParsedToolCall>) {
     extract_tag_blocks(raw, QWEN_OPEN, QWEN_CLOSE, |body| {
+        let mut calls = Vec::new();
         let mut rest = body;
         while let Some(start) = rest.find(INVOKE_PREFIX) {
             let after = &rest[start..];
@@ -427,12 +468,17 @@ fn parse_glm(raw: &str) -> (String, Vec<ParsedToolCall>) {
                 break;
             };
             let tag = &after[..name_open_end + 1];
-            let name = extract_attr(tag, "name")?;
             let inner = &after[name_open_end + 1..];
             let Some(inv_close) = inner.find(INVOKE_CLOSE) else {
                 break;
             };
             let invoke_body = &inner[..inv_close];
+            // Advance before any early exit, so one unparseable invoke does not
+            // abandon the siblings after it.
+            rest = &inner[inv_close + INVOKE_CLOSE.len()..];
+            let Some(name) = extract_attr(tag, "name") else {
+                continue;
+            };
             let mut args = serde_json::Map::new();
             let mut p = invoke_body;
             while let Some(pstart) = p.find(PARAM_PREFIX) {
@@ -441,21 +487,22 @@ fn parse_glm(raw: &str) -> (String, Vec<ParsedToolCall>) {
                     break;
                 };
                 let ptag = &after_p[..ptag_end + 1];
-                let key = extract_attr(ptag, "name")?;
                 let after_ptag = &after_p[ptag_end + 1..];
                 let Some(pend) = after_ptag.find(PARAM_CLOSE) else {
                     break;
                 };
                 let value = &after_ptag[..pend];
-                args.insert(key, coerce_value(value));
                 p = &after_ptag[pend + PARAM_CLOSE.len()..];
+                let Some(key) = extract_attr(ptag, "name") else {
+                    continue;
+                };
+                args.insert(key, coerce_value(value));
             }
             if let Ok(arguments) = serde_json::to_string(&Value::Object(args)) {
-                return Some(ParsedToolCall { name, arguments });
+                calls.push(ParsedToolCall { name, arguments });
             }
-            rest = &inner[inv_close + INVOKE_CLOSE.len()..];
         }
-        None
+        calls
     })
 }
 
@@ -474,16 +521,18 @@ fn parse_kimi(raw: &str) -> (String, Vec<ParsedToolCall>) {
         return (raw.to_owned(), Vec::new());
     };
     let after_sec = &raw[sec_start + KIMI_SECTION_BEGIN.len()..];
-    let section_end = after_sec
-        .find(KIMI_SECTION_END)
-        .map(|e| e + sec_start + KIMI_SECTION_BEGIN.len())
-        .unwrap_or(raw.len());
+    // Two different offsets: where the section's *content* stops, and where the
+    // surrounding prose resumes. Using one for both left the literal end marker
+    // at the head of the visible content.
+    let (section_end, resume) = match after_sec.find(KIMI_SECTION_END) {
+        Some(offset) => {
+            let stop = sec_start + KIMI_SECTION_BEGIN.len() + offset;
+            (stop, stop + KIMI_SECTION_END.len())
+        }
+        None => (raw.len(), raw.len()),
+    };
     let section = &raw[sec_start..section_end];
-    let clean = format!(
-        "{}{}",
-        &raw[..sec_start],
-        &raw[section_end.min(raw.len())..]
-    );
+    let clean = format!("{}{}", &raw[..sec_start], &raw[resume.min(raw.len())..]);
     (clean, parse_kimi_section(section))
 }
 
@@ -519,16 +568,18 @@ fn parse_deepseek(raw: &str) -> (String, Vec<ParsedToolCall>) {
         return (raw.to_owned(), Vec::new());
     };
     let after_sec = &raw[sec_start + DEEPSEEK_CALLS_BEGIN.len()..];
-    let section_end = after_sec
-        .find(DEEPSEEK_CALLS_END)
-        .map(|e| e + sec_start + DEEPSEEK_CALLS_BEGIN.len())
-        .unwrap_or(raw.len());
+    // Two different offsets: where the section's *content* stops, and where the
+    // surrounding prose resumes. Using one for both left the literal end marker
+    // at the head of the visible content.
+    let (section_end, resume) = match after_sec.find(DEEPSEEK_CALLS_END) {
+        Some(offset) => {
+            let stop = sec_start + DEEPSEEK_CALLS_BEGIN.len() + offset;
+            (stop, stop + DEEPSEEK_CALLS_END.len())
+        }
+        None => (raw.len(), raw.len()),
+    };
     let section = &raw[sec_start..section_end];
-    let clean = format!(
-        "{}{}",
-        &raw[..sec_start],
-        &raw[section_end.min(raw.len())..]
-    );
+    let clean = format!("{}{}", &raw[..sec_start], &raw[resume.min(raw.len())..]);
     let mut calls = Vec::new();
     let mut rest = section;
     while let Some(start) = rest.find(DEEPSEEK_CALL_BEGIN) {
@@ -687,8 +738,32 @@ mod tests {
         let raw = "Sure.\n[TOOL_CALLS][{\"name\":\"read_file\",\"arguments\":{\"path\":\"a\"}},{\"name\":\"grep\",\"arguments\":{\"pattern\":\"x\"}}]";
         let (clean, calls) = parse(ToolFormat::Mistral, raw);
         assert_eq!(calls.len(), 2);
-        assert!(clean.contains("Sure."));
-        assert!(!clean.contains("[TOOL_CALLS]"));
+        // Exact, not "does not contain the marker": asserting only the absence
+        // of `[TOOL_CALLS]` is what let the whole JSON payload survive in the
+        // visible content for so long.
+        assert_eq!(clean, "Sure.\n");
+    }
+
+    /// A `]` inside a string value used to close the array early, so the calls
+    /// were dropped and the raw JSON was shown to the user. Regex arguments hit
+    /// this constantly.
+    #[test]
+    fn mistral_array_survives_a_bracket_inside_a_string() {
+        let raw =
+            "Sure.\n[TOOL_CALLS][{\"name\":\"grep\",\"arguments\":{\"pattern\":\"[a-z]+]\"}}]";
+        let (clean, calls) = parse(ToolFormat::Mistral, raw);
+        assert_eq!(calls, vec![call("grep", r#"{"pattern":"[a-z]+]"}"#)]);
+        assert_eq!(clean, "Sure.\n");
+    }
+
+    /// Text after the array is prose again and must survive.
+    #[test]
+    fn mistral_keeps_text_after_the_array() {
+        let raw =
+            "Before.[TOOL_CALLS][{\"name\":\"grep\",\"arguments\":{\"pattern\":\"x\"}}] After.";
+        let (clean, calls) = parse(ToolFormat::Mistral, raw);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(clean, "Before. After.");
     }
 
     #[test]
@@ -711,6 +786,41 @@ mod tests {
         assert_eq!(calls, vec![call("read_file", r#"{"path":"src/main.rs"}"#)]);
     }
 
+    /// GLM emits parallel calls as sibling `<invoke>` elements in one wrapper.
+    /// Only the first was parsed, and because the wrapper had already been
+    /// stripped from the content, the rest vanished without a trace.
+    #[test]
+    fn glm_parses_every_invoke_in_a_block() {
+        let raw = format!(
+            "{QWEN_OPEN}\
+             {INVOKE_PREFIX} name=\"read_file\">{PARAM_PREFIX} name=\"path\">a.rs{PARAM_CLOSE}{INVOKE_CLOSE}\
+             {INVOKE_PREFIX} name=\"grep\">{PARAM_PREFIX} name=\"query\">todo{PARAM_CLOSE}{INVOKE_CLOSE}\
+             {QWEN_CLOSE}"
+        );
+        let (clean, calls) = parse(ToolFormat::Glm, &raw);
+        assert_eq!(
+            calls,
+            vec![
+                call("read_file", r#"{"path":"a.rs"}"#),
+                call("grep", r#"{"query":"todo"}"#),
+            ]
+        );
+        assert_eq!(clean, "");
+    }
+
+    /// One malformed sibling must not take the others down with it.
+    #[test]
+    fn glm_skips_a_bad_invoke_and_keeps_the_rest() {
+        let raw = format!(
+            "{QWEN_OPEN}\
+             {INVOKE_PREFIX}>{PARAM_PREFIX} name=\"path\">a.rs{PARAM_CLOSE}{INVOKE_CLOSE}\
+             {INVOKE_PREFIX} name=\"grep\">{PARAM_PREFIX} name=\"query\">todo{PARAM_CLOSE}{INVOKE_CLOSE}\
+             {QWEN_CLOSE}"
+        );
+        let (_, calls) = parse(ToolFormat::Glm, &raw);
+        assert_eq!(calls, vec![call("grep", r#"{"query":"todo"}"#)]);
+    }
+
     #[test]
     fn kimi_k2_section() {
         let raw = format!(
@@ -718,8 +828,9 @@ mod tests {
         );
         let (clean, calls) = parse(ToolFormat::Kimi, &raw);
         assert_eq!(calls, vec![call("read_file", r#"{"path":"a.rs"}"#)]);
-        assert!(clean.contains("I'll read it."));
-        assert!(!clean.contains(KIMI_SECTION_BEGIN));
+        // Exact: checking only for the *begin* marker let the end marker leak
+        // into the visible content.
+        assert_eq!(clean, "I'll read it.\n");
     }
 
     #[test]
@@ -727,8 +838,79 @@ mod tests {
         let raw = format!(
             "Reading.\n{DEEPSEEK_CALLS_BEGIN}{DEEPSEEK_CALL_BEGIN}read_file{DEEPSEEK_CALL_ARG_BEGIN}{{\"path\":\"a.rs\"}}{DEEPSEEK_CALL_END}{DEEPSEEK_CALLS_END}"
         );
-        let (_, calls) = parse(ToolFormat::DeepSeek, &raw);
+        let (clean, calls) = parse(ToolFormat::DeepSeek, &raw);
         assert_eq!(calls, vec![call("read_file", r#"{"path":"a.rs"}"#)]);
+        assert_eq!(clean, "Reading.\n");
+    }
+
+    /// The invariant every one of these parsers has to hold, checked in one
+    /// place: whatever is left over is prose, with no delimiter of any dialect
+    /// still in it.
+    #[test]
+    fn no_dialect_leaves_markup_in_the_content() {
+        let markers = [
+            HERMES_OPEN,
+            HERMES_CLOSE,
+            QWEN_OPEN,
+            QWEN_CLOSE,
+            INVOKE_PREFIX,
+            INVOKE_CLOSE,
+            PARAM_PREFIX,
+            PARAM_CLOSE,
+            PYTHON_TAG,
+            KIMI_SECTION_BEGIN,
+            KIMI_SECTION_END,
+            KIMI_CALL_BEGIN,
+            KIMI_CALL_END,
+            DEEPSEEK_CALLS_BEGIN,
+            DEEPSEEK_CALLS_END,
+            DEEPSEEK_CALL_BEGIN,
+            DEEPSEEK_CALL_END,
+            MISTRAL_MARKER,
+        ];
+        let cases: Vec<(ToolFormat, String)> = vec![
+            (
+                ToolFormat::Hermes,
+                format!("Hi.{HERMES_OPEN}{{\"name\":\"grep\",\"arguments\":{{}}}}{HERMES_CLOSE}"),
+            ),
+            (
+                ToolFormat::Glm,
+                format!(
+                    "Hi.{QWEN_OPEN}{INVOKE_PREFIX} name=\"grep\">{PARAM_PREFIX} name=\"q\">x{PARAM_CLOSE}{INVOKE_CLOSE}{QWEN_CLOSE}"
+                ),
+            ),
+            (
+                ToolFormat::Kimi,
+                format!(
+                    "Hi.{KIMI_SECTION_BEGIN}{KIMI_CALL_BEGIN}functions.grep:0{KIMI_CALL_ARG_BEGIN}{{}}{KIMI_CALL_END}{KIMI_SECTION_END}"
+                ),
+            ),
+            (
+                ToolFormat::DeepSeek,
+                format!(
+                    "Hi.{DEEPSEEK_CALLS_BEGIN}{DEEPSEEK_CALL_BEGIN}grep{DEEPSEEK_CALL_ARG_BEGIN}{{}}{DEEPSEEK_CALL_END}{DEEPSEEK_CALLS_END}"
+                ),
+            ),
+            (
+                ToolFormat::Mistral,
+                "Hi.[TOOL_CALLS][{\"name\":\"grep\",\"arguments\":{}}]".to_owned(),
+            ),
+            (
+                ToolFormat::Llama3Json,
+                format!("Hi.{PYTHON_TAG}{{\"name\":\"grep\",\"parameters\":{{}}}}"),
+            ),
+        ];
+        for (format, raw) in cases {
+            let (clean, calls) = parse(format, &raw);
+            assert!(!calls.is_empty(), "{format:?} parsed no calls");
+            for marker in markers {
+                assert!(
+                    !clean.contains(marker),
+                    "{format:?} left {marker:?} in the content: {clean:?}"
+                );
+            }
+            assert_eq!(clean.trim(), "Hi.", "{format:?} lost or kept prose");
+        }
     }
 
     #[test]

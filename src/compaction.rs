@@ -24,6 +24,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
+use std::sync::atomic::AtomicBool;
+
 use crate::agent::{message_chars, message_chars_one};
 use crate::model_info::CompactionBudget;
 use crate::provider::Provider;
@@ -37,7 +39,9 @@ const KEEP_RECENT_TOOL_RESULTS: usize = 12;
 /// Progressive middle-out tool-body stripping on summarizer overflow (Goose).
 const OVERFLOW_STRIP_PERCENTS: &[u32] = &[0, 10, 20, 50, 100];
 
-const SENTINEL: &str = "[Old tool result content cleared]";
+/// Marks a shrunk tool result. Matched as a prefix so the check stays true
+/// however much identifying detail the placeholder carries.
+const SENTINEL_PREFIX: &str = "[compacted:";
 const TOOL_BODY_OMITTED: &str = "[tool output omitted for summarization]";
 
 /// Tools whose results are large and re-derivable from disk, so their old
@@ -94,6 +98,7 @@ pub async fn compact(
     messages: &mut Vec<Value>,
     state: &mut CompactionState,
     budget: &CompactionBudget,
+    cancel: &AtomicBool,
 ) {
     // Tier 0 (cheap, no model call): once the conversation outgrows a fresh
     // recent window, replace stale re-derivable tool output (old file/grep
@@ -103,7 +108,7 @@ pub async fn compact(
     // fully verbatim, so small sessions never lose findings and re-read in a
     // loop.
     if should_microcompact(messages, budget) {
-        microcompact(messages);
+        microcompact(messages, budget);
     }
 
     // Tier 1 (one model call): full rolling-summary compaction only near the
@@ -122,16 +127,20 @@ pub async fn compact(
     }
 
     let to_summarize: Vec<Value> = messages[head_end..cut].to_vec();
-    match summarize_range(provider, state, &to_summarize).await {
+    match summarize_range(provider, state, &to_summarize, budget, cancel).await {
         Ok(summary) => {
-            state.running_summary = Some(summary);
+            // Backstop: a model that ignores the compression directive must not
+            // be able to reinstate the growth loop, so an oversized summary is
+            // cut structurally. The tail is kept because the most recent state
+            // is what the next turn needs.
+            state.running_summary = Some(bound_summary(summary, budget.summary_budget_chars));
             let head: Vec<Value> = messages[..head_end].to_vec();
             let tail: Vec<Value> = messages[cut..].to_vec();
             messages.clear();
             messages.extend(head);
             messages.extend(tail);
             // Microcompact the rebuilt history (tail may still carry stale output).
-            microcompact(messages);
+            microcompact(messages, budget);
         }
         Err(error) => {
             // Last-resort fallback: drop the middle with a local trace note so the
@@ -153,12 +162,33 @@ pub async fn compact(
             messages.extend(head);
             messages.push(json!({"role":"system","content":note}));
             messages.extend(tail);
-            microcompact(messages);
+            microcompact(messages, budget);
             // Surface the failure via the state so callers can observe it, but
             // keep going. We do not overwrite an existing good summary.
             let _ = error;
         }
     }
+}
+
+/// Cap a summary at `budget` chars, keeping the end.
+///
+/// Only a backstop — the summariser is asked to compress first. Truncation
+/// loses information, so it keeps the tail, where the current state lives, and
+/// says plainly that earlier detail was cut.
+fn bound_summary(summary: String, budget: usize) -> String {
+    if summary.len() <= budget || budget == 0 {
+        return summary;
+    }
+    let mut start = summary.len() - budget;
+    while start < summary.len() && !summary.is_char_boundary(start) {
+        start += 1;
+    }
+    // Resume at a line break so the kept text does not start mid-sentence.
+    let tail = match summary[start..].find('\n') {
+        Some(offset) => &summary[start + offset + 1..],
+        None => &summary[start..],
+    };
+    format!("[earlier summary detail truncated to fit the context budget]\n{tail}")
 }
 
 /// Whether the conversation is large enough to start trimming stale, re-derivable
@@ -211,10 +241,14 @@ fn find_tail_cut(messages: &[Value], budget: usize, head_end: usize) -> usize {
     messages.len()
 }
 
-/// Replace stale compactable tool-result bodies with a sentinel, keeping the most
-/// recent `KEEP_RECENT_TOOL_RESULTS` live. The tool message itself is preserved so
-/// tool-call→tool-result pairing stays intact.
-fn microcompact(messages: &mut [Value]) {
+/// Shrink stale compactable tool results, keeping a hot tail live. The tool
+/// message itself is preserved so tool-call→tool-result pairing stays intact.
+///
+/// The tail is bounded two ways: by count *and* by size. Count alone was not
+/// enough — twelve `read_file` results on large files can exceed the entire
+/// recent budget, so the cheap lever could run every turn and still leave the
+/// tail bloated.
+fn microcompact(messages: &mut [Value], budget: &CompactionBudget) {
     let compactable: Vec<usize> = messages
         .iter()
         .enumerate()
@@ -226,31 +260,145 @@ fn microcompact(messages: &mut [Value]) {
         })
         .map(|(index, _)| index)
         .collect();
-    if compactable.len() <= KEEP_RECENT_TOOL_RESULTS {
-        return;
+
+    // Walk backwards from the newest, keeping results until either limit trips.
+    let size_budget = budget.recent_budget_chars / 2;
+    let mut kept_chars = 0usize;
+    let mut keep_from = compactable.len();
+    for (position, &index) in compactable.iter().enumerate().rev() {
+        // Everything after `keep_from` has already been accepted, so its length
+        // is the running count — no separate counter to keep in step.
+        let kept = compactable.len() - keep_from;
+        let size = message_chars_one(&messages[index]);
+        if kept >= KEEP_RECENT_TOOL_RESULTS || kept_chars + size > size_budget {
+            break;
+        }
+        kept_chars += size;
+        keep_from = position;
     }
-    let keep_from = compactable.len() - KEEP_RECENT_TOOL_RESULTS;
+
     for &index in &compactable[..keep_from] {
-        // Only blank if it still has real content (idempotent across turns).
-        if let Some(content) = messages[index].get_mut("content").and_then(|c| c.as_str())
-            && content != SENTINEL
-        {
-            messages[index]["content"] = json!(SENTINEL);
+        let Some(content) = messages[index].get("content").and_then(Value::as_str) else {
+            continue;
+        };
+        // Idempotent across turns: an already-shrunk result is left alone.
+        if content.starts_with(SENTINEL_PREFIX) {
+            continue;
+        }
+        let name = messages[index]["name"]
+            .as_str()
+            .unwrap_or("tool")
+            .to_owned();
+        let subject = call_subject(messages, index);
+        messages[index]["content"] = json!(shrink_tool_result(&name, &subject, content));
+    }
+}
+
+/// The path or query a tool result came from, recovered from the tool call that
+/// produced it.
+///
+/// A single `read_file` result is line-numbered content with no path in it, so
+/// the preview alone cannot say which file it was — and that is exactly the
+/// detail whose loss makes the model read it again. The matching call is found
+/// by `tool_call_id` in an earlier assistant message.
+fn call_subject(messages: &[Value], result: usize) -> String {
+    let Some(id) = messages[result]["tool_call_id"].as_str() else {
+        return String::new();
+    };
+    let arguments = messages[..result].iter().rev().find_map(|message| {
+        message["tool_calls"].as_array()?.iter().find_map(|call| {
+            (call["id"].as_str() == Some(id))
+                .then(|| call.pointer("/function/arguments")?.as_str())
+                .flatten()
+        })
+    });
+    let Some(parsed) = arguments.and_then(|raw| serde_json::from_str::<Value>(raw).ok()) else {
+        return String::new();
+    };
+    for key in ["path", "paths", "pattern", "query", "command"] {
+        match &parsed[key] {
+            Value::String(value) => return truncate_subject(value),
+            Value::Array(values) => {
+                let joined = values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if !joined.is_empty() {
+                    return truncate_subject(&joined);
+                }
+            }
+            _ => {}
         }
     }
+    String::new()
+}
+
+fn truncate_subject(value: &str) -> String {
+    const MAX: usize = 80;
+    let flat = value.replace('\n', " ");
+    if flat.chars().count() <= MAX {
+        return flat;
+    }
+    format!("{}…", flat.chars().take(MAX).collect::<String>())
+}
+
+/// Replace a stale tool result with a placeholder that still says what it was.
+///
+/// Blanking the body outright removed every trace of which file or query the
+/// result came from, so the model re-read it — the exact loop microcompaction
+/// exists to prevent. Compactable tools all lead with their subject (the path
+/// header, the first match, the command's first output line), so keeping the
+/// opening lines preserves the identifying detail for a fixed small cost.
+fn shrink_tool_result(name: &str, subject: &str, content: &str) -> String {
+    const PREVIEW_LINES: usize = 3;
+    const PREVIEW_CHARS: usize = 240;
+    let mut preview = String::new();
+    for line in content.lines().take(PREVIEW_LINES) {
+        if preview.len() + line.len() > PREVIEW_CHARS {
+            break;
+        }
+        if !preview.is_empty() {
+            preview.push('\n');
+        }
+        preview.push_str(line);
+    }
+    let header = if subject.is_empty() {
+        format!("{SENTINEL_PREFIX} older {name} result cleared")
+    } else {
+        format!("{SENTINEL_PREFIX} older {name} result for {subject} cleared")
+    };
+    if preview.trim().is_empty() {
+        return format!("{header}]");
+    }
+    format!("{header}, began:\n{preview}\n…]")
 }
 
 async fn summarize_range(
     provider: &Provider,
     state: &CompactionState,
     range: &[Value],
+    budget: &CompactionBudget,
+    cancel: &AtomicBool,
 ) -> Result<String, String> {
     let prompt = json!({"role":"system","content": SUMMARY_PROMPT});
     let prior = state
         .running_summary
         .as_deref()
         .filter(|s| !s.trim().is_empty());
+    // Past its budget the summary has to be condensed rather than extended.
+    // Extending unconditionally is what let it grow until it alone kept the
+    // context over threshold, firing a summariser call every single turn.
+    let over_budget = prior.is_some_and(|summary| summary.len() > budget.summary_budget_chars);
     let directive = match prior {
+        Some(summary) if over_budget => format!(
+            "This is the summary of the conversation so far:\n{summary}\n\n\
+             Rewrite this summary to incorporate the new messages above, compressed to under \
+             {} characters. It has grown too large. Keep current state, open questions, and pending \
+             work in full; condense or drop work that is finished and no longer referenced. Never \
+             drop a decision that still constrains the task.",
+            budget.summary_budget_chars
+        ),
         Some(summary) => format!(
             "This is the summary of the conversation so far:\n{summary}\n\n\
              Extend this summary by taking into account the new messages above. Do not lose any fact \
@@ -279,7 +427,7 @@ async fn summarize_range(
         // assistant output to show the user.
         let (delta_tx, mut delta_rx) = mpsc::unbounded_channel::<String>();
         let drain = tokio::spawn(async move { while delta_rx.recv().await.is_some() {} });
-        let result = provider.complete(&messages, &[], delta_tx).await;
+        let result = provider.complete(&messages, &[], delta_tx, cancel).await;
         let _ = drain.await;
 
         match result {
@@ -429,6 +577,7 @@ mod tests {
         let budget = CompactionBudget {
             compact_at_chars: 100_000,
             recent_budget_chars: 30_000,
+            summary_budget_chars: 4_000,
         };
         let mut messages = vec![json!({"role":"system","content":"rules"})];
         for i in 0..20 {
@@ -440,12 +589,12 @@ mod tests {
         assert!(!should_microcompact(&messages, &budget));
         // Mirror compact()'s policy: under threshold, nothing is blanked.
         if should_microcompact(&messages, &budget) {
-            microcompact(&mut messages);
+            microcompact(&mut messages, &CompactionBudget::default());
         }
         assert!(
-            !messages
-                .iter()
-                .any(|m| m["content"].as_str() == Some(SENTINEL)),
+            !messages.iter().any(|m| m["content"]
+                .as_str()
+                .is_some_and(|c| c.starts_with(SENTINEL_PREFIX))),
             "tool results must survive on a small context"
         );
     }
@@ -457,6 +606,7 @@ mod tests {
         let budget = CompactionBudget {
             compact_at_chars: 1_000_000,
             recent_budget_chars: 1_000,
+            summary_budget_chars: 4_000,
         };
         let mut messages = vec![json!({"role":"system","content":"rules"})];
         for i in 0..20 {
@@ -471,10 +621,15 @@ mod tests {
             &CompactionState::default(),
             &budget
         ));
-        microcompact(&mut messages);
+        microcompact(&mut messages, &CompactionBudget::default());
         let live = messages
             .iter()
-            .filter(|m| m["role"] == "tool" && m["content"].as_str() != Some(SENTINEL))
+            .filter(|m| {
+                m["role"] == "tool"
+                    && m["content"]
+                        .as_str()
+                        .is_some_and(|c| !c.starts_with(SENTINEL_PREFIX))
+            })
             .count();
         assert_eq!(live, KEEP_RECENT_TOOL_RESULTS);
     }
@@ -488,14 +643,16 @@ mod tests {
             ]}));
             messages.push(json!({"role":"tool","tool_call_id":format!("c{i}"),"name":"read_file","content":format!("big file body {i}")}));
         }
-        microcompact(&mut messages);
+        microcompact(&mut messages, &CompactionBudget::default());
         // The most recent 8 read_file results stay live; older ones become the sentinel.
         let live = messages
             .iter()
             .filter(|m| {
                 m["role"] == "tool"
                     && m["name"] == "read_file"
-                    && m["content"].as_str().is_some_and(|c| !c.contains(SENTINEL))
+                    && m["content"]
+                        .as_str()
+                        .is_some_and(|c| !c.starts_with(SENTINEL_PREFIX))
             })
             .count();
         assert_eq!(live, KEEP_RECENT_TOOL_RESULTS);
@@ -513,7 +670,7 @@ mod tests {
             ]}));
             messages.push(json!({"role":"tool","tool_call_id":format!("e{i}"),"name":"edit_file","content":format!("edited {i}")}));
         }
-        microcompact(&mut messages);
+        microcompact(&mut messages, &CompactionBudget::default());
         let edited = messages
             .iter()
             .filter(|m| {
@@ -524,6 +681,131 @@ mod tests {
             })
             .count();
         assert_eq!(edited, 20);
+    }
+
+    /// Blanking a result outright erased which file it came from, so the model
+    /// re-read it — the loop microcompaction exists to prevent.
+    #[test]
+    fn a_shrunk_result_still_says_what_it_was() {
+        let content = "    1 | fn parse() {\n    2 |     todo!()\n";
+        let shrunk = shrink_tool_result("read_file", "src/parser.rs", content);
+        assert!(shrunk.starts_with(SENTINEL_PREFIX));
+        assert!(
+            shrunk.contains("src/parser.rs"),
+            "the path must survive: {shrunk}"
+        );
+        assert!(shrunk.contains("read_file"), "the tool must survive");
+        assert!(
+            shrunk.len() < content.len() + 120,
+            "the placeholder must stay small"
+        );
+    }
+
+    /// A single `read_file` result is line-numbered content with no path in it,
+    /// so the preview alone cannot identify the file. The path has to come from
+    /// the call that produced the result.
+    #[test]
+    fn the_path_is_recovered_from_the_tool_call() {
+        let mut messages = vec![json!({"role":"system","content":"rules"})];
+        for i in 0..20 {
+            messages.push(json!({"role":"assistant","content":null,"tool_calls":[
+                {"id":format!("c{i}"),"type":"function","function":{
+                    "name":"read_file",
+                    "arguments":format!("{{\"path\":\"src/module_{i}.rs\"}}")
+                }}
+            ]}));
+            messages.push(json!({
+                "role":"tool","tool_call_id":format!("c{i}"),"name":"read_file",
+                "content":format!("    1 | fn thing_{i}() {{}}")
+            }));
+        }
+        microcompact(&mut messages, &CompactionBudget::default());
+        let shrunk = messages
+            .iter()
+            .filter_map(|m| m["content"].as_str())
+            .find(|c| c.starts_with(SENTINEL_PREFIX))
+            .expect("something should have been shrunk");
+        assert!(
+            shrunk.contains("src/module_0.rs"),
+            "the file must still be identifiable: {shrunk}"
+        );
+    }
+
+    #[test]
+    fn shrinking_is_idempotent_across_turns() {
+        let once = shrink_tool_result("grep", "todo", "src/a.rs:1: todo\nsrc/b.rs:2: todo");
+        let mut messages = vec![json!({"role":"system","content":"rules"})];
+        for i in 0..20 {
+            messages.push(json!({"role":"assistant","content":null,"tool_calls":[
+                {"id":format!("c{i}"),"type":"function","function":{"name":"grep","arguments":"{}"}}
+            ]}));
+            messages.push(json!({"role":"tool","tool_call_id":format!("c{i}"),"name":"grep","content":once.clone()}));
+        }
+        microcompact(&mut messages, &CompactionBudget::default());
+        // Nothing should have been wrapped a second time.
+        assert!(
+            !messages.iter().any(|m| m["content"]
+                .as_str()
+                .is_some_and(|c| c.matches(SENTINEL_PREFIX).count() > 1)),
+            "an already-shrunk result must be left alone"
+        );
+    }
+
+    /// Twelve large results can exceed the whole recent budget, so the count
+    /// limit alone left the tail bloated.
+    #[test]
+    fn the_hot_tail_is_bounded_by_size_as_well_as_count() {
+        let big = "x".repeat(5_000);
+        let mut messages = vec![json!({"role":"system","content":"rules"})];
+        for i in 0..12 {
+            messages.push(json!({"role":"assistant","content":null,"tool_calls":[
+                {"id":format!("c{i}"),"type":"function","function":{"name":"read_file","arguments":"{}"}}
+            ]}));
+            messages.push(json!({"role":"tool","tool_call_id":format!("c{i}"),"name":"read_file","content":big.clone()}));
+        }
+        let budget = CompactionBudget {
+            compact_at_chars: 100_000,
+            recent_budget_chars: 20_000,
+            summary_budget_chars: 4_000,
+        };
+        microcompact(&mut messages, &budget);
+        let live: usize = messages
+            .iter()
+            .filter(|m| m["role"] == "tool")
+            .filter(|m| {
+                m["content"]
+                    .as_str()
+                    .is_some_and(|c| !c.starts_with(SENTINEL_PREFIX))
+            })
+            .map(message_chars_one)
+            .sum();
+        assert!(
+            live <= budget.recent_budget_chars / 2,
+            "the live tail should fit its byte budget, got {live}"
+        );
+        // The count limit alone would have kept all twelve.
+        assert!(live < 12 * 5_000);
+    }
+
+    /// The summary is counted by `under_pressure`, so an unbounded one keeps
+    /// the context over threshold on its own and fires a summariser call every
+    /// turn, growing it further.
+    #[test]
+    fn an_oversized_summary_is_cut_back() {
+        let long = (0..400)
+            .map(|n| format!("fact {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let bounded = bound_summary(long.clone(), 500);
+        assert!(bounded.len() <= 500 + 80, "got {} chars", bounded.len());
+        assert!(bounded.contains("truncated"), "the loss is stated");
+        // The tail is what survives — the most recent state is what the next
+        // turn needs.
+        assert!(bounded.contains("fact 399"));
+        assert!(!bounded.contains("fact 0\n"));
+
+        // A summary within budget is returned untouched.
+        assert_eq!(bound_summary("short".to_owned(), 500), "short");
     }
 
     #[test]

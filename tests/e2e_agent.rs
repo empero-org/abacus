@@ -4,7 +4,10 @@ use std::sync::{
 };
 
 use abacus_agent::{
-    agent::{AgentEvent, AgentMode, ApprovalDecision, TurnOptions, initial_messages, run_turn},
+    agent::{
+        AgentEvent, AgentMode, ApprovalDecision, DoneReason, TurnOptions, initial_messages,
+        run_turn,
+    },
     compaction::CompactionState,
     config::{AbacusPaths, Config, ProviderProtocol},
     goal::GoalState,
@@ -67,6 +70,8 @@ async fn streamed_agent_searches_workspace_and_finishes() {
         no_session: true,
         model_limits: ModelLimits::default(),
         tool_format: abacus_agent::tool_format::ToolFormat::default(),
+        mode: None,
+        trace_enabled: false,
         web_search: abacus_agent::web::WebConfig::default(),
         paths: AbacusPaths::under(directory.path().join("home")),
     };
@@ -78,6 +83,8 @@ async fn streamed_agent_searches_workspace_and_finishes() {
         provider,
         messages,
         TurnOptions {
+            trace: None,
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             workspace: workspace.clone(),
             max_steps: 4,
             tool_output_limit: 30_000,
@@ -100,7 +107,7 @@ async fn streamed_agent_searches_workspace_and_finishes() {
     while let Some(event) = receiver.recv().await {
         match event {
             AgentEvent::ToolStarted { name, .. } if name == "grep" => searched = true,
-            AgentEvent::Done { messages } => {
+            AgentEvent::Done { messages, .. } => {
                 completed = Some(messages);
                 break;
             }
@@ -123,6 +130,128 @@ async fn streamed_agent_searches_workspace_and_finishes() {
         completed.last().unwrap()["content"],
         "Found the reference in main.rs."
     );
+}
+
+#[tokio::test]
+async fn a_cancelled_turn_keeps_the_work_it_already_did() {
+    // The bug this pins: interrupting used to abort the agent task, and since
+    // `messages` lived inside that task, every tool result from the turn was
+    // discarded. The edits stayed on disk while the model lost all memory of
+    // making them.
+    let directory = tempdir().unwrap();
+    let workspace = directory.path().join("project");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::write(workspace.join("main.rs"), "fn main() { /* needle */ }\n").unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let search = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"grep\",\"arguments\":\"{\\\"query\\\":\\\"needle\\\"}\"}}]}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let _ = read_request(&mut stream).await;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            search.len(),
+            search
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+        // A second request is accepted but deliberately never answered: this is
+        // the stalled-stream case, where cancellation has to be noticed without
+        // a chunk arriving to trigger the check.
+        if let Ok((held, _)) = listener.accept().await {
+            std::future::pending::<()>().await;
+            drop(held);
+        }
+    });
+
+    let workspace = workspace.canonicalize().unwrap();
+    let config = Config {
+        workspace: workspace.clone(),
+        profile: "test".into(),
+        model: "test-model".into(),
+        base_url: format!("http://{address}/v1"),
+        protocol: ProviderProtocol::ChatCompletions,
+        api_key: None,
+        max_steps: 4,
+        tool_output_limit: 30_000,
+        yes: true,
+        no_session: true,
+        model_limits: ModelLimits::default(),
+        tool_format: abacus_agent::tool_format::ToolFormat::default(),
+        mode: None,
+        trace_enabled: false,
+        web_search: abacus_agent::web::WebConfig::default(),
+        paths: AbacusPaths::under(directory.path().join("home")),
+    };
+    let provider = Provider::new(&config).unwrap();
+    let mut messages = initial_messages(&workspace);
+    messages.push(json!({"role":"user","content":"Find needle"}));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (events, mut receiver) = mpsc::unbounded_channel();
+    let agent = tokio::spawn(run_turn(
+        provider,
+        messages,
+        TurnOptions {
+            trace: None,
+            cancel: cancel.clone(),
+            workspace: workspace.clone(),
+            max_steps: 4,
+            tool_output_limit: 30_000,
+            mode: AgentMode::Build,
+            allow_mutations: Arc::new(AtomicBool::new(true)),
+            services: Arc::new(AgentServices::empty(workspace.clone())),
+            session_id: None,
+            goal: GoalState::default(),
+            tasks: TaskList::default(),
+            compaction: CompactionState::default(),
+            compaction_budget: CompactionBudget::default(),
+            allow_subagents: true,
+            web_search: abacus_agent::web::WebConfig::default(),
+        },
+        events,
+    ));
+
+    let mut completed = None;
+    let mut reason = None;
+    while let Some(event) = receiver.recv().await {
+        match event {
+            // Cancel the moment the first tool has run, mimicking a user
+            // pressing esc partway through.
+            AgentEvent::ToolFinished { .. } => cancel.store(true, Ordering::Relaxed),
+            AgentEvent::Done {
+                messages,
+                reason: why,
+            } => {
+                completed = Some(messages);
+                reason = Some(why);
+                break;
+            }
+            AgentEvent::Failed { error, .. } => panic!("agent failed: {error}"),
+            _ => {}
+        }
+    }
+    agent.await.unwrap();
+    server.abort();
+
+    assert_eq!(reason, Some(DoneReason::Interrupted));
+    let completed = completed.expect("a cancelled turn still reports its history");
+    // The assistant's tool call and the tool's result both survive, so the
+    // next turn knows the search happened.
+    assert!(
+        completed
+            .iter()
+            .any(|message| message["role"] == "assistant" && message["tool_calls"].is_array()),
+        "the assistant's tool call should be in history"
+    );
+    let tool_result = completed
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .expect("the tool result should be in history");
+    assert_eq!(tool_result["name"], "grep");
 }
 
 #[tokio::test]
@@ -161,6 +290,8 @@ async fn responses_protocol_uses_responses_endpoint_and_stream_format() {
         no_session: true,
         model_limits: ModelLimits::default(),
         tool_format: abacus_agent::tool_format::ToolFormat::default(),
+        mode: None,
+        trace_enabled: false,
         web_search: abacus_agent::web::WebConfig::default(),
         paths: AbacusPaths::under(directory.path().join("home")),
     };
@@ -171,6 +302,7 @@ async fn responses_protocol_uses_responses_endpoint_and_stream_format() {
             &[json!({"role":"user","content":"hello"})],
             &tool_specs(),
             tx,
+            &std::sync::atomic::AtomicBool::new(false),
         )
         .await
         .unwrap();
@@ -221,6 +353,8 @@ async fn edit_requires_reviewable_approval_before_atomic_write() {
         no_session: true,
         model_limits: ModelLimits::default(),
         tool_format: abacus_agent::tool_format::ToolFormat::default(),
+        mode: None,
+        trace_enabled: false,
         web_search: abacus_agent::web::WebConfig::default(),
         paths: AbacusPaths::under(directory.path().join("home")),
     };
@@ -232,6 +366,8 @@ async fn edit_requires_reviewable_approval_before_atomic_write() {
         provider,
         messages,
         TurnOptions {
+            trace: None,
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             workspace: workspace.clone(),
             max_steps: 4,
             tool_output_limit: 30_000,
@@ -318,6 +454,8 @@ async fn text_emitted_tool_calls_are_parsed_when_native_calls_absent() {
         provider,
         messages,
         TurnOptions {
+            trace: None,
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             workspace: workspace.clone(),
             max_steps: 4,
             tool_output_limit: 30_000,
@@ -403,6 +541,8 @@ async fn auto_mode_blocks_mutation_until_model_selects_build() {
         provider,
         messages,
         TurnOptions {
+            trace: None,
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             workspace: workspace.clone(),
             max_steps: 4,
             tool_output_limit: 30_000,
@@ -478,6 +618,8 @@ async fn auto_mode_selection_enables_later_tool_in_same_completion() {
         provider,
         messages,
         TurnOptions {
+            trace: None,
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             workspace: workspace.clone(),
             max_steps: 4,
             tool_output_limit: 30_000,
@@ -576,6 +718,8 @@ async fn rolling_summary_compaction_fires_on_large_context() {
         provider,
         messages,
         TurnOptions {
+            trace: None,
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             workspace: workspace.clone(),
             max_steps: 4,
             tool_output_limit: 30_000,
@@ -596,7 +740,7 @@ async fn rolling_summary_compaction_fires_on_large_context() {
     let mut completed = None;
     while let Some(event) = receiver.recv().await {
         match event {
-            AgentEvent::Done { messages } => {
+            AgentEvent::Done { messages, .. } => {
                 completed = Some(messages);
                 break;
             }
@@ -656,6 +800,8 @@ fn test_config(
         no_session: true,
         model_limits: ModelLimits::default(),
         tool_format: abacus_agent::tool_format::ToolFormat::default(),
+        mode: None,
+        trace_enabled: false,
         web_search: abacus_agent::web::WebConfig::default(),
         paths: AbacusPaths::under(directory.path().join("home")),
     }

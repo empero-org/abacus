@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, HashMap, HashSet},
     io::{self, Stdout},
     sync::{
@@ -15,7 +16,7 @@ use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-        MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        MouseButton, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{
@@ -28,7 +29,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap},
 };
 use serde_json::{Value, json};
 use tokio::{sync::mpsc, task::JoinHandle};
@@ -37,8 +38,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     activity::ActivityReporter,
     agent::{
-        AgentEvent, AgentMode, ApprovalDecision, ApprovalRequest, TurnOptions, UserQuestionRequest,
-        compact_messages, initial_messages, message_chars, run_turn,
+        AgentEvent, AgentMode, ApprovalDecision, ApprovalRequest, DoneReason, TurnOptions,
+        UserQuestionRequest, compact_messages, initial_messages, message_chars, run_turn,
     },
     compaction::CompactionState,
     config::{Config, Credentials, PermissionMode, ProviderProtocol, SETTINGS_VERSION, Settings},
@@ -46,13 +47,13 @@ use crate::{
     diff::{DiffDocument, DiffLineKind},
     goal::GoalState,
     input::{InputBuffer, InputMode},
-    markdown::{MarkdownTheme, render as render_markdown},
     provider::Provider,
     ralph::{RalphLoop, RalphStatus},
     services::AgentServices,
     session::{Session, SessionStore, SessionUsage},
     task::TaskList,
     theme::{Theme, ThemeChoice, ThemeMode},
+    ui::{self, Entry, EntryKind, ToolCall, ToolStatus},
 };
 
 // Colors resolve from the active (Empero-derived) theme so the UI adapts to a
@@ -88,6 +89,9 @@ fn text() -> Color {
 fn inverse() -> Color {
     crate::theme::active().inverse
 }
+fn rail() -> Color {
+    crate::theme::active().rail
+}
 
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/goal", "Set or manage a persistent goal"),
@@ -113,20 +117,61 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/exit", "Exit Abacus"),
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EntryKind {
-    User,
-    Assistant,
-    Tool,
-    System,
-    Error,
+/// Clickable regions recorded while drawing, so the mouse handler can act on
+/// what is actually on screen rather than re-deriving the layout. Rebuilt every
+/// frame; a region that was not drawn cannot be clicked.
+#[derive(Default)]
+struct Hits {
+    completion: Vec<(Rect, usize)>,
+    config: Vec<(Rect, usize)>,
+    picker: Vec<(Rect, usize)>,
+    transcript: Vec<(Rect, usize)>,
 }
 
-#[derive(Debug, Clone)]
-struct Entry {
-    kind: EntryKind,
-    text: String,
+impl Hits {
+    fn clear(&mut self) {
+        self.completion.clear();
+        self.config.clear();
+        self.picker.clear();
+        self.transcript.clear();
+    }
 }
+
+/// The row of `regions` containing `(column, row)`, if any.
+fn hit(regions: &[(Rect, usize)], column: u16, row: u16) -> Option<usize> {
+    regions
+        .iter()
+        .find(|(rect, _)| {
+            column >= rect.x && column < rect.right() && row >= rect.y && row < rect.bottom()
+        })
+        .map(|(_, index)| *index)
+}
+
+/// How the last turn ended. The status bar reads this instead of matching on
+/// the status *text*, which is a display string and free to change wording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnOutcome {
+    Failed,
+    Interrupted,
+}
+
+/// A provider mid-creation: which profile was added, and what to restore if
+/// the user backs out before giving it a model.
+struct PendingProvider {
+    profile: String,
+    previous: String,
+}
+
+/// Picker values that mean "not a real row" — they open a further step rather
+/// than selecting something.
+const NEW_PROVIDER_SENTINEL: &str = "\u{0}new-provider";
+const CUSTOM_PROVIDER_SENTINEL: &str = "\u{0}custom-provider";
+
+/// Fingerprint deciding whether the memoised transcript is still valid: the
+/// entries revision, the render width, and the spinner phase. The phase only
+/// participates while a tool is running, so an idle transcript is wrapped once
+/// and then reused until something actually changes it.
+type TranscriptKey = (u64, u16, usize, Option<usize>);
 
 struct PendingApproval {
     tool: String,
@@ -210,10 +255,21 @@ impl PendingUserQuestion {
     }
 }
 
+/// What accepting a picker row does. The picker itself is a plain list; this
+/// is how one list widget serves sessions, profiles, and providers without
+/// three near-identical modals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickerAction {
+    ResumeSession,
+    SwitchProfile,
+    AddProvider,
+}
+
 struct Picker {
     title: String,
     items: Vec<(String, String)>,
     selected: usize,
+    action: PickerAction,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,10 +328,13 @@ enum ConfigKey {
     Model,
     BaseUrl,
     Protocol,
+    ApiKey,
     Permission,
     VimMode,
     Animations,
     Tooltips,
+    DraftReplies,
+    TraceLogging,
     MaxSteps,
     ToolOutputLimit,
     ProjectTrust,
@@ -285,18 +344,99 @@ enum ConfigKey {
     AdvancedToml,
 }
 
+/// The config panel's rows: section headings interleaved with settings, so a
+/// long flat list becomes something you can scan by area of concern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigRow {
+    Heading(&'static str),
+    Key(ConfigKey),
+}
+
+const CONFIG_ROWS: &[ConfigRow] = &[
+    ConfigRow::Heading("PROVIDER"),
+    ConfigRow::Key(ConfigKey::Profile),
+    ConfigRow::Key(ConfigKey::Model),
+    ConfigRow::Key(ConfigKey::BaseUrl),
+    ConfigRow::Key(ConfigKey::Protocol),
+    ConfigRow::Key(ConfigKey::ApiKey),
+    ConfigRow::Heading("AGENT"),
+    ConfigRow::Key(ConfigKey::Permission),
+    ConfigRow::Key(ConfigKey::MaxSteps),
+    ConfigRow::Key(ConfigKey::ToolOutputLimit),
+    ConfigRow::Key(ConfigKey::ProjectTrust),
+    ConfigRow::Heading("INTERFACE"),
+    ConfigRow::Key(ConfigKey::VimMode),
+    ConfigRow::Key(ConfigKey::Animations),
+    ConfigRow::Key(ConfigKey::Tooltips),
+    ConfigRow::Key(ConfigKey::DraftReplies),
+    ConfigRow::Key(ConfigKey::TraceLogging),
+    ConfigRow::Heading("PRIVACY"),
+    ConfigRow::Key(ConfigKey::FeedbackEnabled),
+    ConfigRow::Key(ConfigKey::FeedbackDiagnostics),
+    ConfigRow::Key(ConfigKey::FeedbackEndpoint),
+    ConfigRow::Heading("ADVANCED"),
+    ConfigRow::Key(ConfigKey::AdvancedToml),
+];
+
+/// One line explaining what a setting actually does, shown for whichever row
+/// the cursor is on. A settings screen that only lists names makes the reader
+/// guess; this is the cheapest possible fix for that.
+fn config_help(key: ConfigKey) -> &'static str {
+    match key {
+        ConfigKey::Profile => "Which stored provider profile this session talks to.",
+        ConfigKey::Model => "Model ID sent to the provider. /model lists what the endpoint offers.",
+        ConfigKey::BaseUrl => "OpenAI-compatible endpoint, including the /v1 suffix.",
+        ConfigKey::Protocol => {
+            "Chat Completions suits most providers; Responses is OpenAI and xAI."
+        }
+        ConfigKey::ApiKey => {
+            "Stored in credentials.toml with owner-only permissions. Never shown back."
+        }
+        ConfigKey::Permission => "Ask before every mutation, or allow them for the session.",
+        ConfigKey::VimMode => "Esc enters normal mode in the composer instead of clearing it.",
+        ConfigKey::Animations => "Spinners and the wave on running tool calls.",
+        ConfigKey::Tooltips => "The guidance block on the welcome screen.",
+        ConfigKey::DraftReplies => {
+            "Predict a likely follow-up in the empty composer. One short model call per turn."
+        }
+        ConfigKey::TraceLogging => {
+            "Append every model call to ~/.abacus/traces as JSONL for fine-tuning. Stays local."
+        }
+        ConfigKey::MaxSteps => "How many tool calls one turn may make before it stops.",
+        ConfigKey::ToolOutputLimit => "Characters of tool output kept before truncation.",
+        ConfigKey::ProjectTrust => {
+            "Allow this project's own plugins, hooks, and MCP servers to run."
+        }
+        ConfigKey::FeedbackEnabled => "Whether /feedback is available at all.",
+        ConfigKey::FeedbackDiagnostics => {
+            "Attach extension diagnostics to feedback. Never your transcript."
+        }
+        ConfigKey::FeedbackEndpoint => "Where /feedback submissions are sent.",
+        ConfigKey::AdvancedToml => "Open the raw TOML for settings without a row here.",
+    }
+}
+
+/// The selectable settings, in the order `CONFIG_ROWS` displays them.
+///
+/// `ConfigPanel::selected` indexes this, and the panel derives its cursor from
+/// display position, so the two orderings must agree exactly —
+/// `config_rows_and_keys_agree` pins that. They diverged once, and the symptom
+/// was the panel editing a different setting from the one under the cursor.
 const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey::Profile,
     ConfigKey::Model,
     ConfigKey::BaseUrl,
     ConfigKey::Protocol,
+    ConfigKey::ApiKey,
     ConfigKey::Permission,
-    ConfigKey::VimMode,
-    ConfigKey::Animations,
-    ConfigKey::Tooltips,
     ConfigKey::MaxSteps,
     ConfigKey::ToolOutputLimit,
     ConfigKey::ProjectTrust,
+    ConfigKey::VimMode,
+    ConfigKey::Animations,
+    ConfigKey::Tooltips,
+    ConfigKey::DraftReplies,
+    ConfigKey::TraceLogging,
     ConfigKey::FeedbackEnabled,
     ConfigKey::FeedbackDiagnostics,
     ConfigKey::FeedbackEndpoint,
@@ -367,6 +507,57 @@ struct App {
     services_rx: mpsc::UnboundedReceiver<ServicesResult>,
     allow_mutations: Arc<AtomicBool>,
     receiving_delta: bool,
+    /// When the in-flight tool call started, so the settled row can report how
+    /// long it took.
+    tool_started: Option<Instant>,
+    /// When the current turn started, for the footer's live elapsed readout.
+    turn_started: Option<Instant>,
+    /// How the previous turn ended, or `None` if it completed cleanly.
+    last_outcome: Option<TurnOutcome>,
+    /// Clickable regions from the last frame. `RefCell` because the draw
+    /// helpers take `&App` — recording where something landed is not a
+    /// meaningful mutation of application state.
+    hits: RefCell<Hits>,
+    /// When the last scroll event arrived, used to tell a trackpad's dense
+    /// stream from a mouse wheel's discrete notches.
+    last_scroll: Option<Instant>,
+    /// A predicted next message, offered in the empty composer. Cleared the
+    /// moment the user types — it is a suggestion, never a commitment.
+    draft: Option<String>,
+    draft_tx: mpsc::UnboundedSender<Option<String>>,
+    draft_rx: mpsc::UnboundedReceiver<Option<String>>,
+    draft_task: Option<JoinHandle<()>>,
+    /// Appends one training record per model call. `None` when disabled or when
+    /// the session has not been saved yet, since a trace is keyed by session id.
+    trace: Option<crate::sft::TraceWriter>,
+    /// Raised to ask a running turn to stop. The turn finishes reporting what
+    /// it did instead of being killed, which is what kept its tool results.
+    cancel: Arc<AtomicBool>,
+    /// A provider added but not yet given a model. Abandoning the prompt rolls
+    /// it back rather than leaving the session pointed at a profile that
+    /// cannot run.
+    pending_provider: Option<PendingProvider>,
+    /// Selected transcript block, when the user is navigating the scrollback.
+    /// `None` means the transcript is just being read, not steered.
+    cursor: Option<usize>,
+    /// Set when the cursor moves, so the next frame — which is where the row
+    /// offsets are actually known — can scroll it into view.
+    cursor_pending: bool,
+    /// Bumped on every mutation of `entries`; the transcript cache keys on it
+    /// so a change to *any* entry invalidates the wrap, not just a change to
+    /// the last one.
+    entries_rev: u64,
+    /// Branch shown in the header. Refreshed between turns rather than per
+    /// frame — it only changes when the agent (or the user) moves HEAD.
+    git_branch: Option<String>,
+    /// Highlighted row in the completion popup, and whether the user has
+    /// dismissed it for the text currently in the composer.
+    completion_index: usize,
+    completion_dismissed: bool,
+    /// Wrapped transcript rows, memoised across frames. Re-wrapping the whole
+    /// scrollback is the one genuinely expensive thing on the draw path, so it
+    /// is recomputed only when the content, width, or spinner phase changes.
+    transcript_cache: Option<(TranscriptKey, ui::Transcript)>,
     follow: bool,
     scroll: u16,
     transcript_height: u16,
@@ -458,21 +649,20 @@ impl App {
         let ctx_chars = message_chars(&messages);
         let mut entries = entries_from_messages(&messages);
         if !entries.is_empty() {
-            entries.push(Entry {
-                kind: EntryKind::System,
-                text: "Session resumed.".to_owned(),
-            });
+            entries.push(Entry::new(EntryKind::System, "Session resumed.".to_owned()));
         }
         for diagnostic in services.diagnostics() {
-            entries.push(Entry {
-                kind: EntryKind::Error,
-                text: format!("Extension warning: {diagnostic}"),
-            });
+            entries.push(Entry::new(
+                EntryKind::Error,
+                format!("Extension warning: {diagnostic}"),
+            ));
         }
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (feedback_tx, feedback_rx) = mpsc::unbounded_channel();
         let (services_tx, services_rx) = mpsc::unbounded_channel();
+        let (draft_tx, draft_rx) = mpsc::unbounded_channel();
         let yes = config.yes;
+        let branch = git_branch(&config.workspace);
         Ok(Self {
             config,
             settings,
@@ -509,6 +699,25 @@ impl App {
             services_rx,
             allow_mutations: Arc::new(AtomicBool::new(yes)),
             receiving_delta: false,
+            tool_started: None,
+            turn_started: None,
+            last_outcome: None,
+            trace: None,
+            last_scroll: None,
+            draft: None,
+            draft_tx,
+            draft_rx,
+            draft_task: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            pending_provider: None,
+            hits: RefCell::new(Hits::default()),
+            cursor: None,
+            cursor_pending: false,
+            entries_rev: 0,
+            git_branch: branch,
+            completion_index: 0,
+            completion_dismissed: false,
+            transcript_cache: None,
             follow: true,
             scroll: 0,
             transcript_height: 1,
@@ -529,6 +738,71 @@ impl App {
         })
     }
 
+    /// Append a transcript entry, invalidating the memoised wrap.
+    fn push_entry(&mut self, entry: Entry) {
+        self.entries_rev = self.entries_rev.wrapping_add(1);
+        self.entries.push(entry);
+    }
+
+    /// Replace the whole transcript, as a session resume does.
+    fn set_entries(&mut self, entries: Vec<Entry>) {
+        self.entries_rev = self.entries_rev.wrapping_add(1);
+        self.entries = entries;
+    }
+
+    /// The in-flight tool row, if the last entry is one. Bumps the revision
+    /// because the caller is about to mutate what it hands back.
+    fn open_tool(&mut self) -> Option<&mut ToolCall> {
+        self.entries_rev = self.entries_rev.wrapping_add(1);
+        self.entries
+            .last_mut()
+            .filter(|entry| entry.kind == EntryKind::Tool)
+            .and_then(|entry| entry.tool.as_mut())
+    }
+
+    /// Kick off a prediction of the user's next message. Only when the composer
+    /// is genuinely idle: a draft that appears over something half-typed, or
+    /// while a queued message is waiting, would be noise.
+    fn start_draft(&mut self) {
+        self.draft = None;
+        if !self.settings.ui.draft_replies
+            || !self.input.is_empty()
+            || self.queued_message.is_some()
+            || self.running.is_some()
+        {
+            return;
+        }
+        if let Some(task) = self.draft_task.take() {
+            task.abort();
+        }
+        let provider = self.provider.clone();
+        let messages = self.messages.clone();
+        let sender = self.draft_tx.clone();
+        self.draft_task = Some(tokio::spawn(async move {
+            let draft = crate::agent::draft_reply(&provider, &messages).await;
+            let _ = sender.send(draft);
+        }));
+    }
+
+    /// Drop a pending or shown draft. Called as soon as the user does anything
+    /// that makes it stale.
+    fn clear_draft(&mut self) {
+        self.draft = None;
+        if let Some(task) = self.draft_task.take() {
+            task.abort();
+        }
+    }
+
+    fn drain_draft_events(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(draft) = self.draft_rx.try_recv() {
+            changed = true;
+            // Discard anything that arrived after the user started typing.
+            self.draft = draft.filter(|_| self.input.is_empty() && self.running.is_none());
+        }
+        changed
+    }
+
     fn drain_agent_events(&mut self) -> bool {
         let mut changed = false;
         while let Ok(event) = self.event_rx.try_recv() {
@@ -536,28 +810,43 @@ impl App {
             match event {
                 AgentEvent::Delta(delta) => {
                     if !self.receiving_delta {
-                        self.entries.push(Entry {
-                            kind: EntryKind::Assistant,
-                            text: String::new(),
-                        });
+                        self.push_entry(Entry::new(EntryKind::Assistant, String::new()));
                         self.receiving_delta = true;
                     }
                     if let Some(entry) = self.entries.last_mut() {
                         entry.text.push_str(&delta);
                     }
+                    // Growing the open assistant entry in place is the one
+                    // mutation that does not go through `push_entry`, so it
+                    // invalidates the wrap itself.
+                    self.entries_rev = self.entries_rev.wrapping_add(1);
                     // Grow the live context estimate: each delta char is roughly
                     // 1 JSON char in the assistant message (+ small JSON wrapper).
                     self.ctx_chars = self.ctx_chars.saturating_add(delta.len() + 40);
                     self.status = "thinking".to_owned();
                 }
+                AgentEvent::TraceFailed { error } => {
+                    // Reported once; capture is already disabled for the run.
+                    self.trace = None;
+                    self.push_entry(Entry::new(
+                        EntryKind::Error,
+                        format!("Training trace disabled — {error}"),
+                    ));
+                }
                 AgentEvent::Approval(request) => self.set_approval(request),
                 AgentEvent::UserQuestion(request) => self.set_user_question(request),
                 AgentEvent::ToolStarted { name, summary } => {
                     self.receiving_delta = false;
-                    self.entries.push(Entry {
-                        kind: EntryKind::Tool,
-                        text: format!("{name}  {summary}\n… running"),
-                    });
+                    self.tool_started = Some(Instant::now());
+                    self.push_entry(Entry::tool(ToolCall {
+                        name: name.clone(),
+                        summary,
+                        status: ToolStatus::Running,
+                        output: String::new(),
+                        full: String::new(),
+                        duration_ms: None,
+                        expanded: false,
+                    }));
                     self.status = format!("running {name}");
                 }
                 AgentEvent::ToolFinished { name, output } => {
@@ -568,29 +857,46 @@ impl App {
                     self.ctx_chars = self
                         .ctx_chars
                         .saturating_add(output.len() + name.len() + 80);
-                    if let Some(entry) = self
-                        .entries
-                        .last_mut()
-                        .filter(|entry| entry.kind == EntryKind::Tool)
-                    {
-                        entry.text = format!("{name}\n{preview}");
+                    let duration_ms = self
+                        .tool_started
+                        .take()
+                        .map(|started| started.elapsed().as_millis() as u64);
+                    let status = if tool_failed(&output) {
+                        ToolStatus::Failed
                     } else {
-                        self.entries.push(Entry {
-                            kind: EntryKind::Tool,
-                            text: format!("{name}\n{preview}"),
-                        });
+                        ToolStatus::Ok
+                    };
+                    // Settle the row the matching `ToolStarted` opened, keeping
+                    // the argument summary it already shows rather than
+                    // replacing the row wholesale.
+                    let retained = retain_output(&output);
+                    if let Some(call) = self.open_tool() {
+                        call.status = status;
+                        call.output = preview;
+                        call.full = retained;
+                        call.duration_ms = duration_ms;
+                    } else {
+                        self.push_entry(Entry::tool(ToolCall {
+                            name,
+                            summary: String::new(),
+                            status,
+                            output: preview,
+                            full: retained,
+                            duration_ms,
+                            expanded: false,
+                        }));
                     }
                     self.status = "thinking".to_owned();
                 }
                 AgentEvent::ModeChanged { mode, reason } => {
                     self.resolved_agent_mode = Some(mode);
-                    self.entries.push(Entry {
-                        kind: EntryKind::System,
-                        text: format!("{} mode · {reason}", mode.label()),
-                    });
+                    self.push_entry(Entry::new(
+                        EntryKind::System,
+                        format!("{} mode — {reason}", mode.label()),
+                    ));
                     self.status = format!("{} mode", mode.label().to_ascii_lowercase());
                 }
-                AgentEvent::Done { messages } => {
+                AgentEvent::Done { messages, reason } => {
                     let assistant_output = latest_assistant_text(&messages);
                     self.messages = messages;
                     // Resynthe live ctx estimate from the authoritative messages.
@@ -613,8 +919,38 @@ impl App {
                     }
                     self.persist_session();
                     self.running = None;
+                    self.last_outcome = match reason {
+                        DoneReason::Complete => None,
+                        DoneReason::Interrupted => Some(TurnOutcome::Interrupted),
+                        DoneReason::StepLimit => Some(TurnOutcome::Interrupted),
+                    };
+                    // A turn cut short used to look exactly like a finished one.
+                    match reason {
+                        DoneReason::Complete => {}
+                        DoneReason::Interrupted => {
+                            self.push_entry(Entry::new(EntryKind::System, "Interrupted."));
+                            self.status = "interrupted".to_owned();
+                        }
+                        DoneReason::StepLimit => {
+                            self.push_entry(Entry::new(
+                                EntryKind::System,
+                                format!(
+                                    "Stopped after {} steps — the step limit for one turn. \
+                                     Send another message to continue, or raise \
+                                     `Maximum agent steps` in /config.",
+                                    self.config.max_steps
+                                ),
+                            ));
+                            self.status = "step limit reached".to_owned();
+                        }
+                    }
+                    self.turn_started = None;
+                    self.tool_started = None;
                     self.resolved_agent_mode = None;
                     self.receiving_delta = false;
+                    if reason == DoneReason::Complete && !continue_loop {
+                        self.start_draft();
+                    }
                     if continue_loop {
                         self.continue_ralph_loop();
                     } else if !matches!(
@@ -633,13 +969,13 @@ impl App {
                     self.messages = messages;
                     self.ctx_chars = message_chars(&self.messages);
                     self.running = None;
+                    self.last_outcome = Some(TurnOutcome::Failed);
+                    self.turn_started = None;
+                    self.tool_started = None;
                     self.resolved_agent_mode = None;
                     self.receiving_delta = false;
                     self.approval = None;
-                    self.entries.push(Entry {
-                        kind: EntryKind::Error,
-                        text: error,
-                    });
+                    self.push_entry(Entry::new(EntryKind::Error, error));
                     self.status = "error".to_owned();
                     if let Some(state) = &mut self.ralph_loop {
                         let _ = state.pause();
@@ -717,10 +1053,7 @@ impl App {
                 let prompt = self.input.take();
                 let prompt = prompt.trim().to_owned();
                 self.queued_message = Some(prompt.clone());
-                self.entries.push(Entry {
-                    kind: EntryKind::System,
-                    text: format!("Queued: {prompt}"),
-                });
+                self.push_entry(Entry::new(EntryKind::System, format!("Queued: {prompt}")));
                 self.follow = true;
                 self.status = "Queued · runs when agent finishes".to_owned();
             }
@@ -767,11 +1100,12 @@ impl App {
         if self.running.is_some() {
             return;
         }
+        self.turn_started = Some(Instant::now());
+        self.last_outcome = None;
+        self.clear_draft();
+        self.cancel.store(false, Ordering::Relaxed);
         if display {
-            self.entries.push(Entry {
-                kind: EntryKind::User,
-                text: display_prompt.clone(),
-            });
+            self.push_entry(Entry::new(EntryKind::User, display_prompt.clone()));
         }
         let model_prompt = if display {
             expand_file_references(&self.config.workspace, &effective_prompt).unwrap_or_else(
@@ -800,6 +1134,8 @@ impl App {
         let allow_mutations = self.allow_mutations.clone();
         let events = self.event_tx.clone();
         let options = TurnOptions {
+            trace: self.trace.clone(),
+            cancel: self.cancel.clone(),
             workspace: self.config.workspace.clone(),
             max_steps: self.config.max_steps,
             tool_output_limit: self.config.tool_output_limit,
@@ -836,13 +1172,11 @@ impl App {
             }
             "/model" => {
                 if argument.trim().is_empty() {
-                    self.entries.push(Entry {
-                        kind: EntryKind::System,
-                        text: format!(
+                    self.push_entry(Entry::new(EntryKind::System, format!(
                             "Model: {}\nEndpoint: {}\n\nSwitch with /model <id>; discover IDs with `abacus models`.",
                             self.config.model, self.config.base_url
-                        ),
-                    });
+                        )
+                    ));
                 } else {
                     let model = argument.trim().to_owned();
                     let result = self.active_profile_mut().map(|profile| {
@@ -884,10 +1218,10 @@ impl App {
                     "goal_update".to_owned(),
                     "spawn_subagents".to_owned(),
                 ]);
-                self.entries.push(Entry {
-                    kind: EntryKind::System,
-                    text: format!("Tools: {}", names.join(", ")),
-                });
+                self.push_entry(Entry::new(
+                    EntryKind::System,
+                    format!("Tools: {}", names.join(", ")),
+                ));
                 self.follow = true;
                 true
             }
@@ -899,14 +1233,14 @@ impl App {
                     .map(|skill| format!("/{}  {}", skill.name, skill.description))
                     .collect::<Vec<_>>()
                     .join("\n");
-                self.entries.push(Entry {
-                    kind: EntryKind::System,
-                    text: if text.is_empty() {
+                self.push_entry(Entry::new(
+                    EntryKind::System,
+                    if text.is_empty() {
                         "No skills discovered.".to_owned()
                     } else {
                         format!("Skills\n{text}")
                     },
-                });
+                ));
                 self.follow = true;
                 true
             }
@@ -920,14 +1254,14 @@ impl App {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                self.entries.push(Entry {
-                    kind: EntryKind::System,
-                    text: if text.is_empty() {
+                self.push_entry(Entry::new(
+                    EntryKind::System,
+                    if text.is_empty() {
                         "No plugins enabled.".to_owned()
                     } else {
                         format!("Plugins\n{text}")
                     },
-                });
+                ));
                 self.follow = true;
                 true
             }
@@ -939,14 +1273,14 @@ impl App {
                     .map(|tool| format!("{}  {}", tool.exposed_name, tool.description))
                     .collect::<Vec<_>>()
                     .join("\n");
-                self.entries.push(Entry {
-                    kind: EntryKind::System,
-                    text: if text.is_empty() {
+                self.push_entry(Entry::new(
+                    EntryKind::System,
+                    if text.is_empty() {
                         "No MCP tools connected.".to_owned()
                     } else {
                         format!("MCP tools\n{text}")
                     },
-                });
+                ));
                 self.follow = true;
                 true
             }
@@ -966,10 +1300,10 @@ impl App {
                     "plan" => Some(AgentMode::Plan),
                     "build" => Some(AgentMode::Build),
                     _ => {
-                        self.entries.push(Entry {
-                            kind: EntryKind::Error,
-                            text: "Usage: /mode auto|plan|build".to_owned(),
-                        });
+                        self.push_entry(Entry::new(
+                            EntryKind::Error,
+                            "Usage: /mode auto|plan|build".to_owned(),
+                        ));
                         self.follow = true;
                         return true;
                     }
@@ -978,13 +1312,11 @@ impl App {
                     self.agent_mode = mode;
                     self.status = format!("{} mode", mode.label().to_ascii_lowercase());
                 } else {
-                    self.entries.push(Entry {
-                        kind: EntryKind::System,
-                        text: format!(
+                    self.push_entry(Entry::new(EntryKind::System, format!(
                             "Mode: {}\nAUTO lets the model choose PLAN or BUILD per turn; pinned modes enforce your choice.",
                             self.agent_mode.label()
-                        ),
-                    });
+                        )
+                    ));
                     self.follow = true;
                 }
                 true
@@ -1024,24 +1356,30 @@ impl App {
                 // turn and maintains `self.compaction`; this command does not touch
                 // that state, so any prior rolling summary is preserved.
                 let before = self.messages.len();
-                self.messages = compact_messages(&self.messages, 160_000);
+                // Sized from the model's own window, not a fixed number. A
+                // hardcoded 160k chars cut a 1M-context session down to a few
+                // percent of what it could hold, and under-compacted a small one.
+                let budget = self.config.model_limits.compaction_budget();
+                self.messages = compact_messages(&self.messages, budget.recent_budget_chars);
                 self.persist_session();
-                self.entries.push(Entry {
-                    kind: EntryKind::System,
-                    text: format!(
-                        "Quick-compacted conversation from {before} to {} messages. \
-                         Rolling-summary compaction also runs automatically as the context grows.",
-                        self.messages.len()
+                self.push_entry(Entry::new(
+                    EntryKind::System,
+                    format!(
+                        "Quick-compacted conversation from {before} to {} messages, \
+                         targeting {} chars for this model. Dropped messages are not summarised; \
+                         rolling-summary compaction runs automatically as the context grows.",
+                        self.messages.len(),
+                        budget.recent_budget_chars
                     ),
-                });
+                ));
                 self.follow = true;
                 true
             }
             value if value.starts_with('/') => {
-                self.entries.push(Entry {
-                    kind: EntryKind::Error,
-                    text: format!("Unknown command: {value}"),
-                });
+                self.push_entry(Entry::new(
+                    EntryKind::Error,
+                    format!("Unknown command: {value}"),
+                ));
                 self.follow = true;
                 true
             }
@@ -1050,6 +1388,10 @@ impl App {
     }
 
     fn persist_session(&mut self) {
+        // A turn may have switched branches or committed; re-read cheaply here
+        // rather than on the draw path.
+        self.git_branch = git_branch(&self.config.workspace);
+
         let Some(store) = &self.session_store else {
             return;
         };
@@ -1065,6 +1407,21 @@ impl App {
                 )
                 .map_err(|error| self.status = format!("session create failed: {error}"))
                 .ok();
+        }
+        // The trace is keyed by session id, so it can only be opened once the
+        // session exists — which is here, on the first persist. `start_turn`
+        // persists before spawning, so the first model call is already covered.
+        if self.trace.is_none()
+            && self.config.trace_enabled
+            && let Some(session) = &self.session
+        {
+            match crate::sft::TraceWriter::open(
+                &self.config.paths.traces_dir,
+                &session.id.to_string(),
+            ) {
+                Ok(writer) => self.trace = Some(writer),
+                Err(error) => self.status = format!("training trace disabled: {error:#}"),
+            }
         }
         let Some(session) = &mut self.session else {
             return;
@@ -1170,14 +1527,11 @@ impl App {
             }
         };
         match result {
-            Ok(text) => self.entries.push(Entry {
-                kind: EntryKind::System,
-                text,
-            }),
-            Err(error) => self.entries.push(Entry {
-                kind: EntryKind::Error,
-                text: format!("Goal error: {error:#}"),
-            }),
+            Ok(text) => self.push_entry(Entry::new(EntryKind::System, text)),
+            Err(error) => self.push_entry(Entry::new(
+                EntryKind::Error,
+                format!("Goal error: {error:#}"),
+            )),
         }
         self.persist_session();
         self.follow = true;
@@ -1194,13 +1548,13 @@ impl App {
     fn swarm_command(&mut self, argument: &str) {
         let objective = argument.trim();
         if objective.is_empty() {
-            self.entries.push(Entry {
-                kind: EntryKind::System,
-                text: "Usage: /swarm <objective>. Abacus splits the objective into independent \
+            self.push_entry(Entry::new(
+                EntryKind::System,
+                "Usage: /swarm <objective>. Abacus splits the objective into independent \
                        units and delegates them to parallel subagents (one approval, isolated git \
                        worktrees). Best for separable work; a single repository is required."
                     .to_owned(),
-            });
+            ));
             self.follow = true;
             return;
         }
@@ -1230,10 +1584,7 @@ impl App {
                     state.prompt
                 ),
             );
-            self.entries.push(Entry {
-                kind: EntryKind::System,
-                text,
-            });
+            self.push_entry(Entry::new(EntryKind::System, text));
             self.follow = true;
             return;
         }
@@ -1268,10 +1619,8 @@ impl App {
                 self.continue_ralph_loop();
             }
             Err(error) => {
-                self.entries.push(Entry {
-                    kind: EntryKind::Error,
-                    text: format!("Could not start loop: {error:#}\n\nUsage: /loop \"<prompt>\" --max-iterations 20 --completion-promise \"DONE\""),
-                });
+                self.push_entry(Entry::new(EntryKind::Error, format!("Could not start loop: {error:#}\n\nUsage: /loop \"<prompt>\" --max-iterations 20 --completion-promise \"DONE\"")
+                ));
                 self.follow = true;
             }
         }
@@ -1296,10 +1645,10 @@ impl App {
             }
         };
         let prompt = state.prompt.clone();
-        self.entries.push(Entry {
-            kind: EntryKind::System,
-            text: format!("Ralph loop · iteration {iteration}"),
-        });
+        self.push_entry(Entry::new(
+            EntryKind::System,
+            format!("Ralph loop · iteration {iteration}"),
+        ));
         self.persist_session();
         self.start_turn(prompt.clone(), prompt, false);
     }
@@ -1317,10 +1666,10 @@ impl App {
         }
         self.persist_session();
         self.status = "Ralph loop cancelled".to_owned();
-        self.entries.push(Entry {
-            kind: EntryKind::System,
-            text: "Ralph loop cancelled by user.".to_owned(),
-        });
+        self.push_entry(Entry::new(
+            EntryKind::System,
+            "Ralph loop cancelled by user.".to_owned(),
+        ));
         self.follow = true;
     }
 
@@ -1328,7 +1677,7 @@ impl App {
         self.persist_session();
         self.messages = initial_messages(&self.config.workspace);
         self.session = None; // persist_session recreates lazily on first send
-        self.entries.clear();
+        self.set_entries(Vec::new());
         self.goal = GoalState::default();
         self.tasks = TaskList::default();
         self.compaction = CompactionState::default();
@@ -1336,10 +1685,7 @@ impl App {
         self.tokens.store(0, Ordering::Relaxed);
         self.session_initial_active_secs = 0;
         self.started = Instant::now();
-        self.entries.push(Entry {
-            kind: EntryKind::System,
-            text: "New session.".to_owned(),
-        });
+        self.push_entry(Entry::new(EntryKind::System, "New session.".to_owned()));
         self.scroll = 0;
         self.follow = true;
         self.queued_message = None;
@@ -1384,13 +1730,14 @@ impl App {
             return;
         };
         match store.list() {
-            Ok(sessions) if sessions.is_empty() => self.entries.push(Entry {
-                kind: EntryKind::System,
-                text: "No saved sessions for this workspace.".to_owned(),
-            }),
+            Ok(sessions) if sessions.is_empty() => self.push_entry(Entry::new(
+                EntryKind::System,
+                "No saved sessions for this workspace.".to_owned(),
+            )),
             Ok(sessions) => {
                 self.picker = Some(Picker {
                     title: "sessions".to_owned(),
+                    action: PickerAction::ResumeSession,
                     items: sessions
                         .into_iter()
                         .take(50)
@@ -1399,7 +1746,10 @@ impl App {
                                 format!(
                                     "{}  {}  {}",
                                     &session.id.to_string()[..8],
-                                    session.updated_at.format("%m-%d %H:%M"),
+                                    session
+                                        .updated_at
+                                        .with_timezone(&Local)
+                                        .format("%m-%d %H:%M"),
                                     session.title
                                 ),
                                 session.id.to_string(),
@@ -1409,10 +1759,10 @@ impl App {
                     selected: 0,
                 });
             }
-            Err(error) => self.entries.push(Entry {
-                kind: EntryKind::Error,
-                text: format!("Could not list sessions: {error}"),
-            }),
+            Err(error) => self.push_entry(Entry::new(
+                EntryKind::Error,
+                format!("Could not list sessions: {error}"),
+            )),
         }
         self.follow = true;
     }
@@ -1430,15 +1780,15 @@ impl App {
         match store.load(id.trim()) {
             Ok(session) => {
                 self.messages = session.messages.clone();
-                self.entries = entries_from_messages(&self.messages);
-                self.entries.push(Entry {
-                    kind: EntryKind::System,
-                    text: format!(
+                self.set_entries(entries_from_messages(&self.messages));
+                self.push_entry(Entry::new(
+                    EntryKind::System,
+                    format!(
                         "Resumed {} ({})",
                         session.title,
                         &session.id.to_string()[..8]
                     ),
-                });
+                ));
                 self.goal = GoalState::new(session.goal.clone());
                 self.tasks = TaskList::new(session.tasks.clone());
                 self.compaction = session.compaction.clone().unwrap_or_default();
@@ -1452,10 +1802,10 @@ impl App {
                 self.ctx_chars = message_chars(&self.messages);
             }
             Err(error) => {
-                self.entries.push(Entry {
-                    kind: EntryKind::Error,
-                    text: format!("Could not resume session: {error}"),
-                });
+                self.push_entry(Entry::new(
+                    EntryKind::Error,
+                    format!("Could not resume session: {error}"),
+                ));
                 self.follow = true;
             }
         }
@@ -1590,14 +1940,12 @@ impl App {
         let choice = match argument.trim().to_ascii_lowercase().as_str() {
             "" => {
                 let resolved = self.settings.ui.theme.resolve();
-                self.entries.push(Entry {
-                    kind: EntryKind::System,
-                    text: format!(
+                self.push_entry(Entry::new(EntryKind::System, format!(
                         "Theme: {} (showing {}). Switch with /theme dark, /theme light, or /theme auto.",
                         self.settings.ui.theme.label(),
                         if resolved == ThemeMode::Dark { "dark" } else { "light" },
-                    ),
-                });
+                    )
+                ));
                 self.follow = true;
                 return;
             }
@@ -1605,10 +1953,10 @@ impl App {
             "dark" => ThemeChoice::Dark,
             "light" => ThemeChoice::Light,
             _ => {
-                self.entries.push(Entry {
-                    kind: EntryKind::Error,
-                    text: "Usage: /theme auto|dark|light".to_owned(),
-                });
+                self.push_entry(Entry::new(
+                    EntryKind::Error,
+                    "Usage: /theme auto|dark|light".to_owned(),
+                ));
                 self.follow = true;
                 return;
             }
@@ -1625,12 +1973,8 @@ impl App {
     fn cycle_config_value(&mut self, key: ConfigKey) -> Result<()> {
         match key {
             ConfigKey::Profile => {
-                let profiles = self.settings.profiles.keys().cloned().collect::<Vec<_>>();
-                let current = profiles
-                    .iter()
-                    .position(|name| name == &self.settings.default_profile)
-                    .unwrap_or(0);
-                self.settings.default_profile = profiles[(current + 1) % profiles.len()].clone();
+                self.open_profile_picker();
+                return Ok(());
             }
             ConfigKey::Protocol => {
                 let profile = self.active_profile_mut()?;
@@ -1650,6 +1994,23 @@ impl App {
             ConfigKey::VimMode => self.settings.ui.vim_mode = !self.settings.ui.vim_mode,
             ConfigKey::Animations => self.settings.ui.animations = !self.settings.ui.animations,
             ConfigKey::Tooltips => self.settings.ui.show_tooltips = !self.settings.ui.show_tooltips,
+            ConfigKey::DraftReplies => {
+                self.settings.ui.draft_replies = !self.settings.ui.draft_replies;
+                if !self.settings.ui.draft_replies {
+                    self.clear_draft();
+                }
+            }
+            ConfigKey::TraceLogging => {
+                self.settings.trace.enabled = !self.settings.trace.enabled;
+                self.config.trace_enabled = self.settings.trace.enabled;
+                if self.settings.trace.enabled {
+                    // Opened on the next persist, which keeps one code path
+                    // responsible for creating it.
+                    self.persist_session();
+                } else {
+                    self.trace = None;
+                }
+            }
             ConfigKey::ProjectTrust => {
                 let trusted = self.settings.trust.contains(&self.config.workspace);
                 self.settings.trust.set(&self.config.workspace, !trusted);
@@ -1680,6 +2041,15 @@ impl App {
     }
 
     fn begin_config_edit(&mut self, key: ConfigKey) {
+        // A secret is never seeded into the editor: `config_value` reports only
+        // where the key came from, so pre-filling would put that description
+        // into the field and, worse, invite showing the real value.
+        if key == ConfigKey::ApiKey {
+            if let Some(panel) = &mut self.config_panel {
+                panel.editing = Some((key, InputBuffer::new()));
+            }
+            return;
+        }
         let value = self.config_value(key);
         let mut input = InputBuffer::new();
         input.insert_str(&value);
@@ -1731,11 +2101,28 @@ impl App {
                     self.settings.feedback.endpoint = value.trim().to_owned();
                 })
             }
+            // The key goes to credentials.toml, which is written separately
+            // from settings and kept owner-only.
+            ConfigKey::ApiKey => {
+                let profile = self.settings.default_profile.clone();
+                let trimmed = value.trim().to_owned();
+                if trimmed.is_empty() {
+                    self.credentials.keys.remove(&profile);
+                } else {
+                    self.credentials.keys.insert(profile, trimmed);
+                }
+                self.credentials.save(&self.config.paths)
+            }
             _ => Ok(()),
         }
         .and_then(|()| self.save_and_apply_settings());
         match result {
-            Ok(()) => self.status = format!("{} saved", config_label(key)),
+            Ok(()) => {
+                if key == ConfigKey::Model {
+                    self.pending_provider = None;
+                }
+                self.status = format!("{} saved", config_label(key));
+            }
             Err(error) => {
                 self.status = format!("configuration error: {error:#}");
                 self.begin_config_edit(key);
@@ -1754,10 +2141,39 @@ impl App {
             ConfigKey::Protocol => profile
                 .map(|value| format!("{:?}", value.protocol))
                 .unwrap_or_default(),
+            // Report where the credential comes from, never the credential.
+            ConfigKey::ApiKey => {
+                let env = profile.and_then(|value| value.api_key_env.as_deref());
+                let in_env =
+                    env.is_some_and(|name| std::env::var(name).is_ok_and(|v| !v.trim().is_empty()));
+                if in_env {
+                    format!("set · {} from environment", env.unwrap_or_default())
+                } else if self
+                    .credentials
+                    .keys
+                    .get(&self.settings.default_profile)
+                    .is_some_and(|key| !key.trim().is_empty())
+                {
+                    "set · stored locally".to_owned()
+                } else if env.is_some() {
+                    format!(
+                        "not set · export {} or press enter",
+                        env.unwrap_or_default()
+                    )
+                } else {
+                    "not set".to_owned()
+                }
+            }
             ConfigKey::Permission => format!("{:?}", self.settings.ui.permission_mode),
             ConfigKey::VimMode => on_off(self.settings.ui.vim_mode),
             ConfigKey::Animations => on_off(self.settings.ui.animations),
             ConfigKey::Tooltips => on_off(self.settings.ui.show_tooltips),
+            ConfigKey::DraftReplies => on_off(self.settings.ui.draft_replies),
+            ConfigKey::TraceLogging => match (&self.trace, self.settings.trace.enabled) {
+                (Some(trace), true) => format!("On · {} records", trace.steps()),
+                (None, true) => "On".to_owned(),
+                (_, false) => "Off".to_owned(),
+            },
             ConfigKey::MaxSteps => self.settings.agent.max_steps.to_string(),
             ConfigKey::ToolOutputLimit => self.settings.agent.tool_output_limit.to_string(),
             ConfigKey::ProjectTrust => on_off(self.settings.trust.contains(&self.config.workspace)),
@@ -1773,12 +2189,200 @@ impl App {
         }
     }
 
+    /// Offer the stored profiles, plus a way to add one. Cycling was the only
+    /// way to switch before, which does nothing visible when there is a single
+    /// profile and gives no way to create a second.
+    /// Undo a provider that never got a model, restoring the previous profile.
+    fn cancel_pending_provider(&mut self) {
+        let Some(pending) = self.pending_provider.take() else {
+            return;
+        };
+        // Only roll back a profile that is still unusable; if the user gave it
+        // a model by another route, leave it alone.
+        let unfinished = self
+            .settings
+            .profiles
+            .get(&pending.profile)
+            .is_some_and(|profile| profile.model.trim().is_empty());
+        if !unfinished {
+            return;
+        }
+        self.settings.profiles.remove(&pending.profile);
+        self.settings.default_profile = pending.previous;
+        let _ = self.settings.save(&self.config.paths);
+        self.status = "provider discarded — no model was set".to_owned();
+    }
+
+    fn open_profile_picker(&mut self) {
+        let mut items = self
+            .settings
+            .profiles
+            .iter()
+            .map(|(id, profile)| {
+                let marker = if *id == self.settings.default_profile {
+                    "● "
+                } else {
+                    "  "
+                };
+                (
+                    format!("{marker}{id}  —  {}  ·  {}", profile.name, profile.model),
+                    id.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        items.push((
+            "  + Add a provider…".to_owned(),
+            NEW_PROVIDER_SENTINEL.to_owned(),
+        ));
+        self.picker = Some(Picker {
+            title: "profile".to_owned(),
+            items,
+            selected: 0,
+            action: PickerAction::SwitchProfile,
+        });
+    }
+
+    /// The provider list from `abacus setup`, offered inside the TUI so a
+    /// second provider does not require quitting and re-running the wizard.
+    fn open_provider_picker(&mut self) {
+        let mut items = crate::setup::PRESETS
+            .iter()
+            .map(|preset| {
+                let key = match preset.env_key {
+                    Some(name) if crate::setup::key_in_env(preset) => format!("✓ {name}"),
+                    Some(name) => format!("  {name}"),
+                    None => "  no key needed".to_owned(),
+                };
+                (
+                    format!("  {:<18}{:<32}{key}", preset.name, preset.hint),
+                    preset.id.to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        items.push((
+            "  Custom OpenAI-compatible endpoint".to_owned(),
+            CUSTOM_PROVIDER_SENTINEL.to_owned(),
+        ));
+        self.picker = Some(Picker {
+            title: "provider".to_owned(),
+            items,
+            selected: 0,
+            action: PickerAction::AddProvider,
+        });
+    }
+
+    /// Accept the highlighted picker row, or `index` when a click named one.
+    fn accept_picker(&mut self, index: Option<usize>) {
+        let Some(picker) = &self.picker else {
+            return;
+        };
+        let index = index.unwrap_or(picker.selected);
+        let Some((_, value)) = picker.items.get(index).cloned() else {
+            return;
+        };
+        let action = picker.action;
+        self.picker = None;
+        match action {
+            PickerAction::ResumeSession => self.resume_session(&value),
+            PickerAction::SwitchProfile if value == NEW_PROVIDER_SENTINEL => {
+                self.open_provider_picker()
+            }
+            PickerAction::SwitchProfile => {
+                self.settings.default_profile = value.clone();
+                if let Err(error) = self.save_and_apply_settings() {
+                    self.status = format!("could not switch profile: {error:#}");
+                } else {
+                    self.status = format!("profile {value}");
+                }
+            }
+            PickerAction::AddProvider => self.add_provider(&value),
+        }
+    }
+
+    /// Create a profile from a preset (or a blank custom one), make it active,
+    /// and open the field that most needs filling in next.
+    fn add_provider(&mut self, id: &str) {
+        let preset = crate::setup::PRESETS.iter().find(|preset| preset.id == id);
+        let (name, base_url, protocol, env_key) = match preset {
+            Some(preset) => (
+                preset.name.to_owned(),
+                preset.base_url.to_owned(),
+                preset.protocol,
+                preset.env_key.map(str::to_owned),
+            ),
+            None => (
+                "Custom".to_owned(),
+                "http://localhost:8000/v1".to_owned(),
+                ProviderProtocol::ChatCompletions,
+                None,
+            ),
+        };
+        // Never silently replace an existing profile of the same name.
+        let mut profile_id = if preset.is_some() {
+            id.to_owned()
+        } else {
+            "custom".to_owned()
+        };
+        let mut suffix = 2;
+        while self.settings.profiles.contains_key(&profile_id) {
+            profile_id = format!("{}-{suffix}", preset.map(|p| p.id).unwrap_or("custom"));
+            suffix += 1;
+        }
+        self.settings.profiles.insert(
+            profile_id.clone(),
+            crate::config::ProviderProfile {
+                name,
+                base_url,
+                model: String::new(),
+                protocol,
+                api_key_env: env_key.clone(),
+            },
+        );
+        // Deliberately persisted but *not* applied: a profile with no model
+        // fails validation, and applying a half-made provider would break the
+        // running session. The live config keeps pointing at the old profile
+        // until a model is committed, at which point the normal save-and-apply
+        // path picks it up.
+        self.pending_provider = Some(PendingProvider {
+            profile: profile_id.clone(),
+            previous: self.settings.default_profile.clone(),
+        });
+        self.settings.default_profile = profile_id.clone();
+        if let Err(error) = self.settings.save(&self.config.paths) {
+            self.status = format!("could not add provider: {error:#}");
+            return;
+        }
+        let needs_key = env_key
+            .as_deref()
+            .is_some_and(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()));
+        self.status = if needs_key {
+            format!("{profile_id} added — set a model")
+        } else if env_key.is_some() {
+            format!(
+                "{profile_id} added — set a model, then an API key ({})",
+                env_key.as_deref().unwrap_or_default()
+            )
+        } else {
+            format!("{profile_id} added — set a model")
+        };
+        // A new profile has no model, which is the one field it cannot run
+        // without; open it rather than leaving the user to find it.
+        if self.config_panel.is_some()
+            && let Some(index) = CONFIG_KEYS.iter().position(|key| *key == ConfigKey::Model)
+        {
+            if let Some(panel) = &mut self.config_panel {
+                panel.selected = index;
+            }
+            self.begin_config_edit(ConfigKey::Model);
+        }
+    }
+
     fn open_feedback(&mut self) {
         if !self.settings.feedback.enabled {
-            self.entries.push(Entry {
-                kind: EntryKind::Error,
-                text: "Feedback is disabled. Enable it in /config.".to_owned(),
-            });
+            self.push_entry(Entry::new(
+                EntryKind::Error,
+                "Feedback is disabled. Enable it in /config.".to_owned(),
+            ));
             self.follow = true;
             return;
         }
@@ -1844,10 +2448,10 @@ impl App {
                         .id
                         .map(|id| format!(" Reference: {id}."))
                         .unwrap_or_default();
-                    self.entries.push(Entry {
-                        kind: EntryKind::System,
-                        text: format!("Thank you — your feedback was sent.{reference}"),
-                    });
+                    self.push_entry(Entry::new(
+                        EntryKind::System,
+                        format!("Thank you — your feedback was sent.{reference}"),
+                    ));
                     self.status = "feedback sent".to_owned();
                     self.follow = true;
                 }
@@ -1894,12 +2498,10 @@ impl App {
                     self.status = "configuration active".to_owned();
                 }
                 Err(error) => {
-                    self.entries.push(Entry {
-                        kind: EntryKind::Error,
-                        text: format!(
-                            "Configuration saved, but extensions could not reload: {error}"
-                        ),
-                    });
+                    self.push_entry(Entry::new(
+                        EntryKind::Error,
+                        format!("Configuration saved, but extensions could not reload: {error}"),
+                    ));
                     self.status = "extension reload failed".to_owned();
                     self.follow = true;
                 }
@@ -1924,15 +2526,40 @@ impl App {
         }
         self.last_ctrl_c = Some(now);
         if self.running.is_some() {
-            self.interrupt();
+            let escalated = self.request_interrupt();
             self.queued_message = None;
-            self.status = "interrupted · Ctrl+C again to exit".to_owned();
+            self.status = if escalated {
+                "interrupted · Ctrl+C again to exit".to_owned()
+            } else {
+                "interrupting… · Ctrl+C again to force".to_owned()
+            };
         } else if !self.input.text().trim().is_empty() {
             self.input.clear();
             self.status = "cleared · Ctrl+C again to exit".to_owned();
         } else {
             self.status = "Press Ctrl+C again to exit".to_owned();
         }
+    }
+
+    /// Ask a running turn to stop. The first request is cooperative: the turn
+    /// finishes its current tool, reports everything it did, and the transcript
+    /// keeps it. A second request — while the first is still pending — escalates
+    /// to a hard abort, which is the old behaviour and does lose the turn.
+    ///
+    /// Returns true when it escalated.
+    fn request_interrupt(&mut self) -> bool {
+        if self.running.is_none() {
+            return false;
+        }
+        if self.cancel.swap(true, Ordering::Relaxed) {
+            self.interrupt();
+            return true;
+        }
+        if let Some(state) = &mut self.ralph_loop {
+            state.cancel();
+        }
+        self.status = "interrupting…".to_owned();
+        false
     }
 
     fn interrupt(&mut self) {
@@ -1943,14 +2570,96 @@ impl App {
             handle.abort();
             self.approval = None;
             self.receiving_delta = false;
-            self.entries.push(Entry {
-                kind: EntryKind::System,
-                text: "Interrupted.".to_owned(),
-            });
+            // The aborted task will never send its `ToolFinished`, so settle
+            // the open tool row here — otherwise it spins forever.
+            let elapsed = self
+                .tool_started
+                .map(|started| started.elapsed().as_millis() as u64);
+            if let Some(call) = self
+                .open_tool()
+                .filter(|call| call.status == ToolStatus::Running)
+            {
+                call.status = ToolStatus::Failed;
+                call.output = "interrupted".to_owned();
+                call.duration_ms = elapsed;
+            }
+            self.push_entry(Entry::new(EntryKind::System, "Interrupted.".to_owned()));
             self.status = "interrupted".to_owned();
+            self.last_outcome = Some(TurnOutcome::Interrupted);
             self.follow = true;
         }
+        self.turn_started = None;
+        self.tool_started = None;
         self.persist_session();
+    }
+
+    /// Move the transcript cursor by `delta` blocks, starting from the last
+    /// block when nothing is selected yet. Selecting stops follow-mode: the
+    /// user is reading history, and yanking them back to the tail on the next
+    /// token would be hostile.
+    fn move_cursor(&mut self, delta: isize) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let last = self.entries.len() - 1;
+        let next = match self.cursor {
+            Some(current) => (current as isize + delta).clamp(0, last as isize) as usize,
+            None if delta < 0 => last,
+            None => 0,
+        };
+        self.cursor = Some(next);
+        self.cursor_pending = true;
+        self.follow = false;
+    }
+
+    /// Fold or unfold the selected tool row. Returns whether anything moved, so
+    /// the caller can fall through to another binding when it did not.
+    fn toggle_cursor_fold(&mut self, expand: Option<bool>) -> bool {
+        let Some(index) = self.cursor else {
+            return false;
+        };
+        let Some(call) = self
+            .entries
+            .get_mut(index)
+            .and_then(|entry| entry.tool.as_mut())
+        else {
+            return false;
+        };
+        if !call.has_more() {
+            return false;
+        }
+        let next = expand.unwrap_or(!call.expanded);
+        if next == call.expanded {
+            return false;
+        }
+        call.expanded = next;
+        self.entries_rev = self.entries_rev.wrapping_add(1);
+        self.cursor_pending = true;
+        true
+    }
+
+    fn clear_cursor(&mut self) {
+        self.cursor = None;
+        self.cursor_pending = false;
+    }
+
+    /// Lines to move for one scroll event, chosen from how fast the events are
+    /// arriving.
+    ///
+    /// A mouse wheel sends one chunky notch at a time; a trackpad sends a dense
+    /// stream of small ones. Moving three lines per event suits the wheel and
+    /// makes a trackpad fly past whatever you were reading, so a burst is
+    /// treated as a trackpad and moves one line. The first event after a pause
+    /// keeps the wheel's larger step, which is what makes a single notch still
+    /// feel responsive.
+    fn scroll_step(&mut self) -> u16 {
+        const TRACKPAD_GAP: Duration = Duration::from_millis(80);
+        let now = Instant::now();
+        let rapid = self
+            .last_scroll
+            .is_some_and(|previous| now.duration_since(previous) < TRACKPAD_GAP);
+        self.last_scroll = Some(now);
+        if rapid { 1 } else { 3 }
     }
 
     fn scroll_up(&mut self, amount: u16) {
@@ -2190,6 +2899,7 @@ async fn event_loop(
         dirty |= app.drain_agent_events();
         dirty |= app.drain_feedback_events();
         dirty |= app.drain_services_events();
+        dirty |= app.drain_draft_events();
         app.start_services_reload();
         if dirty {
             terminal.draw(|frame| draw(frame, app))?;
@@ -2200,13 +2910,26 @@ async fn event_loop(
         if event::poll(Duration::from_millis(wait))? {
             match event::read()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    let before = app.input.text();
                     handle_key(app, key);
+                    // Editing the prompt invalidates the highlighted
+                    // suggestion, so reconcile the popup after every key.
+                    app.sync_completion(&before);
                     dirty = true;
                 }
                 Event::Mouse(mouse) => {
                     match mouse.kind {
-                        MouseEventKind::ScrollUp => app.scroll_up(3),
-                        MouseEventKind::ScrollDown => app.scroll_down(3),
+                        MouseEventKind::ScrollUp => {
+                            let step = app.scroll_step();
+                            app.scroll_up(step)
+                        }
+                        MouseEventKind::ScrollDown => {
+                            let step = app.scroll_step();
+                            app.scroll_down(step)
+                        }
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            handle_click(app, mouse.column, mouse.row)
+                        }
                         _ => {}
                     }
                     dirty = true;
@@ -2225,7 +2948,9 @@ async fn event_loop(
                     {
                         input.insert_str(&text);
                     } else if app.usage_panel.is_none() && app.mode == InputMode::Insert {
+                        let before = app.input.text();
                         app.input.insert_str(&text);
+                        app.sync_completion(&before);
                     }
                     dirty = true;
                 }
@@ -2408,6 +3133,33 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // Routed before the panels: a picker opened from /config sits on top of it
+    // and must own the keys while it is up.
+    if app.picker.is_some() {
+        let mut accept = false;
+        let mut cancel = false;
+        if let Some(picker) = &mut app.picker {
+            match key.code {
+                KeyCode::Char('k') | KeyCode::Up => {
+                    picker.selected = picker.selected.saturating_sub(1)
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    picker.selected =
+                        (picker.selected + 1).min(picker.items.len().saturating_sub(1))
+                }
+                KeyCode::Enter => accept = true,
+                KeyCode::Esc | KeyCode::Char('q') => cancel = true,
+                _ => {}
+            }
+        }
+        if accept {
+            app.accept_picker(None);
+        } else if cancel {
+            app.picker = None;
+        }
+        return;
+    }
+
     if app.raw_config.is_some() {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
             app.save_raw_config();
@@ -2454,6 +3206,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 if let Some(panel) = &mut app.config_panel {
                     panel.editing = None;
                 }
+                app.cancel_pending_provider();
             } else if key.code == KeyCode::Enter {
                 app.commit_config_edit();
             } else if let Some((_, input)) = app
@@ -2511,39 +3264,6 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    if app.picker.is_some() {
-        let mut accept = false;
-        let mut cancel = false;
-        if let Some(picker) = &mut app.picker {
-            match key.code {
-                KeyCode::Char('k') | KeyCode::Up => {
-                    picker.selected = picker.selected.saturating_sub(1)
-                }
-                KeyCode::Char('j') | KeyCode::Down => {
-                    picker.selected =
-                        (picker.selected + 1).min(picker.items.len().saturating_sub(1))
-                }
-                KeyCode::Enter => accept = true,
-                KeyCode::Esc | KeyCode::Char('q') => cancel = true,
-                _ => {}
-            }
-        }
-        if accept {
-            let value = app
-                .picker
-                .as_ref()
-                .and_then(|picker| picker.items.get(picker.selected))
-                .map(|(_, value)| value.clone());
-            app.picker = None;
-            if let Some(value) = value {
-                app.resume_session(&value);
-            }
-        } else if cancel {
-            app.picker = None;
-        }
-        return;
-    }
-
     if app.show_help {
         if matches!(key.code, KeyCode::Esc | KeyCode::Char('?') | KeyCode::Enter) {
             app.show_help = false;
@@ -2579,13 +3299,101 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+/// Route a left click to whatever was drawn under it.
+///
+/// Regions are tested in the order they stack on screen — the completion popup
+/// and any open panel float above the transcript — so a click never falls
+/// through to a block hidden behind an overlay. A first click selects; a second
+/// click on an already-selected row activates it, which keeps a stray click
+/// from editing a setting or resuming a session outright.
+fn handle_click(app: &mut App, column: u16, row: u16) {
+    let hits = app.hits.borrow();
+    let completion = hit(&hits.completion, column, row);
+    let config = hit(&hits.config, column, row);
+    let picker = hit(&hits.picker, column, row);
+    let transcript = hit(&hits.transcript, column, row);
+    drop(hits);
+
+    if let Some(index) = completion {
+        app.completion_index = index;
+        app.accept_completion();
+        return;
+    }
+    // Same precedence as drawing: a picker floats above the config panel, so a
+    // click landing on both belongs to the picker.
+    if let Some(index) = picker {
+        let already = app
+            .picker
+            .as_ref()
+            .is_some_and(|picker| picker.selected == index);
+        if let Some(picker) = &mut app.picker {
+            picker.selected = index;
+        }
+        if already {
+            app.accept_picker(Some(index));
+        }
+        return;
+    }
+    if let Some(index) = config {
+        let already = app
+            .config_panel
+            .as_ref()
+            .is_some_and(|panel| panel.selected == index);
+        if let Some(panel) = &mut app.config_panel {
+            panel.selected = index;
+        }
+        if already {
+            let key = CONFIG_KEYS[index];
+            if config_key_is_editable(key) {
+                app.begin_config_edit(key);
+            } else if let Err(error) = app.cycle_config_value(key) {
+                app.status = format!("configuration error: {error:#}");
+            }
+        }
+        return;
+    }
+    if let Some(index) = transcript {
+        // Clicking a block selects it; clicking the one already selected folds
+        // or unfolds it, matching the two-step the panels use.
+        let already = app.cursor == Some(index);
+        app.cursor = Some(index);
+        app.follow = false;
+        if already {
+            app.toggle_cursor_fold(None);
+        }
+    }
+}
+
 fn handle_insert_key(app: &mut App, key: KeyEvent) {
     let modified_enter = key
         .modifiers
         .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT);
+    // While the completion popup is up it owns the navigation keys: up/down
+    // move the highlight, Enter and Tab insert it, and Esc dismisses the list
+    // rather than leaving insert mode. Everything else falls through to normal
+    // editing, so typing keeps filtering.
+    let completing = app.visible_completion().is_some();
     match key.code {
+        KeyCode::Esc if completing => app.completion_dismissed = true,
+        // A running turn owns Esc: stopping the agent is the more urgent
+        // action, and it is what the status bar advertises.
+        KeyCode::Esc if app.running.is_some() => {
+            app.request_interrupt();
+        }
+        KeyCode::Up if completing => app.move_completion(-1),
+        KeyCode::Down if completing => app.move_completion(1),
+        // When the popup declines — because the command is already typed out in
+        // full — Enter must still send. Consuming it here regardless is what
+        // made a finished command unsendable.
+        KeyCode::Enter if completing && !modified_enter => {
+            if !app.accept_completion() {
+                app.submit();
+            }
+        }
         KeyCode::Esc if app.settings.ui.vim_mode => app.mode = InputMode::Normal,
-        KeyCode::Esc => {}
+        // Outside vim mode Esc is otherwise inert; use it to abandon a draft,
+        // which is what every other composer does.
+        KeyCode::Esc => app.input.clear(),
         KeyCode::Enter if modified_enter => app.input.insert('\n'),
         KeyCode::Enter => app.submit(),
         // Ctrl+J is a real control byte every terminal forwards, so it is the
@@ -2637,7 +3445,16 @@ fn handle_insert_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::PageUp => app.scroll_up(app.transcript_height.saturating_sub(2)),
         KeyCode::PageDown => app.scroll_down(app.transcript_height.saturating_sub(2)),
-        KeyCode::Tab => complete_at_cursor(app),
+        KeyCode::Tab => {
+            // With an empty composer there is no completion to accept, so Tab
+            // is free to take the drafted follow-up.
+            if let Some(draft) = app.draft.take().filter(|_| app.input.is_empty()) {
+                app.input.insert_str(&draft);
+                app.clear_draft();
+            } else {
+                app.accept_completion();
+            }
+        }
         // Ctrl+V: paste from the system clipboard. Bracketed paste
         // (EnableBracketedPaste) already handles terminals that send paste
         // contents as an Event::Paste; this covers terminals that send the raw
@@ -2663,6 +3480,8 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
         match key.code {
             KeyCode::Char('u') => app.scroll_up(app.transcript_height / 2),
             KeyCode::Char('d') => app.scroll_down(app.transcript_height / 2),
+            KeyCode::Char('y') => app.scroll_up(1),
+            KeyCode::Char('e') => app.scroll_down(1),
             _ => {}
         }
         return;
@@ -2674,6 +3493,7 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
         (Some('g'), KeyCode::Char('g')) => {
             app.scroll = 0;
             app.follow = false;
+            app.clear_cursor();
         }
         (_, KeyCode::Char('d')) => app.normal_prefix = Some('d'),
         (_, KeyCode::Char('g')) => app.normal_prefix = Some('g'),
@@ -2690,21 +3510,41 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
             app.input.move_start();
             app.mode = InputMode::Insert;
         }
-        (_, KeyCode::Char('h')) | (_, KeyCode::Left) => app.input.move_left(),
-        (_, KeyCode::Char('l')) | (_, KeyCode::Right) => app.input.move_right(),
         (_, KeyCode::Char('w')) => app.input.move_word_forward(),
         (_, KeyCode::Char('b')) => app.input.move_word_backward(),
         (_, KeyCode::Char('0')) | (_, KeyCode::Home) => app.input.move_start(),
         (_, KeyCode::Char('$')) | (_, KeyCode::End) => app.input.move_end(),
         (_, KeyCode::Char('x')) | (_, KeyCode::Delete) => app.input.delete(),
-        (_, KeyCode::Char('j')) | (_, KeyCode::Down) => app.scroll_down(1),
-        (_, KeyCode::Char('k')) | (_, KeyCode::Up) => app.scroll_up(1),
+        // j/k walk the transcript block by block. Line-at-a-time scrolling
+        // moved to Ctrl+E / Ctrl+Y: a cursor you can act on is worth more than
+        // one-row nudges, which the wheel and PgUp/PgDn already cover.
+        (_, KeyCode::Char('j')) | (_, KeyCode::Down) => app.move_cursor(1),
+        (_, KeyCode::Char('k')) | (_, KeyCode::Up) => app.move_cursor(-1),
+        (_, KeyCode::Char('o')) | (_, KeyCode::Char(' ')) => {
+            app.toggle_cursor_fold(None);
+        }
+        (_, KeyCode::Char('l')) | (_, KeyCode::Right) => {
+            if !app.toggle_cursor_fold(Some(true)) {
+                app.input.move_right();
+            }
+        }
+        (_, KeyCode::Char('h')) | (_, KeyCode::Left) => {
+            if !app.toggle_cursor_fold(Some(false)) {
+                app.input.move_left();
+            }
+        }
         (_, KeyCode::PageUp) => app.scroll_up(app.transcript_height.saturating_sub(2)),
         (_, KeyCode::PageDown) => app.scroll_down(app.transcript_height.saturating_sub(2)),
         (_, KeyCode::Char('G')) => {
             app.follow = true;
+            app.clear_cursor();
         }
-        (_, KeyCode::Enter) => app.mode = InputMode::Insert,
+        (_, KeyCode::Esc) => app.clear_cursor(),
+        (_, KeyCode::Enter) => {
+            if !app.toggle_cursor_fold(None) {
+                app.mode = InputMode::Insert;
+            }
+        }
         (_, KeyCode::Char('?')) => app.show_help = true,
         (_, KeyCode::Char('q')) if app.running.is_none() => app.quit = true,
         _ => {}
@@ -2713,6 +3553,7 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
 
 fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
+    app.hits.borrow_mut().clear();
     let input_height = (app.input.line_count() as u16 + 2).clamp(3, 9);
     let task_height = u16::from(app.goal.snapshot().is_some() || app.ralph_loop.is_some()) * 2
         + u16::from(!app.tasks.is_empty());
@@ -2728,16 +3569,21 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .split(area);
 
     draw_header(frame, chunks[0], app);
-    let transcript = content_rect(chunks[1], 112);
+    let transcript = ui::measure(chunks[1], 112);
     draw_transcript(frame, transcript, app);
     if task_height > 0 {
-        draw_task_bar(frame, content_rect(chunks[2], 112), app);
+        draw_task_bar(frame, ui::measure(chunks[2], 112), app);
     }
-    let input = content_rect(chunks[3], 112);
+    let input = ui::measure(chunks[3], 112);
     draw_input(frame, input, app);
-    draw_footer(frame, content_rect(chunks[4], 112), app);
+    draw_footer(frame, ui::measure(chunks[4], 112), app);
     draw_completion_popup(frame, input, app);
-    if app.raw_config.is_some() {
+    // The picker is checked first because it can be opened *from* the config
+    // panel; behind it, the panel would be drawn over its own child and the
+    // selection would be invisible.
+    if app.picker.is_some() {
+        draw_picker(frame, area, app);
+    } else if app.raw_config.is_some() {
         draw_raw_config(frame, area, app);
     } else if app.feedback_form.is_some() {
         draw_feedback(frame, area, app);
@@ -2751,85 +3597,163 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         draw_approval(frame, area, app);
     } else if app.question.is_some() {
         draw_user_question(frame, area, app);
-    } else if app.picker.is_some() {
-        draw_picker(frame, area, app);
     }
 }
 
-fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let visible_agent_mode = app.resolved_agent_mode.unwrap_or(app.agent_mode);
-    let state = if app.running.is_some() && app.settings.ui.animations {
-        let frames = ["·", "×", "+", "×"];
-        let index = (app.started.elapsed().as_millis() / 180) as usize % frames.len();
-        frames[index]
-    } else if app.running.is_some() {
-        "•"
+/// The current git branch, read from `.git` rather than by shelling out — the
+/// header refreshes after every turn and a subprocess each time would be
+/// noticeable on a large repository. Handles linked worktrees, where `.git` is
+/// a file pointing at the real git directory.
+fn git_branch(workspace: &std::path::Path) -> Option<String> {
+    let dot_git = workspace.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
     } else {
-        "·"
+        let pointer = std::fs::read_to_string(&dot_git).ok()?;
+        let path = pointer.trim().strip_prefix("gitdir: ")?.to_owned();
+        let path = std::path::PathBuf::from(path);
+        if path.is_absolute() {
+            path
+        } else {
+            workspace.join(path)
+        }
     };
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-        .split(area);
-    let first = vec![
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    match head.strip_prefix("ref: refs/heads/") {
+        Some(branch) => Some(branch.to_owned()),
+        // Detached HEAD: the short object id is the useful thing to show.
+        None => head.get(..7).map(str::to_owned),
+    }
+}
+
+/// The colour that stands for an agent mode, used consistently by the header
+/// badge, the welcome screen, and the mode-change notices.
+fn mode_color(mode: AgentMode) -> Color {
+    match mode {
+        AgentMode::Auto => primary(),
+        AgentMode::Plan => warning(),
+        AgentMode::Build => success(),
+    }
+}
+
+/// Two rows: identity and target on the left, model and mode on the right, over
+/// a hairline that separates the chrome from the conversation.
+fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let mode = app.resolved_agent_mode.unwrap_or(app.agent_mode);
+
+    let mut left = vec![
+        ui::badge("ABACUS", secondary()),
         Span::styled(
-            " ABACUS ",
-            Style::default()
-                .fg(inverse())
-                .bg(secondary())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("  {state}  {}", app.config.workspace_name()),
-            Style::default().fg(text()),
+            format!("  {}", app.config.workspace_name()),
+            Style::default().fg(text()).add_modifier(Modifier::BOLD),
         ),
     ];
-    frame.render_widget(Paragraph::new(Line::from(first)), columns[0]);
+    if let Some(branch) = &app.git_branch {
+        left.push(Span::styled(
+            format!("  {} {}", ui::glyphs().branch, ui::truncate(branch, 24)),
+            Style::default().fg(muted()),
+        ));
+    }
+    if app.config.profile != "default" {
+        left.push(ui::dot());
+        left.push(Span::styled(
+            ui::truncate(&app.config.profile, 18),
+            Style::default().fg(muted()),
+        ));
+    }
+
+    let right = vec![
+        Span::styled(
+            ui::truncate(&app.config.model, 34),
+            Style::default().fg(muted()),
+        ),
+        Span::raw("  "),
+        ui::badge(mode.label(), mode_color(mode)),
+    ];
+
+    // Give the left cluster its own clipped rect rather than letting the
+    // right-aligned one paint over it. Overlapping them truncates the branch
+    // mid-word on a narrow terminal; clipping ends it cleanly instead.
+    let row = Rect { height: 1, ..area };
+    let reserved = ui::spans_width(&right) as u16 + 2;
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                single_line(&app.config.model, 34),
-                Style::default().fg(text()),
-            ),
-            Span::styled("  ·  ", Style::default().fg(border())),
-            Span::styled(
-                visible_agent_mode.label(),
-                Style::default()
-                    .fg(match visible_agent_mode {
-                        AgentMode::Auto => primary(),
-                        AgentMode::Plan => warning(),
-                        AgentMode::Build => success(),
-                    })
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]))
-        .alignment(Alignment::Right),
-        columns[1],
+        Paragraph::new(Line::from(left)),
+        Rect {
+            width: row.width.saturating_sub(reserved),
+            ..row
+        },
     );
-    let second = Rect {
-        x: area.x,
-        y: area.y.saturating_add(1),
-        width: area.width,
-        height: 1,
-    };
-    let project = app.config.workspace.to_string_lossy();
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled(single_line(&project, 70), Style::default().fg(muted())),
-            Span::styled(
-                format!("  ·  profile {}", app.config.profile),
-                Style::default().fg(muted()),
-            ),
-        ])),
-        second,
+        Paragraph::new(Line::from(right)).alignment(Alignment::Right),
+        row,
+    );
+    frame.render_widget(
+        Paragraph::new(ui::rule(area.width)),
+        Rect {
+            y: area.y.saturating_add(1),
+            height: 1,
+            ..area
+        },
     );
 }
 
+impl App {
+    /// Ensure the wrapped transcript matches `width` and the current content,
+    /// re-wrapping only when the fingerprint moves.
+    fn wrapped_transcript(&mut self, width: u16, spinner: &str, phase: usize) -> &ui::Transcript {
+        let key: TranscriptKey = (self.entries_rev, width, phase, self.cursor);
+        let stale = self
+            .transcript_cache
+            .as_ref()
+            .is_none_or(|(cached, _)| *cached != key);
+        if stale {
+            let rendered = ui::transcript(&self.entries, width as usize, spinner, self.cursor);
+            self.transcript_cache = Some((key, rendered));
+        }
+        &self.transcript_cache.as_ref().expect("just populated").1
+    }
+
+    /// Bring the selected block fully into view, preferring to show its start.
+    /// Only meaningful once the frame has been wrapped, which is why it runs
+    /// from the draw path rather than from the key handler.
+    fn reveal_cursor(&mut self, height: u16, max_scroll: u16) {
+        if !std::mem::take(&mut self.cursor_pending) {
+            return;
+        }
+        let Some(index) = self.cursor else {
+            return;
+        };
+        let Some((start, len)) = self
+            .transcript_cache
+            .as_ref()
+            .and_then(|(_, rendered)| rendered.spans.get(index).copied())
+        else {
+            return;
+        };
+        let height = height as usize;
+        let start = start as u16;
+        let end = (start as usize + len).saturating_sub(1) as u16;
+        if start < self.scroll {
+            self.scroll = start;
+        } else if end >= self.scroll.saturating_add(height as u16) {
+            // Anchor to the block's start when it is taller than the viewport,
+            // so an expanded row opens at its header instead of its tail.
+            self.scroll = if len >= height {
+                start
+            } else {
+                end.saturating_sub(height as u16 - 1)
+            };
+        }
+        self.scroll = self.scroll.min(max_scroll);
+    }
+}
+
 fn draw_transcript(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
-    // Reserve one line at the bottom so the last content line always sits a
-    // little above the input bar, avoiding visual overlap when the visual-line
-    // estimate drifts from ratatui's actual wrapping.
+    // Keep one row clear above the composer so the last line of output never
+    // butts up against the input frame. That freed row is where the "you have
+    // scrolled away" marker sits, so the marker never covers content.
+    let full = area;
     let area = Rect {
         height: area.height.saturating_sub(1),
         ..area
@@ -2839,131 +3763,205 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         draw_welcome(frame, area, app);
         return;
     }
-    let width = area.width.max(1) as usize;
-    let (mut text, visual_lines) = transcript_text(&app.entries, width);
-    // Pad the bottom with 2 blank lines so the last content lines always have
-    // breathing room above the input bar, regardless of how the visual-line
-    // estimate drifts from ratatui's actual wrapping.
-    text.lines.push(Line::from(""));
-    text.lines.push(Line::from(""));
-    let max_scroll = (visual_lines + 2)
-        .saturating_sub(area.height as usize)
-        .min(u16::MAX as usize) as u16;
+    // The scrollbar gutter is reserved whether or not a scrollbar is showing.
+    // Claiming it only once the content overflows would re-wrap the whole
+    // transcript the moment it passed one screen, which reads as a glitch.
+    let body = Rect {
+        width: area.width.saturating_sub(SCROLLBAR_COLUMNS),
+        ..area
+    };
+    // A running tool animates, so the spinner phase joins the cache key; when
+    // nothing is running the phase is pinned and the wrap is reused verbatim.
+    let running = app
+        .entries
+        .last()
+        .and_then(|entry| entry.tool.as_ref())
+        .is_some_and(|call| call.status == ToolStatus::Running);
+    let animated = app.settings.ui.animations;
+    let phase = if running && animated {
+        (app.started.elapsed().as_millis() / 90) as usize % ui::SPINNER_FRAMES
+    } else {
+        usize::MAX
+    };
+    let spinner = if running {
+        ui::spinner_frame(app.started.elapsed(), animated)
+    } else {
+        ui::glyphs().still
+    };
+
+    let height = body.height as usize;
+    let total = app
+        .wrapped_transcript(body.width.max(1), spinner, phase)
+        .lines
+        .len();
+    let max_scroll = total.saturating_sub(height).min(u16::MAX as usize) as u16;
     if app.follow {
         app.scroll = max_scroll;
     } else {
         app.scroll = app.scroll.min(max_scroll);
-        if app.scroll >= max_scroll {
+        // Re-entering follow because the view happens to sit at the bottom is
+        // right for a reader, but not while a block is selected — that would
+        // drag the cursor along with new output.
+        if app.scroll >= max_scroll && app.cursor.is_none() {
             app.follow = true;
         }
     }
-    let paragraph = Paragraph::new(text)
-        .scroll((app.scroll, 0))
-        .wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, area);
+    app.reveal_cursor(body.height, max_scroll);
+
+    // Slice out just the rows on screen. The wrap above is exact, so this is a
+    // direct index rather than a scroll offset ratatui has to re-derive.
+    let start = app.scroll as usize;
+    let visible = app
+        .transcript_cache
+        .as_ref()
+        .map(|(_, rendered)| {
+            rendered
+                .lines
+                .iter()
+                .skip(start)
+                .take(height)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    frame.render_widget(Paragraph::new(Text::from(visible)), body);
+
+    // Map each on-screen block back to the entry it came from, so a click can
+    // select and unfold it.
+    if let Some((_, rendered)) = app.transcript_cache.as_ref() {
+        let mut hits = app.hits.borrow_mut();
+        for (index, (offset, len)) in rendered.spans.iter().copied().enumerate() {
+            let top = offset.max(start);
+            let bottom = (offset + len).min(start + height);
+            if top >= bottom {
+                continue;
+            }
+            hits.transcript.push((
+                Rect {
+                    x: body.x,
+                    y: body.y + (top - start) as u16,
+                    width: body.width,
+                    height: (bottom - top) as u16,
+                },
+                index,
+            ));
+        }
+    }
+
+    if total > height {
+        draw_scrollbar(frame, area, total, start, height);
+        // When the user has scrolled away from the tail, say so and name the
+        // key that gets them back — otherwise live output appears to have
+        // stopped arriving.
+        if !app.follow {
+            draw_follow_pill(frame, full);
+        }
+    }
 }
 
-fn draw_welcome(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let compact = area.width < 72 || area.height < 15;
-    let height = if app.settings.ui.show_tooltips && !compact {
-        13
-    } else {
-        7
-    };
-    let welcome = centered_rect(area.width.min(76), height, area);
-    let mut lines = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            "ABACUS",
-            Style::default()
-                .fg(secondary())
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            "A focused coding agent for your terminal",
-            Style::default().fg(muted()),
-        )),
-        Line::from(""),
-    ];
-    if app.settings.ui.show_tooltips && !compact {
-        lines.extend([
-            Line::from(vec![
-                Span::styled(
-                    "  Build  ",
-                    Style::default().fg(success()).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("Describe a change and Abacus will inspect, edit, and verify."),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    "  Plan   ",
-                    Style::default().fg(warning()).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("AUTO chooses the workflow; Shift+Tab pins a mode."),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    "  Goal   ",
-                    Style::default().fg(primary()).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("Use /goal for a persistent definition of done."),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    "  Loop   ",
-                    Style::default()
-                        .fg(secondary())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("Use /loop for autonomous, promise-driven iteration."),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Type / for commands  ·  @file to attach context  ·  F1 for help",
-                Style::default().fg(muted()),
-            )),
-        ]);
-    } else {
-        lines.push(Line::from(Span::styled(
-            "Type a request or / for commands",
-            Style::default().fg(muted()),
-        )));
+/// Columns held back for the scrollbar: one blank gap, one track.
+const SCROLLBAR_COLUMNS: u16 = 2;
+
+/// A hairline scrollbar on the right edge of the transcript. Drawn only when
+/// the content actually overflows, so a short session has no chrome at all.
+fn draw_scrollbar(frame: &mut Frame<'_>, area: Rect, total: usize, position: usize, height: usize) {
+    if area.width < 2 || height == 0 {
+        return;
     }
+    let track = area.height as usize;
+    let thumb = ((height * track) / total.max(1)).clamp(1, track);
+    let span = total.saturating_sub(height).max(1);
+    let offset = ((position * (track - thumb)) / span).min(track - thumb);
+    let x = area.right().saturating_sub(1);
+    for row in 0..track {
+        let inside = row >= offset && row < offset + thumb;
+        let set = ui::glyphs();
+        let (glyph, color) = if inside {
+            (set.thumb, primary())
+        } else {
+            (set.track, rail())
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(glyph, Style::default().fg(color)))),
+            Rect {
+                x,
+                y: area.y + row as u16,
+                width: 1,
+                height: 1,
+            },
+        );
+    }
+}
+
+/// Floating "you are not at the bottom" affordance.
+fn draw_follow_pill(frame: &mut Frame<'_>, area: Rect) {
+    let label = format!(" {} latest · G ", ui::glyphs().down);
+    let width = UnicodeWidthStr::width(label.as_str()) as u16;
+    if area.width < width + SCROLLBAR_COLUMNS {
+        return;
+    }
+    let pill = Rect {
+        x: area.right().saturating_sub(width + SCROLLBAR_COLUMNS),
+        y: area.bottom().saturating_sub(1),
+        width,
+        height: 1,
+    };
+    frame.render_widget(Clear, pill);
     frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(border())),
-            ),
-        welcome,
+        Paragraph::new(Line::from(Span::styled(label, ui::fill_style(primary())))),
+        pill,
     );
 }
 
+/// The empty-transcript splash. Vertically centred, left-aligned inside a
+/// measure narrow enough to read — a centred paragraph of tips looks like a
+/// marketing page, a left-aligned facts block looks like a tool.
+fn draw_welcome(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let compact = area.width < 64 || area.height < 18;
+    let mode = app.resolved_agent_mode.unwrap_or(app.agent_mode);
+    let info = ui::Welcome {
+        version: env!("CARGO_PKG_VERSION"),
+        workspace: &app.config.workspace.to_string_lossy(),
+        model: &app.config.model,
+        mode: mode.label(),
+        branch: app.git_branch.as_deref(),
+        tips: app.settings.ui.show_tooltips && !compact,
+    };
+    let lines = ui::welcome(&info, area.width.min(68) as usize);
+    let height = lines.len() as u16;
+    let width = area.width.min(68);
+    let panel = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height: height.min(area.height),
+    };
+    frame.render_widget(Paragraph::new(Text::from(lines)), panel);
+}
+
+/// The persistent-work strip between transcript and composer: goal, loop, and
+/// task-list state. Filled with the surface colour so it reads as a pinned
+/// band rather than as more transcript.
 fn draw_task_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let mut lines = Vec::new();
     if let Some(goal) = app.goal.snapshot() {
-        let (icon, color) = match goal.status {
-            crate::goal::GoalStatus::Active => ("●", primary()),
-            crate::goal::GoalStatus::Paused => ("Ⅱ", warning()),
-            crate::goal::GoalStatus::Complete => ("✓", success()),
-            crate::goal::GoalStatus::Cancelled => ("×", muted()),
+        let set = ui::glyphs();
+        let (glyph, color) = match goal.status {
+            crate::goal::GoalStatus::Active => (set.goal, primary()),
+            crate::goal::GoalStatus::Paused => (set.paused, warning()),
+            crate::goal::GoalStatus::Complete => (set.ok, success()),
+            crate::goal::GoalStatus::Cancelled => (set.failed, muted()),
         };
         lines.push(Line::from(vec![
             Span::styled(
-                format!(" {icon} Goal  "),
+                format!(" {glyph} GOAL  "),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                single_line(&goal.objective, 74),
+                ui::truncate(&goal.objective, 72),
                 Style::default().fg(text()),
             ),
-            Span::styled(
-                "   /goal pause · edit · clear",
-                Style::default().fg(muted()),
-            ),
+            Span::styled("   /goal pause · edit · clear", Style::default().fg(rail())),
         ]));
     }
     if let Some(state) = &app.ralph_loop {
@@ -2979,40 +3977,41 @@ fn draw_task_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .unwrap_or_else(|| "∞".to_owned());
         lines.push(Line::from(vec![
             Span::styled(
-                " ↻ Loop  ",
+                format!(" {} LOOP  ", ui::glyphs().repeat),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!(
-                    "{} / {limit}  ·  promise: {}",
-                    state.iteration,
-                    single_line(&state.completion_promise, 28)
-                ),
+                format!("{} / {limit}", state.iteration),
                 Style::default().fg(text()),
             ),
-            Span::styled("   /cancel-loop", Style::default().fg(muted())),
+            ui::dot(),
+            Span::styled(
+                format!("promise: {}", ui::truncate(&state.completion_promise, 32)),
+                Style::default().fg(muted()),
+            ),
+            Span::styled("   /cancel-loop", Style::default().fg(rail())),
         ]));
     }
     let tasks = app.tasks.snapshot();
     if !tasks.is_empty() {
         let done = tasks.iter().filter(|task| task.done).count();
-        let next = tasks
-            .iter()
-            .find(|task| !task.done)
-            .map(|task| task.text.as_str());
-        let progress = format!(" {done}/{} done", tasks.len());
+        let percent = ((done * 100) / tasks.len().max(1)) as u16;
         let mut spans = vec![
             Span::styled(
-                " ▦ Tasks  ",
+                format!(" {} TASKS  ", ui::glyphs().tasks),
                 Style::default()
                     .fg(secondary())
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(progress, Style::default().fg(text())),
+            Span::styled(
+                format!("{done}/{} ", tasks.len()),
+                Style::default().fg(text()),
+            ),
         ];
-        if let Some(text) = next {
+        spans.extend(ui::meter(percent, 10, success()));
+        if let Some(next) = tasks.iter().find(|task| !task.done) {
             spans.push(Span::styled(
-                format!("   next: {}", single_line(text, 60)),
+                format!("   next: {}", ui::truncate(&next.text, 52)),
                 Style::default().fg(muted()),
             ));
         }
@@ -3027,79 +4026,206 @@ fn draw_task_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
     );
 }
 
+/// Slash-command and `@file` suggestions, floated above the composer with the
+/// highlighted row filled. Selection is real here: the popup is navigable, and
+/// what is highlighted is what Tab or Enter will insert.
 fn draw_completion_popup(frame: &mut Frame<'_>, input_area: Rect, app: &App) {
-    if app.running.is_some()
-        || app.config_panel.is_some()
+    if app.config_panel.is_some()
         || app.raw_config.is_some()
         || app.feedback_form.is_some()
         || app.usage_panel.is_some()
     {
         return;
     }
-    let Some((suggestions, title)) = active_completion(app) else {
+    let Some((suggestions, title)) = app.visible_completion() else {
         return;
     };
-    // Clamp to the rows available above the input so a long list never overruns
-    // the screen; if it doesn't all fit, the last row says how many remain.
-    let room = (input_area.y as usize).saturating_sub(2).clamp(1, 14);
+
+    // Clamp to the rows available above the composer, keeping the selected row
+    // in view by scrolling the window rather than the list.
+    let room = (input_area.y as usize).saturating_sub(3).clamp(1, 12);
     let visible = suggestions.len().min(room);
-    let truncated = suggestions.len() - visible;
-    let mut lines = suggestions
-        .iter()
-        .take(visible)
-        .map(|(value, description)| {
-            Line::from(vec![
-                Span::styled(
-                    format!(" {value:<22}"),
-                    Style::default().fg(primary()).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(description.clone(), Style::default().fg(muted())),
-            ])
-        })
-        .collect::<Vec<_>>();
-    if truncated > 0 {
-        lines.push(Line::from(Span::styled(
-            format!(" … {truncated} more — keep typing to filter"),
-            Style::default().fg(muted()),
-        )));
+    let first = app
+        .completion_index
+        .saturating_sub(visible.saturating_sub(1))
+        .min(suggestions.len().saturating_sub(visible));
+
+    let width = input_area.width.min(76);
+    let inner = width.saturating_sub(4) as usize;
+    let mut lines = Vec::with_capacity(visible);
+    for (index, (value, description)) in suggestions.iter().enumerate().skip(first).take(visible) {
+        let selected = index == app.completion_index;
+        let fill = if selected {
+            crate::theme::active().selection
+        } else {
+            crate::theme::active().overlay
+        };
+        let label_width = 22.min(inner.saturating_sub(4));
+        let mut spans = vec![
+            Span::styled(
+                if selected { ui::glyphs().bar } else { " " },
+                Style::default().fg(primary()).bg(fill),
+            ),
+            Span::styled(
+                format!(" {:<label_width$}", ui::truncate(value, label_width)),
+                Style::default()
+                    .fg(if selected { text() } else { primary() })
+                    .bg(fill)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ];
+        if !description.is_empty() {
+            let room = inner.saturating_sub(label_width + 2);
+            spans.push(Span::styled(
+                ui::truncate(description, room),
+                Style::default().fg(muted()).bg(fill),
+            ));
+        }
+        // Pad the row to the full width so the selection highlight is a solid
+        // band instead of stopping at the end of the text.
+        let used = ui::spans_width(&spans);
+        if used < inner + 2 {
+            spans.push(Span::styled(
+                " ".repeat(inner + 2 - used),
+                Style::default().bg(fill),
+            ));
+        }
+        app.hits.borrow_mut().completion.push((
+            Rect {
+                x: input_area.x + 1,
+                y: 0, // resolved below, once the popup's origin is known
+                width: width.saturating_sub(2),
+                height: 1,
+            },
+            index,
+        ));
+        lines.push(Line::from(spans));
     }
+
+    let hidden = suggestions.len() - visible;
+    let footer = if hidden > 0 {
+        ui::overlay_hints(&[("↑↓", "select"), ("⇥", "insert"), ("esc", "dismiss")])
+            .spans
+            .into_iter()
+            .chain(std::iter::once(Span::styled(
+                format!("   +{hidden} more"),
+                Style::default().fg(rail()),
+            )))
+            .collect::<Vec<_>>()
+            .into()
+    } else {
+        ui::overlay_hints(&[("↑↓", "select"), ("⇥", "insert"), ("esc", "dismiss")])
+    };
+
     let height = lines.len() as u16 + 2;
     let area = Rect {
         x: input_area.x,
         y: input_area.y.saturating_sub(height),
-        width: input_area.width.min(72),
+        width,
         height,
     };
+    // The rows were recorded before the popup's origin was known; place them
+    // now that it is.
+    for (offset, (rect, _)) in app.hits.borrow_mut().completion.iter_mut().enumerate() {
+        rect.y = area.y + 1 + offset as u16;
+    }
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(Text::from(lines)).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(border()))
-                .title(title),
-        ),
+        Paragraph::new(Text::from(lines)).block(ui::overlay_block(title, primary(), Some(footer))),
         area,
     );
 }
 
+/// The composer. The frame carries the state: accent border and mode badge when
+/// it is your turn, dimmed with a queue-oriented placeholder while the agent is
+/// working, so the box itself tells you what pressing Enter will do.
 fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let color = match app.mode {
+    let running = app.running.is_some();
+    let accent = match app.mode {
         InputMode::Insert => primary(),
         InputMode::Normal => secondary(),
     };
-    let block = Block::default()
+    let frame_color = if running { rail() } else { accent };
+
+    let mut top_right = vec![Span::styled(
+        if running { " ⏎ queue" } else { " ⏎ send" },
+        Style::default().fg(rail()),
+    )];
+    // Count `@file` mentions so the composer can say what will be attached
+    // before the prompt is sent.
+    let mentions = app
+        .input
+        .text()
+        .split_whitespace()
+        .filter(|token| token.len() > 1 && token.starts_with('@'))
+        .count();
+    if mentions > 0 {
+        top_right.insert(
+            0,
+            Span::styled(
+                format!(" {} {mentions} attached ", ui::glyphs().attached),
+                Style::default().fg(primary()),
+            ),
+        );
+    }
+    top_right.push(Span::raw(" "));
+
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(color))
-        .title(Span::styled(
-            format!(" {} ", app.mode.label()),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ));
+        .border_style(Style::default().fg(frame_color))
+        .padding(Padding::horizontal(1))
+        .title_top(Line::from(vec![
+            Span::raw(" "),
+            ui::badge(app.mode.label(), frame_color),
+            Span::raw(" "),
+        ]))
+        .title_top(Line::from(top_right).right_aligned());
+    if let Some(queued) = &app.queued_message {
+        block = block.title_bottom(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                format!("{} queued", ui::glyphs().queued),
+                Style::default().fg(warning()),
+            ),
+            Span::styled(
+                format!("  {} ", ui::truncate(queued, 48)),
+                Style::default().fg(muted()),
+            ),
+        ]));
+    }
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width < 3 || inner.height == 0 {
+        return;
+    }
+
+    // The prompt arrow sits in its own column so wrapped and continuation rows
+    // hang under the text rather than under the marker.
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            ui::glyphs().prompt,
+            Style::default()
+                .fg(frame_color)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        Rect {
+            width: 1,
+            height: 1,
+            ..inner
+        },
+    );
+    let text_area = Rect {
+        x: inner.x + 2,
+        width: inner.width - 2,
+        ..inner
+    };
+
     let text = app.input.text();
     let (cursor_row, cursor_col) = app.input.cursor_position();
-    let inner_width = area.width.saturating_sub(2).max(1) as usize;
-    let visible_rows = area.height.saturating_sub(2).max(1) as usize;
+    let inner_width = text_area.width.max(1) as usize;
+    let visible_rows = text_area.height.max(1) as usize;
     let input_scroll = cursor_row.saturating_sub(visible_rows.saturating_sub(1));
 
     // Cell width of the text before the cursor on its line. A long line is
@@ -3111,15 +4237,31 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let h_scroll = display_col.saturating_sub(inner_width.saturating_sub(1));
 
     let paragraph = if text.is_empty() {
-        Paragraph::new(Span::styled(
-            "Ask Abacus to inspect, explain, or change the code…",
-            Style::default().fg(muted()),
-        ))
+        // A predicted follow-up stands in for the hint when there is one, with
+        // the key that accepts it spelled out — otherwise it reads as text the
+        // composer already contains.
+        match (&app.draft, running) {
+            (Some(draft), false) => Paragraph::new(Line::from(vec![
+                Span::styled(
+                    ui::truncate(draft, inner.width.saturating_sub(14) as usize),
+                    Style::default().fg(muted()).add_modifier(Modifier::ITALIC),
+                ),
+                Span::styled("  ⇥ use", Style::default().fg(rail())),
+            ])),
+            (_, true) => Paragraph::new(Span::styled(
+                "Type to queue a message for when this turn finishes…",
+                Style::default().fg(rail()),
+            )),
+            (None, false) => Paragraph::new(Span::styled(
+                "Ask Abacus to inspect, explain, or change the code…",
+                Style::default().fg(rail()),
+            )),
+        }
     } else {
         Paragraph::new(text.as_str())
     }
     .scroll((input_scroll as u16, h_scroll as u16));
-    frame.render_widget(paragraph.block(block), area);
+    frame.render_widget(paragraph, text_area);
 
     if app.approval.is_none()
         && !app.show_help
@@ -3128,126 +4270,327 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
         && app.feedback_form.is_none()
         && app.usage_panel.is_none()
     {
-        let x = area.x + 1 + (display_col - h_scroll) as u16;
+        let x = text_area.x + (display_col - h_scroll) as u16;
         let visible_row = cursor_row.saturating_sub(input_scroll) as u16;
-        let y = (area.y + 1 + visible_row).min(area.bottom().saturating_sub(2));
+        let y = (text_area.y + visible_row).min(text_area.bottom().saturating_sub(1));
         frame.set_cursor_position((x, y));
     }
 }
 
+/// The status bar: what the agent is doing on the left, the keys that matter
+/// right now in the middle, and the session's budget on the right.
+///
+/// The right-hand readout is laid out first and the hints are dropped from the
+/// end until the rest fits, so a narrow terminal degrades by shedding the least
+/// important information instead of truncating mid-word.
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let line = if let Some(approval) = &app.approval {
-        Line::from(vec![
-            Span::styled(
-                " ALLOW? ",
-                Style::default()
-                    .fg(inverse())
-                    .bg(warning())
-                    .add_modifier(Modifier::BOLD),
+    if let Some(approval) = &app.approval {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                ui::badge("APPROVAL", warning()),
+                Span::styled(
+                    format!(" {}  ", approval.tool),
+                    Style::default().fg(warning()).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    ui::truncate(&approval.summary, area.width.saturating_sub(46) as usize),
+                    Style::default().fg(muted()),
+                ),
+                Span::styled(
+                    "  y",
+                    Style::default().fg(success()).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" once ", Style::default().fg(muted())),
+                Span::styled(
+                    "a",
+                    Style::default().fg(primary()).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" session ", Style::default().fg(muted())),
+                Span::styled(
+                    "n",
+                    Style::default().fg(danger()).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" reject", Style::default().fg(muted())),
+            ])),
+            area,
+        );
+        return;
+    }
+
+    // How full the window is. The provider's own prompt count is exact, so it
+    // wins; the character estimate is the fallback for endpoints that report no
+    // usage, and it also carries the live movement *within* a turn, before the
+    // next reply reports a new figure.
+    let estimated = (app.ctx_chars / 4).max(1) as u64;
+    let reported = app.provider.context_tokens();
+    let ctx_tokens = if reported > 0 {
+        reported.max(estimated)
+    } else {
+        estimated
+    };
+    let ctx_window = app.config.model_limits.context_window.max(1) as u64;
+    let percent = ((ctx_tokens * 100) / ctx_window).min(100) as u16;
+    let compact_at = (app.config.model_limits.compaction_budget().compact_at_chars / 4).max(1);
+    let ctx_color = if ctx_tokens >= compact_at as u64 || percent >= 75 {
+        warning()
+    } else {
+        muted()
+    };
+
+    // Two different quantities, so they are labelled as such. Side by side and
+    // both called "tokens", the running session total reads as the size of the
+    // context, and the two never agree.
+    let mut right = vec![
+        Span::styled(
+            format!("{} used", ui::format_count(app.provider.tokens_used())),
+            Style::default().fg(muted()),
+        ),
+        ui::dot(),
+        Span::styled(
+            format!(
+                "ctx {}/{} ",
+                ui::format_count(ctx_tokens),
+                ui::format_count(ctx_window)
             ),
+            Style::default().fg(ctx_color),
+        ),
+    ];
+    right.extend(ui::meter(percent, 8, ctx_color));
+    let right_width = ui::spans_width(&right) as u16;
+
+    let running = app.running.is_some();
+    let mut left = if running {
+        let elapsed = app
+            .turn_started
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        vec![
             Span::styled(
                 format!(
-                    " {}  {}  ",
-                    approval.tool,
-                    single_line(&approval.summary, 72)
+                    " {} ",
+                    ui::spinner_frame(elapsed, app.settings.ui.animations)
                 ),
-                Style::default().fg(warning()),
+                Style::default().fg(primary()).add_modifier(Modifier::BOLD),
             ),
+            Span::styled(ui::truncate(&app.status, 28), Style::default().fg(text())),
             Span::styled(
-                "y",
-                Style::default().fg(success()).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" once  "),
-            Span::styled(
-                "a",
-                Style::default().fg(success()).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" session  "),
-            Span::styled(
-                "n",
-                Style::default().fg(danger()).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" reject"),
-        ])
-    } else {
-        // Context-bar spans: show how full the live context window is and how
-        // close to the auto-compaction threshold. Uses `ctx_chars` (updated from
-        // streaming events during the turn) so the percentage moves live, not
-        // just on Done. Chars-to-tokens uses the same 4:1 ratio as compaction.
-        let chars = app.ctx_chars;
-        let ctx_tokens = (chars / 4).max(1) as u64;
-        let ctx_window = app.config.model_limits.context_window.max(1) as u64;
-        let pct = ((ctx_tokens * 100) / ctx_window).min(100) as u16;
-        let budget = app.config.model_limits.compaction_budget();
-        let compact_tokens = (budget.compact_at_chars / 4).max(1) as u64;
-        let near_compact = ctx_tokens >= compact_tokens;
-        let ctx_color = if near_compact { warning() } else { muted() };
-        Line::from(vec![
-            Span::styled(format!(" {} ", app.status), Style::default().fg(muted())),
-            Span::styled("/", Style::default().fg(primary())),
-            Span::raw(" commands  "),
-            Span::styled("ctrl+c", Style::default().fg(primary())),
-            Span::raw(" interrupt  "),
-            Span::styled("shift+tab", Style::default().fg(primary())),
-            Span::raw(" mode  "),
-            Span::styled(
-                format!("{} tokens", format_count(app.provider.tokens_used())),
+                format!("  {}", ui::format_elapsed(elapsed.as_millis() as u64)),
                 Style::default().fg(muted()),
             ),
-            Span::raw("  "),
-            Span::styled(format!("ctx {pct}%"), Style::default().fg(ctx_color)),
-        ])
+        ]
+    } else {
+        let set = ui::glyphs();
+        let (glyph, color) = match app.last_outcome {
+            Some(TurnOutcome::Failed) => (set.failed, danger()),
+            Some(TurnOutcome::Interrupted) => (set.paused, warning()),
+            None => (set.still, success()),
+        };
+        vec![
+            Span::styled(
+                format!(" {glyph} "),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(ui::truncate(&app.status, 28), Style::default().fg(muted())),
+        ]
     };
-    frame.render_widget(Paragraph::new(line), area);
+
+    // Contextual hints: only the keys that do something in the current state.
+    let pairs: &[(&str, &str)] = if running {
+        &[("esc", "interrupt"), ("^C", "twice to quit")]
+    } else if app.mode == InputMode::Normal {
+        &[
+            ("j/k", "blocks"),
+            ("o", "unfold"),
+            ("i", "insert"),
+            ("?", "help"),
+        ]
+    } else if app.input.is_empty() {
+        &[
+            ("/", "commands"),
+            ("@", "files"),
+            ("⇧⇥", "mode"),
+            ("F1", "help"),
+        ]
+    } else {
+        &[("⏎", "send"), ("^J", "newline"), ("^C", "clear")]
+    };
+    let mut hints = pairs.to_vec();
+    let budget = area.width.saturating_sub(right_width + 2) as usize;
+    while !hints.is_empty() {
+        let candidate = ui::spans_width(&left) + 3 + ui::spans_width(&ui::hints(&hints));
+        if candidate <= budget {
+            break;
+        }
+        hints.pop();
+    }
+    if !hints.is_empty() {
+        left.push(Span::styled("   ", Style::default()));
+        left.extend(ui::hints(&hints));
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(left)),
+        Rect {
+            width: area.width.saturating_sub(right_width + 1),
+            ..area
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(right)).alignment(Alignment::Right),
+        area,
+    );
 }
 
+/// One row of a selectable list. The cursor row is filled edge to edge and
+/// marked with a rail, so the highlight reads as a band rather than as text
+/// that happens to be a different colour.
+fn list_row(selected: bool, width: usize, content: Vec<Span<'static>>) -> Line<'static> {
+    let palette = crate::theme::active();
+    // Without colour a background fill says nothing, so a selected row leans on
+    // its rail and bold text instead of a band.
+    let fill = if selected {
+        palette.selection
+    } else {
+        palette.overlay
+    };
+    let mark = if selected {
+        Style::default()
+            .fg(primary())
+            .bg(fill)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().bg(fill)
+    };
+    let mut spans = vec![Span::styled(
+        if selected {
+            format!("{} ", ui::glyphs().bar)
+        } else {
+            "  ".to_owned()
+        },
+        mark,
+    )];
+    for span in content {
+        let mut style = span.style.bg(fill);
+        if selected && palette.plain {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        spans.push(Span::styled(span.content, style));
+    }
+    let used = ui::spans_width(&spans);
+    if used < width {
+        spans.push(Span::styled(
+            " ".repeat(width - used),
+            Style::default().bg(fill),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// Frame an overlay and hand back its inner area, already cleared.
+fn open_overlay(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &str,
+    accent: Color,
+    hints: &[(&str, &str)],
+) -> Rect {
+    frame.render_widget(Clear, area);
+    let block = ui::overlay_block(title, accent, Some(ui::overlay_hints(hints)));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    inner
+}
+
+/// The key reference, grouped so a reader can find the section they need
+/// instead of scanning one long list.
 fn draw_help(frame: &mut Frame<'_>, area: Rect) {
-    let popup = centered_rect(82, 24, area);
-    frame.render_widget(Clear, popup);
-    let text = Text::from(vec![
-        Line::from(Span::styled(
-            "ABACUS KEYS",
-            Style::default()
-                .fg(secondary())
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        key_line("Enter", "send prompt"),
-        key_line("Ctrl+J / Ctrl+O / Shift+Enter", "new line"),
-        key_line("Ctrl+V", "paste from clipboard"),
-        key_line("PgUp / PgDn / Ctrl+u / Ctrl+d", "scroll transcript"),
-        key_line("Esc", "normal mode"),
-        key_line("i / a / A / I", "enter insert mode"),
-        key_line("h j k l / w b / 0 $", "Vim movement and scroll"),
-        key_line("gg / G / Ctrl+u / Ctrl+d", "transcript navigation"),
-        key_line("x / dd", "delete character / clear prompt"),
-        key_line("Ctrl+c", "interrupt / clear prompt; twice to exit"),
-        key_line("Shift+Tab", "cycle AUTO / PLAN / BUILD"),
-        key_line("Ctrl+q / q", "quit"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "/goal  /loop  /cancel-loop  /config  /feedback  /mode  /model  /usage  /sessions",
-            Style::default().fg(primary()),
-        )),
-        Line::from(Span::styled(
-            "/swarm  /theme  /new  /compact  /skills  /plugins  /mcps  /tools  /quit",
-            Style::default().fg(primary()),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Press Esc, Enter, or ? to close",
-            Style::default().fg(muted()),
-        )),
-    ]);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(secondary()))
-        .title(" help ");
-    frame.render_widget(
-        Paragraph::new(text).block(block).alignment(Alignment::Left),
+    const SECTIONS: &[(&str, &[(&str, &str)])] = &[
+        (
+            "COMPOSE",
+            &[
+                ("Enter", "send the prompt"),
+                ("Ctrl+J · Ctrl+O · Shift+Enter", "insert a newline"),
+                ("Tab", "accept the highlighted suggestion"),
+                ("↑ ↓", "browse prompt history, or the suggestion list"),
+                ("Ctrl+V", "paste from the clipboard"),
+                ("Esc", "clear the draft"),
+            ],
+        ),
+        (
+            "TRANSCRIPT (normal mode)",
+            &[
+                ("j · k", "move between blocks"),
+                ("o · space · enter", "fold or unfold a tool result"),
+                ("h · l", "fold or unfold explicitly"),
+                ("PgUp · PgDn", "scroll a page"),
+                ("Ctrl+U · Ctrl+D", "scroll half a page"),
+                ("Ctrl+Y · Ctrl+E", "scroll one line"),
+                ("gg · G", "jump to the top, or back to live"),
+                ("Esc", "drop the selection"),
+                ("i a A I", "return to insert mode"),
+            ],
+        ),
+        (
+            "SESSION",
+            &[
+                ("Shift+Tab", "cycle AUTO / PLAN / BUILD"),
+                ("Ctrl+C", "interrupt the turn; twice to exit"),
+                ("Ctrl+Q", "quit"),
+            ],
+        ),
+    ];
+
+    let width = 84.min(area.width.saturating_sub(4));
+    // Two border columns plus the frame's one-column padding on each side.
+    let measure = width.saturating_sub(4) as usize;
+
+    let mut lines = Vec::new();
+    for (heading, keys) in SECTIONS {
+        lines.push(Line::from(Span::styled(
+            *heading,
+            Style::default().fg(muted()).add_modifier(Modifier::BOLD),
+        )));
+        for (key, description) in *keys {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {key:<30}"),
+                    Style::default().fg(primary()).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled((*description).to_owned(), Style::default().fg(text())),
+            ]));
+        }
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(Span::styled(
+        "COMMANDS",
+        Style::default().fg(muted()).add_modifier(Modifier::BOLD),
+    )));
+    // Built from the same table that drives the palette, so the two can never
+    // drift apart.
+    let commands = SLASH_COMMANDS
+        .iter()
+        .map(|(command, _)| *command)
+        .collect::<Vec<_>>()
+        .join("  ");
+    lines.extend(ui::wrap(
+        &[Span::styled(commands, Style::default().fg(primary()))],
+        measure,
+        &[Span::raw("  ")],
+        &[Span::raw("  ")],
+    ));
+
+    // Size the frame to the content rather than to a guess, so nothing is
+    // silently clipped when a section grows.
+    let popup = ui::centered(width, lines.len() as u16 + 2, area);
+    let inner = open_overlay(
+        frame,
         popup,
+        "KEYS",
+        secondary(),
+        &[("esc", "close"), ("?", "toggle")],
     );
+    lines.truncate(inner.height as usize);
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
 fn draw_usage(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -3256,8 +4599,14 @@ fn draw_usage(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
     let width = area.width.saturating_sub(4).clamp(24, 112);
     let height = area.height.saturating_sub(2).clamp(12, 29);
-    let popup = centered_rect(width, height, area);
-    frame.render_widget(Clear, popup);
+    let popup = ui::centered(width, height, area);
+    let inner = open_overlay(
+        frame,
+        popup,
+        "USAGE",
+        secondary(),
+        &[("tab", "view"), ("r", "dates"), ("esc", "close")],
+    );
 
     let today = Local::now().date_naive();
     let records = panel
@@ -3265,7 +4614,7 @@ fn draw_usage(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .iter()
         .filter(|record| panel.range.includes(usage_date(record), today))
         .collect::<Vec<_>>();
-    let inner_width = popup.width.saturating_sub(2) as usize;
+    let inner_width = inner.width as usize;
     let mut lines = vec![usage_tabs(panel.tab), Line::from("")];
     match panel.tab {
         UsageTab::Overview => {
@@ -3292,20 +4641,8 @@ fn draw_usage(frame: &mut Frame<'_>, area: Rect, app: &App) {
             lines.extend(usage_model_lines(&records, &app.config.model, inner_width));
         }
     }
-    let visible = popup.height.saturating_sub(2) as usize;
-    lines.truncate(visible);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(secondary()))
-        .title(Span::styled(
-            " Usage ",
-            Style::default().fg(text()).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(
-            Line::from(" Tab view  ·  r dates  ·  Esc close ").alignment(Alignment::Right),
-        );
-    frame.render_widget(Paragraph::new(Text::from(lines)).block(block), popup);
+    lines.truncate(inner.height as usize);
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
 fn usage_tabs(selected: UsageTab) -> Line<'static> {
@@ -3720,74 +5057,134 @@ fn draw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let Some(panel) = &app.config_panel else {
         return;
     };
-    let popup = centered_rect(area.width.saturating_sub(8).min(96), 23, area);
-    frame.render_widget(Clear, popup);
-    let inner_height = popup.height.saturating_sub(4) as usize;
-    let start = panel
-        .selected
-        .saturating_sub(inner_height.saturating_sub(1));
-    let mut lines = Vec::new();
-    for (index, key) in CONFIG_KEYS
-        .iter()
-        .copied()
-        .enumerate()
-        .skip(start)
-        .take(inner_height)
-    {
-        let selected = index == panel.selected;
-        let marker = if selected { "›" } else { " " };
-        let label_style = if selected {
-            Style::default()
-                .fg(text())
-                .bg(surface())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(muted())
-        };
-        let value_style = if selected {
-            Style::default().fg(primary()).bg(surface())
-        } else {
-            Style::default().fg(text())
-        };
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {marker} {:<25}", config_label(key)), label_style),
-            Span::styled(single_line(&app.config_value(key), 54), value_style),
-        ]));
+    // Two rows of chrome, one blank, one help line — sized to the content so
+    // the panel never leaves a band of dead space.
+    let body_rows = CONFIG_ROWS.len() as u16;
+    let popup = ui::centered(area.width.saturating_sub(8).min(96), body_rows + 4, area);
+    let inner = open_overlay(
+        frame,
+        popup,
+        "CONFIGURATION",
+        secondary(),
+        &[
+            ("↑↓", "move"),
+            ("enter", "edit"),
+            ("esc", "close"),
+            ("", "saved immediately"),
+        ],
+    );
+    // The last two rows are a separator and the help line for the selected row.
+    let help_height = 2u16.min(inner.height);
+    let list = Rect {
+        height: inner.height.saturating_sub(help_height),
+        ..inner
+    };
+
+    let width = list.width as usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut key_index = 0usize;
+    let mut selected_row = 0usize;
+    // Build every row first, then window around the cursor: with headings
+    // interleaved, a row's position is no longer its index in CONFIG_KEYS.
+    let mut rows: Vec<(Option<usize>, Line<'static>)> = Vec::new();
+    for row in CONFIG_ROWS {
+        match row {
+            ConfigRow::Heading(title) => rows.push((
+                None,
+                Line::from(Span::styled(
+                    format!("  {title}"),
+                    Style::default().fg(rail()).add_modifier(Modifier::BOLD),
+                )),
+            )),
+            ConfigRow::Key(key) => {
+                let index = key_index;
+                key_index += 1;
+                let selected = index == panel.selected;
+                if selected {
+                    selected_row = rows.len();
+                }
+                rows.push((
+                    Some(index),
+                    list_row(
+                        selected,
+                        width,
+                        vec![
+                            Span::styled(
+                                format!("{:<26}", config_label(*key)),
+                                Style::default()
+                                    .fg(if selected { text() } else { muted() })
+                                    .add_modifier(if selected {
+                                        Modifier::BOLD
+                                    } else {
+                                        Modifier::empty()
+                                    }),
+                            ),
+                            Span::styled(
+                                ui::truncate(&app.config_value(*key), width.saturating_sub(30)),
+                                Style::default().fg(if selected { primary() } else { text() }),
+                            ),
+                        ],
+                    ),
+                ));
+            }
+        }
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Enter edit/toggle  ·  j/k move  ·  Esc close  ·  changes save immediately",
-        Style::default().fg(muted()),
-    )));
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(secondary()))
-        .title(Span::styled(
-            " Configuration ",
-            Style::default().fg(text()).add_modifier(Modifier::BOLD),
-        ));
-    frame.render_widget(Paragraph::new(Text::from(lines)).block(block), popup);
+    let visible = list.height as usize;
+    let first = selected_row
+        .saturating_sub(visible.saturating_sub(1))
+        .min(rows.len().saturating_sub(visible.min(rows.len())));
+    for (offset, (index, line)) in rows.into_iter().skip(first).take(visible).enumerate() {
+        if let Some(index) = index {
+            app.hits.borrow_mut().config.push((
+                Rect {
+                    x: list.x,
+                    y: list.y + offset as u16,
+                    width: list.width,
+                    height: 1,
+                },
+                index,
+            ));
+        }
+        lines.push(line);
+    }
+    frame.render_widget(Paragraph::new(Text::from(lines)), list);
+
+    if help_height == 2 {
+        let help = Rect {
+            y: list.bottom(),
+            height: 2,
+            ..inner
+        };
+        let key = CONFIG_KEYS[panel.selected.min(CONFIG_KEYS.len() - 1)];
+        frame.render_widget(
+            Paragraph::new(Text::from(vec![
+                ui::rule(inner.width),
+                Line::from(Span::styled(
+                    ui::truncate(config_help(key), inner.width as usize),
+                    Style::default().fg(muted()),
+                )),
+            ])),
+            help,
+        );
+    }
 
     if let Some((key, input)) = &panel.editing {
-        let editor = centered_rect(popup.width.saturating_sub(10), 7, popup);
+        let editor = ui::centered(popup.width.saturating_sub(10), 3, popup);
         frame.render_widget(Clear, editor);
-        let text = input.text();
-        let edit_block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(primary()))
-            .title(format!(" {} ", config_label(*key)));
-        frame.render_widget(
-            Paragraph::new(text.as_str())
-                .block(edit_block)
-                .wrap(Wrap { trim: false }),
-            editor,
-        );
+        let block = ui::overlay_block(config_label(*key), primary(), None);
+        let field = block.inner(editor);
+        frame.render_widget(block, editor);
+        let value = input.text();
+        let shown = if *key == ConfigKey::ApiKey {
+            "•".repeat(value.chars().count())
+        } else {
+            value.clone()
+        };
+        frame.render_widget(Paragraph::new(shown.as_str()), field);
         let (_, column) = input.cursor_position();
         frame.set_cursor_position((
-            (editor.x + 1 + column as u16).min(editor.right().saturating_sub(2)),
-            editor.y + 1,
+            (field.x + column as u16).min(field.right().saturating_sub(1)),
+            field.y,
         ));
     }
 }
@@ -3796,44 +5193,62 @@ fn draw_raw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let Some(editor) = &app.raw_config else {
         return;
     };
-    let popup = centered_rect(
+    let popup = ui::centered(
         area.width.saturating_sub(6).min(112),
         area.height.saturating_sub(4),
         area,
     );
-    frame.render_widget(Clear, popup);
+    // A parse error takes over the accent so the panel itself reports that the
+    // document will not save in its current state.
+    let accent = if editor.error.is_some() {
+        danger()
+    } else {
+        secondary()
+    };
+    let inner = open_overlay(
+        frame,
+        popup,
+        "ADVANCED · TOML",
+        accent,
+        &[("^S", "save & apply"), ("esc", "discard")],
+    );
+
+    let mut body = inner;
+    if let Some(error) = &editor.error {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    format!("{} ", ui::glyphs().failed),
+                    Style::default().fg(danger()).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    ui::truncate(error, inner.width.saturating_sub(3) as usize),
+                    Style::default().fg(danger()),
+                ),
+            ])),
+            Rect { height: 1, ..inner },
+        );
+        body = Rect {
+            y: inner.y + 1,
+            height: inner.height.saturating_sub(1),
+            ..inner
+        };
+    }
+
     let text = editor.input.text();
     let (row, column) = editor.input.cursor_position();
-    let visible = popup.height.saturating_sub(4).max(1) as usize;
+    let visible = body.height.max(1) as usize;
     let scroll = row.saturating_sub(visible.saturating_sub(1));
-    let title = if let Some(error) = &editor.error {
-        format!(" Advanced configuration · {} ", single_line(error, 70))
-    } else {
-        " Advanced configuration · TOML ".to_owned()
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(if editor.error.is_some() {
-            danger()
-        } else {
-            secondary()
-        }))
-        .title(title)
-        .title_bottom(
-            Line::from(" Ctrl+S save & apply  ·  Esc discard ").alignment(Alignment::Right),
-        );
     frame.render_widget(
         Paragraph::new(text.as_str())
-            .block(block)
             .scroll((scroll as u16, 0))
             .wrap(Wrap { trim: false }),
-        popup,
+        body,
     );
     let visible_row = row.saturating_sub(scroll) as u16;
     frame.set_cursor_position((
-        (popup.x + 1 + column as u16).min(popup.right().saturating_sub(2)),
-        (popup.y + 1 + visible_row).min(popup.bottom().saturating_sub(2)),
+        (body.x + column as u16).min(body.right().saturating_sub(1)),
+        (body.y + visible_row).min(body.bottom().saturating_sub(1)),
     ));
 }
 
@@ -3841,50 +5256,59 @@ fn draw_feedback(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let Some(form) = &app.feedback_form else {
         return;
     };
-    let popup = centered_rect(area.width.saturating_sub(10).min(88), 18, area);
-    frame.render_widget(Clear, popup);
+    let popup = ui::centered(area.width.saturating_sub(10).min(88), 18, area);
+    // The hint strip doubles as the status line: while a send is in flight or
+    // has failed, that is the only thing worth saying down there.
+    let hints: &[(&str, &str)] = if form.sending {
+        &[("", "sending…")]
+    } else {
+        &[("^S", "send"), ("^D", "diagnostics"), ("esc", "cancel")]
+    };
+    let inner = open_overlay(frame, popup, "FEEDBACK", secondary(), hints);
+
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .margin(1)
         .constraints([
             Constraint::Length(2),
-            Constraint::Min(6),
+            Constraint::Min(4),
             Constraint::Length(2),
-            Constraint::Length(2),
+            Constraint::Length(1),
         ])
-        .split(popup);
-    let category = FEEDBACK_CATEGORIES[form.category];
+        .split(inner);
+
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("Category  ", Style::default().fg(muted())),
             Span::styled(
-                category,
+                FEEDBACK_CATEGORIES[form.category],
                 Style::default().fg(primary()).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("   Tab to change", Style::default().fg(muted())),
+            Span::styled("   tab to change", Style::default().fg(rail())),
         ])),
         sections[0],
     );
-    let text = form.input.text();
+
+    let body = form.input.text();
+    let field = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(rail()))
+        .padding(Padding::horizontal(1));
+    let field_inner = field.inner(sections[1]);
+    frame.render_widget(field, sections[1]);
     frame.render_widget(
-        Paragraph::new(if text.is_empty() {
+        Paragraph::new(if body.is_empty() {
             Text::from(Span::styled(
                 "What should we improve? Please avoid secrets or sensitive source code.",
-                Style::default().fg(muted()),
+                Style::default().fg(rail()),
             ))
         } else {
-            Text::from(text.as_str())
+            Text::from(body.as_str())
         })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(primary()))
-                .title(" Feedback "),
-        )
         .wrap(Wrap { trim: false }),
-        sections[1],
+        field_inner,
     );
+
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
@@ -3899,268 +5323,217 @@ fn draw_feedback(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     muted()
                 }),
             ),
-            Span::raw(" Include extension diagnostics  "),
-            Span::styled("Ctrl+D", Style::default().fg(primary())),
             Span::styled(
-                "  ·  Never includes your transcript",
+                " Include extension diagnostics",
+                Style::default().fg(text()),
+            ),
+            ui::dot(),
+            Span::styled(
+                "your transcript is never included",
                 Style::default().fg(muted()),
             ),
         ])),
         sections[2],
     );
-    let footer = if form.sending {
-        Line::from(Span::styled(
-            "Sending feedback…",
-            Style::default().fg(warning()),
-        ))
-    } else if let Some(error) = &form.error {
-        Line::from(Span::styled(
-            single_line(error, 82),
-            Style::default().fg(danger()),
-        ))
-    } else {
-        Line::from(vec![
-            Span::styled("Ctrl+S", Style::default().fg(primary())),
-            Span::raw(" send  ·  "),
-            Span::styled("Enter", Style::default().fg(primary())),
-            Span::raw(" new line  ·  "),
-            Span::styled("Esc", Style::default().fg(primary())),
-            Span::raw(" cancel"),
-        ])
-    };
-    frame.render_widget(Paragraph::new(footer), sections[3]);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(secondary()))
-        .title(" Send feedback to Empero ");
-    frame.render_widget(block, popup);
+
+    if let Some(error) = &form.error {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                ui::truncate(error, sections[3].width as usize),
+                Style::default().fg(danger()),
+            ))),
+            sections[3],
+        );
+    }
+
     if !form.sending {
         let (row, column) = form.input.cursor_position();
         frame.set_cursor_position((
-            (sections[1].x + 1 + column as u16).min(sections[1].right().saturating_sub(2)),
-            (sections[1].y + 1 + row as u16).min(sections[1].bottom().saturating_sub(2)),
+            (field_inner.x + column as u16).min(field_inner.right().saturating_sub(1)),
+            (field_inner.y + row as u16).min(field_inner.bottom().saturating_sub(1)),
         ));
     }
 }
 
+/// The `ask_user` modal: the agent's question, its options, and a free-text
+/// field for anything the options don't cover.
 fn draw_user_question(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let Some(question) = &app.question else {
         return;
     };
-    // Sizing: 80 cols wide, with a sensible height based on content.
-    let opts = question.options.len() as u16;
-    let option_rows = opts.max(2); // reserve at least 2 lines even when 0 options
-    let custom_rows: u16 = 3; // border + 1 inner line + border
-    let height = (8 + option_rows + custom_rows + 3).min(area.height.saturating_sub(2));
-    let width = 96u16.min(area.width.saturating_sub(4));
-    let popup = centered_rect(width, height, area);
-    frame.render_widget(Clear, popup);
+    let options = question.options.len().max(1) as u16;
+    let height = (10 + options).min(area.height.saturating_sub(2));
+    let popup = ui::centered(96.min(area.width.saturating_sub(4)), height, area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(secondary()))
-        .title(Span::styled(
-            if question.header.is_empty() {
-                " Question ".to_owned()
-            } else {
-                format!(" {} ", question.header)
-            },
-            Style::default()
-                .fg(inverse())
-                .bg(secondary())
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let hints: &[(&str, &str)] = if question.editing_custom {
+        &[("esc", "leave field"), ("enter", "submit")]
+    } else if question.multi_select {
+        &[
+            ("↑↓", "move"),
+            ("space", "toggle"),
+            ("t", "type"),
+            ("enter", "submit"),
+        ]
+    } else {
+        &[
+            ("↑↓", "move"),
+            ("x", "choose"),
+            ("t", "type"),
+            ("esc", "skip"),
+        ]
+    };
+    let title = if question.header.is_empty() {
+        "QUESTION".to_owned()
+    } else {
+        question.header.to_uppercase()
+    };
+    let inner = open_overlay(frame, popup, &title, secondary(), hints);
 
-    // Inner layout: question text, spacer, option list, spacer, custom input.
-    let chunks = Layout::default()
+    // Every section gets its own row budget up front; the options list takes
+    // whatever is left, which is what keeps a long list from pushing the
+    // custom-answer field off the bottom of the frame.
+    let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2), // question label + value
+            Constraint::Length(2), // question, wrapped to two rows
+            Constraint::Min(2),    // options
             Constraint::Length(1), // spacer
-            Constraint::Min(3),    // options
-            Constraint::Length(1), // spacer
-            Constraint::Length(3), // custom prompt
-            Constraint::Length(2), // footer hints
+            Constraint::Length(3), // custom answer
         ])
         .split(inner);
 
-    // Question text.
-    let question_text = Text::from(vec![
-        Line::from(Span::styled(
-            "QUESTION",
-            Style::default().fg(muted()).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(question.question.as_str()),
-    ]);
     frame.render_widget(
-        Paragraph::new(question_text).wrap(Wrap { trim: false }),
-        chunks[0],
+        Paragraph::new(Text::from(ui::wrap(
+            &[Span::styled(
+                question.question.clone(),
+                Style::default().fg(text()).add_modifier(Modifier::BOLD),
+            )],
+            sections[0].width as usize,
+            &[],
+            &[],
+        ))),
+        sections[0],
     );
 
-    // Options list.
-    let option_entries: Vec<Line> = if question.options.is_empty() {
-        vec![Line::from(Span::styled(
-            "(no options — type a custom answer and press Enter)",
+    let width = sections[1].width as usize;
+    let mut lines = Vec::new();
+    if question.options.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No options — type an answer below and press Enter.",
             Style::default().fg(muted()),
-        ))]
-    } else {
-        let mut lines = Vec::with_capacity(question.options.len());
-        for (idx, opt) in question.options.iter().enumerate() {
-            let is_cursor = idx == question.cursor && !question.editing_custom;
-            let is_on = question.selected.get(idx).copied().unwrap_or(false);
-            let marker = if question.multi_select {
-                if is_on { "[x]" } else { "[ ]" }
-            } else if is_on {
-                "(•)"
-            } else {
-                "( )"
-            };
-            let arrow = if is_cursor { "▶" } else { " " };
-            let style = if is_cursor {
-                Style::default().fg(primary()).add_modifier(Modifier::BOLD)
-            } else if is_on {
-                Style::default().fg(success())
-            } else {
-                Style::default().fg(text())
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!("{}{} ", arrow, marker), style),
-                Span::styled(opt.as_str(), style),
-            ]));
-        }
-        lines
-    };
-    frame.render_widget(Paragraph::new(option_entries), chunks[1]);
+        )));
+    }
+    for (index, option) in question.options.iter().enumerate() {
+        let on_cursor = index == question.cursor && !question.editing_custom;
+        let checked = question.selected.get(index).copied().unwrap_or(false);
+        let marker = match (question.multi_select, checked) {
+            (true, true) => "[x]",
+            (true, false) => "[ ]",
+            (false, true) => "(•)",
+            (false, false) => "( )",
+        };
+        lines.push(list_row(
+            on_cursor,
+            width,
+            vec![
+                Span::styled(
+                    format!("{marker} "),
+                    Style::default().fg(if checked { success() } else { muted() }),
+                ),
+                Span::styled(
+                    ui::truncate(option, width.saturating_sub(7)),
+                    Style::default()
+                        .fg(if on_cursor { text() } else { muted() })
+                        .add_modifier(if on_cursor {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+            ],
+        ));
+    }
+    frame.render_widget(Paragraph::new(Text::from(lines)), sections[1]);
 
-    // Custom-answer field.
-    let custom_label = if question.editing_custom { "> " } else { "  " };
-    let custom_focused = question.editing_custom;
-    let custom_color = if custom_focused { primary() } else { muted() };
-    let placeholder = if custom_focused {
-        String::new()
-    } else if question.options.is_empty() {
-        // Free-text-only mode: tell the user to focus this with `t`.
-        "(press t to type an answer)".to_owned()
-    } else {
-        "(optional — type to add a custom answer)".to_owned()
-    };
-    let value = question.custom.text();
-    let custom_line = if value.is_empty() {
-        Line::from(vec![
-            Span::styled(custom_label.to_string(), Style::default().fg(custom_color)),
-            Span::styled(placeholder, Style::default().fg(muted())),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled(custom_label.to_string(), Style::default().fg(custom_color)),
-            Span::styled(value.as_str(), Style::default().fg(custom_color)),
-        ])
-    };
-    let custom_block = Block::default()
+    let focused = question.editing_custom;
+    let accent = if focused { primary() } else { rail() };
+    let field = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(custom_color))
-        .title(Span::styled(" custom ", Style::default().fg(custom_color)));
-    frame.render_widget(Paragraph::new(custom_line).block(custom_block), chunks[2]);
+        .border_style(Style::default().fg(accent))
+        .padding(Padding::horizontal(1))
+        .title_top(Line::from(Span::styled(
+            " your answer ",
+            Style::default().fg(accent),
+        )));
+    let field_inner = field.inner(sections[3]);
+    frame.render_widget(field, sections[3]);
 
-    // Footer hints.
-    let hint_switch = if question.editing_custom {
-        Line::from(vec![
-            Span::styled("Esc", Style::default().fg(primary())),
-            Span::raw(" leave field  "),
-            Span::styled("Enter", Style::default().fg(primary())),
-            Span::raw(" submit"),
-        ])
-    } else if question.multi_select {
-        Line::from(vec![
-            Span::styled("↑↓", Style::default().fg(primary())),
-            Span::raw(" navigate  "),
-            Span::styled("space/x", Style::default().fg(primary())),
-            Span::raw(" toggle  "),
-            Span::styled("t", Style::default().fg(primary())),
-            Span::raw(" custom  "),
-            Span::styled("Enter", Style::default().fg(primary())),
-            Span::raw(" submit  "),
-            Span::styled("Esc", Style::default().fg(primary())),
-            Span::raw(" cancel"),
-        ])
+    let value = question.custom.text();
+    let line = if value.is_empty() && !focused {
+        Line::from(Span::styled(
+            if question.options.is_empty() {
+                "press t to type an answer"
+            } else {
+                "optional — press t to add your own answer"
+            },
+            Style::default().fg(rail()),
+        ))
     } else {
-        Line::from(vec![
-            Span::styled("↑↓", Style::default().fg(primary())),
-            Span::raw(" navigate  "),
-            Span::styled("x", Style::default().fg(primary())),
-            Span::raw(" choose & submit  "),
-            Span::styled("t", Style::default().fg(primary())),
-            Span::raw(" custom  "),
-            Span::styled("Esc", Style::default().fg(primary())),
-            Span::raw(" cancel"),
-        ])
+        Line::from(Span::styled(value.clone(), Style::default().fg(text())))
     };
-    frame.render_widget(Paragraph::new(hint_switch), chunks[3]);
+    frame.render_widget(Paragraph::new(line), field_inner);
 
-    // Place the cursor inside the custom-answer field when it's focused, so
-    // typing actually inserts at the right position.
-    if question.editing_custom {
-        let (row, col) = question.custom.cursor_position();
-        let inner_width = chunks[2].width.saturating_sub(2).max(1);
-        let h = row.min(chunks[2].height.saturating_sub(2).max(1) as usize);
-        let v = col.min(inner_width as usize);
+    if focused {
+        let (row, column) = question.custom.cursor_position();
         frame.set_cursor_position((
-            (chunks[2].x + 1 + v as u16).min(chunks[2].right().saturating_sub(2)),
-            (chunks[2].y + 1 + h as u16).min(chunks[2].bottom().saturating_sub(2)),
+            (field_inner.x + column as u16).min(field_inner.right().saturating_sub(1)),
+            (field_inner.y + row as u16).min(field_inner.bottom().saturating_sub(1)),
         ));
     }
 }
 
+/// The approval gate. This is the one screen where a wrong click costs the user
+/// something, so it gets the widest frame, the warning accent, and controls
+/// spelled out as labelled chips rather than bare letters.
 fn draw_approval(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let Some(approval) = &app.approval else {
         return;
     };
-    let width = area.width.saturating_sub(4).min(120);
-    let height = area.height.saturating_sub(2).max(10);
-    let popup = centered_rect(width, height, area);
-    frame.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(warning()))
-        .title(Line::from(vec![
-            Span::styled(
-                " APPROVAL REQUIRED ",
-                Style::default()
-                    .fg(inverse())
-                    .bg(warning())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  {} ", approval.tool),
-                Style::default().fg(muted()),
-            ),
-        ]));
-    frame.render_widget(block, popup);
-    let content = Rect {
-        x: popup.x + 2,
-        y: popup.y + 1,
-        width: popup.width.saturating_sub(4),
-        height: popup.height.saturating_sub(2),
-    };
+    let popup = ui::centered(
+        area.width.saturating_sub(4).min(120),
+        area.height.saturating_sub(2).max(10),
+        area,
+    );
+    let mut hints: Vec<(&str, &str)> = vec![
+        ("y", "allow once"),
+        ("a", "allow session"),
+        ("n", "reject"),
+        ("j/k", "scroll"),
+    ];
+    if approval.diff.is_some() {
+        hints.push(("v", "raw/unified"));
+    }
+    let inner = open_overlay(frame, popup, "APPROVAL REQUIRED", warning(), &hints);
+
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(3),
-            Constraint::Length(2),
-        ])
-        .split(content);
+        .constraints([Constraint::Length(3), Constraint::Min(3)])
+        .split(inner);
 
-    let mut header = vec![Line::from(Span::styled(
-        single_line(&approval.summary, 108),
-        Style::default().fg(text()).add_modifier(Modifier::BOLD),
-    ))];
+    let mut header = vec![Line::from(vec![
+        Span::styled(
+            format!("{}  ", approval.tool),
+            Style::default().fg(warning()).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            ui::truncate(
+                &approval.summary,
+                sections[0].width.saturating_sub(20) as usize,
+            ),
+            Style::default().fg(text()),
+        ),
+    ])];
     if let Some(diff) = &approval.diff {
         header.push(Line::from(vec![
             Span::styled(
@@ -4172,15 +5545,19 @@ fn draw_approval(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 Style::default().fg(muted()),
             ),
             Span::styled(
-                format!("  +{}", diff.additions),
+                format!("   +{}", diff.additions),
                 Style::default().fg(success()).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("  -{}", diff.deletions),
                 Style::default().fg(danger()).add_modifier(Modifier::BOLD),
             ),
+            ui::dot(),
             Span::styled(
-                format!("  ·  {:?} view", approval.view),
+                match approval.view {
+                    ApprovalView::Unified => "unified view",
+                    ApprovalView::Raw => "raw view",
+                },
                 Style::default().fg(muted()),
             ),
         ]));
@@ -4208,52 +5585,18 @@ fn draw_approval(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(border()))
-                    .title(if approval.diff.is_some() {
-                        " Changes "
-                    } else {
-                        " Operation "
-                    }),
+                    .border_style(Style::default().fg(rail()))
+                    .title_top(Line::from(Span::styled(
+                        if approval.diff.is_some() {
+                            " changes "
+                        } else {
+                            " operation "
+                        },
+                        Style::default().fg(muted()),
+                    ))),
             ),
         sections[1],
     );
-
-    let mut controls = vec![
-        Span::styled(
-            " y ",
-            Style::default()
-                .fg(inverse())
-                .bg(success())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" once  "),
-        Span::styled(
-            " a ",
-            Style::default()
-                .fg(inverse())
-                .bg(primary())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" session  "),
-        Span::styled(
-            " n ",
-            Style::default()
-                .fg(text())
-                .bg(danger())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" reject   "),
-        Span::styled("j/k", Style::default().fg(primary())),
-        Span::raw(" scroll  "),
-        Span::styled("h/l", Style::default().fg(primary())),
-        Span::raw(" pan"),
-    ];
-    if approval.diff.is_some() {
-        controls.push(Span::raw("  "));
-        controls.push(Span::styled("v", Style::default().fg(primary())));
-        controls.push(Span::raw(" view"));
-    }
-    frame.render_widget(Paragraph::new(Line::from(controls)), sections[2]);
 }
 
 fn diff_text(diff: &DiffDocument) -> Text<'static> {
@@ -4340,115 +5683,76 @@ fn draw_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let Some(picker) = &app.picker else {
         return;
     };
-    let max_height = area.height.saturating_sub(4).max(3);
-    let height = (picker.items.len() as u16 + 4).min(max_height).max(3);
-    let popup = centered_rect(area.width.saturating_sub(12).min(100), height, area);
-    frame.render_widget(Clear, popup);
-    let visible = popup.height.saturating_sub(3) as usize;
-    let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+    let height = (picker.items.len() as u16 + 2)
+        .min(area.height.saturating_sub(4))
+        .max(3);
+    let popup = ui::centered(area.width.saturating_sub(12).min(100), height, area);
+    let inner = open_overlay(
+        frame,
+        popup,
+        &picker.title.to_uppercase(),
+        primary(),
+        &[("↑↓", "select"), ("enter", "open"), ("esc", "close")],
+    );
+
+    let rows = inner.height as usize;
+    let width = inner.width as usize;
+    let start = picker.selected.saturating_sub(rows.saturating_sub(1));
     let mut lines = Vec::new();
-    for (index, (label, _)) in picker.items.iter().enumerate().skip(start).take(visible) {
-        let selected = index == picker.selected;
-        let prefix = if selected { "› " } else { "  " };
-        let style = if selected {
-            Style::default()
-                .fg(inverse())
-                .bg(primary())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(text())
-        };
-        lines.push(Line::from(Span::styled(format!("{prefix}{label}"), style)));
+    if picker.items.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  Nothing to show yet.",
+            Style::default().fg(muted()),
+        )));
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "enter open   j/k select   esc close",
-        Style::default().fg(muted()),
-    )));
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(primary()))
-        .title(format!(" {} ", picker.title));
-    frame.render_widget(Paragraph::new(Text::from(lines)).block(block), popup);
+    for (index, (label, _)) in picker.items.iter().enumerate().skip(start).take(rows) {
+        let selected = index == picker.selected;
+        app.hits.borrow_mut().picker.push((
+            Rect {
+                x: inner.x,
+                y: inner.y + lines.len() as u16,
+                width: inner.width,
+                height: 1,
+            },
+            index,
+        ));
+        lines.push(list_row(
+            selected,
+            width,
+            vec![Span::styled(
+                ui::truncate(label, width.saturating_sub(3)),
+                Style::default()
+                    .fg(if selected { text() } else { muted() })
+                    .add_modifier(if selected {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            )],
+        ));
+    }
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
-fn transcript_text(entries: &[Entry], width: usize) -> (Text<'static>, usize) {
-    let mut lines = Vec::new();
-    let mut visual = 0;
-    for (index, entry) in entries.iter().enumerate() {
-        if index > 0 {
-            lines.push(Line::from(""));
-            visual += 1;
-        }
-        let (label, color) = match entry.kind {
-            EntryKind::User => ("› YOU", primary()),
-            EntryKind::Assistant => ("◆ ABACUS", secondary()),
-            EntryKind::Tool => ("┌ TOOL", warning()),
-            EntryKind::System => ("• SYSTEM", muted()),
-            EntryKind::Error => ("! ERROR", danger()),
-        };
-        lines.push(Line::from(Span::styled(
-            label,
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        )));
-        visual += 1;
-
-        if entry.kind == EntryKind::Assistant {
-            let rendered = render_markdown(
-                &entry.text,
-                MarkdownTheme {
-                    text: text(),
-                    muted: muted(),
-                    heading: secondary(),
-                    accent: primary(),
-                    code: success(),
-                    code_background: crate::theme::active().code_bg,
-                    quote: primary(),
-                    link: primary(),
-                },
-            );
-            if rendered.lines.is_empty() {
-                lines.push(Line::from(""));
-                visual += 1;
-            } else {
-                for line in rendered.lines {
-                    let line_width = line
-                        .spans
-                        .iter()
-                        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
-                        .sum::<usize>();
-                    visual += line_width.max(1).div_ceil(width.max(1));
-                    lines.push(line);
-                }
-            }
-            continue;
-        }
-
-        let mut code = false;
-        for raw in entry.text.lines() {
-            let trimmed = raw.trim_start();
-            if trimmed.starts_with("```") {
-                code = !code;
-            }
-            let style = if code {
-                Style::default().fg(success())
-            } else if trimmed.starts_with('#') {
-                Style::default().fg(text()).add_modifier(Modifier::BOLD)
-            } else if entry.kind == EntryKind::Tool {
-                Style::default().fg(muted())
-            } else {
-                Style::default().fg(text())
-            };
-            lines.push(Line::from(Span::styled(raw.to_owned(), style)));
-            let line_width = UnicodeWidthStr::width(raw);
-            visual += line_width.max(1).div_ceil(width.max(1));
-        }
-        if entry.text.is_empty() {
-            lines.push(Line::from(""));
-            visual += 1;
-        }
+/// The slice of a tool result kept for expansion, bounded so one enormous
+/// result cannot grow the session's footprint without limit.
+fn retain_output(output: &str) -> String {
+    if output.len() <= ui::MAX_RETAINED_OUTPUT {
+        return output.to_owned();
     }
-    (Text::from(lines), visual)
+    let mut boundary = ui::MAX_RETAINED_OUTPUT;
+    while !output.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    format!("{}\n… truncated", &output[..boundary])
+}
+
+/// Whether a tool result reports a failure. The agent surfaces errors and
+/// rejections as ordinary tool output, so the outcome has to be read back out
+/// of the text — this is what colours the row's glyph red instead of green.
+fn tool_failed(output: &str) -> bool {
+    let head = output.trim_start();
+    head.starts_with("Error:") || head.starts_with("error:") || head.starts_with("User rejected")
 }
 
 fn tool_preview(output: &str) -> String {
@@ -4487,58 +5791,35 @@ fn entries_from_messages(messages: &[Value]) -> Vec<Entry> {
             continue;
         }
         match role {
-            "user" => entries.push(Entry {
-                kind: EntryKind::User,
-                text: content
+            "user" => entries.push(Entry::new(
+                EntryKind::User,
+                content
                     .split("\n\n<attached_file path=\"")
                     .next()
                     .unwrap_or(content)
                     .to_owned(),
-            }),
-            "assistant" => entries.push(Entry {
-                kind: EntryKind::Assistant,
-                text: content.to_owned(),
-            }),
-            "tool" => entries.push(Entry {
-                kind: EntryKind::Tool,
-                text: format!(
-                    "{}\n{}",
-                    message["name"].as_str().unwrap_or("tool"),
-                    tool_preview(content)
-                ),
-            }),
+            )),
+            "assistant" => entries.push(Entry::new(EntryKind::Assistant, content.to_owned())),
+            // A restored session has no timings — the durations were never
+            // persisted — but the outcome is still readable from the output, so
+            // resumed tool rows keep their pass/fail colouring.
+            "tool" => entries.push(Entry::tool(ToolCall {
+                name: message["name"].as_str().unwrap_or("tool").to_owned(),
+                summary: String::new(),
+                status: if tool_failed(content) {
+                    ToolStatus::Failed
+                } else {
+                    ToolStatus::Ok
+                },
+                output: tool_preview(content),
+                full: retain_output(content),
+                duration_ms: None,
+                expanded: false,
+            })),
             _ => {}
         }
     }
     entries
-}
-
-fn key_line<'a>(key: &'a str, description: &'a str) -> Line<'a> {
-    Line::from(vec![
-        Span::styled(format!("{key:<24}"), Style::default().fg(primary())),
-        Span::raw(description),
-    ])
-}
-
-fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
-    let width = width.min(area.width.saturating_sub(2)).max(1);
-    let height = height.min(area.height.saturating_sub(2)).max(1);
-    Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    }
-}
-
-fn content_rect(area: Rect, max_width: u16) -> Rect {
-    let width = area.width.min(max_width);
-    Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y,
-        width,
-        height: area.height,
-    }
 }
 
 fn validate_settings(settings: &Settings) -> Result<()> {
@@ -4571,10 +5852,13 @@ fn config_label(key: ConfigKey) -> &'static str {
         ConfigKey::Model => "Model",
         ConfigKey::BaseUrl => "Provider URL",
         ConfigKey::Protocol => "Wire protocol",
+        ConfigKey::ApiKey => "API key",
         ConfigKey::Permission => "Permission mode",
         ConfigKey::VimMode => "Vim keybindings",
         ConfigKey::Animations => "Animations",
         ConfigKey::Tooltips => "Welcome tips",
+        ConfigKey::DraftReplies => "Draft next message",
+        ConfigKey::TraceLogging => "Training traces",
         ConfigKey::MaxSteps => "Maximum agent steps",
         ConfigKey::ToolOutputLimit => "Tool output limit",
         ConfigKey::ProjectTrust => "Trust this project",
@@ -4590,6 +5874,7 @@ fn config_key_is_editable(key: ConfigKey) -> bool {
         key,
         ConfigKey::Model
             | ConfigKey::BaseUrl
+            | ConfigKey::ApiKey
             | ConfigKey::MaxSteps
             | ConfigKey::ToolOutputLimit
             | ConfigKey::FeedbackEndpoint
@@ -4629,7 +5914,11 @@ fn edit_buffer(input: &mut InputBuffer, key: KeyEvent, multiline: bool) {
 }
 
 fn slash_suggestions(input: &str) -> Vec<(&'static str, &'static str)> {
-    let query = input.trim();
+    // Only leading space is ignored. A *trailing* space means the user has
+    // finished choosing — accepting a suggestion appends one — so trimming it
+    // here would keep the popup open over a completed command and leave Enter
+    // re-accepting it forever instead of sending.
+    let query = input.trim_start();
     if !query.starts_with('/') || query.contains(char::is_whitespace) {
         return Vec::new();
     }
@@ -4640,16 +5929,6 @@ fn slash_suggestions(input: &str) -> Vec<(&'static str, &'static str)> {
         .copied()
         .filter(|(command, _)| command.starts_with(query))
         .collect()
-}
-
-fn complete_slash_command(input: &mut InputBuffer) {
-    let value = input.text();
-    let Some((command, _)) = slash_suggestions(&value).first().copied() else {
-        return;
-    };
-    input.clear();
-    input.insert_str(command);
-    input.insert(' ');
 }
 
 /// Up to eight workspace files matching `partial` (the text after `@`), used for
@@ -4708,7 +5987,7 @@ fn active_completion(app: &App) -> Option<(Vec<(String, String)>, &'static str)>
             .into_iter()
             .map(|(command, description)| (command.to_owned(), description.to_owned()))
             .collect();
-        return Some((items, " commands · Tab to complete "));
+        return Some((items, "COMMANDS"));
     }
     let token = app.input.token_before_cursor();
     if let Some(partial) = token.strip_prefix('@') {
@@ -4720,25 +5999,77 @@ fn active_completion(app: &App) -> Option<(Vec<(String, String)>, &'static str)>
             .into_iter()
             .map(|path| (format!("@{path}"), String::new()))
             .collect();
-        return Some((items, " files · Tab to complete "));
+        return Some((items, "FILES"));
     }
     None
 }
 
-/// Apply the top completion: replace the `@token` at the cursor, or fall back to
-/// whole-line slash completion.
-fn complete_at_cursor(app: &mut App) {
-    let token = app.input.token_before_cursor();
-    if let Some(partial) = token.strip_prefix('@') {
-        if let Some(first) = file_suggestions(&app.config.workspace, partial)
-            .into_iter()
-            .next()
-        {
-            app.input.replace_token_before_cursor(&format!("@{first}"));
-            app.input.insert(' ');
+impl App {
+    /// The completion list the popup should draw, or `None` when there is
+    /// nothing to offer or the user has dismissed it for this text.
+    fn visible_completion(&self) -> Option<(Vec<(String, String)>, &'static str)> {
+        if self.completion_dismissed {
+            return None;
         }
-    } else if app.input.text().trim_start().starts_with('/') {
-        complete_slash_command(&mut app.input);
+        active_completion(self)
+    }
+
+    /// Keep the highlighted row valid as the suggestion list changes under it.
+    /// Editing the text resets the selection to the top and un-dismisses the
+    /// popup — a fresh list deserves a fresh look.
+    fn sync_completion(&mut self, previous: &str) {
+        if !self.input.is_empty() {
+            self.draft = None;
+        }
+        if self.input.text() != previous {
+            self.completion_index = 0;
+            self.completion_dismissed = false;
+        }
+        let count = active_completion(self)
+            .map(|(items, _)| items.len())
+            .unwrap_or(0);
+        self.completion_index = self.completion_index.min(count.saturating_sub(1));
+    }
+
+    /// Move the highlight, wrapping at both ends so holding a key cycles.
+    fn move_completion(&mut self, delta: isize) {
+        let Some((items, _)) = self.visible_completion() else {
+            return;
+        };
+        if items.is_empty() {
+            return;
+        }
+        let count = items.len() as isize;
+        let next = (self.completion_index as isize + delta).rem_euclid(count);
+        self.completion_index = next as usize;
+    }
+
+    /// Insert the highlighted suggestion. A slash command replaces the whole
+    /// line and leaves a trailing space ready for arguments; an `@file` mention
+    /// replaces only the token under the cursor.
+    fn accept_completion(&mut self) -> bool {
+        let Some((items, _)) = self.visible_completion() else {
+            return false;
+        };
+        let Some((value, _)) = items.get(self.completion_index).cloned() else {
+            return false;
+        };
+        // Typing a command out in full leaves it highlighted; accepting it
+        // again would only re-insert what is already there, so let the key
+        // fall through to whatever it normally does.
+        if self.input.text().trim_end() == value && !value.starts_with('@') {
+            return false;
+        }
+        if let Some(path) = value.strip_prefix('@') {
+            self.input.replace_token_before_cursor(&format!("@{path}"));
+            self.input.insert(' ');
+        } else {
+            self.input.clear();
+            self.input.insert_str(&value);
+            self.input.insert(' ');
+        }
+        self.completion_index = 0;
+        true
     }
 }
 
@@ -4780,13 +6111,430 @@ mod tests {
     }
 
     #[test]
-    fn transcript_estimates_wrapped_height() {
-        let entries = vec![Entry {
-            kind: EntryKind::Assistant,
-            text: "1234567890".to_owned(),
-        }];
-        let (_, height) = transcript_text(&entries, 5);
-        assert_eq!(height, 3); // label plus two wrapped lines
+    fn a_completed_command_can_be_sent() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        for ch in "/help".chars() {
+            let before = app.input.text();
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()),
+            );
+            app.sync_completion(&before);
+        }
+        // Fully typed, so Enter must send rather than re-accept the suggestion.
+        assert!(app.visible_completion().is_some(), "popup lists the match");
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert!(app.input.is_empty(), "Enter should have submitted");
+        assert!(app.show_help, "/help should have run");
+    }
+
+    #[test]
+    fn accepting_a_suggestion_closes_the_popup() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        for ch in "/comp".chars() {
+            let before = app.input.text();
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()),
+            );
+            app.sync_completion(&before);
+        }
+        let before = app.input.text();
+        handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        app.sync_completion(&before);
+        assert_eq!(app.input.text(), "/compact ");
+        // The trailing space is the signal that choosing is done. Trimming it
+        // away was what trapped Enter in an accept loop.
+        assert!(
+            app.visible_completion().is_none(),
+            "a completed command must not keep offering itself"
+        );
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert!(app.input.is_empty(), "Enter should have submitted");
+    }
+
+    #[test]
+    fn the_profile_row_opens_a_picker_that_switches_profiles() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.settings.profiles.insert(
+            "second".to_owned(),
+            crate::config::ProviderProfile {
+                name: "Second".into(),
+                base_url: "http://127.0.0.1:9/v1".into(),
+                model: "other-model".into(),
+                protocol: ProviderProtocol::ChatCompletions,
+                api_key_env: None,
+            },
+        );
+        app.open_profile_picker();
+        let picker = app.picker.as_ref().expect("picker");
+        assert_eq!(picker.action, PickerAction::SwitchProfile);
+        // Every profile, plus the add-a-provider row.
+        assert_eq!(picker.items.len(), app.settings.profiles.len() + 1);
+
+        let index = picker
+            .items
+            .iter()
+            .position(|(_, value)| value == "second")
+            .expect("second profile listed");
+        app.accept_picker(Some(index));
+        assert_eq!(app.settings.default_profile, "second");
+        assert!(app.picker.is_none());
+    }
+
+    #[test]
+    fn adding_a_provider_creates_a_profile_and_asks_for_a_model() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.config_panel = Some(ConfigPanel {
+            selected: 0,
+            editing: None,
+        });
+        app.open_profile_picker();
+        let index = app
+            .picker
+            .as_ref()
+            .expect("picker")
+            .items
+            .iter()
+            .position(|(_, value)| value == NEW_PROVIDER_SENTINEL)
+            .expect("add-provider row");
+        app.accept_picker(Some(index));
+
+        // That row opens a second step rather than selecting anything.
+        let picker = app.picker.as_ref().expect("provider picker");
+        assert_eq!(picker.action, PickerAction::AddProvider);
+        let xai = picker
+            .items
+            .iter()
+            .position(|(_, value)| value == "xai")
+            .expect("xai preset offered");
+        app.accept_picker(Some(xai));
+
+        let profile = app.settings.profiles.get("xai").expect("profile created");
+        assert_eq!(profile.base_url, "https://api.x.ai/v1");
+        assert_eq!(profile.api_key_env.as_deref(), Some("XAI_API_KEY"));
+        assert_eq!(app.settings.default_profile, "xai");
+        // Not applied yet: a profile with no model cannot validate, so the
+        // running session stays on the old provider until one is given.
+        assert_eq!(app.config.profile, "test");
+        // A profile with no model cannot run, so that field opens straight away.
+        let editing = app
+            .config_panel
+            .as_ref()
+            .and_then(|panel| panel.editing.as_ref())
+            .map(|(key, _)| *key);
+        assert_eq!(editing, Some(ConfigKey::Model));
+    }
+
+    #[test]
+    fn abandoning_the_model_prompt_rolls_the_new_provider_back() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.config_panel = Some(ConfigPanel {
+            selected: 0,
+            editing: None,
+        });
+        app.add_provider("groq");
+        assert_eq!(app.settings.default_profile, "groq");
+
+        // Esc out of the model prompt.
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        assert_eq!(
+            app.settings.default_profile, "test",
+            "the previous profile should be restored"
+        );
+        assert!(
+            !app.settings.profiles.contains_key("groq"),
+            "an unusable profile should not be left behind"
+        );
+    }
+
+    #[test]
+    fn a_committed_model_keeps_the_new_provider() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.config_panel = Some(ConfigPanel {
+            selected: 0,
+            editing: None,
+        });
+        app.add_provider("groq");
+        if let Some(panel) = &mut app.config_panel
+            && let Some((_, input)) = panel.editing.as_mut()
+        {
+            input.insert_str("llama-3.3-70b");
+        }
+        app.commit_config_edit();
+        assert_eq!(app.settings.default_profile, "groq");
+        assert_eq!(app.config.model, "llama-3.3-70b", "now applied");
+        assert!(app.pending_provider.is_none());
+
+        // A later Esc must not undo a finished profile.
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(app.settings.profiles.contains_key("groq"));
+    }
+
+    #[test]
+    fn adding_the_same_provider_twice_does_not_overwrite_the_first() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.add_provider("groq");
+        app.settings.profiles.get_mut("groq").expect("first").model = "keep-me".into();
+        app.add_provider("groq");
+        assert_eq!(
+            app.settings.profiles.get("groq").expect("first").model,
+            "keep-me",
+            "the existing profile must survive"
+        );
+        assert!(app.settings.profiles.contains_key("groq-2"));
+        assert_eq!(app.settings.default_profile, "groq-2");
+    }
+
+    #[test]
+    fn the_api_key_row_reports_provenance_and_never_the_secret() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        assert_eq!(app.config_value(ConfigKey::ApiKey), "not set");
+
+        app.config_panel = Some(ConfigPanel {
+            selected: 0,
+            editing: None,
+        });
+        app.begin_config_edit(ConfigKey::ApiKey);
+        // The editor starts empty rather than seeded with anything.
+        let buffer = app
+            .config_panel
+            .as_ref()
+            .and_then(|panel| panel.editing.as_ref())
+            .map(|(_, input)| input.text())
+            .expect("editing");
+        assert!(buffer.is_empty());
+
+        if let Some(panel) = &mut app.config_panel
+            && let Some((_, input)) = panel.editing.as_mut()
+        {
+            input.insert_str("sk-secret-value");
+        }
+        app.commit_config_edit();
+        let shown = app.config_value(ConfigKey::ApiKey);
+        assert_eq!(shown, "set · stored locally");
+        assert!(!shown.contains("sk-secret"), "the key must never be echoed");
+        assert_eq!(
+            app.credentials.keys.get("test").map(String::as_str),
+            Some("sk-secret-value")
+        );
+    }
+
+    #[test]
+    fn a_picker_opened_from_config_is_visible_and_owns_the_keys() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.settings.profiles.insert(
+            "second".to_owned(),
+            crate::config::ProviderProfile {
+                name: "Second".into(),
+                base_url: "http://127.0.0.1:9/v1".into(),
+                model: "other".into(),
+                protocol: ProviderProtocol::ChatCompletions,
+                api_key_env: None,
+            },
+        );
+        app.config_panel = Some(ConfigPanel {
+            selected: 0,
+            editing: None,
+        });
+        app.open_profile_picker();
+
+        // Drawn on top: the config panel must not paint over its own child.
+        let backend = TestBackend::new(96, 34);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let rendered = buffer_text(terminal.backend().buffer(), 96, 34);
+        assert!(rendered.contains("PROFILE"), "picker should be visible");
+        assert!(
+            rendered.contains("Add a provider"),
+            "picker rows should be visible"
+        );
+
+        // And it owns the keys, rather than them going to the panel behind it.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+        );
+        assert_eq!(app.picker.as_ref().expect("picker").selected, 1);
+        assert_eq!(
+            app.config_panel.as_ref().expect("panel").selected,
+            0,
+            "the panel behind must not have moved"
+        );
+    }
+
+    #[test]
+    fn a_draft_is_only_offered_to_an_idle_composer() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        assert!(app.settings.ui.draft_replies, "on by default");
+
+        // Typing invalidates a shown draft immediately.
+        app.draft = Some("run the tests".into());
+        let before = app.input.text();
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()),
+        );
+        app.sync_completion(&before);
+        assert_eq!(app.draft, None, "a draft must not linger over typed text");
+
+        // A draft arriving late, after the user has started typing, is dropped
+        // rather than replacing what they wrote.
+        let _ = app.draft_tx.send(Some("too late".into()));
+        app.drain_draft_events();
+        assert_eq!(app.draft, None);
+
+        // With an empty composer it is kept.
+        app.input.clear();
+        let _ = app.draft_tx.send(Some("run the tests".into()));
+        app.drain_draft_events();
+        assert_eq!(app.draft.as_deref(), Some("run the tests"));
+    }
+
+    #[test]
+    fn tab_takes_the_draft_and_leaves_completion_alone() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.draft = Some("add a regression test".into());
+        handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        assert_eq!(app.input.text(), "add a regression test");
+        assert_eq!(app.draft, None, "accepting consumes it");
+
+        // With text present, Tab is the completion key again, not a draft key.
+        app.input.clear();
+        app.input.insert_str("/mod");
+        app.sync_completion("");
+        app.draft = Some("should be ignored".into());
+        handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+        assert!(app.input.text().starts_with("/mod"));
+        assert_ne!(app.input.text(), "should be ignored");
+    }
+
+    #[test]
+    fn drafting_off_suppresses_the_request_entirely() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.settings.ui.draft_replies = false;
+        app.start_draft();
+        assert!(app.draft_task.is_none(), "no call should be made");
+
+        // And a turn still running never triggers one either.
+        app.settings.ui.draft_replies = true;
+        app.input.insert_str("half typed");
+        app.start_draft();
+        assert!(app.draft_task.is_none(), "a busy composer is left alone");
+    }
+
+    #[test]
+    fn a_trackpad_burst_scrolls_a_line_at_a_time() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        // First event after a pause is a wheel notch.
+        assert_eq!(app.scroll_step(), 3);
+        // Events arriving back to back are a trackpad, and move one line each so
+        // the view does not shoot past what is being read.
+        assert_eq!(app.scroll_step(), 1);
+        assert_eq!(app.scroll_step(), 1);
+
+        // After a pause it is a notch again.
+        app.last_scroll = Some(Instant::now() - Duration::from_millis(400));
+        assert_eq!(app.scroll_step(), 3);
+    }
+
+    #[test]
+    fn the_footer_separates_session_total_from_context_size() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.entries = vec![Entry::new(EntryKind::Assistant, "hi")];
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let rendered = buffer_text(terminal.backend().buffer(), 100, 20);
+        // "449.1k tokens · ctx 24%" read as one measurement of the same thing.
+        // They are the running session total and the current window, so they
+        // are named differently and the window shows its own denominator.
+        assert!(
+            rendered.contains("used"),
+            "session total should be labelled"
+        );
+        assert!(rendered.contains("ctx "), "context should be labelled");
+        assert!(
+            !rendered.contains("tokens  ·  ctx"),
+            "the two figures must not both read as token counts"
+        );
+    }
+
+    #[test]
+    fn a_trace_opens_with_the_session_and_records_the_toggle() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.session_store = Some(SessionStore::new(
+            &app.config.paths,
+            app.config.workspace.clone(),
+        ));
+        app.config.trace_enabled = true;
+        assert!(app.trace.is_none(), "nothing to key on before a session");
+
+        // The session is created on first persist, and the trace opens with it.
+        app.persist_session();
+        let trace = app
+            .trace
+            .as_ref()
+            .expect("trace should open with the session");
+        assert!(trace.path().exists());
+        assert!(
+            trace.path().starts_with(&app.config.paths.traces_dir),
+            "traces belong under the traces directory"
+        );
+
+        // Turning it off in /config drops the writer.
+        app.settings.trace.enabled = true;
+        app.cycle_config_value(ConfigKey::TraceLogging).unwrap();
+        assert!(!app.settings.trace.enabled);
+        assert!(app.trace.is_none(), "disabling must stop capture at once");
+        assert_eq!(app.config_value(ConfigKey::TraceLogging), "Off");
+
+        // And back on.
+        app.cycle_config_value(ConfigKey::TraceLogging).unwrap();
+        assert!(app.settings.trace.enabled);
+        assert!(app.trace.is_some(), "re-enabling reopens it");
+    }
+
+    #[test]
+    fn config_rows_and_keys_agree() {
+        // The panel numbers its rows by display position but looks settings up
+        // in CONFIG_KEYS. If the two orders drift, the cursor sits on one row
+        // and Enter edits another.
+        let displayed = CONFIG_ROWS
+            .iter()
+            .filter_map(|row| match row {
+                ConfigRow::Key(key) => Some(*key),
+                ConfigRow::Heading(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(displayed, CONFIG_KEYS);
+        // Every heading must precede at least one setting, or it renders as a
+        // label with nothing under it.
+        assert!(matches!(CONFIG_ROWS.first(), Some(ConfigRow::Heading(_))));
+        for pair in CONFIG_ROWS.windows(2) {
+            if let ConfigRow::Heading(title) = pair[0] {
+                assert!(
+                    matches!(pair[1], ConfigRow::Key(_)),
+                    "heading {title} has no settings under it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transcript_wraps_to_an_exact_row_count() {
+        // Wrapping happens here rather than in ratatui, so the row count is
+        // authoritative: twelve columns minus the two-column gutter leaves ten
+        // usable cells, so twenty-five characters take three rows.
+        let entries = vec![Entry::new(EntryKind::Assistant, "a".repeat(25))];
+        let rows = ui::transcript(&entries, 12, "•", None).lines.len();
+        assert_eq!(rows, 3);
     }
 
     #[test]
@@ -4807,14 +6555,14 @@ mod tests {
             });
             terminal.draw(|frame| draw(frame, &mut app)).unwrap();
             let rendered = buffer_text(terminal.backend().buffer(), width, height);
-            assert!(rendered.contains("Configuration"));
+            assert!(rendered.contains("CONFIGURATION"));
             assert!(rendered.contains("Active profile"));
 
             app.config_panel = None;
             app.open_feedback();
             terminal.draw(|frame| draw(frame, &mut app)).unwrap();
             let rendered = buffer_text(terminal.backend().buffer(), width, height);
-            assert!(rendered.contains("Send feedback"));
+            assert!(rendered.contains("FEEDBACK"));
             assert!(rendered.contains("Category"));
         }
     }
@@ -4822,15 +6570,14 @@ mod tests {
     #[test]
     fn transcript_renders_markdown_semantically() {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
-        app.entries = vec![Entry {
-            kind: EntryKind::Assistant,
-            text: "# Result\n\nUse **cargo test** and `cargo clippy`.\n\n```rust\nfn main() {}\n```\n\n| Check | State |\n|---|---|\n| tests | green |".into(),
-        }];
+        app.entries = vec![Entry::new(
+            EntryKind::Assistant,
+            "# Result\n\nUse **cargo test** and `cargo clippy`.\n\n```rust\nfn main() {}\n```\n\n| Check | State |\n|---|---|\n| tests | green |",
+        )];
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let rendered = buffer_text(terminal.backend().buffer(), 80, 30);
-        assert!(rendered.contains("◆ ABACUS"));
         assert!(rendered.contains("Result"));
         assert!(rendered.contains("cargo test"));
         assert!(rendered.contains("╭─ rust"));
@@ -4984,7 +6731,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let rendered = buffer_text(terminal.backend().buffer(), 110, 32);
-        assert!(rendered.contains("Usage"));
+        assert!(rendered.contains("USAGE"));
         assert!(rendered.contains("Overview"));
         assert!(rendered.contains("Favorite model"));
         assert!(rendered.contains("abacus-pro"));
@@ -5010,10 +6757,10 @@ mod tests {
 
         app.input.insert_str("look at @mai");
         let (items, title) = active_completion(&app).expect("file completion");
-        assert!(title.contains("files"));
+        assert_eq!(title, "FILES");
         assert!(items.iter().any(|(value, _)| value == "@src/main.rs"));
 
-        complete_at_cursor(&mut app);
+        assert!(app.accept_completion());
         assert_eq!(app.input.text(), "look at @src/main.rs ");
     }
 
@@ -5022,6 +6769,320 @@ mod tests {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
         assert!(app.slash_command("/exit"));
         assert!(app.quit);
+    }
+
+    #[test]
+    fn completion_popup_navigates_and_inserts_the_highlighted_row() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        for ch in "/mod".chars() {
+            let before = app.input.text();
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()),
+            );
+            app.sync_completion(&before);
+        }
+        let (items, _) = app.visible_completion().expect("command completion");
+        assert!(items.len() > 1, "expected /mode and /model");
+        assert_eq!(app.completion_index, 0);
+
+        // Down moves the highlight rather than reaching for prompt history.
+        let before = app.input.text();
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+        );
+        app.sync_completion(&before);
+        assert_eq!(app.completion_index, 1);
+        assert_eq!(
+            app.input.text(),
+            "/mod",
+            "navigation must not edit the draft"
+        );
+
+        // Enter inserts what is highlighted, not the first match.
+        let before = app.input.text();
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        app.sync_completion(&before);
+        assert_eq!(app.input.text(), format!("{} ", items[1].0));
+    }
+
+    #[test]
+    fn editing_the_draft_resets_the_highlight_and_revives_a_dismissed_popup() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.input.insert_str("/mod");
+        app.sync_completion("");
+        app.completion_index = 1;
+
+        // Esc dismisses without leaving insert mode or clearing the draft.
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(app.completion_dismissed);
+        assert!(app.visible_completion().is_none());
+        assert_eq!(app.input.text(), "/mod");
+
+        // Typing brings it back, at the top of the fresh list.
+        let before = app.input.text();
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::empty()),
+        );
+        app.sync_completion(&before);
+        assert!(!app.completion_dismissed);
+        assert_eq!(app.completion_index, 0);
+        assert!(app.visible_completion().is_some());
+    }
+
+    fn tool_entry(output: &str) -> Entry {
+        Entry::tool(ToolCall {
+            name: "run_command".into(),
+            summary: "cargo test".into(),
+            status: ToolStatus::Ok,
+            output: tool_preview(output),
+            full: retain_output(output),
+            duration_ms: Some(120),
+            expanded: false,
+        })
+    }
+
+    #[test]
+    fn normal_mode_walks_blocks_and_unfolds_the_selected_tool() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        let long = (1..=40)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.entries = vec![
+            Entry::new(EntryKind::User, "run the tests"),
+            tool_entry(&long),
+        ];
+        app.mode = InputMode::Normal;
+
+        // k from nothing selects the last block, not the first.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::empty()),
+        );
+        assert_eq!(app.cursor, Some(1));
+        assert!(!app.follow, "selecting stops follow-mode");
+
+        let collapsed = ui::transcript(&app.entries, 60, "•", app.cursor)
+            .lines
+            .len();
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()),
+        );
+        assert!(
+            app.entries[1].tool.as_ref().expect("tool").expanded,
+            "o should unfold the selected tool"
+        );
+        let expanded = ui::transcript(&app.entries, 60, "•", app.cursor)
+            .lines
+            .len();
+        assert!(
+            expanded > collapsed,
+            "unfolding must reveal rows: {collapsed} -> {expanded}"
+        );
+
+        // The preview caps at 8 lines; the full result must survive for the
+        // unfolded view.
+        let rendered = ui::transcript(&app.entries, 60, "•", app.cursor);
+        let text: String = rendered
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+            .collect();
+        assert!(text.contains("line 40"), "full output should be reachable");
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()),
+        );
+        assert!(!app.entries[1].tool.as_ref().expect("tool").expanded);
+    }
+
+    #[test]
+    fn folding_is_offered_only_when_there_is_more_to_see() {
+        let short = tool_entry("one line");
+        let call = short.tool.as_ref().expect("tool");
+        assert!(
+            !call.has_more(),
+            "a result the preview already shows in full is not foldable"
+        );
+
+        let long = (1..=40)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(tool_entry(&long).tool.as_ref().expect("tool").has_more());
+    }
+
+    #[test]
+    fn a_selected_block_is_scrolled_into_view() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        for n in 0..40 {
+            app.entries
+                .push(Entry::new(EntryKind::User, format!("prompt {n}")));
+        }
+        app.mode = InputMode::Normal;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let bottom = app.scroll;
+
+        // Walk to the very first block; the viewport has to follow it up.
+        for _ in 0..60 {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('k'), KeyModifiers::empty()),
+            );
+        }
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert_eq!(app.cursor, Some(0));
+        assert!(app.scroll < bottom, "the view should have scrolled up");
+        assert_eq!(app.scroll, 0, "the first block sits at the top");
+    }
+
+    #[test]
+    fn clicking_the_transcript_selects_then_unfolds_a_tool_row() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        let long = (1..=30)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.entries = vec![Entry::new(EntryKind::User, "run it"), tool_entry(&long)];
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        // Find where the tool block actually landed rather than assuming a row.
+        let (rect, index) = app
+            .hits
+            .borrow()
+            .transcript
+            .iter()
+            .copied()
+            .find(|(_, index)| *index == 1)
+            .expect("tool block should be clickable");
+        assert_eq!(index, 1);
+
+        handle_click(&mut app, rect.x + 2, rect.y);
+        assert_eq!(app.cursor, Some(1), "first click selects");
+        assert!(!app.entries[1].tool.as_ref().expect("tool").expanded);
+
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        handle_click(&mut app, rect.x + 2, rect.y);
+        assert!(
+            app.entries[1].tool.as_ref().expect("tool").expanded,
+            "clicking the selected row unfolds it"
+        );
+    }
+
+    #[test]
+    fn clicking_a_suggestion_inserts_it() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.input.insert_str("/mod");
+        app.sync_completion("");
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let (items, _) = app.visible_completion().expect("completion");
+        let (rect, index) = app
+            .hits
+            .borrow()
+            .completion
+            .iter()
+            .copied()
+            .find(|(_, index)| *index == 1)
+            .expect("second suggestion should be clickable");
+        handle_click(&mut app, rect.x + 1, rect.y);
+        assert_eq!(app.input.text(), format!("{} ", items[index].0));
+    }
+
+    #[test]
+    fn a_click_on_an_overlay_does_not_reach_the_transcript_beneath() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.entries = vec![Entry::new(EntryKind::User, "hello")];
+        app.config_panel = Some(ConfigPanel {
+            selected: 0,
+            editing: None,
+        });
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let (rect, _) = app
+            .hits
+            .borrow()
+            .config
+            .iter()
+            .copied()
+            .find(|(_, index)| *index == 2)
+            .expect("config row");
+        handle_click(&mut app, rect.x + 2, rect.y);
+        assert_eq!(
+            app.config_panel.as_ref().expect("panel").selected,
+            2,
+            "the click belongs to the panel on top"
+        );
+        assert_eq!(
+            app.cursor, None,
+            "the transcript must not have been touched"
+        );
+    }
+
+    #[tokio::test]
+    async fn esc_asks_a_running_turn_to_stop_before_killing_it() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.start_turn("check the tests".into(), "check the tests".into(), true);
+        assert!(app.running.is_some());
+
+        // First press is cooperative: the turn is asked to stop so it can
+        // report the work it already did, rather than being killed and losing
+        // every tool result from this turn.
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(app.cancel.load(Ordering::Relaxed), "stop was requested");
+        assert!(
+            app.running.is_some(),
+            "the turn should still be finishing up"
+        );
+        assert!(app.status.contains("interrupting"));
+    }
+
+    #[tokio::test]
+    async fn a_second_interrupt_escalates_and_settles_the_open_tool_row() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.start_turn("check the tests".into(), "check the tests".into(), true);
+        app.push_entry(Entry::tool(ToolCall {
+            name: "run_command".into(),
+            summary: "cargo test".into(),
+            status: ToolStatus::Running,
+            output: String::new(),
+            full: String::new(),
+            duration_ms: None,
+            expanded: false,
+        }));
+        app.tool_started = Some(Instant::now());
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+
+        assert!(app.running.is_none(), "a second esc forces the stop");
+        assert!(app.turn_started.is_none());
+        // The aborted task never reports back, so the row must not keep
+        // spinning for the rest of the session.
+        let call = app
+            .entries
+            .iter()
+            .rev()
+            .find_map(|entry| entry.tool.as_ref())
+            .expect("tool row");
+        assert_eq!(call.status, ToolStatus::Failed);
+        assert_eq!(call.output, "interrupted");
     }
 
     #[tokio::test]
@@ -5166,6 +7227,8 @@ mod tests {
             no_session: true,
             model_limits: crate::model_info::ModelLimits::default(),
             tool_format: crate::tool_format::ToolFormat::default(),
+            mode: None,
+            trace_enabled: false,
             web_search: crate::web::WebConfig::default(),
             paths,
         };
