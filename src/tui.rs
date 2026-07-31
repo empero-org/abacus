@@ -103,6 +103,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/feedback", "Send product feedback"),
     ("/mode", "Set auto, plan, or build mode"),
     ("/plan", "Toggle plan pin"),
+    ("/thinking", "Show or hide the model's reasoning"),
     ("/model", "Inspect or switch model"),
     ("/usage", "View local usage and activity"),
     ("/sessions", "Browse saved sessions"),
@@ -1331,6 +1332,52 @@ impl App {
                     AgentMode::Plan
                 };
                 self.status = format!("{} mode", self.agent_mode.label().to_ascii_lowercase());
+                true
+            }
+            // Worth a command of its own rather than only a /config row: whether
+            // you want to watch a model reason changes from task to task, and
+            // reaching for it should not mean opening a panel.
+            "/thinking" => {
+                let requested = match argument.trim().to_ascii_lowercase().as_str() {
+                    "" => Some(!self.settings.ui.show_thinking),
+                    "on" | "show" | "yes" => Some(true),
+                    "off" | "hide" | "no" => Some(false),
+                    _ => None,
+                };
+                let Some(show) = requested else {
+                    self.push_entry(Entry::new(
+                        EntryKind::Error,
+                        "Usage: /thinking [on|off]".to_owned(),
+                    ));
+                    self.follow = true;
+                    return true;
+                };
+                self.settings.ui.show_thinking = show;
+                match self.save_and_apply_settings() {
+                    Ok(()) => {
+                        self.status = if show {
+                            "thinking shown".to_owned()
+                        } else {
+                            "thinking hidden".to_owned()
+                        };
+                        // Say where it went, so hiding it does not look like
+                        // the reasoning stopped being captured.
+                        self.push_entry(Entry::new(
+                            EntryKind::System,
+                            if show {
+                                "Reasoning will be shown above each reply.".to_owned()
+                            } else {
+                                "Reasoning hidden. It is still recorded in training traces."
+                                    .to_owned()
+                            },
+                        ));
+                    }
+                    Err(error) => {
+                        self.settings.ui.show_thinking = !show;
+                        self.status = format!("configuration error: {error:#}");
+                    }
+                }
+                self.follow = true;
                 true
             }
             "/mode" => {
@@ -6667,6 +6714,64 @@ mod tests {
         app.settings.ui.show_token_rate = false;
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert!(!buffer_text(terminal.backend().buffer(), 110, 16).contains("tok/s"));
+    }
+
+    #[test]
+    fn thinking_command_toggles_and_takes_an_explicit_state() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        assert!(app.settings.ui.show_thinking);
+
+        // Bare invocation flips it.
+        assert!(app.slash_command("/thinking"));
+        assert!(!app.settings.ui.show_thinking);
+        assert!(app.slash_command("/thinking"));
+        assert!(app.settings.ui.show_thinking);
+
+        // Explicit states are idempotent, so a keybinding or script can set
+        // rather than flip.
+        assert!(app.slash_command("/thinking off"));
+        assert!(!app.settings.ui.show_thinking);
+        assert!(app.slash_command("/thinking off"));
+        assert!(!app.settings.ui.show_thinking);
+        assert!(app.slash_command("/thinking on"));
+        assert!(app.settings.ui.show_thinking);
+    }
+
+    #[test]
+    fn thinking_command_says_capture_continues_when_hidden() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.slash_command("/thinking off");
+        let last = app.entries.last().expect("a notice");
+        assert_eq!(last.kind, EntryKind::System);
+        assert!(
+            last.text.contains("still recorded"),
+            "hiding must not read as disabling capture: {}",
+            last.text
+        );
+    }
+
+    #[test]
+    fn thinking_command_rejects_an_unknown_argument_without_changing_anything() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        let before = app.settings.ui.show_thinking;
+        assert!(app.slash_command("/thinking maybe"));
+        assert_eq!(app.settings.ui.show_thinking, before);
+        assert_eq!(app.entries.last().expect("an error").kind, EntryKind::Error);
+    }
+
+    /// The palette is built from the same table the dispatcher matches on, so a
+    /// command that exists must be discoverable.
+    #[test]
+    fn thinking_is_offered_by_the_command_palette() {
+        assert!(
+            SLASH_COMMANDS
+                .iter()
+                .any(|(command, _)| *command == "/thinking")
+        );
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.input.insert_str("/think");
+        let (items, _) = app.visible_completion().expect("a suggestion");
+        assert!(items.iter().any(|(value, _)| value == "/thinking"));
     }
 
     #[test]

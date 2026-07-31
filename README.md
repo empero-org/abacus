@@ -75,6 +75,7 @@ Assistant responses render as terminal-native Markdown, including headings, emph
 | `/usage` | View the local activity heatmap, usage totals, and model breakdown |
 | `/mode [auto\|plan\|build]` | Inspect or pin the workflow mode |
 | `/plan` | Toggle the read-only PLAN pin |
+| `/thinking [on\|off]` | Show or hide the model's reasoning; hiding does not stop it being recorded |
 | `/goal [objective]` | Show or create a persistent session goal |
 | `/goal pause\|resume\|edit <text>\|clear` | Manage the active goal |
 | `/loop "<prompt>" [options]` | Start a promise-driven Ralph loop |
