@@ -113,6 +113,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/sessions", "Browse saved sessions"),
     ("/new", "Start a new session"),
     ("/compact", "Compact conversation context"),
+    ("/repair", "Fix corrupted session history"),
     ("/skills", "Browse Agent Skills"),
     ("/plugins", "Inspect plugins"),
     ("/mcps", "Inspect MCP tools"),
@@ -1032,7 +1033,20 @@ impl App {
                     self.resolved_agent_mode = None;
                     self.receiving_delta = false;
                     self.approval = None;
+                    // Provider rejections are very often not transient: an
+                    // interrupted turn leaves history that strict providers
+                    // refuse on every retry. Point at the way out.
+                    let provider_rejection = error.contains("provider stream error")
+                        || error.contains("provider returned");
                     self.push_entry(Entry::new(EntryKind::Error, error));
+                    if provider_rejection {
+                        self.push_entry(Entry::new(
+                            EntryKind::System,
+                            "If this error repeats, the session history may be corrupted — \
+                             run /repair to check and fix it."
+                                .to_owned(),
+                        ));
+                    }
                     self.status = "error".to_owned();
                     if let Some(state) = &mut self.ralph_loop {
                         let _ = state.pause();
@@ -1542,6 +1556,33 @@ impl App {
                         budget.recent_budget_chars
                     ),
                 ));
+                self.follow = true;
+                true
+            }
+            "/repair" => {
+                // An interrupted or failed turn can leave the saved history in
+                // a state strict providers reject wholesale (a tool call whose
+                // streamed arguments were cut short, a call with no result).
+                // The failure mode is every turn erroring from then on, so the
+                // fix has to be reachable from inside the stuck session.
+                if self.running.is_some() {
+                    self.status = "cannot repair while a turn is running".to_owned();
+                    return true;
+                }
+                let fixes = crate::session::repair_messages(&mut self.messages);
+                if fixes.is_empty() {
+                    self.push_entry(Entry::new(
+                        EntryKind::System,
+                        "No corruption found: every tool call parses and has a result.".to_owned(),
+                    ));
+                } else {
+                    self.ctx_chars = message_chars(&self.messages);
+                    self.persist_session();
+                    self.push_entry(Entry::new(
+                        EntryKind::System,
+                        format!("Repaired the session history: {}.", fixes.join("; ")),
+                    ));
+                }
                 self.follow = true;
                 true
             }
@@ -6824,6 +6865,64 @@ mod tests {
         app.settings.ui.show_token_rate = false;
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert!(!buffer_text(terminal.backend().buffer(), 110, 16).contains("tok/s"));
+    }
+
+    #[test]
+    fn repair_command_fixes_corruption_and_reports_a_clean_history() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.messages = vec![
+            serde_json::json!({"role":"system","content":"s"}),
+            serde_json::json!({"role":"assistant","content":"Let me write that.","tool_calls":[
+                {"id":"cut","type":"function","function":{"name":"write_file","arguments":"{\"content\": \"trunc"}}
+            ]}),
+        ];
+        app.ctx_chars = 0;
+
+        assert!(app.slash_command("/repair"));
+        let notice = app.entries.last().expect("a repair report");
+        assert_eq!(notice.kind, EntryKind::System);
+        assert!(notice.text.contains("Repaired"), "{}", notice.text);
+        assert!(app.messages[1].get("tool_calls").is_none());
+        assert!(app.ctx_chars > 0, "context estimate must be refreshed");
+
+        // A second pass finds nothing and says so.
+        assert!(app.slash_command("/repair"));
+        let notice = app.entries.last().expect("a no-op report");
+        assert_eq!(notice.kind, EntryKind::System);
+        assert!(notice.text.contains("No corruption"), "{}", notice.text);
+    }
+
+    #[tokio::test]
+    async fn repair_command_refuses_to_run_mid_turn() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.messages = vec![serde_json::json!({"role":"system","content":"s"})];
+        let before = app.messages.clone();
+        app.start_turn("go".into(), "go".into(), false);
+        assert!(app.slash_command("/repair"));
+        assert_eq!(app.status, "cannot repair while a turn is running");
+        // The running turn's history is untouched (only the queued user
+        // message was added by start_turn).
+        assert_eq!(app.messages.len(), before.len() + 1);
+    }
+
+    #[test]
+    fn provider_failure_hints_at_repair() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        let _ = app.event_tx.send(AgentEvent::Failed {
+            error: "provider stream error: {\"code\":400}".to_owned(),
+            messages: vec![serde_json::json!({"role":"system","content":"s"})],
+        });
+        assert!(app.drain_agent_events());
+        let last = app.entries.last().expect("a hint");
+        assert_eq!(last.kind, EntryKind::System);
+        assert!(last.text.contains("/repair"), "{}", last.text);
+        // A non-provider failure gets no hint — /repair cannot fix those.
+        let _ = app.event_tx.send(AgentEvent::Failed {
+            error: "file reference warning".to_owned(),
+            messages: vec![serde_json::json!({"role":"system","content":"s"})],
+        });
+        assert!(app.drain_agent_events());
+        assert_eq!(app.entries.last().expect("an error").kind, EntryKind::Error);
     }
 
     #[test]

@@ -769,10 +769,19 @@ fn finish_completion(
     // produce them routinely: a bare `{"index":1}` sentinel some servers emit,
     // and cancelling mid-stream. Erroring threw away the streamed content and
     // every well-formed call alongside the bad one.
+    //
+    // Arguments must parse as JSON too: an interrupt mid-`write_file` leaves
+    // half an argument object, and once that reaches saved history strict
+    // providers reject every subsequent request in the session.
     let seen = calls.len();
     let tool_calls = calls
         .into_values()
-        .filter(|call| !call.id.is_empty() && !call.name.is_empty())
+        .filter(|call| {
+            !call.id.is_empty()
+                && !call.name.is_empty()
+                && (call.arguments.is_empty()
+                    || serde_json::from_str::<serde::de::IgnoredAny>(&call.arguments).is_ok())
+        })
         .map(|call| ToolCall {
             id: call.id,
             name: call.name,
@@ -857,6 +866,37 @@ fn truncate_error(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_stream_drops_truncated_tool_call_but_keeps_valid_ones() {
+        // Interrupting mid-`write_file` cuts the arguments mid-string. The
+        // truncated call must not survive into history (strict providers
+        // reject the whole session over it), while a call that finished
+        // streaming before the interrupt is kept.
+        let mut calls = BTreeMap::new();
+        calls.insert(
+            0,
+            PartialToolCall {
+                id: "done".into(),
+                name: "read_file".into(),
+                arguments: "{\"path\":\"a\"}".into(),
+            },
+        );
+        calls.insert(
+            1,
+            PartialToolCall {
+                id: "cut".into(),
+                name: "write_file".into(),
+                arguments: "{\"content\": \"unterminat".into(),
+            },
+        );
+        let completion =
+            finish_completion("partial prose".into(), String::new(), calls, true).unwrap();
+        assert!(completion.cancelled);
+        assert_eq!(completion.content, "partial prose");
+        assert_eq!(completion.tool_calls.len(), 1);
+        assert_eq!(completion.tool_calls[0].id, "done");
+    }
 
     #[test]
     fn sse_decoder_handles_split_utf8_and_lines() {

@@ -293,6 +293,118 @@ fn title_from_prompt(prompt: &str) -> String {
     }
 }
 
+/// Fix message-history corruption left behind by interrupted or failed turns,
+/// in place. Strict providers reject the whole request over a single bad entry
+/// (a tool call whose streamed JSON arguments were cut mid-write, a call with
+/// no recorded result, a result whose call is gone), which presents to the
+/// user as every subsequent turn failing. Returns one line per fix applied;
+/// empty means the history was already clean.
+pub fn repair_messages(messages: &mut Vec<Value>) -> Vec<String> {
+    let mut fixes = Vec::new();
+
+    // Pass 1: drop tool calls whose arguments are not valid JSON. These are
+    // always truncation artifacts — a model never legitimately emits half an
+    // argument object — so nothing of value is lost, and the prose (if any)
+    // on the same message is kept with a note marking the interruption.
+    for message in messages.iter_mut() {
+        let (dropped, now_empty) = {
+            let Some(calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            let before = calls.len();
+            calls.retain(|call| {
+                call.pointer("/function/arguments")
+                    .and_then(Value::as_str)
+                    .is_some_and(|arguments| serde_json::from_str::<Value>(arguments).is_ok())
+            });
+            (before - calls.len(), calls.is_empty())
+        };
+        if dropped == 0 {
+            continue;
+        }
+        fixes.push(format!(
+            "removed {dropped} tool call{} with truncated arguments",
+            if dropped == 1 { "" } else { "s" }
+        ));
+        let note = "[a tool call was interrupted before it ran; no file or command was executed]";
+        let content = match message.get("content").and_then(Value::as_str) {
+            Some(text) if !text.is_empty() => format!("{text}\n{note}"),
+            _ => note.to_owned(),
+        };
+        message["content"] = Value::String(content);
+        if now_empty && let Some(object) = message.as_object_mut() {
+            object.remove("tool_calls");
+        }
+    }
+
+    // Pass 2: give every surviving call a result. A call the agent never
+    // answered (interrupt between tools) makes strict providers reject the
+    // pairing, so a synthetic "interrupted" result is inserted directly after
+    // the assistant message that made the call.
+    let answered: std::collections::HashSet<String> = messages
+        .iter()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("tool"))
+        .filter_map(|message| message.get("tool_call_id").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    let mut index = 0;
+    while index < messages.len() {
+        let orphan_ids: Vec<String> = messages[index]
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .map(|calls| {
+                calls
+                    .iter()
+                    .filter_map(|call| call.get("id").and_then(Value::as_str))
+                    .filter(|id| !answered.contains(*id))
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (offset, id) in orphan_ids.iter().enumerate() {
+            messages.insert(
+                index + 1 + offset,
+                serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": id,
+                    "content": "Error: interrupted before a result was recorded.",
+                }),
+            );
+            fixes.push("added a missing result for an unanswered tool call".to_owned());
+        }
+        index += 1 + orphan_ids.len();
+    }
+
+    // Pass 3: drop tool results whose call no longer exists (e.g. the call
+    // was removed by pass 1, or by an earlier compaction bug).
+    let known_calls: std::collections::HashSet<String> = messages
+        .iter()
+        .filter_map(|message| message.get("tool_calls").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|call| call.get("id").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    let before = messages.len();
+    messages.retain(|message| {
+        if message.get("role").and_then(Value::as_str) != Some("tool") {
+            return true;
+        }
+        match message.get("tool_call_id").and_then(Value::as_str) {
+            Some(id) => known_calls.contains(id),
+            None => false,
+        }
+    });
+    let dropped = before - messages.len();
+    if dropped > 0 {
+        fixes.push(format!(
+            "removed {dropped} tool result{} whose call no longer exists",
+            if dropped == 1 { "" } else { "s" }
+        ));
+    }
+
+    fixes
+}
+
 fn workspace_key(workspace: &std::path::Path) -> String {
     // Stable FNV-1a keeps workspace directories short without another runtime dependency.
     let mut hash = 0xcbf29ce484222325_u64;
@@ -351,5 +463,87 @@ mod tests {
         assert_eq!(usage.len(), 1);
         assert_eq!(usage[0].tokens_used, 12_345);
         assert!(!usage[0].tokens_estimated);
+    }
+
+    #[test]
+    fn repair_leaves_clean_history_untouched() {
+        let mut messages = vec![
+            json!({"role":"system","content":"s"}),
+            json!({"role":"user","content":"u"}),
+            json!({"role":"assistant","content":null,"tool_calls":[
+                {"id":"a","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"x\"}"}}
+            ]}),
+            json!({"role":"tool","tool_call_id":"a","content":"ok"}),
+            json!({"role":"assistant","content":"done"}),
+        ];
+        let original = messages.clone();
+        assert!(repair_messages(&mut messages).is_empty());
+        assert_eq!(messages, original);
+    }
+
+    #[test]
+    fn repair_removes_truncated_call_and_keeps_prose() {
+        // The exact corruption an interrupt leaves behind: a call whose
+        // streamed arguments were cut mid-string, with no tool result.
+        let mut messages = vec![
+            json!({"role":"user","content":"write it"}),
+            json!({"role":"assistant","content":"Let me rewrite that.","tool_calls":[
+                {"id":"cut","type":"function","function":{"name":"write_file","arguments":"{\"content\": \"unterminated"}}
+            ]}),
+            json!({"role":"user","content":"no, differently"}),
+        ];
+        let fixes = repair_messages(&mut messages);
+        assert_eq!(fixes.len(), 1, "{fixes:?}");
+        assert_eq!(messages.len(), 3);
+        let repaired = &messages[1];
+        assert!(repaired.get("tool_calls").is_none());
+        let content = repaired["content"].as_str().unwrap();
+        assert!(content.starts_with("Let me rewrite that."));
+        assert!(content.contains("interrupted"));
+    }
+
+    #[test]
+    fn repair_answers_orphan_call_and_drops_orphan_result() {
+        let mut messages = vec![
+            json!({"role":"assistant","content":null,"tool_calls":[
+                {"id":"unanswered","type":"function","function":{"name":"run_command","arguments":"{\"command\":\"ls\"}"}}
+            ]}),
+            json!({"role":"tool","tool_call_id":"ghost","content":"result of a vanished call"}),
+        ];
+        let fixes = repair_messages(&mut messages);
+        assert_eq!(fixes.len(), 2, "{fixes:?}");
+        assert_eq!(messages.len(), 2);
+        // The valid-but-unanswered call gained a synthetic result right after it.
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["tool_call_id"], "unanswered");
+        assert!(
+            messages[1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("interrupted")
+        );
+        // The ghost result is gone.
+        assert!(!messages.iter().any(|m| m["tool_call_id"] == "ghost"));
+    }
+
+    #[test]
+    fn repair_fixes_the_real_interrupt_shape_end_to_end() {
+        // Truncated call on a message that also has valid calls: only the
+        // broken one is removed, and the valid one keeps its pairing.
+        let mut messages = vec![
+            json!({"role":"assistant","content":null,"tool_calls":[
+                {"id":"good","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a\"}"}},
+                {"id":"bad","type":"function","function":{"name":"write_file","arguments":"{\"trunc"}}
+            ]}),
+            json!({"role":"tool","tool_call_id":"good","content":"contents"}),
+        ];
+        let fixes = repair_messages(&mut messages);
+        assert!(!fixes.is_empty());
+        let calls = messages[0]["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["id"], "good");
+        assert_eq!(messages[1]["tool_call_id"], "good");
+        // Second run is a no-op: repair is idempotent.
+        assert!(repair_messages(&mut messages).is_empty());
     }
 }

@@ -237,6 +237,10 @@ async fn run_turn_inner(
             {
                 Ok(completion) => completion,
                 Err(error) => {
+                    // The forwarder only exits once every sender is gone;
+                    // without this drop the await below deadlocks and the
+                    // turn hangs on "connecting" instead of reporting.
+                    drop(delta_tx);
                     let _ = forward.await;
                     let _ = events.send(AgentEvent::Failed {
                         error: format!("{error:#}"),
