@@ -349,6 +349,8 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
             model: model.clone(),
             protocol,
             api_key_env: env_key.clone(),
+            providers: Vec::new(),
+            allow_fallbacks: true,
         },
     );
     settings.default_profile = profile_id.clone();
@@ -465,6 +467,71 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
     );
     console::blank();
     Ok(())
+}
+
+/// One upstream supplier able to serve a model, as OpenRouter reports it.
+pub struct Endpoint {
+    /// The name to put in `provider.order`.
+    pub name: String,
+    /// The more specific endpoint tag, which `order` also accepts.
+    pub tag: String,
+    pub context_length: u64,
+    pub quantization: String,
+}
+
+/// Ask OpenRouter which suppliers serve `model`.
+///
+/// They differ in ways that matter — the same model can be offered at 1M
+/// context and fp8 by one and 96k at fp4 by another — so this exists to make
+/// the choice visible rather than something you accept by default.
+pub async fn discover_endpoints(
+    base_url: &str,
+    api_key: Option<&str>,
+    model: &str,
+) -> Result<Vec<Endpoint>> {
+    if !base_url.contains("openrouter.ai") {
+        bail!("provider routing is an OpenRouter feature; this profile points at {base_url}");
+    }
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(12))
+        .user_agent(concat!("abacus-agent/", env!("CARGO_PKG_VERSION")))
+        .build()?;
+    let mut request = client
+        .get(format!(
+            "{}/models/{}/endpoints",
+            base_url.trim_end_matches('/'),
+            model.trim_matches('/')
+        ))
+        .header(header::ACCEPT, "application/json");
+    if let Some(key) = api_key {
+        request = request.bearer_auth(key);
+    }
+    let response = request.send().await.context("could not reach provider")?;
+    let status = response.status();
+    if !status.is_success() {
+        let detail = response.text().await.unwrap_or_default();
+        bail!("provider returned {status}: {}", one_line(&detail, 240));
+    }
+    let value: Value = response
+        .json()
+        .await
+        .context("provider returned invalid JSON")?;
+    Ok(value["data"]["endpoints"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|endpoint| {
+            Some(Endpoint {
+                name: endpoint["provider_name"].as_str()?.to_owned(),
+                tag: endpoint["tag"].as_str().unwrap_or_default().to_owned(),
+                context_length: endpoint["context_length"].as_u64().unwrap_or(0),
+                quantization: endpoint["quantization"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_owned(),
+            })
+        })
+        .collect())
 }
 
 pub async fn discover_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<String>> {

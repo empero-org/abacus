@@ -151,6 +151,8 @@ pub enum Command {
     },
     /// List models reported by the active provider
     Models,
+    /// List the upstream providers that can serve the active model
+    Providers,
     /// List saved sessions for this workspace
     Sessions,
     /// Print configuration and environment diagnostics
@@ -303,6 +305,8 @@ pub struct Config {
     pub mode: Option<crate::agent::AgentMode>,
     /// Whether to append SFT training traces for this session.
     pub trace_enabled: bool,
+    /// Upstream routing preferences, applied by providers that support them.
+    pub routing: Routing,
     pub web_search: crate::web::WebConfig,
     pub paths: AbacusPaths,
 }
@@ -385,6 +389,12 @@ impl Config {
             tool_format,
             mode: cli.mode,
             trace_enabled: settings.trace.enabled,
+            routing: Routing {
+                order: profile
+                    .map(|profile| profile.providers.clone())
+                    .unwrap_or_default(),
+                allow_fallbacks: profile.is_none_or(|profile| profile.allow_fallbacks),
+            },
             web_search: settings.search.resolve(),
             paths,
         })
@@ -542,6 +552,24 @@ pub struct ProviderProfile {
     pub protocol: ProviderProtocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
+    /// Upstream providers to route to, most preferred first.
+    ///
+    /// OpenRouter fronts many suppliers for the same model and they differ in
+    /// context length, quantization, and speed — one `glm-5.2` endpoint offers
+    /// 1M context at fp8, another 96k at fp4. Pinning is how you stop landing
+    /// on whichever happens to be cheapest today.
+    ///
+    /// Written through verbatim as `provider.order`, so use whatever spelling
+    /// OpenRouter reports (`Together`, `Z.AI`, `deepinfra/fp8`) — `abacus
+    /// providers` lists them for the active model. Empty means "let OpenRouter
+    /// choose". Ignored by providers that do not support routing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<String>,
+    /// Whether OpenRouter may fall back to a provider outside `providers` when
+    /// none of them can serve the request. False makes the pin strict: the
+    /// request fails rather than quietly landing somewhere else.
+    #[serde(default = "default_true")]
+    pub allow_fallbacks: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
@@ -578,6 +606,45 @@ pub struct UiSettings {
 
 fn default_true() -> bool {
     true
+}
+
+/// Upstream provider routing for a request.
+#[derive(Debug, Clone, Default)]
+pub struct Routing {
+    /// Preferred providers, most preferred first.
+    pub order: Vec<String>,
+    /// Whether anything outside `order` may serve the request.
+    pub allow_fallbacks: bool,
+}
+
+impl Routing {
+    pub fn is_pinned(&self) -> bool {
+        !self.order.is_empty()
+    }
+
+    /// The `provider` object to merge into a request body, or `None` when
+    /// nothing is pinned — an unpinned request carries no routing field at all
+    /// rather than an empty one.
+    pub fn body(&self) -> Option<serde_json::Value> {
+        if !self.is_pinned() {
+            return None;
+        }
+        Some(serde_json::json!({
+            "order": self.order,
+            "allow_fallbacks": self.allow_fallbacks,
+        }))
+    }
+
+    /// Parse a user-typed list. Commas or whitespace separate entries, so both
+    /// `Together, Anthropic` and `Together Anthropic` work.
+    pub fn parse_order(input: &str) -> Vec<String> {
+        input
+            .split([',', ' ', '\t', '\n'])
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
 }
 
 /// Training-trace capture. On by default: the data is only useful if it exists
@@ -796,6 +863,41 @@ pub fn atomic_write(path: &Path, content: &[u8], private: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The pin is only meaningful if it reaches the request, and only safe if
+    /// it stays off requests to endpoints that do not know the field.
+    #[test]
+    fn routing_becomes_a_provider_object_only_when_pinned() {
+        let none = Routing::default();
+        assert!(!none.is_pinned());
+        assert!(
+            none.body().is_none(),
+            "an unpinned request carries no field"
+        );
+
+        let pinned = Routing {
+            order: vec!["Together".into(), "Anthropic".into()],
+            allow_fallbacks: false,
+        };
+        let body = pinned.body().expect("a provider object");
+        assert_eq!(body["order"][0], "Together");
+        assert_eq!(body["order"][1], "Anthropic");
+        assert_eq!(body["allow_fallbacks"], false);
+    }
+
+    #[test]
+    fn an_order_can_be_written_with_commas_or_spaces() {
+        assert_eq!(
+            Routing::parse_order("Together, Anthropic"),
+            vec!["Together", "Anthropic"]
+        );
+        assert_eq!(
+            Routing::parse_order("  DeepInfra   Novita  "),
+            vec!["DeepInfra", "Novita"]
+        );
+        assert_eq!(Routing::parse_order("Z.AI"), vec!["Z.AI"]);
+        assert!(Routing::parse_order("  ,, ").is_empty());
+    }
     use super::*;
     use tempfile::tempdir;
 
@@ -812,6 +914,8 @@ mod tests {
                 model: "codestral".into(),
                 protocol: ProviderProtocol::ChatCompletions,
                 api_key_env: None,
+                providers: Vec::new(),
+                allow_fallbacks: true,
             },
         );
         settings.default_profile = "local".into();

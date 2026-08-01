@@ -72,6 +72,7 @@ async fn streamed_agent_searches_workspace_and_finishes() {
         tool_format: abacus_agent::tool_format::ToolFormat::default(),
         mode: None,
         trace_enabled: false,
+        routing: Default::default(),
         web_search: abacus_agent::web::WebConfig::default(),
         paths: AbacusPaths::under(directory.path().join("home")),
     };
@@ -184,6 +185,7 @@ async fn a_cancelled_turn_keeps_the_work_it_already_did() {
         tool_format: abacus_agent::tool_format::ToolFormat::default(),
         mode: None,
         trace_enabled: false,
+        routing: Default::default(),
         web_search: abacus_agent::web::WebConfig::default(),
         paths: AbacusPaths::under(directory.path().join("home")),
     };
@@ -292,6 +294,7 @@ async fn responses_protocol_uses_responses_endpoint_and_stream_format() {
         tool_format: abacus_agent::tool_format::ToolFormat::default(),
         mode: None,
         trace_enabled: false,
+        routing: Default::default(),
         web_search: abacus_agent::web::WebConfig::default(),
         paths: AbacusPaths::under(directory.path().join("home")),
     };
@@ -358,6 +361,7 @@ async fn edit_requires_reviewable_approval_before_atomic_write() {
         tool_format: abacus_agent::tool_format::ToolFormat::default(),
         mode: None,
         trace_enabled: false,
+        routing: Default::default(),
         web_search: abacus_agent::web::WebConfig::default(),
         paths: AbacusPaths::under(directory.path().join("home")),
     };
@@ -805,6 +809,7 @@ fn test_config(
         tool_format: abacus_agent::tool_format::ToolFormat::default(),
         mode: None,
         trace_enabled: false,
+        routing: Default::default(),
         web_search: abacus_agent::web::WebConfig::default(),
         paths: AbacusPaths::under(directory.path().join("home")),
     }

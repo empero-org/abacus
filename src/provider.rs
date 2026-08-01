@@ -33,6 +33,8 @@ pub struct Provider {
     /// same session go straight to `max_completion_tokens`. Shared across
     /// clones for the same reason `tokens` is.
     prefers_max_completion_tokens: Arc<AtomicBool>,
+    /// Upstream provider pins, sent only to endpoints that understand them.
+    routing: crate::config::Routing,
     /// Prompt tokens from the most recent reply — how full the window actually
     /// was, as measured by the provider rather than estimated from characters.
     context_tokens: Arc<AtomicU64>,
@@ -106,6 +108,7 @@ impl Provider {
             max_output_tokens: config.model_limits.configured_output_tokens,
             tool_format: config.tool_format,
             tokens,
+            routing: config.routing.clone(),
             prefers_max_completion_tokens: Arc::new(AtomicBool::new(false)),
             context_tokens: Arc::new(AtomicU64::new(0)),
         })
@@ -193,6 +196,14 @@ impl Provider {
         }
         if let Some(max_tokens) = self.max_output_tokens {
             body[self.output_tokens_field()] = json!(max_tokens);
+        }
+        // Routing is an OpenRouter extension. Sending it to an endpoint that
+        // does not know the field risks a 400 from the stricter servers, and it
+        // would mean nothing to the ones that merely ignore it.
+        if self.routes_upstream()
+            && let Some(provider) = self.routing.body()
+        {
+            body["provider"] = provider;
         }
         // The request has to be raced as well as the stream: `post_stream` waits
         // for response headers, and a server that accepts the connection then
@@ -365,6 +376,15 @@ impl Provider {
         }
         self.record_tokens(reported_usage, messages, &content, &calls);
         finish_completion(content, reasoning, calls, cancelled)
+    }
+
+    /// Whether this endpoint accepts upstream provider routing.
+    ///
+    /// Matched on the host rather than a config flag so a profile pointed at an
+    /// OpenRouter-compatible gateway behaves the same way without extra setup,
+    /// and a pin silently does nothing rather than breaking a plain endpoint.
+    fn routes_upstream(&self) -> bool {
+        self.endpoint.contains("openrouter.ai")
     }
 
     /// Which output-cap parameter this endpoint accepts. Starts optimistic and

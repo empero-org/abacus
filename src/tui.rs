@@ -105,6 +105,10 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/plan", "Toggle plan pin"),
     ("/thinking", "Show or hide the model's reasoning"),
     ("/model", "Inspect or switch model"),
+    (
+        "/providers",
+        "Pin which upstream providers may serve the model",
+    ),
     ("/usage", "View local usage and activity"),
     ("/sessions", "Browse saved sessions"),
     ("/new", "Start a new session"),
@@ -329,6 +333,8 @@ enum ConfigKey {
     Model,
     BaseUrl,
     Protocol,
+    Providers,
+    Fallbacks,
     ApiKey,
     Permission,
     VimMode,
@@ -361,6 +367,8 @@ const CONFIG_ROWS: &[ConfigRow] = &[
     ConfigRow::Key(ConfigKey::Model),
     ConfigRow::Key(ConfigKey::BaseUrl),
     ConfigRow::Key(ConfigKey::Protocol),
+    ConfigRow::Key(ConfigKey::Providers),
+    ConfigRow::Key(ConfigKey::Fallbacks),
     ConfigRow::Key(ConfigKey::ApiKey),
     ConfigRow::Heading("AGENT"),
     ConfigRow::Key(ConfigKey::Permission),
@@ -393,6 +401,12 @@ fn config_help(key: ConfigKey) -> &'static str {
         ConfigKey::BaseUrl => "OpenAI-compatible endpoint, including the /v1 suffix.",
         ConfigKey::Protocol => {
             "Chat Completions suits most providers; Responses is OpenAI and xAI."
+        }
+        ConfigKey::Providers => {
+            "OpenRouter only: which suppliers may serve this model, best first. `abacus providers` lists them."
+        }
+        ConfigKey::Fallbacks => {
+            "Off pins strictly — a request fails rather than landing on an unpinned provider."
         }
         ConfigKey::ApiKey => {
             "Stored in credentials.toml with owner-only permissions. Never shown back."
@@ -436,6 +450,8 @@ const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey::Model,
     ConfigKey::BaseUrl,
     ConfigKey::Protocol,
+    ConfigKey::Providers,
+    ConfigKey::Fallbacks,
     ConfigKey::ApiKey,
     ConfigKey::Permission,
     ConfigKey::MaxSteps,
@@ -625,6 +641,8 @@ impl App {
                     model: config.model.clone(),
                     protocol: config.protocol,
                     api_key_env: None,
+                    providers: Vec::new(),
+                    allow_fallbacks: true,
                 },
             );
         }
@@ -1227,6 +1245,71 @@ impl App {
                         Ok(()) => self.status = format!("model: {} · saved", self.config.model),
                         Err(error) => self.status = format!("model switch failed: {error:#}"),
                     }
+                }
+                self.follow = true;
+                true
+            }
+            // OpenRouter fronts many suppliers for one model and they differ in
+            // context length and quantization, so which one serves a request is
+            // a decision worth making rather than accepting by default.
+            "/providers" => {
+                let argument = argument.trim();
+                if argument.is_empty() {
+                    let profile = self.settings.profiles.get(&self.settings.default_profile);
+                    let pinned = profile
+                        .map(|profile| profile.providers.clone())
+                        .unwrap_or_default();
+                    let body = if pinned.is_empty() {
+                        "No providers pinned — the endpoint chooses.".to_owned()
+                    } else {
+                        format!(
+                            "Pinned, in order: {}\nFallbacks: {}",
+                            pinned.join(", "),
+                            on_off(profile.is_none_or(|profile| profile.allow_fallbacks))
+                                .to_ascii_lowercase()
+                        )
+                    };
+                    self.push_entry(Entry::new(
+                        EntryKind::System,
+                        format!(
+                            "{body}\n\nSet with /providers <name, name>; \
+                             /providers clear removes the pin; \
+                             /providers strict|fallback controls whether anything else may serve it. \
+                             List what is available with `abacus providers`."
+                        ),
+                    ));
+                    self.follow = true;
+                    return true;
+                }
+                let lowered = argument.to_ascii_lowercase();
+                let outcome = match lowered.as_str() {
+                    "clear" | "none" | "off" => self.active_profile_mut().map(|profile| {
+                        profile.providers.clear();
+                        "providers unpinned".to_owned()
+                    }),
+                    "strict" => self.active_profile_mut().map(|profile| {
+                        profile.allow_fallbacks = false;
+                        "strict: only pinned providers may serve this model".to_owned()
+                    }),
+                    "fallback" | "fallbacks" => self.active_profile_mut().map(|profile| {
+                        profile.allow_fallbacks = true;
+                        "fallbacks allowed".to_owned()
+                    }),
+                    _ => {
+                        let order = crate::config::Routing::parse_order(argument);
+                        self.active_profile_mut().map(|profile| {
+                            let summary = order.join(", ");
+                            profile.providers = order;
+                            format!("pinned to {summary}")
+                        })
+                    }
+                };
+                match outcome.and_then(|summary| {
+                    self.save_and_apply_settings()?;
+                    Ok(summary)
+                }) {
+                    Ok(summary) => self.status = summary,
+                    Err(error) => self.status = format!("routing error: {error:#}"),
                 }
                 self.follow = true;
                 true
@@ -2063,6 +2146,10 @@ impl App {
                 self.open_profile_picker();
                 return Ok(());
             }
+            ConfigKey::Fallbacks => {
+                let profile = self.active_profile_mut()?;
+                profile.allow_fallbacks = !profile.allow_fallbacks;
+            }
             ConfigKey::Protocol => {
                 let profile = self.active_profile_mut()?;
                 profile.protocol = match profile.protocol {
@@ -2167,6 +2254,9 @@ impl App {
             ConfigKey::BaseUrl => self.active_profile_mut().map(|profile| {
                 profile.base_url = value.trim().trim_end_matches('/').to_owned();
             }),
+            ConfigKey::Providers => self.active_profile_mut().map(|profile| {
+                profile.providers = crate::config::Routing::parse_order(&value);
+            }),
             ConfigKey::MaxSteps => value
                 .trim()
                 .parse::<usize>()
@@ -2234,6 +2324,17 @@ impl App {
             ConfigKey::Protocol => profile
                 .map(|value| format!("{:?}", value.protocol))
                 .unwrap_or_default(),
+            ConfigKey::Providers => {
+                let pinned = profile
+                    .map(|profile| profile.providers.clone())
+                    .unwrap_or_default();
+                if pinned.is_empty() {
+                    "any (endpoint chooses)".to_owned()
+                } else {
+                    pinned.join(", ")
+                }
+            }
+            ConfigKey::Fallbacks => on_off(profile.is_none_or(|profile| profile.allow_fallbacks)),
             // Report where the credential comes from, never the credential.
             ConfigKey::ApiKey => {
                 let env = profile.and_then(|value| value.api_key_env.as_deref());
@@ -2431,6 +2532,8 @@ impl App {
                 model: String::new(),
                 protocol,
                 api_key_env: env_key.clone(),
+                providers: Vec::new(),
+                allow_fallbacks: true,
             },
         );
         // Deliberately persisted but *not* applied: a profile with no model
@@ -5972,6 +6075,8 @@ fn config_label(key: ConfigKey) -> &'static str {
         ConfigKey::Model => "Model",
         ConfigKey::BaseUrl => "Provider URL",
         ConfigKey::Protocol => "Wire protocol",
+        ConfigKey::Providers => "Upstream providers",
+        ConfigKey::Fallbacks => "Allow other providers",
         ConfigKey::ApiKey => "API key",
         ConfigKey::Permission => "Permission mode",
         ConfigKey::VimMode => "Vim keybindings",
@@ -5996,6 +6101,7 @@ fn config_key_is_editable(key: ConfigKey) -> bool {
         key,
         ConfigKey::Model
             | ConfigKey::BaseUrl
+            | ConfigKey::Providers
             | ConfigKey::ApiKey
             | ConfigKey::MaxSteps
             | ConfigKey::ToolOutputLimit
@@ -6292,6 +6398,8 @@ mod tests {
                 model: "other-model".into(),
                 protocol: ProviderProtocol::ChatCompletions,
                 api_key_env: None,
+                providers: Vec::new(),
+                allow_fallbacks: true,
             },
         );
         app.open_profile_picker();
@@ -6459,6 +6567,8 @@ mod tests {
                 model: "other".into(),
                 protocol: ProviderProtocol::ChatCompletions,
                 api_key_env: None,
+                providers: Vec::new(),
+                allow_fallbacks: true,
             },
         );
         app.config_panel = Some(ConfigPanel {
@@ -6772,6 +6882,51 @@ mod tests {
         app.input.insert_str("/think");
         let (items, _) = app.visible_completion().expect("a suggestion");
         assert!(items.iter().any(|(value, _)| value == "/thinking"));
+    }
+
+    #[test]
+    fn providers_command_pins_orders_and_clears() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        assert!(app.slash_command("/providers Together, Anthropic"));
+        let profile = app.settings.profiles.get("test").expect("profile");
+        // Order is meaningful — it is a preference list, not a set.
+        assert_eq!(profile.providers, vec!["Together", "Anthropic"]);
+
+        // Whitespace separation works too, since both read naturally.
+        assert!(app.slash_command("/providers DeepInfra Novita"));
+        assert_eq!(
+            app.settings.profiles["test"].providers,
+            vec!["DeepInfra", "Novita"]
+        );
+
+        assert!(app.slash_command("/providers clear"));
+        assert!(app.settings.profiles["test"].providers.is_empty());
+    }
+
+    #[test]
+    fn strict_and_fallback_control_whether_anything_else_may_serve() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        assert!(
+            app.settings.profiles["test"].allow_fallbacks,
+            "on by default"
+        );
+        assert!(app.slash_command("/providers strict"));
+        assert!(!app.settings.profiles["test"].allow_fallbacks);
+        assert!(app.slash_command("/providers fallback"));
+        assert!(app.settings.profiles["test"].allow_fallbacks);
+    }
+
+    #[test]
+    fn providers_with_no_argument_reports_the_current_pin() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.slash_command("/providers");
+        let text = &app.entries.last().expect("a notice").text;
+        assert!(text.contains("No providers pinned"), "{text}");
+
+        app.slash_command("/providers Together");
+        app.slash_command("/providers");
+        let text = &app.entries.last().expect("a notice").text;
+        assert!(text.contains("Together"), "{text}");
     }
 
     #[test]
@@ -7485,6 +7640,8 @@ mod tests {
                 model: "test-model".into(),
                 protocol: ProviderProtocol::ChatCompletions,
                 api_key_env: None,
+                providers: Vec::new(),
+                allow_fallbacks: true,
             },
         );
         let config = Config {
@@ -7502,6 +7659,7 @@ mod tests {
             tool_format: crate::tool_format::ToolFormat::default(),
             mode: None,
             trace_enabled: false,
+            routing: Default::default(),
             web_search: crate::web::WebConfig::default(),
             paths,
         };

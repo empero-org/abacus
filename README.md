@@ -72,6 +72,7 @@ Assistant responses render as terminal-native Markdown, including headings, emph
 | `/sessions` / `/resume <id>` | Pick or resume a saved session |
 | `/rename <title>` | Rename the active session |
 | `/model [id]` | Inspect or switch model |
+| `/providers [names\|clear\|strict\|fallback]` | Pin which upstream suppliers may serve the model (OpenRouter) |
 | `/usage` | View the local activity heatmap, usage totals, and model breakdown |
 | `/mode [auto\|plan\|build]` | Inspect or pin the workflow mode |
 | `/plan` | Toggle the read-only PLAN pin |
@@ -135,6 +136,39 @@ abacus pull all          # traces + every session; or: abacus pull --all ./datas
 A rebuilt record is thinner than a live capture — a session file stores the conversation, not the requests that produced it, so there is no reasoning, no list of tools offered, and no per-call mode. It carries `"source": "session"` so you can weight or drop those samples; a live capture carries `"source": "live"`. Where a session has both, the live capture wins and is never overwritten. (Records written before schema version 2 have no `source` field; they are all live.)
 
 Traces hold your prompts, your code, and your tool output. They never leave the machine, and deleting the directory is the whole cleanup. Turn them off with the `/config` row or `[trace] enabled = false`.
+
+## Pinning upstream providers
+
+OpenRouter fronts many suppliers for the same model, and they are not interchangeable: `z-ai/glm-5.2` is offered at 1M context and fp8 by some, 96k at fp4 by others. Left alone, you get whichever routing picks that day.
+
+```sh
+abacus providers                 # what can serve the active model, ✓ marks the pin
+```
+
+```text
+  ✓ DeepInfra    deepinfra/fp4                1.0M ctx  fp4
+    GMICloud     gmicloud/fp8                 1.0M ctx  fp8
+    Cloudflare   cloudflare/fp8             384.0k ctx  fp8
+```
+
+Pin from the TUI, in preference order:
+
+```text
+/providers Together, Anthropic   # or whitespace-separated
+/providers strict                # only these may serve it — fail rather than reroute
+/providers fallback              # allow others when none can
+/providers clear                 # back to letting the endpoint choose
+```
+
+Either spelling OpenRouter reports works — the display name (`Z.AI`) or the endpoint tag (`z-ai/fp8`) — and the value is passed through verbatim as `provider.order`. The same settings live in `/config` under **Upstream providers** and **Allow other providers**, and in the profile:
+
+```toml
+[profiles.glm]
+providers = ["DeepInfra", "Z.AI"]
+allow_fallbacks = false
+```
+
+The `provider` field is only sent to OpenRouter endpoints. A pin on a profile pointed elsewhere is inert rather than a request another server would reject.
 
 ## Coding tools
 

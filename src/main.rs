@@ -215,6 +215,67 @@ async fn main() -> Result<()> {
             }
             return Ok(());
         }
+        Some(Command::Providers) => {
+            use abacus_agent::console;
+            let endpoints = setup::discover_endpoints(
+                &config.base_url,
+                config.api_key.as_deref(),
+                &config.model,
+            )
+            .await?;
+            console::banner(&format!("providers for {}", config.model));
+            console::blank();
+            if endpoints.is_empty() {
+                console::note("The endpoint reported no upstream providers for this model.");
+                console::blank();
+                return Ok(());
+            }
+            let pinned = &config.routing.order;
+            let width = endpoints
+                .iter()
+                .map(|endpoint| endpoint.name.len())
+                .max()
+                .unwrap_or(16);
+            for endpoint in &endpoints {
+                // Mark what the active profile already pins, so the list doubles
+                // as a view of the current routing.
+                let marker = if pinned.iter().any(|entry| {
+                    entry.eq_ignore_ascii_case(&endpoint.name) || *entry == endpoint.tag
+                }) {
+                    console::ok(console::marks().pass)
+                } else {
+                    " ".to_owned()
+                };
+                println!(
+                    "  {marker} {}  {}  {}",
+                    console::pad(&endpoint.name, width),
+                    console::dim(&console::pad(&endpoint.tag, 22)),
+                    console::dim(&format!(
+                        "{:>9} ctx  {}",
+                        abacus_agent::ui::format_count(endpoint.context_length),
+                        endpoint.quantization
+                    )),
+                );
+            }
+            console::blank();
+            if pinned.is_empty() {
+                console::note(
+                    "Nothing pinned — the endpoint chooses. Pin with /providers <name, name>.",
+                );
+            } else {
+                console::note(&format!(
+                    "Pinned: {}  ·  fallbacks {}",
+                    pinned.join(", "),
+                    if config.routing.allow_fallbacks {
+                        "allowed"
+                    } else {
+                        "off"
+                    }
+                ));
+            }
+            console::blank();
+            return Ok(());
+        }
         Some(Command::Sessions) => {
             unreachable!()
         }
