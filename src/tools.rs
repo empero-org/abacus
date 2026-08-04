@@ -894,7 +894,8 @@ impl ToolExecutor {
             bail!("head requires base; pass both revisions to diff a range");
         }
         if let Some(path) = &args.path {
-            let _ = self.resolve_for_write(path)?;
+            let resolved = self.resolve_for_write(path)?;
+            guard_secret(&resolved)?;
         }
         let base = args.base.as_deref().map(validate_ref).transpose()?;
         let head = args.head.as_deref().map(validate_ref).transpose()?;
@@ -970,7 +971,8 @@ impl ToolExecutor {
         }
         let args: Args = parse_args(arguments)?;
         if let Some(path) = &args.path {
-            self.resolve_for_write(path)?;
+            let resolved = self.resolve_for_write(path)?;
+            guard_secret(&resolved)?;
         }
         let mut command = Command::new("git");
         command.args([
@@ -2210,6 +2212,50 @@ mod tests {
         }
         assert!(!dir.path().join("../outside").exists());
         assert!(!dir.path().join(".env").exists());
+    }
+
+    #[tokio::test]
+    async fn git_diff_and_log_block_dotenv_path_filter() {
+        let dir = tempdir().unwrap();
+        init_repo(dir.path());
+        fs::write(dir.path().join(".env"), "TOKEN=secret\n").unwrap();
+        StdCommand::new("git")
+            .args(["add", ".env"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["commit", "-m", "baseline"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        fs::write(dir.path().join(".env"), "TOKEN=leaked\n").unwrap();
+
+        let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
+        let diff = ToolCall {
+            id: "d".into(),
+            name: "git_diff".into(),
+            arguments: r#"{"path":".env"}"#.into(),
+        };
+        let output = tools.execute(&diff).await;
+        assert!(output.contains("Error:"), "git_diff must guard .env: {output}");
+        assert!(!output.contains("leaked"));
+
+        let log = ToolCall {
+            id: "l".into(),
+            name: "git_log".into(),
+            arguments: r#"{"path":".env"}"#.into(),
+        };
+        let output = tools.execute(&log).await;
+        assert!(output.contains("Error:"), "git_log must guard .env: {output}");
+
+        fs::write(dir.path().join("file.txt"), "hi\n").unwrap();
+        let diff = ToolCall {
+            id: "d2".into(),
+            name: "git_diff".into(),
+            arguments: r#"{"path":"file.txt"}"#.into(),
+        };
+        assert!(!tools.execute(&diff).await.starts_with("Error:"));
     }
 
     #[tokio::test]
