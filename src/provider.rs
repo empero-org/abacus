@@ -96,7 +96,16 @@ impl Provider {
         let client = Client::builder()
             .user_agent(concat!("abacus-agent/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(600))
+            // Bound INACTIVITY, not total runtime. A total timeout is wrong for
+            // a streaming completion: generation time scales with output length
+            // and model speed, so any fixed ceiling eventually cuts off a
+            // legitimate long answer mid-stream (a 13B on CPU emits ~4 tok/s, so
+            // a single-file HTML app is 15+ minutes and blew the old 600s cap
+            // with the plan already streamed). read_timeout fires only when no
+            // byte arrives for the whole window, which still catches a genuinely
+            // dead connection or a wedged server -- including on non-streaming
+            // requests -- without punishing slow-but-alive ones.
+            .read_timeout(Duration::from_secs(180))
             .build()
             .context("could not create HTTP client")?;
         Ok(Self {
