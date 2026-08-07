@@ -1165,7 +1165,55 @@ fn build_provider_messages(
         "role": "system",
         "content": mode_prompt(active_mode)
     }));
-    provider_messages
+    merge_system_messages(provider_messages)
+}
+
+/// Fold every non-leading `system` message into a single leading one.
+///
+/// Abacus layers context (extensions, rolling summary, goal, tasks, mode) as
+/// system messages appended AFTER the conversation, and compaction inserts a
+/// system note mid-array. OpenAI- and Anthropic-shaped APIs accept a system
+/// message at any index, but strict chat templates do not: the Qwen3.5 family
+/// (Eden among them) renders `raise_exception('System message must be at the
+/// beginning.')`, so every turn fails with a provider 500 before the model is
+/// ever reached.
+///
+/// Merging concatenates the blocks in their existing order into one system
+/// message at index 0, so no content and no relative ordering is lost -- the
+/// same session now works on both permissive and strict backends. Non-string
+/// system content (multimodal parts; Abacus never builds one) is left in place
+/// rather than dropped.
+fn merge_system_messages(messages: Vec<Value>) -> Vec<Value> {
+    if !messages
+        .iter()
+        .skip(1)
+        .any(|message| message["role"] == "system" && message["content"].is_string())
+    {
+        return messages;
+    }
+
+    let mut merged = String::new();
+    let mut rest: Vec<Value> = Vec::with_capacity(messages.len());
+    for message in messages {
+        match (message["role"].as_str(), message["content"].as_str()) {
+            (Some("system"), Some(content)) => {
+                if !content.is_empty() {
+                    if !merged.is_empty() {
+                        merged.push_str("\n\n");
+                    }
+                    merged.push_str(content);
+                }
+            }
+            _ => rest.push(message),
+        }
+    }
+
+    let mut out = Vec::with_capacity(rest.len() + 1);
+    if !merged.is_empty() {
+        out.push(json!({"role": "system", "content": merged}));
+    }
+    out.extend(rest);
+    out
 }
 
 pub fn initial_messages(workspace: &Path) -> Vec<Value> {
@@ -1208,6 +1256,53 @@ fn system_prompt(workspace: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merges_trailing_system_messages_into_the_leading_one() {
+        // The shape build_provider_messages produces: base system prompt,
+        // conversation, then layered context appended at the end.
+        let merged = merge_system_messages(vec![
+            json!({"role":"system","content":"base"}),
+            json!({"role":"user","content":"hey"}),
+            json!({"role":"assistant","content":"hi"}),
+            json!({"role":"system","content":"goal"}),
+            json!({"role":"system","content":"mode"}),
+        ]);
+
+        // Exactly one system message, and it is first -- what strict Qwen3.5
+        // templates require.
+        assert_eq!(merged.len(), 3, "3 system messages collapse to 1, + user + assistant");
+        assert_eq!(merged[0]["role"], "system");
+        assert_eq!(merged[0]["content"], "base\n\ngoal\n\nmode");
+        assert!(
+            merged.iter().skip(1).all(|m| m["role"] != "system"),
+            "no system message may follow the first"
+        );
+        // Conversation order is untouched.
+        assert_eq!(merged[1]["content"], "hey");
+        assert_eq!(merged[2]["content"], "hi");
+    }
+
+    #[test]
+    fn merges_the_mid_array_system_note_compaction_inserts() {
+        let merged = merge_system_messages(vec![
+            json!({"role":"system","content":"base"}),
+            json!({"role":"system","content":"3 older messages were omitted"}),
+            json!({"role":"user","content":"hey"}),
+        ]);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0]["content"], "base\n\n3 older messages were omitted");
+        assert_eq!(merged[1]["role"], "user");
+    }
+
+    #[test]
+    fn leaves_an_already_valid_message_list_untouched() {
+        let messages = vec![
+            json!({"role":"system","content":"base"}),
+            json!({"role":"user","content":"hey"}),
+        ];
+        assert_eq!(merge_system_messages(messages.clone()), messages);
+    }
 
     #[test]
     fn assistant_tool_message_has_provider_shape() {
