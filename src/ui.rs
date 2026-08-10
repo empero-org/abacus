@@ -713,6 +713,7 @@ pub fn transcript(
 /// The user's turn, marked by a solid accent rail down the left edge. The rail
 /// repeats on wrapped rows so a long prompt stays visually bounded.
 fn user_block(body: &str, width: usize) -> Vec<Line<'static>> {
+    let tint = theme::active().user_bg;
     let bar = vec![Span::styled(
         format!("{} ", glyphs().bar),
         Style::default().fg(primary()).add_modifier(Modifier::BOLD),
@@ -725,7 +726,35 @@ fn user_block(body: &str, width: usize) -> Vec<Line<'static>> {
         )];
         lines.extend(wrap(&spans, width, &bar, &bar));
     }
-    lines
+    // The prompt renders as a card: a quiet tint band behind the whole block,
+    // padded to the measure and given a breathing row above and below, so the
+    // messages that structure the conversation stand out at a glance. With no
+    // tint in the palette (16-colour, NO_COLOR) the rail alone carries it and
+    // the padding rows are omitted rather than wasting two blank lines.
+    if tint == Color::Reset {
+        return lines;
+    }
+    let pad_row = || Line::from(Span::styled(" ".repeat(width), Style::default().bg(tint)));
+    let mut card = vec![pad_row()];
+    for mut line in lines {
+        let used: usize = line
+            .spans
+            .iter()
+            .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+            .sum();
+        for span in &mut line.spans {
+            span.style = span.style.bg(tint);
+        }
+        if used < width {
+            line.spans.push(Span::styled(
+                " ".repeat(width - used),
+                Style::default().bg(tint),
+            ));
+        }
+        card.push(line);
+    }
+    card.push(pad_row());
+    card
 }
 
 /// The model thinking aloud. Dimmed and italic behind a quiet rail, so it reads
@@ -1053,6 +1082,36 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    #[test]
+    fn user_block_renders_as_a_full_width_tinted_card() {
+        let tint = theme::active().user_bg;
+        if tint == Color::Reset {
+            // NO_COLOR run: the card degrades to the plain rail block.
+            return;
+        }
+        let lines = user_block("hello there", 40);
+        assert!(lines.len() >= 3, "padding row above and below the text");
+        for line in &lines {
+            let width: usize = line
+                .spans
+                .iter()
+                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                .sum();
+            assert_eq!(
+                width,
+                40,
+                "every row pads to the measure: {:?}",
+                plain(line)
+            );
+            assert!(
+                line.spans.iter().all(|span| span.style.bg == Some(tint)),
+                "every span carries the tint"
+            );
+        }
+        assert_eq!(plain(&lines[0]).trim(), "", "top padding row is blank");
+        assert!(plain(&lines[1]).contains("hello there"));
     }
 
     #[test]

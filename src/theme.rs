@@ -72,6 +72,9 @@ pub struct Theme {
     pub rail: Color,
     /// Fill behind the selected row of a list, palette, or picker.
     pub selection: Color,
+    /// Tint band behind a user message, so the prompts that structure the
+    /// conversation read as cards without needing a heavier marker.
+    pub user_bg: Color,
     /// Fill for raised surfaces — modals and the completion popup — so an
     /// overlay reads as floating above the transcript rather than punched
     /// through it.
@@ -102,6 +105,7 @@ impl Theme {
         del_bg: Color::Rgb(54, 24, 30),
         rail: Color::Rgb(62, 56, 80),
         selection: Color::Rgb(45, 33, 68),
+        user_bg: Color::Rgb(33, 28, 46),
         overlay: Color::Rgb(27, 22, 39),
         plain: false,
     };
@@ -125,6 +129,7 @@ impl Theme {
         del_bg: Color::Rgb(244, 220, 222),
         rail: Color::Rgb(198, 190, 178),
         selection: Color::Rgb(226, 216, 243),
+        user_bg: Color::Rgb(237, 232, 243),
         overlay: Color::Rgb(250, 248, 244),
         plain: false,
     };
@@ -151,6 +156,7 @@ impl Theme {
         del_bg: Color::Reset,
         rail: Color::Reset,
         selection: Color::Reset,
+        user_bg: Color::Reset,
         overlay: Color::Reset,
         plain: true,
     };
@@ -195,6 +201,7 @@ impl Theme {
             del_bg: f(self.del_bg),
             rail: f(self.rail),
             selection: f(self.selection),
+            user_bg: f(self.user_bg),
             overlay: f(self.overlay),
             plain: self.plain,
         }
@@ -249,6 +256,8 @@ impl Theme {
             del_bg: Color::Reset,
             rail: Color::DarkGray,
             selection: if dark { Color::DarkGray } else { Color::Gray },
+            // Same rationale as `surface`: sixteen colours have no subtle band.
+            user_bg: Color::Reset,
             overlay: Color::Reset,
             plain: self.plain,
         }

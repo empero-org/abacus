@@ -4915,7 +4915,13 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     // Contextual hints: only the keys that do something in the current state.
     let pairs: &[(&str, &str)] = if running {
-        &[("esc", "to interrupt"), ("^C", "twice to quit")]
+        // Typing during a turn queues rather than being lost — worth saying,
+        // since most tools silently drop input here.
+        &[
+            ("⏎", "queue message"),
+            ("esc", "to interrupt"),
+            ("^C", "twice to quit"),
+        ]
     } else if app.mode == InputMode::Normal {
         &[
             ("j/k", "blocks"),
@@ -6046,7 +6052,11 @@ fn draw_approval(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(3)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(3),
+            Constraint::Length(4),
+        ])
         .split(inner);
 
     let mut header = vec![Line::from(vec![
@@ -6124,6 +6134,40 @@ fn draw_approval(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     ))),
             ),
         sections[1],
+    );
+
+    // The choices spelled out as sentences. The rejection line matters most:
+    // saying what rejection *leads to* keeps it from reading as a dead end.
+    let option = |key: &str, label: &str, lead: bool| {
+        Line::from(vec![
+            Span::styled(
+                format!("  {key}  "),
+                Style::default()
+                    .fg(if lead { success() } else { primary() })
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                label.to_owned(),
+                Style::default().fg(if lead { text() } else { muted() }),
+            ),
+        ])
+    };
+    frame.render_widget(
+        Paragraph::new(Text::from(vec![
+            Line::from(""),
+            option("y", "Yes, run it once", true),
+            option(
+                "a",
+                "Yes, and allow this for the rest of the session",
+                false,
+            ),
+            option(
+                "n",
+                "No — reject it, then tell Abacus in chat what to do instead",
+                false,
+            ),
+        ])),
+        sections[2],
     );
 }
 
@@ -7283,6 +7327,31 @@ mod tests {
             KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()),
         );
         assert!(app.rewind_armed.is_none());
+    }
+
+    #[test]
+    fn approval_modal_spells_out_the_choices() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        let (respond, _receive) = tokio::sync::oneshot::channel();
+        app.set_approval(crate::agent::ApprovalRequest {
+            tool: "run_command".into(),
+            summary: "rm -rf build/".into(),
+            details: "$ rm -rf build/".into(),
+            respond,
+        });
+        let backend = TestBackend::new(110, 34);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let rendered = buffer_text(terminal.backend().buffer(), 110, 34);
+        assert!(rendered.contains("Yes, run it once"), "{rendered}");
+        assert!(
+            rendered.contains("allow this for the rest of the session"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("tell Abacus in chat what to do instead"),
+            "{rendered}"
+        );
     }
 
     #[test]
