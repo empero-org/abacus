@@ -17,6 +17,9 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+arboard = { version = "3", features = ["wayland-data-control"] }
+base64 = "0.22"
+png = "0.17"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"

@@ -776,6 +776,7 @@ pub struct AbacusPaths {
     pub credentials_file: PathBuf,
     pub sessions_dir: PathBuf,
     pub traces_dir: PathBuf,
+    pub attachments_dir: PathBuf,
 }
 
 impl AbacusPaths {
@@ -796,6 +797,7 @@ impl AbacusPaths {
             credentials_file: root.join("credentials.toml"),
             sessions_dir: root.join("sessions"),
             traces_dir: root.join("traces"),
+            attachments_dir: root.join("attachments"),
             root,
         }
     }

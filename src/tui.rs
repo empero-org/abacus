@@ -1167,6 +1167,45 @@ impl App {
         self.start_turn(prompt, effective_prompt, true);
     }
 
+    /// Ctrl+V. An image on the clipboard is saved under the attachments
+    /// directory and referenced from the composer with a short `[image:…]`
+    /// token the user can still edit around or delete; text is inserted as-is.
+    fn paste_from_clipboard(&mut self) {
+        match crate::clipboard::read_image() {
+            Ok(Some(image)) => {
+                match crate::clipboard::save_attachment(&self.config.paths.attachments_dir, &image)
+                {
+                    Ok((token, _)) => {
+                        let needs_space =
+                            !self.input.is_empty() && !self.input.text().ends_with(' ');
+                        if needs_space {
+                            self.input.insert(' ');
+                        }
+                        self.input.insert_str(&token);
+                        self.status = format!("image attached ({}x{})", image.width, image.height);
+                    }
+                    Err(error) => self.status = format!("could not save image: {error:#}"),
+                }
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                // No clipboard backend at all: still try the text utilities
+                // before reporting, so plain text paste keeps working on
+                // setups arboard cannot reach.
+                if let Some(text) = clipboard_text() {
+                    self.input.insert_str(&text);
+                } else {
+                    self.status = format!("{error:#}");
+                }
+                return;
+            }
+        }
+        if let Some(text) = clipboard_text() {
+            self.input.insert_str(&text);
+        }
+    }
+
     fn start_turn(&mut self, display_prompt: String, effective_prompt: String, display: bool) {
         if self.running.is_some() {
             return;
@@ -1191,10 +1230,18 @@ impl App {
             // Ralph iterations must receive the exact same prompt bytes every time.
             effective_prompt
         };
-        self.messages
-            .push(json!({"role": "user", "content": model_prompt}));
-        // Account for the user message just added to the context.
-        self.ctx_chars = self.ctx_chars.saturating_add(model_prompt.len() + 40);
+        // Resolve `[image:…]` paste tokens and `@file.png` references into
+        // vision content parts; a text-only prompt stays a plain string.
+        let content = crate::context::user_content(
+            &self.config.workspace,
+            &self.config.paths.attachments_dir,
+            &model_prompt,
+        );
+        let message = json!({"role": "user", "content": content});
+        self.ctx_chars = self
+            .ctx_chars
+            .saturating_add(crate::agent::message_chars_one(&message));
+        self.messages.push(message);
         self.persist_session();
         self.receiving_delta = false;
         self.follow = true;
@@ -3710,14 +3757,13 @@ fn handle_insert_key(app: &mut App, key: KeyEvent) {
                 app.accept_completion();
             }
         }
-        // Ctrl+V: paste from the system clipboard. Bracketed paste
-        // (EnableBracketedPaste) already handles terminals that send paste
-        // contents as an Event::Paste; this covers terminals that send the raw
-        // Ctrl+V byte instead, and any terminal without bracketed-paste support.
+        // Ctrl+V: paste from the system clipboard. Images first — a terminal's
+        // own paste can only ever deliver text, so this key is the sole route
+        // by which a screenshot on the clipboard can reach the prompt. With no
+        // image present it falls through to text, covering terminals that send
+        // the raw Ctrl+V byte instead of a bracketed paste.
         KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if let Some(text) = clipboard_text() {
-                app.input.insert_str(&text);
-            }
+            app.paste_from_clipboard();
         }
         KeyCode::Char(ch)
             if !key
@@ -5271,6 +5317,15 @@ fn format_count(value: u64) -> String {
 /// Linux uses `xclip`/`xsel` (whichever is available); Windows uses `clip`.
 fn clipboard_text() -> Option<String> {
     use std::process::Command;
+    // Native clipboard first: works on Wayland, X11, macOS and Windows with
+    // no external tools. The subprocess paths below remain as a fallback for
+    // environments where arboard cannot connect (odd SSH/X forwarding).
+    if let Ok(mut clipboard) = arboard::Clipboard::new()
+        && let Ok(text) = clipboard.get_text()
+        && !text.is_empty()
+    {
+        return Some(text);
+    }
     let result = if cfg!(target_os = "macos") {
         Command::new("pbpaste").output()
     } else if cfg!(target_os = "linux") {

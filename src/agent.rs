@@ -674,6 +674,23 @@ pub fn message_chars(messages: &[Value]) -> usize {
 }
 
 pub fn message_chars_one(message: &Value) -> usize {
+    // Image parts carry base64 payloads that are huge on the wire but cost a
+    // roughly fixed number of vision tokens, so counting their raw length
+    // would make the context estimate useless after one screenshot.
+    const IMAGE_PART_CHARS: usize = 6_000;
+    if let Some(parts) = message.get("content").and_then(Value::as_array) {
+        let content: usize = parts
+            .iter()
+            .map(|part| {
+                if part.get("type").and_then(Value::as_str) == Some("image_url") {
+                    IMAGE_PART_CHARS
+                } else {
+                    serde_json::to_string(part).map_or(0, |value| value.len())
+                }
+            })
+            .sum();
+        return content + 40;
+    }
     serde_json::to_string(message).map_or(0, |value| value.len())
 }
 
