@@ -1271,7 +1271,11 @@ mod tests {
 
         // Exactly one system message, and it is first -- what strict Qwen3.5
         // templates require.
-        assert_eq!(merged.len(), 3, "3 system messages collapse to 1, + user + assistant");
+        assert_eq!(
+            merged.len(),
+            3,
+            "3 system messages collapse to 1, + user + assistant"
+        );
         assert_eq!(merged[0]["role"], "system");
         assert_eq!(merged[0]["content"], "base\n\ngoal\n\nmode");
         assert!(
@@ -1291,7 +1295,10 @@ mod tests {
             json!({"role":"user","content":"hey"}),
         ]);
         assert_eq!(merged.len(), 2);
-        assert_eq!(merged[0]["content"], "base\n\n3 older messages were omitted");
+        assert_eq!(
+            merged[0]["content"],
+            "base\n\n3 older messages were omitted"
+        );
         assert_eq!(merged[1]["role"], "user");
     }
 
