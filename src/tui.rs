@@ -552,6 +552,9 @@ struct App {
     receiving_thinking: bool,
     /// How the previous turn ended, or `None` if it completed cleanly.
     last_outcome: Option<TurnOutcome>,
+    /// When Esc was last pressed on an idle, empty composer — the first press
+    /// arms the rewind, a second within the window performs it.
+    rewind_armed: Option<Instant>,
     /// Clickable regions from the last frame. `RefCell` because the draw
     /// helpers take `&App` — recording where something landed is not a
     /// meaningful mutation of application state.
@@ -746,6 +749,7 @@ impl App {
             turn_had_tools: false,
             receiving_thinking: false,
             last_outcome: None,
+            rewind_armed: None,
             trace: None,
             last_scroll: None,
             draft: None,
@@ -802,6 +806,88 @@ impl App {
             .last_mut()
             .filter(|entry| entry.kind == EntryKind::Tool)
             .and_then(|entry| entry.tool.as_mut())
+    }
+
+    /// Collapse a run of successful read-only tool rows into one "explored"
+    /// row. A session step that reads five files and greps twice becomes a
+    /// single `explored read a.rs · grep 'x' · …` line instead of seven rows
+    /// of near-identical noise; expanding it shows every result, labelled.
+    /// A failed call, a mutation, or any prose between calls breaks the run —
+    /// failures and writes must stay individually visible.
+    fn group_exploration(&mut self) {
+        let count = self.entries.len();
+        if count < 2 {
+            return;
+        }
+        let explorable = |call: &ToolCall| {
+            call.status == ToolStatus::Ok
+                && !call.expanded
+                && crate::agent::tool_reads_only(&call.name)
+        };
+        let current_fits = self.entries[count - 1]
+            .tool
+            .as_ref()
+            .is_some_and(explorable);
+        let previous = self.entries[count - 2].tool.as_ref();
+        let previous_is_group =
+            previous.is_some_and(|call| call.name == "explored" && call.status == ToolStatus::Ok);
+        let previous_fits = previous.is_some_and(explorable);
+        if !current_fits || (!previous_is_group && !previous_fits) {
+            return;
+        }
+        let Some(current) = self.entries.pop().and_then(|entry| entry.tool) else {
+            return;
+        };
+        let Some(target) = self.open_tool() else {
+            return;
+        };
+        if !previous_is_group {
+            target.full = format!(
+                "── {} {} ──\n{}",
+                target.name,
+                target.summary,
+                if target.full.is_empty() {
+                    "(no output)"
+                } else {
+                    &target.full
+                }
+            );
+            target.summary = format!("{} {}", explore_verb(&target.name), target.summary);
+            target.name = "explored".to_owned();
+            // The group header is the content; per-call previews live behind
+            // the fold.
+            target.output = String::new();
+        }
+        target.summary = ui::truncate(
+            &format!(
+                "{} · {} {}",
+                target.summary,
+                explore_verb(&current.name),
+                current.summary
+            ),
+            200,
+        );
+        target.full.push_str(&format!(
+            "\n\n── {} {} ──\n{}",
+            current.name,
+            current.summary,
+            if current.full.is_empty() {
+                "(no output)"
+            } else {
+                &current.full
+            }
+        ));
+        if target.full.len() > ui::MAX_RETAINED_OUTPUT {
+            let mut boundary = ui::MAX_RETAINED_OUTPUT;
+            while !target.full.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            target.full.truncate(boundary);
+        }
+        target.duration_ms = match (target.duration_ms, current.duration_ms) {
+            (Some(a), Some(b)) => Some(a + b),
+            (a, b) => a.or(b),
+        };
     }
 
     /// Kick off a prediction of the user's next message. Only when the composer
@@ -957,6 +1043,7 @@ impl App {
                             expanded: false,
                         }));
                     }
+                    self.group_exploration();
                     self.status = "thinking".to_owned();
                 }
                 AgentEvent::ModeChanged { mode, reason } => {
@@ -1194,6 +1281,41 @@ impl App {
         };
 
         self.start_turn(prompt, effective_prompt, true);
+    }
+
+    /// Esc-esc: fork the session from just before the most recent prompt.
+    /// The prompt returns to the composer for editing; the turn it produced
+    /// is discarded from history (and from the saved session — this is a
+    /// fork, not an undo stack). Repeating steps back one prompt at a time.
+    fn rewind_to_previous_prompt(&mut self) {
+        let Some(entry_index) = self
+            .entries
+            .iter()
+            .rposition(|entry| entry.kind == EntryKind::User)
+        else {
+            self.status = "nothing to rewind".to_owned();
+            return;
+        };
+        let Some(message_index) = self
+            .messages
+            .iter()
+            .rposition(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        else {
+            self.status = "nothing to rewind".to_owned();
+            return;
+        };
+        let prompt = self.entries[entry_index].text.clone();
+        self.entries.truncate(entry_index);
+        self.entries_rev = self.entries_rev.wrapping_add(1);
+        self.clear_cursor();
+        self.messages.truncate(message_index);
+        self.ctx_chars = message_chars(&self.messages);
+        self.clear_draft();
+        self.input.clear();
+        self.input.insert_str(&prompt);
+        self.follow = true;
+        self.persist_session();
+        self.status = "rewound — edit and resend, or esc esc to step further back".to_owned();
     }
 
     /// Ctrl+V. An image on the clipboard is saved under the attachments
@@ -3233,6 +3355,10 @@ async fn event_loop(
         dirty |= app.drain_feedback_events();
         dirty |= app.drain_services_events();
         dirty |= app.drain_draft_events();
+        // A running turn animates (spinner, shimmer, elapsed) even while the
+        // stream is silent — e.g. during a long tool call — so redraw on every
+        // poll tick rather than only when an event arrives.
+        dirty |= app.running.is_some() && app.settings.ui.animations;
         app.start_services_reload();
         if dirty {
             terminal.draw(|frame| draw(frame, app))?;
@@ -3305,6 +3431,10 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     let is_ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
     if !is_ctrl_c {
         app.last_ctrl_c = None;
+    }
+    // Likewise an armed rewind: only an immediate second Esc may fire it.
+    if key.code != KeyCode::Esc {
+        app.rewind_armed = None;
     }
     if app.approval.is_some() {
         match key.code {
@@ -3724,6 +3854,25 @@ fn handle_insert_key(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Esc if app.settings.ui.vim_mode => app.mode = InputMode::Normal,
+        // Esc on an idle, empty composer: double-press rewinds to the previous
+        // prompt for editing. Two presses because the rewind discards the
+        // turn that followed — it must not fire off a stray Esc.
+        KeyCode::Esc if app.input.is_empty() => match app.rewind_armed {
+            Some(armed) if armed.elapsed() < Duration::from_secs(3) => {
+                app.rewind_armed = None;
+                app.rewind_to_previous_prompt();
+            }
+            _ => {
+                if app
+                    .entries
+                    .iter()
+                    .any(|entry| entry.kind == EntryKind::User)
+                {
+                    app.rewind_armed = Some(Instant::now());
+                    app.status = "esc again to rewind and edit your last message".to_owned();
+                }
+            }
+        },
         // Outside vim mode Esc is otherwise inert; use it to abandon a draft,
         // which is what every other composer does.
         KeyCode::Esc => app.input.clear(),
@@ -3871,7 +4020,32 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
             app.follow = true;
             app.clear_cursor();
         }
-        (_, KeyCode::Esc) => app.clear_cursor(),
+        // With a cursor active Esc clears it; otherwise the same esc-esc
+        // rewind as insert mode, so vim users are not locked out of it.
+        (_, KeyCode::Esc) => {
+            if app.cursor.is_some() {
+                app.clear_cursor();
+            } else if app.running.is_none() && app.input.is_empty() {
+                match app.rewind_armed {
+                    Some(armed) if armed.elapsed() < Duration::from_secs(3) => {
+                        app.rewind_armed = None;
+                        app.rewind_to_previous_prompt();
+                        app.mode = InputMode::Insert;
+                    }
+                    _ => {
+                        if app
+                            .entries
+                            .iter()
+                            .any(|entry| entry.kind == EntryKind::User)
+                        {
+                            app.rewind_armed = Some(Instant::now());
+                            app.status =
+                                "esc again to rewind and edit your last message".to_owned();
+                        }
+                    }
+                }
+            }
+        }
         (_, KeyCode::Enter) => {
             if !app.toggle_cursor_fold(None) {
                 app.mode = InputMode::Insert;
@@ -4696,22 +4870,24 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .turn_started
             .map(|started| started.elapsed())
             .unwrap_or_default();
-        let mut spans = vec![
-            Span::styled(
-                format!(
-                    " {} ",
-                    ui::spinner_frame(elapsed, app.settings.ui.animations)
-                ),
-                Style::default().fg(primary()).add_modifier(Modifier::BOLD),
+        let mut spans = vec![Span::styled(
+            format!(
+                " {} ",
+                ui::spinner_frame(elapsed, app.settings.ui.animations)
             ),
-            // Wide enough for a reasoning-derived header, which carries real
-            // information; hints yield first when the row runs out of room.
-            Span::styled(ui::truncate(&app.status, 44), Style::default().fg(text())),
-            Span::styled(
-                format!("  {}", ui::format_elapsed(elapsed.as_millis() as u64)),
-                Style::default().fg(muted()),
-            ),
-        ];
+            Style::default().fg(primary()).add_modifier(Modifier::BOLD),
+        )];
+        // Wide enough for a reasoning-derived header, which carries real
+        // information; hints yield first when the row runs out of room.
+        spans.extend(ui::shimmer(
+            &ui::truncate(&app.status, 44),
+            elapsed,
+            app.settings.ui.animations,
+        ));
+        spans.push(Span::styled(
+            format!("  {}", ui::format_elapsed(elapsed.as_millis() as u64)),
+            Style::default().fg(muted()),
+        ));
         if app.settings.ui.show_token_rate
             && let Some(rate) = app.token_rate()
         {
@@ -5971,14 +6147,21 @@ fn diff_text(diff: &DiffDocument) -> Text<'static> {
                 Style::default().fg(muted()).bg(surface()),
             ),
         ]));
+        let mut past_first_hunk = false;
         for line in &file.lines {
             match line.kind {
-                DiffLineKind::Hunk => lines.push(Line::from(Span::styled(
-                    format!("     {}", line.text),
-                    Style::default()
-                        .fg(primary())
-                        .bg(crate::theme::active().code_bg),
-                ))),
+                // The line-number gutter already says where a hunk sits, so
+                // the noisy `@@ -a,b +c,d @@` header earns no row. Hunks after
+                // the first get a quiet elision mark for the skipped lines.
+                DiffLineKind::Hunk => {
+                    if past_first_hunk {
+                        lines.push(Line::from(Span::styled(
+                            format!("     {}", ui::glyphs().gap),
+                            Style::default().fg(muted()),
+                        )));
+                    }
+                    past_first_hunk = true;
+                }
                 DiffLineKind::Addition | DiffLineKind::Deletion | DiffLineKind::Context => {
                     let palette = crate::theme::active();
                     let (marker, foreground, background) = match line.kind {
@@ -6105,6 +6288,25 @@ fn retain_output(output: &str) -> String {
 fn tool_failed(output: &str) -> bool {
     let head = output.trim_start();
     head.starts_with("Error:") || head.starts_with("error:") || head.starts_with("User rejected")
+}
+
+/// Short verb for a read-only tool inside an "explored" group summary.
+fn explore_verb(name: &str) -> &'static str {
+    match name {
+        "read_file" | "read_files" => "read",
+        "list_files" => "list",
+        "glob" => "glob",
+        "grep" => "grep",
+        "tool_search" | "skill_search" => "search",
+        "git_status" => "git status",
+        "git_diff" => "git diff",
+        "git_log" => "git log",
+        "git_show" => "git show",
+        "git_blame" => "git blame",
+        "web_search" => "web",
+        "read_page" => "fetch",
+        _ => "read",
+    }
 }
 
 /// Mine the streaming reasoning for a live status header: the most recent
@@ -6977,6 +7179,154 @@ mod tests {
         app.settings.ui.show_token_rate = false;
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert!(!buffer_text(terminal.backend().buffer(), 110, 16).contains("tok/s"));
+    }
+
+    #[test]
+    fn consecutive_read_only_tools_collapse_into_an_explored_group() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        for (name, summary, output) in [
+            ("read_file", "src/a.rs", "fn a() {}"),
+            ("grep", "'pattern'", "src/a.rs:3: match"),
+            ("read_file", "src/b.rs", "fn b() {}"),
+        ] {
+            let _ = app.event_tx.send(AgentEvent::ToolStarted {
+                name: name.into(),
+                summary: summary.into(),
+            });
+            let _ = app.event_tx.send(AgentEvent::ToolFinished {
+                name: name.into(),
+                output: output.into(),
+            });
+        }
+        assert!(app.drain_agent_events());
+        let tools: Vec<_> = app
+            .entries
+            .iter()
+            .filter_map(|entry| entry.tool.as_ref())
+            .collect();
+        assert_eq!(tools.len(), 1, "three reads collapse to one row");
+        let group = tools[0];
+        assert_eq!(group.name, "explored");
+        assert!(group.summary.contains("read src/a.rs"), "{}", group.summary);
+        assert!(
+            group.summary.contains("grep 'pattern'"),
+            "{}",
+            group.summary
+        );
+        // Expansion shows each call's full result, labelled.
+        assert!(group.full.contains("── read_file src/a.rs ──"));
+        assert!(group.full.contains("fn b() {}"));
+    }
+
+    #[test]
+    fn writes_and_failures_do_not_join_an_exploration_group() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        for (name, output) in [
+            ("read_file", "content"),
+            ("write_file", "wrote 3 lines"),
+            ("read_file", "Error: missing"),
+        ] {
+            let _ = app.event_tx.send(AgentEvent::ToolStarted {
+                name: name.into(),
+                summary: "x".into(),
+            });
+            let _ = app.event_tx.send(AgentEvent::ToolFinished {
+                name: name.into(),
+                output: output.into(),
+            });
+        }
+        assert!(app.drain_agent_events());
+        let tools: Vec<_> = app
+            .entries
+            .iter()
+            .filter_map(|entry| entry.tool.as_ref())
+            .collect();
+        assert_eq!(tools.len(), 3, "a write and a failure stay individual rows");
+        assert!(tools.iter().all(|call| call.name != "explored"));
+    }
+
+    #[tokio::test]
+    async fn esc_esc_rewinds_to_the_previous_prompt() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        // Exercise the insert-mode path; vim mode routes Esc through Normal
+        // mode first and has its own arm with the same behavior.
+        app.settings.ui.vim_mode = false;
+        app.messages = vec![
+            serde_json::json!({"role":"system","content":"s"}),
+            serde_json::json!({"role":"user","content":"first question"}),
+            serde_json::json!({"role":"assistant","content":"first answer"}),
+        ];
+        app.push_entry(Entry::new(EntryKind::User, "first question"));
+        app.push_entry(Entry::new(EntryKind::Assistant, "first answer"));
+
+        // One Esc only arms; nothing is discarded yet.
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        assert_eq!(app.messages.len(), 3);
+        assert!(app.status.contains("esc again"), "{}", app.status);
+
+        // A second Esc rewinds: prompt back in the composer, turn discarded.
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        assert_eq!(app.input.text(), "first question");
+        assert_eq!(app.messages.len(), 1, "only the system message remains");
+        assert!(
+            app.entries
+                .iter()
+                .all(|entry| entry.kind != EntryKind::User),
+            "the user entry was rewound"
+        );
+
+        // Any other key disarms: Esc, type, Esc must not rewind.
+        app.input.clear();
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()),
+        );
+        assert!(app.rewind_armed.is_none());
+    }
+
+    #[test]
+    fn diff_hunks_render_a_gap_mark_instead_of_headers() {
+        let diff = DiffDocument::parse(
+            "--- a/x.rs\n+++ b/x.rs\n@@ -1,2 +1,2 @@\n-a\n+b\n@@ -10,2 +10,2 @@\n-c\n+d\n",
+        )
+        .unwrap();
+        let text = diff_text(&diff);
+        let plain: Vec<String> = text
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            !plain.iter().any(|line| line.contains("@@")),
+            "hunk headers must not render: {plain:?}"
+        );
+        assert_eq!(
+            plain.iter().filter(|line| line.trim() == "⋮").count(),
+            1,
+            "one gap between two hunks: {plain:?}"
+        );
+    }
+
+    #[test]
+    fn shimmer_preserves_the_text_and_respects_the_animations_toggle() {
+        let joined = |spans: &[ratatui::text::Span<'_>]| {
+            spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+        let off = ui::shimmer("thinking", Duration::from_millis(500), false);
+        assert_eq!(off.len(), 1);
+        assert_eq!(joined(&off), "thinking");
+        let on = ui::shimmer("thinking", Duration::from_millis(500), true);
+        assert_eq!(on.len(), "thinking".len());
+        assert_eq!(joined(&on), "thinking");
     }
 
     #[test]

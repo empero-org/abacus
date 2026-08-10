@@ -70,6 +70,8 @@ pub struct Glyphs {
     pub repeat: &'static str,
     pub tasks: &'static str,
     pub down: &'static str,
+    /// Vertical ellipsis marking an elided gap between diff hunks.
+    pub gap: &'static str,
     /// Half-block wordmark rows, or `None` where the blocks won't render and
     /// the splash falls back to plain letters.
     pub wordmark: Option<[&'static str; 2]>,
@@ -103,6 +105,7 @@ impl Glyphs {
         repeat: "↻",
         tasks: "▦",
         down: "↓",
+        gap: "⋮",
         wordmark: Some(["▄▀█ █▄▄ ▄▀█ █▀▀ █ █ █▀", "█▀█ █▄█ █▀█ █▄▄ █▄█ ▄█"]),
     };
 
@@ -131,6 +134,7 @@ impl Glyphs {
         repeat: "@",
         tasks: "#",
         down: "v",
+        gap: ":",
         wordmark: None,
     };
 }
@@ -151,6 +155,59 @@ pub fn glyphs() -> &'static Glyphs {
             Glyphs::UNICODE
         }
     })
+}
+
+/// The status header with a highlight band sweeping across it — the "alive"
+/// signal for a running turn. A cosine band (half-width 5 columns, 2-second
+/// period) brightens each character from `muted` toward `text`, bold at the
+/// peak. Truecolor themes blend smoothly; quantized palettes step through
+/// DIM → normal → BOLD; animations off returns one plain span.
+pub fn shimmer(text: &str, elapsed: std::time::Duration, animated: bool) -> Vec<Span<'static>> {
+    let palette = theme::active();
+    if !animated || text.is_empty() {
+        return vec![Span::styled(
+            text.to_owned(),
+            Style::default().fg(palette.text),
+        )];
+    }
+    const PERIOD_MS: u128 = 2_000;
+    const HALF_WIDTH: f64 = 5.0;
+    let characters: Vec<char> = text.chars().collect();
+    let phase = (elapsed.as_millis() % PERIOD_MS) as f64 / PERIOD_MS as f64;
+    let sweep = phase * (characters.len() as f64 + 2.0 * HALF_WIDTH) - HALF_WIDTH;
+    let blend = match (palette.muted, palette.text) {
+        (Color::Rgb(br, bg, bb), Color::Rgb(tr, tg, tb)) => Some(((br, bg, bb), (tr, tg, tb))),
+        _ => None,
+    };
+    characters
+        .into_iter()
+        .enumerate()
+        .map(|(index, ch)| {
+            let distance = (index as f64 - sweep).abs();
+            let intensity = if distance <= HALF_WIDTH {
+                ((distance / HALF_WIDTH) * std::f64::consts::FRAC_PI_2).cos()
+            } else {
+                0.0
+            };
+            let mut style = match blend {
+                Some(((br, bg, bb), (tr, tg, tb))) => {
+                    let mix = |from: u8, to: u8| {
+                        (f64::from(from) + (f64::from(to) - f64::from(from)) * intensity).round()
+                            as u8
+                    };
+                    Style::default().fg(Color::Rgb(mix(br, tr), mix(bg, tg), mix(bb, tb)))
+                }
+                None if intensity < 0.33 => Style::default()
+                    .fg(palette.muted)
+                    .add_modifier(Modifier::DIM),
+                None => Style::default().fg(palette.text),
+            };
+            if intensity > 0.85 {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            Span::styled(ch.to_string(), style)
+        })
+        .collect()
 }
 
 /// The spinner frame for `elapsed`, or a static bullet when the user has turned

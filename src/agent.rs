@@ -814,8 +814,14 @@ fn mode_blocks(mode: AgentMode, call: &ToolCall, requires_approval: bool) -> boo
 /// from `requires_approval`, so a tool has to be named here to escape a mode
 /// gate — a new mutating tool cannot slip through by omission.
 fn is_read_only(call: &ToolCall) -> bool {
+    tool_reads_only(&call.name)
+}
+
+/// Whether a tool only inspects state. Shared with the transcript, which
+/// groups consecutive read-only calls into one "explored" row.
+pub fn tool_reads_only(name: &str) -> bool {
     matches!(
-        call.name.as_str(),
+        name,
         "read_file"
             | "read_files"
             | "list_files"
