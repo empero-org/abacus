@@ -33,6 +33,12 @@ pub struct Provider {
     /// same session go straight to `max_completion_tokens`. Shared across
     /// clones for the same reason `tokens` is.
     prefers_max_completion_tokens: Arc<AtomicBool>,
+    /// Output-token ceiling learned from a provider rejection ("supports at
+    /// most N completion tokens"), 0 when none. Detection can over-report —
+    /// an upstream echoing its context window as the completion cap — and the
+    /// rejection is the authoritative correction, so it is remembered for the
+    /// rest of the session. Shared across clones.
+    learned_output_cap: Arc<AtomicU64>,
     /// Upstream provider pins, sent only to endpoints that understand them.
     routing: crate::config::Routing,
     /// Prompt tokens from the most recent reply — how full the window actually
@@ -119,8 +125,19 @@ impl Provider {
             tokens,
             routing: config.routing.clone(),
             prefers_max_completion_tokens: Arc::new(AtomicBool::new(false)),
+            learned_output_cap: Arc::new(AtomicU64::new(0)),
             context_tokens: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    /// The output ceiling to actually send: the configured/detected value,
+    /// clamped by anything a provider rejection has taught us this session.
+    fn effective_output_tokens(&self) -> Option<usize> {
+        let configured = self.max_output_tokens?;
+        match self.learned_output_cap.load(Ordering::Relaxed) {
+            0 => Some(configured),
+            cap => Some(configured.min(cap as usize)),
+        }
     }
 
     /// Approximate tokens processed so far this session.
@@ -203,7 +220,7 @@ impl Provider {
             body["tools"] = json!(tools);
             body["tool_choice"] = json!("auto");
         }
-        if let Some(max_tokens) = self.max_output_tokens {
+        if let Some(max_tokens) = self.effective_output_tokens() {
             body[self.output_tokens_field()] = json!(max_tokens);
         }
         // Routing is an OpenRouter extension. Sending it to an endpoint that
@@ -232,9 +249,25 @@ impl Provider {
                 self.prefers_max_completion_tokens
                     .store(true, Ordering::Relaxed);
                 body.as_object_mut().map(|body| body.remove("max_tokens"));
-                if let Some(max_tokens) = self.max_output_tokens {
+                if let Some(max_tokens) = self.effective_output_tokens() {
                     body["max_completion_tokens"] = json!(max_tokens);
                 }
+                tokio::select! {
+                    biased;
+                    sent = self.post_stream(&body) => sent?,
+                    () = wait_for_cancel(cancel) => return Ok(Completion::cancelled()),
+                }
+            }
+            // "max_tokens is too large: N. This model supports at most M…" —
+            // detection over-reported (an upstream echoing its context window
+            // as the completion cap is common on aggregator endpoints). The
+            // rejection carries the real ceiling, so learn it, clamp, and
+            // retry once; the cap sticks for the rest of the session.
+            Err(error) if rejected_output_cap(&error, self.effective_output_tokens()).is_some() => {
+                let cap = rejected_output_cap(&error, self.effective_output_tokens())
+                    .expect("guard checked");
+                self.learned_output_cap.store(cap as u64, Ordering::Relaxed);
+                body[self.output_tokens_field()] = json!(cap);
                 tokio::select! {
                     biased;
                     sent = self.post_stream(&body) => sent?,
@@ -336,7 +369,7 @@ impl Provider {
             "parallel_tool_calls": true,
             "stream": true
         });
-        if let Some(max_tokens) = self.max_output_tokens {
+        if let Some(max_tokens) = self.effective_output_tokens() {
             body["max_output_tokens"] = json!(max_tokens);
         }
         let response = tokio::select! {
@@ -553,6 +586,47 @@ async fn wait_for_cancel(cancel: &AtomicBool) {
 fn is_max_tokens_rejection(error: &anyhow::Error) -> bool {
     let text = format!("{error:#}");
     text.contains("max_completion_tokens") && text.contains("max_tokens")
+}
+
+/// Extract the real output ceiling from a "max_tokens is too large" rejection.
+///
+/// Message phrasing varies by server — "supports at most 131072 completion
+/// tokens", "must be less than or equal to 65536", "maximum value is 32768" —
+/// so rather than pattern-match each one, the error must (a) be about the
+/// output-token parameter and a limit, and (b) contain a plausible cap:
+/// the largest number that is at least 1024 and strictly below what was sent.
+/// Numbers under 1024 (status codes, model-name fragments) never qualify.
+fn rejected_output_cap(error: &anyhow::Error, sent: Option<usize>) -> Option<usize> {
+    let sent = sent?;
+    let text = format!("{error:#}").to_ascii_lowercase();
+    let about_output = text.contains("max_tokens")
+        || text.contains("max_output_tokens")
+        || text.contains("completion tokens")
+        || text.contains("output tokens");
+    let about_limit = text.contains("too large")
+        || text.contains("at most")
+        || text.contains("less than or equal")
+        || text.contains("maximum")
+        || text.contains("exceed");
+    if !about_output || !about_limit {
+        return None;
+    }
+    let mut best: Option<usize> = None;
+    let mut current = 0_usize;
+    let mut in_number = false;
+    for ch in text.chars().chain(std::iter::once(' ')) {
+        if ch.is_ascii_digit() {
+            current = current.saturating_mul(10) + (ch as usize - '0' as usize);
+            in_number = true;
+        } else if in_number {
+            if (1_024..sent).contains(&current) && best.is_none_or(|value| current > value) {
+                best = Some(current);
+            }
+            current = 0;
+            in_number = false;
+        }
+    }
+    best
 }
 
 /// Merge a tool call's `id` or `name` fragment into what has been seen so far.
@@ -875,6 +949,33 @@ fn truncate_error(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejected_output_cap_reads_the_real_ceiling_from_the_message() {
+        let error = anyhow!(
+            "provider returned 400 Bad Request: {{\"error\":{{\"type\":\"invalid_request_error\",\
+             \"message\":\"Error from provider (Console): Upstream request failed: [bad_request] \
+             bad request: max_tokens is too large: 262144. This model supports at most 131072 \
+             completion tokens.\"}}}}"
+        );
+        assert_eq!(rejected_output_cap(&error, Some(262_144)), Some(131_072));
+
+        // OpenAI-style phrasing.
+        let error = anyhow!(
+            "provider returned 400: max_tokens must be less than or equal to 65536, got 262144"
+        );
+        assert_eq!(rejected_output_cap(&error, Some(262_144)), Some(65_536));
+
+        // Not an output-limit error: no cap, no retry.
+        let error = anyhow!("provider returned 400: model not found: deepseek-v99");
+        assert_eq!(rejected_output_cap(&error, Some(262_144)), None);
+        // A limit error whose numbers are all >= what we sent teaches nothing.
+        let error = anyhow!("max_tokens is too large: 262144");
+        assert_eq!(rejected_output_cap(&error, Some(262_144)), None);
+        // Nothing was sent, so nothing can be clamped.
+        let error = anyhow!("max_tokens is too large: at most 131072 completion tokens");
+        assert_eq!(rejected_output_cap(&error, None), None);
+    }
 
     #[test]
     fn cancelled_stream_drops_truncated_tool_call_but_keeps_valid_ones() {

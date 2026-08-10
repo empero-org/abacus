@@ -338,6 +338,8 @@ enum ConfigKey {
     Fallbacks,
     ApiKey,
     Permission,
+    ContextWindow,
+    MaxOutput,
     VimMode,
     ShowThinking,
     TokenRate,
@@ -374,6 +376,8 @@ const CONFIG_ROWS: &[ConfigRow] = &[
     ConfigRow::Heading("AGENT"),
     ConfigRow::Key(ConfigKey::Permission),
     ConfigRow::Key(ConfigKey::MaxSteps),
+    ConfigRow::Key(ConfigKey::ContextWindow),
+    ConfigRow::Key(ConfigKey::MaxOutput),
     ConfigRow::Key(ConfigKey::ToolOutputLimit),
     ConfigRow::Key(ConfigKey::ProjectTrust),
     ConfigRow::Heading("INTERFACE"),
@@ -427,6 +431,12 @@ fn config_help(key: ConfigKey) -> &'static str {
             "Append every model call to ~/.abacus/traces as JSONL for fine-tuning. Stays local."
         }
         ConfigKey::MaxSteps => "How many tool calls one turn may make before it stops.",
+        ConfigKey::ContextWindow => {
+            "Context window override in tokens (accepts 128k / 1m). Blank returns to auto-detection."
+        }
+        ConfigKey::MaxOutput => {
+            "Max output tokens sent as max_tokens (accepts 8k / 64k). Blank returns to auto — set this when the provider rejects the detected value."
+        }
         ConfigKey::ToolOutputLimit => "Characters of tool output kept before truncation.",
         ConfigKey::ProjectTrust => {
             "Allow this project's own plugins, hooks, and MCP servers to run."
@@ -456,6 +466,8 @@ const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey::ApiKey,
     ConfigKey::Permission,
     ConfigKey::MaxSteps,
+    ConfigKey::ContextWindow,
+    ConfigKey::MaxOutput,
     ConfigKey::ToolOutputLimit,
     ConfigKey::ProjectTrust,
     ConfigKey::VimMode,
@@ -2322,6 +2334,20 @@ impl App {
             });
         self.config.max_steps = self.settings.agent.max_steps.clamp(1, 128);
         self.config.tool_output_limit = self.settings.agent.tool_output_limit.clamp(2_000, 200_000);
+        // Re-resolve the model limits when an override is in play — either
+        // newly set (it must reach the provider and the compaction budget
+        // immediately) or newly cleared (the Override source must not stick).
+        // With no override involved, startup detection is left alone.
+        if self.settings.agent.context_window.is_some()
+            || self.settings.agent.max_output_tokens.is_some()
+            || self.config.model_limits.source == crate::model_info::LimitSource::Override
+        {
+            self.config.model_limits = crate::model_info::ModelLimits::resolve_from_name(
+                &self.config.model,
+                self.settings.agent.context_window,
+                self.settings.agent.max_output_tokens,
+            );
+        }
         let always = self.settings.ui.permission_mode == PermissionMode::AlwaysApprove;
         self.config.yes = always;
         self.allow_mutations
@@ -2509,6 +2535,14 @@ impl App {
                     self.settings.agent.max_steps = number;
                     Ok(())
                 }),
+            // Blank returns the limit to auto-resolution; a value (with `k`/`m`
+            // suffixes accepted) becomes a hard override sent to the provider.
+            ConfigKey::ContextWindow => parse_optional_tokens(&value).map(|tokens| {
+                self.settings.agent.context_window = tokens;
+            }),
+            ConfigKey::MaxOutput => parse_optional_tokens(&value).map(|tokens| {
+                self.settings.agent.max_output_tokens = tokens;
+            }),
             ConfigKey::ToolOutputLimit => value
                 .trim()
                 .parse::<usize>()
@@ -2612,6 +2646,27 @@ impl App {
                 (_, false) => "Off".to_owned(),
             },
             ConfigKey::MaxSteps => self.settings.agent.max_steps.to_string(),
+            // The override when set; otherwise what auto-resolution landed on
+            // and where it came from, so "auto" is never a mystery value.
+            ConfigKey::ContextWindow => match self.settings.agent.context_window {
+                Some(tokens) => ui::format_count(tokens as u64),
+                None => format!(
+                    "auto — {} ({})",
+                    ui::format_count(self.config.model_limits.context_window as u64),
+                    limit_source_label(self.config.model_limits.source),
+                ),
+            },
+            ConfigKey::MaxOutput => match self.settings.agent.max_output_tokens {
+                Some(tokens) => ui::format_count(tokens as u64),
+                None => match self.config.model_limits.configured_output_tokens {
+                    Some(tokens) => format!(
+                        "auto — {} ({})",
+                        ui::format_count(tokens as u64),
+                        limit_source_label(self.config.model_limits.source),
+                    ),
+                    None => "auto — server default".to_owned(),
+                },
+            },
             ConfigKey::ToolOutputLimit => self.settings.agent.tool_output_limit.to_string(),
             ConfigKey::ProjectTrust => on_off(self.settings.trust.contains(&self.config.workspace)),
             ConfigKey::FeedbackEnabled => on_off(self.settings.feedback.enabled),
@@ -6486,12 +6541,33 @@ fn config_label(key: ConfigKey) -> &'static str {
         ConfigKey::DraftReplies => "Draft next message",
         ConfigKey::TraceLogging => "Training traces",
         ConfigKey::MaxSteps => "Maximum agent steps",
+        ConfigKey::ContextWindow => "Context window",
+        ConfigKey::MaxOutput => "Max output tokens",
         ConfigKey::ToolOutputLimit => "Tool output limit",
         ConfigKey::ProjectTrust => "Trust this project",
         ConfigKey::FeedbackEnabled => "Feedback",
         ConfigKey::FeedbackDiagnostics => "Feedback diagnostics",
         ConfigKey::FeedbackEndpoint => "Feedback endpoint",
         ConfigKey::AdvancedToml => "Advanced configuration",
+    }
+}
+
+/// Parse an optional token count for a limit override: blank clears it, a
+/// number (with `k`/`m` suffixes) sets it.
+fn parse_optional_tokens(value: &str) -> Result<Option<usize>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
+        return Ok(None);
+    }
+    crate::model_info::parse_tokens(trimmed).map(Some)
+}
+
+fn limit_source_label(source: crate::model_info::LimitSource) -> &'static str {
+    match source {
+        crate::model_info::LimitSource::Override => "override",
+        crate::model_info::LimitSource::Detected => "detected",
+        crate::model_info::LimitSource::Heuristic => "known model",
+        crate::model_info::LimitSource::Default => "default",
     }
 }
 
@@ -6503,6 +6579,8 @@ fn config_key_is_editable(key: ConfigKey) -> bool {
             | ConfigKey::Providers
             | ConfigKey::ApiKey
             | ConfigKey::MaxSteps
+            | ConfigKey::ContextWindow
+            | ConfigKey::MaxOutput
             | ConfigKey::ToolOutputLimit
             | ConfigKey::FeedbackEndpoint
     )
@@ -7223,6 +7301,50 @@ mod tests {
         app.settings.ui.show_token_rate = false;
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert!(!buffer_text(terminal.backend().buffer(), 110, 16).contains("tok/s"));
+    }
+
+    #[test]
+    fn output_token_override_applies_live_and_clears_back_to_auto() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        let edit = |app: &mut App, key: ConfigKey, text: &str| {
+            let mut input = InputBuffer::new();
+            input.insert_str(text);
+            app.config_panel = Some(ConfigPanel {
+                selected: 0,
+                editing: Some((key, input)),
+            });
+            app.commit_config_edit();
+        };
+
+        // Setting the override reaches settings, the resolved limits, and the
+        // wire value in one step — this is the /config escape hatch for a
+        // provider that rejects the detected max_tokens.
+        edit(&mut app, ConfigKey::MaxOutput, "64k");
+        assert_eq!(app.settings.agent.max_output_tokens, Some(64_000));
+        assert_eq!(
+            app.config.model_limits.configured_output_tokens,
+            Some(64_000)
+        );
+        assert!(app.status.contains("saved"), "{}", app.status);
+
+        // Context window accepts m-suffixed values.
+        edit(&mut app, ConfigKey::ContextWindow, "1m");
+        assert_eq!(app.config.model_limits.context_window, 1_000_000);
+
+        // Blank (or "auto") clears the override and re-resolves.
+        edit(&mut app, ConfigKey::MaxOutput, "");
+        assert_eq!(app.settings.agent.max_output_tokens, None);
+        edit(&mut app, ConfigKey::ContextWindow, "auto");
+        assert_eq!(app.settings.agent.context_window, None);
+        assert_ne!(
+            app.config.model_limits.source,
+            crate::model_info::LimitSource::Override
+        );
+
+        // Garbage is rejected without changing anything.
+        edit(&mut app, ConfigKey::MaxOutput, "lots");
+        assert!(app.status.contains("configuration error"), "{}", app.status);
+        assert_eq!(app.settings.agent.max_output_tokens, None);
     }
 
     #[test]

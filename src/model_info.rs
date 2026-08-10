@@ -119,8 +119,16 @@ impl ModelLimits {
         }
         self.context_window = context;
         if let Some(output) = output {
-            self.max_output_tokens = output;
-            self.configured_output_tokens = Some(output);
+            self.max_output_tokens = output.min(context);
+            // A reported output cap that equals (or exceeds) the context window
+            // is the server echoing the window, not a real completion limit —
+            // several OpenRouter upstreams do this. Sending it as `max_tokens`
+            // gets the request rejected by any stricter upstream the router
+            // lands on, so an echo informs the compaction estimate above but
+            // is never configured onto the wire.
+            if output < context {
+                self.configured_output_tokens = Some(output);
+            }
         }
         self.source = LimitSource::Detected;
     }
@@ -404,6 +412,25 @@ mod tests {
         assert_eq!(limits.context_window, 256_000);
         assert_eq!(limits.configured_output_tokens, Some(12_000));
         assert_eq!(limits.source, LimitSource::Detected);
+    }
+
+    #[test]
+    fn detected_output_echoing_the_window_is_not_configured_onto_the_wire() {
+        // Aggregator upstreams commonly report max_completion_tokens equal to
+        // the context window. That is not a real completion cap, and sending
+        // it as max_tokens gets rejected by stricter upstreams.
+        let mut limits = ModelLimits::resolve_from_name("unknown-via-proxy", None, None);
+        limits.apply_detected(262_144, Some(262_144));
+        assert_eq!(limits.context_window, 262_144);
+        assert_eq!(limits.max_output_tokens, 262_144, "estimate still informed");
+        assert_eq!(
+            limits.configured_output_tokens, None,
+            "an echoed cap must not be sent to the provider"
+        );
+        // A genuinely smaller cap is still configured.
+        let mut limits = ModelLimits::resolve_from_name("unknown-via-proxy", None, None);
+        limits.apply_detected(262_144, Some(131_072));
+        assert_eq!(limits.configured_output_tokens, Some(131_072));
     }
 
     #[test]
