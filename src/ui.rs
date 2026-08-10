@@ -296,9 +296,17 @@ pub fn format_elapsed(ms: u64) -> String {
         format!("{ms}ms")
     } else if ms < 60_000 {
         format!("{:.1}s", ms as f64 / 1_000.0)
+    } else if ms < 3_600_000 {
+        let total = ms / 1_000;
+        format!("{}m {:02}s", total / 60, total % 60)
     } else {
         let total = ms / 1_000;
-        format!("{}m{:02}s", total / 60, total % 60)
+        format!(
+            "{}h {:02}m {:02}s",
+            total / 3600,
+            (total % 3600) / 60,
+            total % 60
+        )
     }
 }
 
@@ -504,6 +512,9 @@ pub enum EntryKind {
     Tool,
     System,
     Error,
+    /// A labelled horizontal rule — "Worked for 2m 03s" after a heavy turn —
+    /// so long sessions get scannable structure between work blocks.
+    Rule,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -624,6 +635,7 @@ pub fn transcript(
             EntryKind::Error => {
                 lines.extend(notice_block(&entry.text, width, danger(), glyphs().failed))
             }
+            EntryKind::Rule => lines.push(rule_line(&entry.text, width)),
         }
         // A selected non-tool block is marked by tinting its rows, since it has
         // no status glyph to brighten.
@@ -848,6 +860,17 @@ fn tool_block(call: &ToolCall, width: usize, spinner: &str, selected: bool) -> V
 
 /// System notices and errors: a coloured glyph in the gutter and body text that
 /// hangs under the content column.
+/// A full-width dim rule with the label embedded near its left end:
+/// `─ Worked for 2m 03s ───────────…`. The label doubles as the information —
+/// the rule only appears where real work happened.
+fn rule_line(label: &str, width: usize) -> Line<'static> {
+    let bar = glyphs().rule;
+    let mut text = format!("{bar} {label} ");
+    let used = UnicodeWidthStr::width(text.as_str());
+    text.push_str(&bar.repeat(width.saturating_sub(used).max(2) / bar.width().max(1)));
+    Line::from(Span::styled(text, Style::default().fg(muted())))
+}
+
 fn notice_block(body: &str, width: usize, color: Color, glyph: &str) -> Vec<Line<'static>> {
     let first = vec![
         Span::raw(" ".repeat(GUTTER)),
@@ -1102,7 +1125,8 @@ mod tests {
     fn elapsed_and_counts_stay_narrow() {
         assert_eq!(format_elapsed(240), "240ms");
         assert_eq!(format_elapsed(1_500), "1.5s");
-        assert_eq!(format_elapsed(90_000), "1m30s");
+        assert_eq!(format_elapsed(90_000), "1m 30s");
+        assert_eq!(format_elapsed(3_723_000), "1h 02m 03s");
         assert_eq!(format_count(938), "938");
         assert_eq!(format_count(12_400), "12.4k");
     }

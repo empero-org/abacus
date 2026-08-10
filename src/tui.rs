@@ -543,6 +543,11 @@ struct App {
     /// Characters generated this turn — answer and reasoning both — behind the
     /// optional tokens-per-second readout.
     turn_output_chars: usize,
+    /// The turn's accumulated reasoning, mined for a live status header so the
+    /// footer says what the model is actually doing, not just "thinking".
+    turn_reasoning: String,
+    /// Whether any tool ran this turn — gates the "Worked for …" separator.
+    turn_had_tools: bool,
     /// Whether the open block is reasoning rather than the answer.
     receiving_thinking: bool,
     /// How the previous turn ended, or `None` if it completed cleanly.
@@ -737,6 +742,8 @@ impl App {
             tool_started: None,
             turn_started: None,
             turn_output_chars: 0,
+            turn_reasoning: String::new(),
+            turn_had_tools: false,
             receiving_thinking: false,
             last_outcome: None,
             trace: None,
@@ -874,6 +881,12 @@ impl App {
                 }
                 AgentEvent::Reasoning(piece) => {
                     self.turn_output_chars = self.turn_output_chars.saturating_add(piece.len());
+                    // The status header follows the reasoning even when the
+                    // reasoning itself is hidden — it is the footer's job to
+                    // say what the model is doing either way.
+                    self.turn_reasoning.push_str(&piece);
+                    self.status = reasoning_header(&self.turn_reasoning)
+                        .unwrap_or_else(|| "thinking".to_owned());
                     if !self.settings.ui.show_thinking {
                         continue;
                     }
@@ -894,6 +907,7 @@ impl App {
                 AgentEvent::UserQuestion(request) => self.set_user_question(request),
                 AgentEvent::ToolStarted { name, summary } => {
                     self.receiving_delta = false;
+                    self.turn_had_tools = true;
                     self.tool_started = Some(Instant::now());
                     self.push_entry(Entry::tool(ToolCall {
                         name: name.clone(),
@@ -981,6 +995,21 @@ impl App {
                         DoneReason::Interrupted => Some(TurnOutcome::Interrupted),
                         DoneReason::StepLimit => Some(TurnOutcome::Interrupted),
                     };
+                    // A separator after turns that did real work for a while,
+                    // so long sessions read in scannable blocks. Conversational
+                    // turns get nothing — the rule marks work, not chat.
+                    if self.turn_had_tools
+                        && let Some(started) = self.turn_started
+                        && started.elapsed().as_secs() >= 60
+                    {
+                        self.push_entry(Entry::new(
+                            EntryKind::Rule,
+                            format!(
+                                "Worked for {}",
+                                ui::format_elapsed(started.elapsed().as_millis() as u64)
+                            ),
+                        ));
+                    }
                     // A turn cut short used to look exactly like a finished one.
                     match reason {
                         DoneReason::Complete => {}
@@ -1212,6 +1241,8 @@ impl App {
         }
         self.turn_started = Some(Instant::now());
         self.turn_output_chars = 0;
+        self.turn_reasoning.clear();
+        self.turn_had_tools = false;
         self.receiving_thinking = false;
         self.last_outcome = None;
         self.clear_draft();
@@ -4673,7 +4704,9 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 ),
                 Style::default().fg(primary()).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(ui::truncate(&app.status, 28), Style::default().fg(text())),
+            // Wide enough for a reasoning-derived header, which carries real
+            // information; hints yield first when the row runs out of room.
+            Span::styled(ui::truncate(&app.status, 44), Style::default().fg(text())),
             Span::styled(
                 format!("  {}", ui::format_elapsed(elapsed.as_millis() as u64)),
                 Style::default().fg(muted()),
@@ -4706,7 +4739,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     // Contextual hints: only the keys that do something in the current state.
     let pairs: &[(&str, &str)] = if running {
-        &[("esc", "interrupt"), ("^C", "twice to quit")]
+        &[("esc", "to interrupt"), ("^C", "twice to quit")]
     } else if app.mode == InputMode::Normal {
         &[
             ("j/k", "blocks"),
@@ -6074,7 +6107,31 @@ fn tool_failed(output: &str) -> bool {
     head.starts_with("Error:") || head.starts_with("error:") || head.starts_with("User rejected")
 }
 
+/// Mine the streaming reasoning for a live status header: the most recent
+/// complete `**bold**` span, which reasoning-trained models use as section
+/// headers ("**Checking the parser**"). Returns `None` — and the footer keeps
+/// its generic word — when the model reasons in plain prose.
+fn reasoning_header(reasoning: &str) -> Option<String> {
+    let mut header = None;
+    let mut rest = reasoning;
+    while let Some(start) = rest.find("**") {
+        let after = &rest[start + 2..];
+        let Some(length) = after.find("**") else {
+            break;
+        };
+        let candidate = after[..length].trim();
+        if !candidate.is_empty() && candidate.len() <= 64 && !candidate.contains('\n') {
+            header = Some(candidate.to_owned());
+        }
+        rest = &after[length + 2..];
+    }
+    header
+}
+
 fn tool_preview(output: &str) -> String {
+    if output.trim().is_empty() {
+        return "(no output)".to_owned();
+    }
     let mut preview = output.lines().take(8).collect::<Vec<_>>().join("\n");
     if output.lines().count() > 8 {
         preview.push_str("\n…");
@@ -6920,6 +6977,65 @@ mod tests {
         app.settings.ui.show_token_rate = false;
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert!(!buffer_text(terminal.backend().buffer(), 110, 16).contains("tok/s"));
+    }
+
+    #[test]
+    fn reasoning_header_takes_the_latest_complete_bold_span() {
+        assert_eq!(reasoning_header("no markup at all"), None);
+        assert_eq!(
+            reasoning_header("**Reading the config** then prose"),
+            Some("Reading the config".to_owned())
+        );
+        // The newest header wins, and an unterminated one is ignored.
+        assert_eq!(
+            reasoning_header("**First step** prose **Second step** more **half"),
+            Some("Second step".to_owned())
+        );
+        // Emphasis spanning lines or overlong "headers" are not headers.
+        assert_eq!(reasoning_header("**a\nb**"), None);
+        let long = format!("**{}**", "x".repeat(80));
+        assert_eq!(reasoning_header(&long), None);
+    }
+
+    #[tokio::test]
+    async fn heavy_turns_get_a_worked_for_separator_and_chat_turns_do_not() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        // A long turn that ran tools → rule.
+        app.turn_had_tools = true;
+        app.turn_started = Some(Instant::now() - Duration::from_secs(61));
+        let _ = app.event_tx.send(AgentEvent::Done {
+            messages: vec![serde_json::json!({"role":"system","content":"s"})],
+            reason: DoneReason::Complete,
+        });
+        assert!(app.drain_agent_events());
+        let rule = app
+            .entries
+            .iter()
+            .find(|entry| entry.kind == EntryKind::Rule)
+            .expect("a worked-for rule");
+        assert!(rule.text.starts_with("Worked for 1m"), "{}", rule.text);
+
+        // A quick conversational turn → no rule.
+        let before = app.entries.len();
+        app.turn_had_tools = false;
+        app.turn_started = Some(Instant::now() - Duration::from_secs(200));
+        let _ = app.event_tx.send(AgentEvent::Done {
+            messages: vec![serde_json::json!({"role":"system","content":"s"})],
+            reason: DoneReason::Complete,
+        });
+        assert!(app.drain_agent_events());
+        assert!(
+            app.entries[before..]
+                .iter()
+                .all(|entry| entry.kind != EntryKind::Rule)
+        );
+    }
+
+    #[test]
+    fn empty_tool_output_reads_as_no_output() {
+        assert_eq!(tool_preview(""), "(no output)");
+        assert_eq!(tool_preview("  \n "), "(no output)");
+        assert!(!tool_preview("real content").contains("(no output)"));
     }
 
     #[test]
