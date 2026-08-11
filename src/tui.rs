@@ -114,6 +114,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/new", "Start a new session"),
     ("/compact", "Compact conversation context"),
     ("/repair", "Fix corrupted session history"),
+    ("/papercuts", "List or delete recorded lessons"),
     ("/skills", "Browse Agent Skills"),
     ("/plugins", "Inspect plugins"),
     ("/mcps", "Inspect MCP tools"),
@@ -521,6 +522,7 @@ struct App {
     session_store: Option<SessionStore>,
     services: Arc<AgentServices>,
     goal: GoalState,
+    papercuts: crate::papercuts::PapercutStore,
     tasks: TaskList,
     compaction: CompactionState,
     ralph_loop: Option<RalphLoop>,
@@ -721,6 +723,10 @@ impl App {
         let (draft_tx, draft_rx) = mpsc::unbounded_channel();
         let yes = config.yes;
         let branch = git_branch(&config.workspace);
+        let papercuts = crate::papercuts::PapercutStore::load(
+            config.paths.papercuts_file.clone(),
+            &config.workspace,
+        );
         Ok(Self {
             config,
             settings,
@@ -731,6 +737,7 @@ impl App {
             session_store,
             services,
             goal,
+            papercuts,
             tasks,
             compaction,
             ralph_loop,
@@ -1439,6 +1446,7 @@ impl App {
             services: self.services.clone(),
             session_id: self.session.as_ref().map(|session| session.id.to_string()),
             goal: self.goal.clone(),
+            papercuts: self.papercuts.clone(),
             tasks: self.tasks.clone(),
             compaction: self.compaction.clone(),
             compaction_budget: self.config.model_limits.compaction_budget(),
@@ -1804,6 +1812,62 @@ impl App {
                         EntryKind::System,
                         format!("Repaired the session history: {}.", fixes.join("; ")),
                     ));
+                }
+                self.follow = true;
+                true
+            }
+            "/papercuts" => {
+                let argument = argument.trim();
+                let snapshot = self.papercuts.snapshot();
+                if let Some(target) = argument.strip_prefix("delete") {
+                    let target = target.trim();
+                    let removed = target
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|number| snapshot.get(number.saturating_sub(1)))
+                        .map(|papercut| (papercut.title.clone(), papercut.id));
+                    match removed {
+                        Some((title, id)) if self.papercuts.remove(id) => {
+                            self.push_entry(Entry::new(
+                                EntryKind::System,
+                                format!("Papercut \"{title}\" deleted."),
+                            ));
+                        }
+                        _ => {
+                            self.push_entry(Entry::new(
+                                EntryKind::Error,
+                                "Usage: /papercuts delete <number> — numbers from /papercuts"
+                                    .to_owned(),
+                            ));
+                        }
+                    }
+                } else if snapshot.is_empty() {
+                    self.push_entry(Entry::new(
+                        EntryKind::System,
+                        "No papercuts yet. When Abacus works through a snag it records the \
+                         lesson here and recalls it the next time a tripwire matches."
+                            .to_owned(),
+                    ));
+                } else {
+                    let now = chrono::Utc::now();
+                    let mut lines = vec![format!(
+                        "{} papercut(s) for this workspace:",
+                        snapshot.len()
+                    )];
+                    for (index, papercut) in snapshot.iter().enumerate() {
+                        lines.push(format!(
+                            "{}. {} — tripped {}x, recalled {}x, strength {:.1}\n   fix: {}\n   tripwires: {}",
+                            index + 1,
+                            papercut.title,
+                            papercut.trip_count,
+                            papercut.recall_count,
+                            papercut.decayed_strength(now),
+                            papercut.fix,
+                            papercut.tripwires.join(" · "),
+                        ));
+                    }
+                    lines.push("Delete one with /papercuts delete <number>.".to_owned());
+                    self.push_entry(Entry::new(EntryKind::System, lines.join("\n")));
                 }
                 self.follow = true;
                 true

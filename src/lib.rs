@@ -15,6 +15,7 @@ pub mod input;
 pub mod markdown;
 pub mod mcp;
 pub mod model_info;
+pub mod papercuts;
 pub mod provider;
 pub mod ralph;
 pub mod services;

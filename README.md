@@ -94,6 +94,7 @@ Before a mutation, Abacus opens a semantic review with per-file statistics, line
 | `/theme [auto\|dark\|light]` | Switch the Empero-derived palette; `auto` detects the terminal |
 | `/feedback` | Send product feedback to the configured Empero endpoint |
 | `/compact` | Compact old conversation context |
+| `/papercuts` / `/papercuts delete <n>` | List or delete recorded lessons from past snags |
 | `/repair` | Fix corrupted session history — truncated or unanswered tool calls that make strict providers reject every request |
 | `/tools` / `/skills` / `/plugins` / `/mcps` | Inspect active capabilities |
 | `/help` / `/quit` (`/q`, `/exit`) | Show help or exit |
@@ -117,6 +118,24 @@ Consecutive successful read-only tool calls — reads, greps, globs, git inspect
 Typing `/` or `@` opens a suggestion list: `Up`/`Down` move the highlight, `Tab` or `Enter` inserts it, and `Esc` dismisses it. Once a command is complete the list closes, so `Enter` sends it. `Esc` otherwise stops a running turn, enters normal mode when Vim keybindings are on, or clears the draft. On an idle, empty composer, pressing `Esc` twice rewinds the session to your previous prompt: the prompt returns to the composer for editing and the turn it produced is discarded — a fork, not an undo — with the first press only arming it and any other key disarming. Repeat to step further back, one prompt at a time. `Ctrl+c` (or `Esc`) asks a running turn to stop — it finishes its current tool and keeps everything it did in the conversation; pressing it again forces an immediate stop. With no turn running, `Ctrl+c` clears the prompt, and twice in a row exits. `Ctrl+q` exits immediately. `F1` (or `?` in normal mode) opens the key reference.
 
 Set `ABACUS_ASCII=1` to swap the box-drawing, braille, and block glyphs for ASCII stand-ins of the same width, for terminals whose fonts lack them. Colour depth is detected from `COLORTERM` and `TERM` and the palette is quantized to match — truecolor, 256, or a role-mapped sixteen — with `ABACUS_COLOR=none|16|256|truecolor` to override. `NO_COLOR` is honoured: the interface drops to the terminal's own palette and leans on structure, bold, and reverse video instead.
+
+## Papercuts
+
+When Abacus works through a snag — an error whose fix was not obvious, a tool that failed repeatedly until the approach changed — it records the lesson as a **papercut**: a title, what went wrong, the fix that worked, optional references, and **tripwires** — distinctive strings from the failure output that identify the same snag when it happens again.
+
+Recall is trigger-driven and frequency-adaptive. Every tool call's arguments and output are scanned against the tripwires of the recorded papercuts; a match counts as an encounter and strengthens the lesson, and — subject to a cooldown that shrinks as strength grows — injects it into the tool result right where the model is looking:
+
+```text
+exit: 1
+error: DATABASE_URL must be set to compile this crate
+
+Lessons from earlier snags that match this situation:
+[papercut] sqlx tests need DATABASE_URL — fix: export DATABASE_URL first (see .env.example)
+```
+
+Two consecutive failed tool results, or a blocked call loop, force-recall the strongest lessons even inside their cooldown. Strength decays with a two-week half-life, so a papercut that stops being encountered fades to an occasional reminder instead of permanent noise — the more often a lesson is needed, the more often it appears, and vice versa.
+
+Papercuts are workspace-scoped by default (the model can record `scope: global` for lessons that apply everywhere) and live in `~/.abacus/papercuts.json`. `/papercuts` lists them with trip counts and strengths; `/papercuts delete <n>` removes one. The model records them itself via the `papercut_record` tool — the system prompt asks it to do so whenever it recovers from a non-obvious failure — and can consult `papercut_list`.
 
 ## Training traces
 

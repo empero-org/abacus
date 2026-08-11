@@ -259,6 +259,9 @@ impl SubagentRuntime {
                 compaction_budget: CompactionBudget::default(),
                 allow_subagents: false,
                 web_search: self.web_search.clone(),
+                // Inert: a subagent's snags belong to its delegated task, and
+                // its worktree paths would pollute workspace scoping.
+                papercuts: crate::papercuts::PapercutStore::default(),
             },
             events,
         );

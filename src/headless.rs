@@ -478,6 +478,10 @@ fn turn_options(
         compaction: compaction.clone(),
         compaction_budget: config.model_limits.compaction_budget(),
         allow_subagents: true,
+        papercuts: crate::papercuts::PapercutStore::load(
+            config.paths.papercuts_file.clone(),
+            &config.workspace,
+        ),
         web_search: config.web_search.clone(),
     }
 }
