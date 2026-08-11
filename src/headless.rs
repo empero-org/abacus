@@ -279,6 +279,9 @@ pub async fn run(
                     }
                     // Headless output is the answer, not the deliberation.
                     AgentEvent::Reasoning(_) => {}
+                    AgentEvent::Notice(notice) => {
+                        eprintln!("note: {notice}");
+                    }
                     AgentEvent::TraceFailed { error } => {
                         eprintln!("warning: training trace disabled — {error}");
                     }

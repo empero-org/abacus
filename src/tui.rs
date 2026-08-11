@@ -177,7 +177,7 @@ const CUSTOM_PROVIDER_SENTINEL: &str = "\u{0}custom-provider";
 /// entries revision, the render width, and the spinner phase. The phase only
 /// participates while a tool is running, so an idle transcript is wrapped once
 /// and then reused until something actually changes it.
-type TranscriptKey = (u64, u16, usize, Option<usize>);
+type TranscriptKey = (u64, u16, usize, Option<usize>, bool);
 
 struct PendingApproval {
     tool: String,
@@ -567,6 +567,9 @@ struct App {
     /// When Esc was last pressed on an idle, empty composer — the first press
     /// arms the rewind, a second within the window performs it.
     rewind_armed: Option<Instant>,
+    /// Ctrl+O: an open approval/question stepped aside so the transcript
+    /// behind it can be read. Reset whenever a new dialog arrives.
+    overlay_hidden: bool,
     /// Clickable regions from the last frame. `RefCell` because the draw
     /// helpers take `&App` — recording where something landed is not a
     /// meaningful mutation of application state.
@@ -762,6 +765,7 @@ impl App {
             receiving_thinking: false,
             last_outcome: None,
             rewind_armed: None,
+            overlay_hidden: false,
             trace: None,
             last_scroll: None,
             draft: None,
@@ -977,6 +981,10 @@ impl App {
                         format!("Training trace disabled — {error}"),
                     ));
                 }
+                AgentEvent::Notice(notice) => {
+                    self.push_entry(Entry::new(EntryKind::System, notice));
+                    self.follow = true;
+                }
                 AgentEvent::Reasoning(piece) => {
                     self.turn_output_chars = self.turn_output_chars.saturating_add(piece.len());
                     // The status header follows the reasoning even when the
@@ -1189,6 +1197,7 @@ impl App {
     }
 
     fn set_approval(&mut self, request: ApprovalRequest) {
+        self.overlay_hidden = false;
         self.status = format!("approval needed: {}", request.tool);
         let diff = DiffDocument::parse(&request.details);
         self.approval = Some(PendingApproval {
@@ -1208,6 +1217,7 @@ impl App {
     }
 
     fn set_user_question(&mut self, request: UserQuestionRequest) {
+        self.overlay_hidden = false;
         self.status = format!("waiting for answer: {}", request.header);
         self.question = Some(PendingUserQuestion::new(
             request.header,
@@ -3491,7 +3501,39 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     if key.code != KeyCode::Esc {
         app.rewind_armed = None;
     }
-    if app.approval.is_some() {
+    // F3 flips reasoning visibility everywhere — including blocks already in
+    // the transcript — so a busy answer can be read without the deliberation.
+    if key.code == KeyCode::F(3) {
+        app.settings.ui.show_thinking = !app.settings.ui.show_thinking;
+        let _ = app.save_and_apply_settings();
+        app.status = if app.settings.ui.show_thinking {
+            "thinking shown".to_owned()
+        } else {
+            "thinking hidden".to_owned()
+        };
+        return;
+    }
+    // Ctrl+O steps an open approval or question aside so the output behind it
+    // can be read (and scrolled); pressing it again brings the dialog back.
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.code == KeyCode::Char('o')
+        && (app.approval.is_some() || app.question.is_some())
+    {
+        app.overlay_hidden = !app.overlay_hidden;
+        app.status = if app.overlay_hidden {
+            "dialog hidden — ctrl+o to answer".to_owned()
+        } else {
+            "dialog restored".to_owned()
+        };
+        return;
+    }
+    // Ctrl+G jumps back to the live tail from anywhere, in any mode.
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('g') {
+        app.follow = true;
+        app.clear_cursor();
+        return;
+    }
+    if app.approval.is_some() && !app.overlay_hidden {
         match key.code {
             KeyCode::Char('y') | KeyCode::Enter => app.decide(ApprovalDecision::Once),
             KeyCode::Char('a') => app.decide(ApprovalDecision::Always),
@@ -3537,7 +3579,9 @@ fn handle_key(app: &mut App, key: KeyEvent) {
 
     // ask_user modal: navigate options, toggle selected (multi-select),
     // type a custom answer, confirm with Enter, cancel with Esc.
-    if let Some(question) = &mut app.question {
+    if !app.overlay_hidden
+        && let Some(question) = &mut app.question
+    {
         if question.editing_custom {
             match key.code {
                 KeyCode::Esc => {
@@ -3898,6 +3942,22 @@ fn handle_insert_key(app: &mut App, key: KeyEvent) {
         KeyCode::Esc if app.running.is_some() => {
             app.request_interrupt();
         }
+        // Modified arrows scroll the transcript from insert mode; both Alt and
+        // Shift are accepted because terminals differ in which they deliver.
+        KeyCode::Up
+            if key
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
+        {
+            app.scroll_up(3)
+        }
+        KeyCode::Down
+            if key
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
+        {
+            app.scroll_down(3)
+        }
         KeyCode::Up if completing => app.move_completion(-1),
         KeyCode::Down if completing => app.move_completion(1),
         // When the popup declines — because the command is already typed out in
@@ -4154,9 +4214,9 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         draw_usage(frame, area, app);
     } else if app.show_help {
         draw_help(frame, area);
-    } else if app.approval.is_some() {
+    } else if app.approval.is_some() && !app.overlay_hidden {
         draw_approval(frame, area, app);
-    } else if app.question.is_some() {
+    } else if app.question.is_some() && !app.overlay_hidden {
         draw_user_question(frame, area, app);
     }
 }
@@ -4263,13 +4323,25 @@ impl App {
     /// Ensure the wrapped transcript matches `width` and the current content,
     /// re-wrapping only when the fingerprint moves.
     fn wrapped_transcript(&mut self, width: u16, spinner: &str, phase: usize) -> &ui::Transcript {
-        let key: TranscriptKey = (self.entries_rev, width, phase, self.cursor);
+        let key: TranscriptKey = (
+            self.entries_rev,
+            width,
+            phase,
+            self.cursor,
+            self.settings.ui.show_thinking,
+        );
         let stale = self
             .transcript_cache
             .as_ref()
             .is_none_or(|(cached, _)| *cached != key);
         if stale {
-            let rendered = ui::transcript(&self.entries, width as usize, spinner, self.cursor);
+            let rendered = ui::transcript(
+                &self.entries,
+                width as usize,
+                spinner,
+                self.cursor,
+                self.settings.ui.show_thinking,
+            );
             self.transcript_cache = Some((key, rendered));
         }
         &self.transcript_cache.as_ref().expect("just populated").1
@@ -4845,7 +4917,9 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
 /// end until the rest fits, so a narrow terminal degrades by shedding the least
 /// important information instead of truncating mid-word.
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    if let Some(approval) = &app.approval {
+    if let Some(approval) = &app.approval
+        && !app.overlay_hidden
+    {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 ui::badge("APPROVAL", warning()),
@@ -5962,6 +6036,7 @@ fn draw_user_question(frame: &mut Frame<'_>, area: Rect, app: &App) {
             ("space", "toggle"),
             ("t", "type"),
             ("enter", "submit"),
+            ("^O", "peek output"),
         ]
     } else {
         &[
@@ -5969,6 +6044,7 @@ fn draw_user_question(frame: &mut Frame<'_>, area: Rect, app: &App) {
             ("x", "choose"),
             ("t", "type"),
             ("esc", "skip"),
+            ("^O", "peek output"),
         ]
     };
     let title = if question.header.is_empty() {
@@ -6069,15 +6145,25 @@ fn draw_user_question(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Style::default().fg(rail()),
         ))
     } else {
-        Line::from(Span::styled(value.clone(), Style::default().fg(text())))
+        // Window the cursor's line horizontally: an answer longer than the
+        // field slides left so the insertion point stays visible, instead of
+        // typing continuing invisibly past the right edge.
+        let field_width = field_inner.width.max(1) as usize;
+        let (cursor_row, cursor_column) = question.custom.cursor_position();
+        let current_line = value.split('\n').nth(cursor_row).unwrap_or("");
+        let skip = cursor_column.saturating_sub(field_width.saturating_sub(1));
+        let visible: String = current_line.chars().skip(skip).take(field_width).collect();
+        Line::from(Span::styled(visible, Style::default().fg(text())))
     };
     frame.render_widget(Paragraph::new(line), field_inner);
 
     if focused {
-        let (row, column) = question.custom.cursor_position();
+        let (_, column) = question.custom.cursor_position();
+        let field_width = field_inner.width.max(1) as usize;
+        let skip = column.saturating_sub(field_width.saturating_sub(1));
         frame.set_cursor_position((
-            (field_inner.x + column as u16).min(field_inner.right().saturating_sub(1)),
-            (field_inner.y + row as u16).min(field_inner.bottom().saturating_sub(1)),
+            (field_inner.x + (column - skip) as u16).min(field_inner.right().saturating_sub(1)),
+            field_inner.y.min(field_inner.bottom().saturating_sub(1)),
         ));
     }
 }
@@ -6099,6 +6185,7 @@ fn draw_approval(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ("a", "allow session"),
         ("n", "reject"),
         ("j/k", "scroll"),
+        ("^O", "peek output"),
     ];
     if approval.diff.is_some() {
         hints.push(("v", "raw/unified"));
@@ -7304,6 +7391,84 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_o_steps_a_question_aside_and_a_new_dialog_returns_visible() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        let (respond, _receive) = tokio::sync::oneshot::channel();
+        app.set_user_question(crate::agent::UserQuestionRequest {
+            question: "Which one?".into(),
+            header: "PICK".into(),
+            options: vec!["a".into(), "b".into()],
+            multi_select: false,
+            respond,
+        });
+        assert!(!app.overlay_hidden);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        );
+        assert!(app.overlay_hidden);
+        // While hidden, transcript keys work instead of feeding the dialog.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::empty()),
+        );
+        assert!(app.question.is_some(), "the question is parked, not lost");
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        );
+        assert!(!app.overlay_hidden);
+        // A fresh dialog always arrives visible.
+        app.overlay_hidden = true;
+        let (respond, _receive) = tokio::sync::oneshot::channel();
+        app.set_approval(crate::agent::ApprovalRequest {
+            tool: "write_file".into(),
+            summary: "x".into(),
+            details: "x".into(),
+            respond,
+        });
+        assert!(!app.overlay_hidden);
+    }
+
+    #[test]
+    fn f3_toggles_thinking_and_hides_streamed_reasoning_blocks() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.push_entry(Entry::new(EntryKind::Thinking, "step by step"));
+        app.push_entry(Entry::new(EntryKind::Assistant, "the answer"));
+        let visible = ui::transcript(&app.entries, 60, "•", None, true);
+        let joined = |t: &ui::Transcript| {
+            t.lines
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref().to_owned())
+                .collect::<String>()
+        };
+        assert!(joined(&visible).contains("step by step"));
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::F(3), KeyModifiers::empty()),
+        );
+        assert!(!app.settings.ui.show_thinking);
+        let hidden = ui::transcript(&app.entries, 60, "•", None, false);
+        assert!(!joined(&hidden).contains("step by step"));
+        assert!(joined(&hidden).contains("the answer"));
+        // Entry indices stay aligned for the cursor and click hit-testing.
+        assert_eq!(hidden.spans.len(), app.entries.len());
+    }
+
+    #[tokio::test]
+    async fn ctrl_g_returns_to_the_live_tail() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.follow = false;
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+        );
+        assert!(app.follow);
+    }
+
+    #[test]
     fn output_token_override_applies_live_and_clears_back_to_auto() {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
         let edit = |app: &mut App, key: ConfigKey, text: &str| {
@@ -7772,7 +7937,7 @@ mod tests {
         // authoritative: twelve columns minus the two-column gutter leaves ten
         // usable cells, so twenty-five characters take three rows.
         let entries = vec![Entry::new(EntryKind::Assistant, "a".repeat(25))];
-        let rows = ui::transcript(&entries, 12, "•", None).lines.len();
+        let rows = ui::transcript(&entries, 12, "•", None, true).lines.len();
         assert_eq!(rows, 3);
     }
 
@@ -8107,7 +8272,7 @@ mod tests {
         assert_eq!(app.cursor, Some(1));
         assert!(!app.follow, "selecting stops follow-mode");
 
-        let collapsed = ui::transcript(&app.entries, 60, "•", app.cursor)
+        let collapsed = ui::transcript(&app.entries, 60, "•", app.cursor, true)
             .lines
             .len();
         handle_key(
@@ -8118,7 +8283,7 @@ mod tests {
             app.entries[1].tool.as_ref().expect("tool").expanded,
             "o should unfold the selected tool"
         );
-        let expanded = ui::transcript(&app.entries, 60, "•", app.cursor)
+        let expanded = ui::transcript(&app.entries, 60, "•", app.cursor, true)
             .lines
             .len();
         assert!(
@@ -8128,7 +8293,7 @@ mod tests {
 
         // The preview caps at 8 lines; the full result must survive for the
         // unfolded view.
-        let rendered = ui::transcript(&app.entries, 60, "•", app.cursor);
+        let rendered = ui::transcript(&app.entries, 60, "•", app.cursor, true);
         let text: String = rendered
             .lines
             .iter()

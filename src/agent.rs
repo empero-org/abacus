@@ -105,6 +105,9 @@ pub enum AgentEvent {
     TraceFailed {
         error: String,
     },
+    /// Something the user should know that is not a failure — e.g. the reply
+    /// hit the output-token ceiling and was cut short.
+    Notice(String),
     Failed {
         error: String,
         messages: Vec<Value>,
@@ -303,11 +306,19 @@ async fn run_turn_inner(
             });
         }
 
+        if completion.truncated {
+            let _ = events.send(AgentEvent::Notice(
+                "The reply hit the output-token limit and was cut short. Raise `Max output \
+                 tokens` in /config (or ask to continue) if this repeats."
+                    .to_owned(),
+            ));
+        }
         // Skip an assistant turn that produced nothing at all, which is what a
         // cancel before the first token looks like.
         if !completion.content.is_empty() || !completion.tool_calls.is_empty() {
             messages.push(assistant_message(
                 &completion.content,
+                &completion.reasoning,
                 &completion.tool_calls,
             ));
         }
@@ -1068,7 +1079,7 @@ pub async fn draft_reply(provider: &Provider, messages: &[Value]) -> Option<Stri
     Some(draft)
 }
 
-fn assistant_message(content: &str, calls: &[ToolCall]) -> Value {
+fn assistant_message(content: &str, reasoning: &str, calls: &[ToolCall]) -> Value {
     let tool_calls = calls
         .iter()
         .map(|call| {
@@ -1083,7 +1094,7 @@ fn assistant_message(content: &str, calls: &[ToolCall]) -> Value {
         })
         .collect::<Vec<_>>();
 
-    if tool_calls.is_empty() {
+    let mut message = if tool_calls.is_empty() {
         json!({"role": "assistant", "content": content})
     } else {
         json!({
@@ -1091,7 +1102,16 @@ fn assistant_message(content: &str, calls: &[ToolCall]) -> Value {
             "content": if content.is_empty() { Value::Null } else { Value::String(content.to_owned()) },
             "tool_calls": tool_calls
         })
+    };
+    // Thinking models on some providers (Kimi K2 thinking, GLM reasoning
+    // deployments) require the reasoning of prior turns passed back with the
+    // assistant message and stop generating without it. Others (DeepSeek's
+    // first-party API) reject the field outright — the provider strips it
+    // again on that rejection, so storing it is the safe default.
+    if !reasoning.is_empty() {
+        message["reasoning_content"] = Value::String(reasoning.to_owned());
     }
+    message
 }
 
 fn mode_tool_spec() -> Value {
@@ -1338,6 +1358,7 @@ mod tests {
     fn assistant_tool_message_has_provider_shape() {
         let value = assistant_message(
             "",
+            "checking the readme first",
             &[ToolCall {
                 id: "call_1".into(),
                 name: "read_file".into(),
@@ -1346,6 +1367,11 @@ mod tests {
         );
         assert!(value["content"].is_null());
         assert_eq!(value["tool_calls"][0]["function"]["name"], "read_file");
+        // Thinking models on some providers need prior reasoning passed back.
+        assert_eq!(value["reasoning_content"], "checking the readme first");
+        // And without reasoning the field is absent, not empty.
+        let value = assistant_message("hi", "", &[]);
+        assert!(value.get("reasoning_content").is_none());
     }
 
     #[test]

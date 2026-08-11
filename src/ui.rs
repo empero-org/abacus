@@ -660,6 +660,7 @@ pub fn transcript(
     width: usize,
     spinner: &str,
     cursor: Option<usize>,
+    show_thinking: bool,
 ) -> Transcript {
     let width = width.max(8);
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -667,6 +668,14 @@ pub fn transcript(
     let mut previous: Option<EntryKind> = None;
 
     for (index, entry) in entries.iter().enumerate() {
+        // Hiding reasoning hides ALL of it, including blocks already
+        // streamed — that is what makes the toggle useful for reading a busy
+        // transcript. A zero-height span keeps entry indices aligned for the
+        // cursor and click hit-testing.
+        if entry.kind == EntryKind::Thinking && !show_thinking {
+            spans.push((lines.len(), 0));
+            continue;
+        }
         // One blank line between blocks, except between consecutive tool rows —
         // a chain of tool calls reads better as a tight group.
         if let Some(previous) = previous {
@@ -1164,7 +1173,7 @@ mod tests {
                 expanded: false,
             }),
         ];
-        let text = transcript(&entries, 40, "⠋", None);
+        let text = transcript(&entries, 40, "⠋", None, true);
         for line in &text.lines {
             assert!(
                 spans_width(&line.spans) <= 40,
@@ -1189,6 +1198,7 @@ mod tests {
             60,
             "⠹",
             None,
+            true,
         );
         let row = plain(&running.lines[0]);
         assert!(row.contains('⠹'), "{row}");
@@ -1207,6 +1217,7 @@ mod tests {
             60,
             "⠹",
             None,
+            true,
         );
         let row = plain(&done.lines[0]);
         assert!(row.contains('✓'), "{row}");
@@ -1226,7 +1237,7 @@ mod tests {
                 expanded: false,
             })
         };
-        let text = transcript(&[call(), call()], 60, "⠋", None);
+        let text = transcript(&[call(), call()], 60, "⠋", None, true);
         assert_eq!(text.lines.len(), 2, "tool rows should not be separated");
     }
 

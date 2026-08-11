@@ -1267,7 +1267,15 @@ impl ToolExecutor {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        let duration = Duration::from_secs(args.timeout_seconds.clamp(1, 300));
+        // A command that visibly sleeps needs at least that long: the model
+        // writes `sleep 180 && retry` in good faith and the default 120s
+        // timeout used to kill it mid-wait. The declared sleep total (plus
+        // grace for the work around it) raises the floor, capped at 10 minutes.
+        let requested = args.timeout_seconds.clamp(1, 600);
+        let sleep_floor = declared_sleep_seconds(&args.command)
+            .map(|seconds| (seconds + 30).min(600))
+            .unwrap_or(0);
+        let duration = Duration::from_secs(requested.max(sleep_floor));
         let mut child = command.spawn().context("could not start command")?;
         let stdout = child.stdout.take().context("could not capture stdout")?;
         let stderr = child.stderr.take().context("could not capture stderr")?;
@@ -1616,7 +1624,7 @@ pub fn tool_specs() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "Shell command"},
-                    "timeout_seconds": {"type": "integer", "description": "Timeout, defaults to 120 and caps at 300"}
+                    "timeout_seconds": {"type": "integer", "description": "Timeout, defaults to 120 and caps at 600; a declared `sleep` in the command raises the floor automatically"}
                 },
                 "required": ["command"]
             }),
@@ -1971,6 +1979,39 @@ fn default_depth() -> usize {
 fn default_timeout() -> u64 {
     120
 }
+
+/// Total seconds of `sleep` a shell command declares, or `None` when it has
+/// none. Reads `sleep 30`, `sleep 2m`, `sleep 90s` — the forms both `sleep(1)`
+/// variants accept — anywhere in the command line.
+fn declared_sleep_seconds(command: &str) -> Option<u64> {
+    let mut total = 0_u64;
+    let mut found = false;
+    let mut words = command.split_whitespace().peekable();
+    while let Some(word) = words.next() {
+        // `(sleep 90)`, `x; sleep 5` — shell punctuation sticks to the word.
+        if word.trim_start_matches(['(', ';', '&', '|', '{']) != "sleep" {
+            continue;
+        }
+        let Some(argument) = words.peek() else {
+            continue;
+        };
+        let argument = argument.trim_end_matches([';', ')', '&', '|']);
+        let (digits, unit) = match argument.chars().last() {
+            Some('s') => (&argument[..argument.len() - 1], 1),
+            Some('m') => (&argument[..argument.len() - 1], 60),
+            Some('h') => (&argument[..argument.len() - 1], 3600),
+            _ => (argument, 1),
+        };
+        if let Ok(value) = digits.parse::<f64>()
+            && value.is_finite()
+            && value >= 0.0
+        {
+            total = total.saturating_add((value * unit as f64).ceil() as u64);
+            found = true;
+        }
+    }
+    found.then_some(total)
+}
 fn default_true() -> bool {
     true
 }
@@ -2024,6 +2065,20 @@ fn validate_branch(value: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn declared_sleep_raises_the_command_timeout_floor() {
+        assert_eq!(declared_sleep_seconds("sleep 180 && cargo test"), Some(180));
+        assert_eq!(declared_sleep_seconds("sleep 2m; echo done"), Some(120));
+        assert_eq!(
+            declared_sleep_seconds("sleep 30s && sleep 45"),
+            Some(75),
+            "multiple sleeps sum"
+        );
+        assert_eq!(declared_sleep_seconds("(sleep 90) & wait"), Some(90));
+        assert_eq!(declared_sleep_seconds("cargo test"), None);
+        assert_eq!(declared_sleep_seconds("echo sleep"), None);
+    }
     use super::*;
     use std::process::Command as StdCommand;
     use tempfile::tempdir;

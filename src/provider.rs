@@ -39,6 +39,12 @@ pub struct Provider {
     /// rejection is the authoritative correction, so it is remembered for the
     /// rest of the session. Shared across clones.
     learned_output_cap: Arc<AtomicU64>,
+    /// Set once the endpoint rejects `reasoning_content` in input messages.
+    /// History stores it because some providers *require* prior reasoning
+    /// passed back (Kimi thinking, GLM reasoning deployments) and stall
+    /// without it; ones that reject it instead (DeepSeek first-party) teach
+    /// us here and get it stripped from then on. Shared across clones.
+    strips_reasoning: Arc<AtomicBool>,
     /// Upstream provider pins, sent only to endpoints that understand them.
     routing: crate::config::Routing,
     /// Prompt tokens from the most recent reply — how full the window actually
@@ -69,6 +75,10 @@ pub struct Completion {
     /// gathered so far are still returned — they were generated and billed, so
     /// discarding them would lose both the text and the token count.
     pub cancelled: bool,
+    /// True when the stream ended with `finish_reason: "length"` — the reply
+    /// hit the output-token ceiling and was cut mid-thought. Callers surface
+    /// this; silently keeping half an answer reads as the model trailing off.
+    pub truncated: bool,
 }
 
 impl Completion {
@@ -79,6 +89,7 @@ impl Completion {
             reasoning: String::new(),
             tool_calls: Vec::new(),
             cancelled: true,
+            truncated: false,
         }
     }
 }
@@ -126,8 +137,18 @@ impl Provider {
             routing: config.routing.clone(),
             prefers_max_completion_tokens: Arc::new(AtomicBool::new(false)),
             learned_output_cap: Arc::new(AtomicU64::new(0)),
+            strips_reasoning: Arc::new(AtomicBool::new(false)),
             context_tokens: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    /// The message list as this endpoint accepts it: verbatim, unless it has
+    /// rejected `reasoning_content` before, in which case the field is removed.
+    fn sanitized_messages(&self, messages: &[Value]) -> Vec<Value> {
+        if !self.strips_reasoning.load(Ordering::Relaxed) {
+            return messages.to_vec();
+        }
+        strip_reasoning_content(messages)
     }
 
     /// The output ceiling to actually send: the configured/detected value,
@@ -206,7 +227,7 @@ impl Provider {
     ) -> Result<Completion> {
         let mut body = json!({
             "model": self.model,
-            "messages": messages,
+            "messages": self.sanitized_messages(messages),
             "stream": true,
             // Streamed responses omit usage unless this is asked for, which is
             // why every token figure was previously a chars/4 estimate.
@@ -258,6 +279,21 @@ impl Provider {
                     () = wait_for_cancel(cancel) => return Ok(Completion::cancelled()),
                 }
             }
+            // Some endpoints reject `reasoning_content` in input messages
+            // (history stores it because other endpoints *require* it).
+            // Strip and retry; the preference sticks for the session.
+            Err(error)
+                if format!("{error:#}").contains("reasoning_content")
+                    && !self.strips_reasoning.load(Ordering::Relaxed) =>
+            {
+                self.strips_reasoning.store(true, Ordering::Relaxed);
+                body["messages"] = json!(strip_reasoning_content(messages));
+                tokio::select! {
+                    biased;
+                    sent = self.post_stream(&body) => sent?,
+                    () = wait_for_cancel(cancel) => return Ok(Completion::cancelled()),
+                }
+            }
             // "max_tokens is too large: N. This model supports at most M…" —
             // detection over-reported (an upstream echoing its context window
             // as the completion cap is common on aggregator endpoints). The
@@ -283,6 +319,7 @@ impl Provider {
         let mut calls: BTreeMap<usize, PartialToolCall> = BTreeMap::new();
         let mut text = TextStream::default();
         let mut reported_usage: Option<Usage> = None;
+        let mut truncated = false;
         let mut stream = response.bytes_stream();
 
         let mut cancelled = false;
@@ -313,6 +350,7 @@ impl Provider {
                         &mut text,
                     )?;
                     capture_usage(&data, &mut reported_usage, parse_chat_usage);
+                    truncated |= chunk_hit_length_limit(&data);
                 }
             }
         }
@@ -328,6 +366,7 @@ impl Provider {
                     &mut text,
                 )?;
                 capture_usage(&data, &mut reported_usage, parse_chat_usage);
+                truncated |= chunk_hit_length_limit(&data);
             }
         }
         self.record_tokens(reported_usage, messages, &content, &calls);
@@ -351,7 +390,7 @@ impl Provider {
                 }
             }
         }
-        finish_completion(content, reasoning, calls, cancelled)
+        finish_completion(content, reasoning, calls, cancelled, truncated)
     }
 
     async fn complete_responses(
@@ -417,7 +456,7 @@ impl Provider {
             }
         }
         self.record_tokens(reported_usage, messages, &content, &calls);
-        finish_completion(content, reasoning, calls, cancelled)
+        finish_completion(content, reasoning, calls, cancelled, false)
     }
 
     /// Whether this endpoint accepts upstream provider routing.
@@ -579,6 +618,34 @@ async fn wait_for_cancel(cancel: &AtomicBool) {
     while !cancel.load(Ordering::Relaxed) {
         sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// Whether a streamed chunk reports the reply was cut by the output-token
+/// ceiling (`finish_reason: "length"`).
+fn chunk_hit_length_limit(data: &str) -> bool {
+    serde_json::from_str::<Value>(data)
+        .ok()
+        .and_then(|value| {
+            value.get("choices")?.as_array()?.iter().find_map(|choice| {
+                (choice.get("finish_reason")?.as_str()? == "length").then_some(true)
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Remove `reasoning_content` from every message, for endpoints that reject
+/// it in the input.
+fn strip_reasoning_content(messages: &[Value]) -> Vec<Value> {
+    messages
+        .iter()
+        .map(|message| {
+            let mut message = message.clone();
+            if let Some(object) = message.as_object_mut() {
+                object.remove("reasoning_content");
+            }
+            message
+        })
+        .collect()
 }
 
 /// Whether a provider error is the "use max_completion_tokens instead" 400 that
@@ -847,6 +914,7 @@ fn finish_completion(
     reasoning: String,
     calls: BTreeMap<usize, PartialToolCall>,
     cancelled: bool,
+    truncated: bool,
 ) -> Result<Completion> {
     // An incomplete entry is dropped rather than failing the turn. Two things
     // produce them routinely: a bare `{"index":1}` sentinel some servers emit,
@@ -887,6 +955,7 @@ fn finish_completion(
         reasoning,
         tool_calls,
         cancelled,
+        truncated,
     })
 }
 
@@ -1001,7 +1070,7 @@ mod tests {
             },
         );
         let completion =
-            finish_completion("partial prose".into(), String::new(), calls, true).unwrap();
+            finish_completion("partial prose".into(), String::new(), calls, true, false).unwrap();
         assert!(completion.cancelled);
         assert_eq!(completion.content, "partial prose");
         assert_eq!(completion.tool_calls.len(), 1);
