@@ -859,6 +859,236 @@ async fn rolling_summary_compaction_fires_on_large_context() {
     assert_eq!(completed.last().unwrap()["content"], "all done");
 }
 
+/// The tether's intent snapshot used to run *after* the answer, so every first
+/// turn ended with a two-second stall. It now runs beside the turn: this proves
+/// the intent request reaches the server while the main stream is still open,
+/// and that the snapshot still lands on the tether by the time the turn is done.
+#[tokio::test]
+async fn intent_snapshot_runs_beside_the_turn_not_after_it() {
+    let directory = tempdir().unwrap();
+    let workspace = directory.path().join("project");
+    std::fs::create_dir(&workspace).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    // Timestamps, in milliseconds since the server started, of the moment the
+    // intent request arrived and the moment the main answer finished streaming.
+    let intent_arrived: Arc<std::sync::Mutex<Option<u128>>> = Arc::default();
+    let answer_finished: Arc<std::sync::Mutex<Option<u128>>> = Arc::default();
+    let (intent_probe, answer_probe) = (intent_arrived.clone(), answer_finished.clone());
+
+    let server = tokio::spawn(async move {
+        let start = std::time::Instant::now();
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let (intent_probe, answer_probe) = (intent_probe.clone(), answer_probe.clone());
+            tokio::spawn(async move {
+                let request = String::from_utf8(read_request(&mut stream).await).unwrap();
+                let is_intent = request.contains("INTENT");
+                let body = if is_intent {
+                    *intent_probe.lock().unwrap() = Some(start.elapsed().as_millis());
+                    concat!(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"Ship the importer fix.\"}}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )
+                } else {
+                    concat!(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                // The main answer is served slowly, so an intent call that only
+                // started afterwards could not possibly arrive before it ends.
+                if !is_intent {
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                }
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+                if !is_intent {
+                    *answer_probe.lock().unwrap() = Some(start.elapsed().as_millis());
+                }
+            });
+        }
+    });
+
+    let config = test_config(&directory, &workspace, address);
+    let provider = Provider::new(&config).unwrap();
+    let mut messages = initial_messages(&workspace);
+    messages.push(json!({"role":"user","content":"fix the importer"}));
+    let tether = abacus_agent::tether::TetherState::default();
+
+    let (events, mut receiver) = mpsc::unbounded_channel();
+    let agent = tokio::spawn(run_turn(
+        provider,
+        messages,
+        TurnOptions {
+            // A session id is what makes the tether run at all.
+            session_id: Some("session-under-test".into()),
+            tether: tether.clone(),
+            ..base_options(&workspace)
+        },
+        events,
+    ));
+
+    let mut tethered = None;
+    while let Some(event) = receiver.recv().await {
+        match event {
+            AgentEvent::Notice(text) if text.starts_with("tethered") => tethered = Some(text),
+            AgentEvent::Done { .. } => break,
+            AgentEvent::Failed { error, .. } => panic!("agent failed: {error}"),
+            _ => {}
+        }
+    }
+    agent.await.unwrap();
+    server.await.unwrap();
+
+    let intent_at = intent_arrived.lock().unwrap().expect("an intent call");
+    let answer_at = answer_finished.lock().unwrap().expect("an answered turn");
+    assert!(
+        intent_at < answer_at,
+        "the intent call must overlap the answer, not follow it \
+         (intent at {intent_at}ms, answer finished at {answer_at}ms)"
+    );
+    assert_eq!(tether.intent().as_deref(), Some("Ship the importer fix."));
+    assert!(
+        tethered.is_some(),
+        "the user is told what the session is tethered to"
+    );
+}
+
+/// The reflection pass used to spend a second full-conversation call just to
+/// restate a summary it had already given. When every record in the batch is
+/// accepted and the model already said what it recorded, one call is enough.
+#[tokio::test]
+async fn reflection_stops_after_one_call_when_every_record_lands() {
+    let directory = tempdir().unwrap();
+    let workspace = directory.path().join("project");
+    std::fs::create_dir(&workspace).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let reflections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = reflections.clone();
+    let server = tokio::spawn(async move {
+        for _ in 0..5 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = String::from_utf8(read_request(&mut stream).await).unwrap();
+            let is_reflection = request.contains("REFLECTION PASS");
+            let is_summary = request.contains("context-aware state summary");
+            let payload = if is_reflection {
+                counter.fetch_add(1, Ordering::Relaxed);
+                // A record *and* a summary in the same completion: nothing is
+                // left for a second pass to discover.
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"Recorded the importer quirk.\"}}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"m1\",\"function\":{\"name\":\"memory_record\",\"arguments\":\"{\\\"title\\\":\\\"importer quirk\\\",\\\"body\\\":\\\"null keys are dropped\\\"}\"}}]}}]}\n\n",
+                    "data: [DONE]\n\n"
+                ).to_owned()
+            } else if is_summary {
+                let chunk = serde_json::to_string(
+                    &json!({"choices":[{"delta":{"content":"1. Primary Request and Intent: do the thing. 10. Next Step: continue."}}]}),
+                )
+                .unwrap();
+                format!("data: {chunk}\n\ndata: [DONE]\n\n")
+            } else {
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n",
+                    "data: [DONE]\n\n"
+                )
+                .to_owned()
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                payload.len(),
+                payload
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.shutdown().await.unwrap();
+            if !is_reflection && !is_summary {
+                break;
+            }
+        }
+    });
+
+    let config = test_config(&directory, &workspace, address);
+    let provider = Provider::new(&config).unwrap();
+    // Over the rolling-summary threshold, which is what runs the reflection.
+    let mut messages = initial_messages(&workspace);
+    messages.push(json!({"role":"user","content":"please do the thing"}));
+    messages.push(json!({"role":"assistant","content":format!("BIGBLOB{}", "x".repeat(420_000))}));
+    messages.push(json!({"role":"user","content":"continue"}));
+
+    let memories = abacus_agent::memories::MemoryStore::default();
+    let (events, mut receiver) = mpsc::unbounded_channel();
+    let agent = tokio::spawn(run_turn(
+        provider,
+        messages,
+        TurnOptions {
+            memories: memories.clone(),
+            ..base_options(&workspace)
+        },
+        events,
+    ));
+    while let Some(event) = receiver.recv().await {
+        match event {
+            AgentEvent::Done { .. } => break,
+            AgentEvent::Failed { error, .. } => panic!("agent failed: {error}"),
+            _ => {}
+        }
+    }
+    agent.await.unwrap();
+    server.await.unwrap();
+
+    assert_eq!(
+        reflections.load(Ordering::Relaxed),
+        1,
+        "one reflection call, not a second one to repeat the summary"
+    );
+    // The saving must not cost the recording itself.
+    let recorded = memories.snapshot();
+    assert!(
+        recorded
+            .iter()
+            .any(|memory| memory.title == "importer quirk"),
+        "the memory was still recorded: {recorded:?}"
+    );
+}
+
+/// Defaults for tests that only care about one or two options.
+fn base_options(workspace: &std::path::Path) -> TurnOptions {
+    TurnOptions {
+        trace: None,
+        cancel: Arc::new(AtomicBool::new(false)),
+        workspace: workspace.to_owned(),
+        max_steps: 4,
+        tool_output_limit: 30_000,
+        mode: AgentMode::Build,
+        allow_mutations: Arc::new(AtomicBool::new(true)),
+        services: Arc::new(AgentServices::empty(workspace.to_owned())),
+        session_id: None,
+        goal: GoalState::default(),
+        tasks: TaskList::default(),
+        compaction: CompactionState::default(),
+        compaction_budget: CompactionBudget::default(),
+        allow_subagents: false,
+        papercuts: abacus_agent::papercuts::PapercutStore::default(),
+        memories: abacus_agent::memories::MemoryStore::default(),
+        tether: abacus_agent::tether::TetherState::default(),
+        hive: abacus_agent::hive::HiveHandle::default(),
+        aux_model: None,
+        injections: abacus_agent::agent::InjectionQueue::default(),
+        modes: abacus_agent::modes::ModeCoach::default(),
+        web_search: abacus_agent::web::WebConfig::default(),
+    }
+}
+
 fn test_config(
     directory: &tempfile::TempDir,
     workspace: &std::path::Path,

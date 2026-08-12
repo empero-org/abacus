@@ -116,6 +116,12 @@ pub async fn run(
             break;
         }
         conversation.push(crate::agent::assistant_reflection_message(&completion));
+        // Every record in this batch landed, and the model already said what it
+        // was recording? Then the next step exists only to repeat that summary
+        // back — a second pass over the whole conversation for nothing. The
+        // step is still taken whenever a record *failed*, which is the case
+        // where seeing the results changes what the model does.
+        let mut all_accepted = true;
         for call in &completion.tool_calls {
             let output = memories
                 .execute(&call.name, &call.arguments)
@@ -134,7 +140,9 @@ pub async fn run(
                     "Error: only memory, papercut, and working-notes tools are available here."
                         .to_owned()
                 });
-            if !output.starts_with("Error:") {
+            if output.starts_with("Error:") {
+                all_accepted = false;
+            } else {
                 recorded += 1;
             }
             conversation.push(json!({
@@ -143,6 +151,9 @@ pub async fn run(
                 "name": call.name,
                 "content": output
             }));
+        }
+        if all_accepted && !summary.is_empty() {
+            break;
         }
     }
 

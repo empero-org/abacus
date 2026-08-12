@@ -100,7 +100,10 @@ were right or wrong, goals accomplished. It runs with a restricted toolset
 (`memory_record`/`memory_forget`, `papercut_record`, `working_notes_update`) and
 records what a future session would genuinely need, *or nothing* — the reflection
 itself is discarded, only the records persist. A `rethink — …` notice marks it in
-the transcript.
+the transcript. The pass stops as soon as it is done: when every record in the
+batch is accepted and the model already said what it recorded, the follow-up
+call that would only restate that summary is skipped — it still runs when a
+record fails, which is the case where seeing the result changes the answer.
 
 Working notes live in a clearly delimited, Abacus-managed `abacus:notes` block
 inside the workspace's `AGENTS.md`. Only that block is ever rewritten; your own
@@ -110,10 +113,12 @@ itself was allowed to mutate — never under a PLAN pin.
 ### Tethering
 
 Long sessions drift: a bug fix becomes a refactor becomes a rewrite. **Tethering**
-is the anchor. Right after your first prompt is answered, a quick model call
-snapshots the session's **intent** — what you're trying to achieve and under
-which constraints — shown as a `tethered — …` notice and persisted so resume
-keeps it.
+is the anchor. A quick model call snapshots the session's **intent** — what
+you're trying to achieve and under which constraints — shown as a `tethered — …`
+notice and persisted so resume keeps it. The snapshot runs *beside* your first
+turn rather than after it: the intent is yours and the prompt already states it,
+so the call overlaps the answer and the notice lands with it instead of holding
+the turn open for a couple of seconds.
 
 Every ~35 model steps, a drift check runs: the intent plus a compact history —
 user prompts, assistant text *and its recorded thinking*, and tool-call names,
@@ -121,8 +126,10 @@ never tool outputs — and a strict-but-fair question: is the recent activity st
 serving the intent? An `ON_TRACK` verdict costs one small call and changes
 nothing. An `OFF_TRACK` verdict arrives with a course correction written by the
 checking call itself, injected as a system layer into the next few requests and
-surfaced as a `tether — …` notice. Thinking is deliberately included: drift shows
-up in the reasoning before it shows up in the actions. A verdict that doesn't
+surfaced as a `tether — …` notice. The check runs detached for the same reason:
+a correction steers the requests *after* this one, so nothing waits on it.
+Thinking is deliberately included: drift shows up in the reasoning before it
+shows up in the actions. A verdict that doesn't
 follow the format is discarded — it gets no steering power.
 
 ### The hive: earned delegation

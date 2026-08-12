@@ -277,6 +277,17 @@ async fn run_turn_inner(
     // call, not one per step.
     let mut command_verdicts: HashMap<String, bool> = HashMap::new();
     let mut active_mode = options.mode;
+    // The first intent snapshot runs *beside* the turn rather than after it.
+    // Intent is the user's, and the prompt already states it in full, so the
+    // call needs nothing the model is about to produce — starting it now and
+    // collecting it at the end costs the user no waiting at all.
+    let mut intent_capture: Option<tokio::task::JoinHandle<Option<String>>> =
+        (options.session_id.is_some() && options.tether.intent().is_none()).then(|| {
+            let (aux, snapshot, cancel) = (aux.clone(), messages.clone(), options.cancel.clone());
+            tokio::spawn(async move {
+                crate::tether::capture_intent(&aux, &snapshot, None, &cancel).await
+            })
+        });
     // Best-effort: count this turn against the active goal's progress metric.
     let _ = options.goal.increment_iteration();
 
@@ -307,18 +318,26 @@ async fn run_turn_inner(
         {
             rethought = true;
             run_rethink(&aux, &messages, &options, active_mode, &events).await;
-            // Refresh the tether snapshot while the evidence is verbatim —
-            // the user may have redirected since it was taken.
-            if options.session_id.is_some()
-                && let Some(intent) = crate::tether::capture_intent(
-                    &aux,
-                    &messages,
-                    options.tether.intent().as_deref(),
-                    &options.cancel,
-                )
-                .await
-            {
-                options.tether.set_intent(intent);
+            // Refresh the tether snapshot while the evidence is verbatim — the
+            // user may have redirected since it was taken. The snapshot is
+            // owned, so this can outlive the compaction that erases the
+            // history it was taken from, and the turn does not wait on it.
+            if options.session_id.is_some() {
+                let (aux, snapshot, previous, tether, cancel) = (
+                    aux.clone(),
+                    messages.clone(),
+                    options.tether.intent(),
+                    options.tether.clone(),
+                    options.cancel.clone(),
+                );
+                tokio::spawn(async move {
+                    if let Some(intent) =
+                        crate::tether::capture_intent(&aux, &snapshot, previous.as_deref(), &cancel)
+                            .await
+                    {
+                        tether.set_intent(intent);
+                    }
+                });
             }
         }
         // Tiered compaction (microcompact + rolling LLM summary) runs before each
@@ -359,6 +378,7 @@ async fn run_turn_inner(
                     // turn hangs on "connecting" instead of reporting.
                     drop(delta_tx);
                     let _ = forward.await;
+                    abort_capture(intent_capture.take());
                     let _ = events.send(AgentEvent::Failed {
                         error: format!("{error:#}"),
                         messages,
@@ -378,6 +398,7 @@ async fn run_turn_inner(
                     // pushing a meaningless empty assistant message into history.
                     drop(delta_tx);
                     let _ = forward.await;
+                    abort_capture(intent_capture.take());
                     let _ = events.send(AgentEvent::Done {
                         messages,
                         reason: DoneReason::Complete,
@@ -437,19 +458,33 @@ async fn run_turn_inner(
             ));
         }
         // Tether drift check every ~35 model steps: a quick call judges the
-        // recent activity against the session intent, and an off-track
-        // verdict becomes a course-correction layer in the next requests.
+        // recent activity against the session intent, and an off-track verdict
+        // becomes a course-correction layer in the next requests. It runs
+        // detached — a drift verdict is a nudge for the requests after this
+        // one, so making the model wait on it buys nothing.
         if options.tether.step_and_check_due()
             && let Some(intent) = options.tether.intent()
-            && let Some(correction) =
-                crate::tether::check_drift(&aux, &intent, &messages, &options.cancel).await
         {
-            options.tether.set_correction(correction.clone());
-            let _ = events.send(AgentEvent::Notice(format!("tether — {correction}")));
+            let (aux, snapshot, tether, cancel, notices) = (
+                aux.clone(),
+                messages.clone(),
+                options.tether.clone(),
+                options.cancel.clone(),
+                events.clone(),
+            );
+            tokio::spawn(async move {
+                if let Some(correction) =
+                    crate::tether::check_drift(&aux, &intent, &snapshot, &cancel).await
+                {
+                    tether.set_correction(correction.clone());
+                    let _ = notices.send(AgentEvent::Notice(format!("tether — {correction}")));
+                }
+            });
         }
         // A cancelled stream still produced (and was billed for) whatever it
         // got through, so it is kept in history before the turn reports back.
         if completion.cancelled || options.cancel.load(Ordering::Relaxed) {
+            abort_capture(intent_capture.take());
             let _ = events.send(AgentEvent::Done {
                 messages,
                 reason: DoneReason::Interrupted,
@@ -470,12 +505,12 @@ async fn run_turn_inner(
             if !rethought && tool_calls_executed >= crate::rethink::LONG_TURN_TOOL_CALLS {
                 run_rethink(&aux, &messages, &options, active_mode, &events).await;
             }
-            // First answered prompt: snapshot the session intent the tether
-            // will hold the rest of the session against.
-            if options.session_id.is_some()
+            // Collect the intent snapshot started when the turn began. It has
+            // had the whole turn to finish, so this is a formality — the
+            // notice lands with the answer instead of seconds behind it.
+            if let Some(handle) = intent_capture.take()
+                && let Ok(Some(intent)) = handle.await
                 && options.tether.intent().is_none()
-                && let Some(intent) =
-                    crate::tether::capture_intent(&aux, &messages, None, &options.cancel).await
             {
                 options.tether.set_intent(intent.clone());
                 let _ = events.send(AgentEvent::Notice(format!("tethered — {intent}")));
@@ -1504,6 +1539,13 @@ pub fn initial_messages(workspace: &Path) -> Vec<Value> {
 
 /// Run the reflection pass and surface its outcome. Workspace notes are only
 /// writable when the turn itself was allowed to mutate.
+/// Drop a background intent snapshot whose turn ended without it.
+fn abort_capture(handle: Option<tokio::task::JoinHandle<Option<String>>>) {
+    if let Some(handle) = handle {
+        handle.abort();
+    }
+}
+
 async fn run_rethink(
     provider: &Provider,
     messages: &[Value],
