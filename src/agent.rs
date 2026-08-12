@@ -233,6 +233,7 @@ async fn run_turn_inner(
     }
     if options.allow_subagents {
         specs.push(SubagentRuntime::tool_spec());
+        specs.push(SubagentRuntime::message_tool_spec());
     }
     if options.mode == AgentMode::Auto {
         specs.push(mode_tool_spec());
@@ -625,6 +626,8 @@ async fn run_turn_inner(
                         let mut output =
                             if call.name == "spawn_subagents" && options.allow_subagents {
                                 subagents.execute(&call.arguments).await
+                            } else if call.name == "message_subagent" && options.allow_subagents {
+                                subagents.message(&call.arguments).await
                             } else if let Some(output) =
                                 options.goal.execute(&call.name, &call.arguments)
                             {
@@ -999,7 +1002,7 @@ fn tool_requires_approval(call: &ToolCall, services: &AgentServices) -> bool {
     match call.name.as_str() {
         "goal_status" | "goal_update" | "task_list" | "task_create" | "task_update"
         | "papercut_record" | "papercut_list" | "memory_record" | "memory_list"
-        | "memory_forget" | "ask_user" => false,
+        | "memory_forget" | "message_subagent" | "ask_user" => false,
         "spawn_subagents" => true,
         _ => services.needs_approval(call),
     }

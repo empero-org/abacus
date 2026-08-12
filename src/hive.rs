@@ -148,6 +148,98 @@ impl SubagentBoard {
     }
 }
 
+/// How many finished workers stay resumable. Transcripts are held in memory,
+/// so the window is bounded; older workers fall out oldest-first.
+const RESUMABLE_WORKERS: usize = 8;
+
+/// What the orchestrator can reach when it addresses a worker by name.
+pub enum WorkerChannel {
+    /// The worker is still running — a message steers it mid-flight, exactly
+    /// like the user steering the main turn.
+    Live(crate::agent::InjectionQueue),
+    /// The worker finished. Its conversation is kept so a follow-up can
+    /// continue with context intact, in a fresh worktree.
+    Finished(Vec<serde_json::Value>),
+}
+
+struct WorkerEntry {
+    running: bool,
+    injections: crate::agent::InjectionQueue,
+    transcript: Vec<serde_json::Value>,
+    /// Monotonic sequence for oldest-first eviction.
+    seq: u64,
+}
+
+/// Named workers the orchestrator can address after spawning them. Lives on
+/// the hive handle so it survives across turns — a worker spawned in one turn
+/// is still reachable from the next.
+#[derive(Clone, Default)]
+pub struct WorkerRegistry {
+    inner: Arc<RwLock<std::collections::BTreeMap<String, WorkerEntry>>>,
+    next_seq: Arc<AtomicU64>,
+}
+
+impl WorkerRegistry {
+    /// Register a starting worker and hand back the queue its turn drains.
+    /// A repeated name replaces the older entry: the live worker is the one
+    /// the orchestrator means.
+    pub fn open(&self, name: &str) -> crate::agent::InjectionQueue {
+        let injections = crate::agent::InjectionQueue::default();
+        let mut inner = self.inner.write().expect("worker registry lock");
+        inner.insert(
+            name.to_owned(),
+            WorkerEntry {
+                running: true,
+                injections: injections.clone(),
+                transcript: Vec::new(),
+                seq: self.next_seq.fetch_add(1, Ordering::Relaxed),
+            },
+        );
+        injections
+    }
+
+    /// Mark a worker finished and keep its conversation for a follow-up.
+    pub fn close(&self, name: &str, transcript: Vec<serde_json::Value>) {
+        let mut inner = self.inner.write().expect("worker registry lock");
+        if let Some(entry) = inner.get_mut(name) {
+            entry.running = false;
+            entry.transcript = transcript;
+        }
+        // Bound the retained set, dropping the oldest finished workers first.
+        while inner.values().filter(|entry| !entry.running).count() > RESUMABLE_WORKERS {
+            let Some(oldest) = inner
+                .iter()
+                .filter(|(_, entry)| !entry.running)
+                .min_by_key(|(_, entry)| entry.seq)
+                .map(|(name, _)| name.clone())
+            else {
+                break;
+            };
+            inner.remove(&oldest);
+        }
+    }
+
+    /// Reach a worker by name, if it is known.
+    pub fn channel(&self, name: &str) -> Option<WorkerChannel> {
+        let inner = self.inner.read().expect("worker registry lock");
+        let entry = inner.get(name)?;
+        Some(if entry.running {
+            WorkerChannel::Live(entry.injections.clone())
+        } else {
+            WorkerChannel::Finished(entry.transcript.clone())
+        })
+    }
+
+    /// Known worker names with their state, for error messages and listings.
+    pub fn roster(&self) -> Vec<(String, bool)> {
+        let inner = self.inner.read().expect("worker registry lock");
+        inner
+            .iter()
+            .map(|(name, entry)| (name.clone(), entry.running))
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HiveTier {
     Probing,
@@ -201,6 +293,8 @@ pub struct HiveHandle {
     stats: Arc<RwLock<HiveStats>>,
     file: Option<PathBuf>,
     pub board: SubagentBoard,
+    /// Named workers the orchestrator can message after spawning them.
+    pub workers: WorkerRegistry,
 }
 
 impl HiveHandle {
@@ -213,6 +307,7 @@ impl HiveHandle {
             stats: Arc::new(RwLock::new(stats)),
             file: Some(file),
             board: SubagentBoard::default(),
+            workers: WorkerRegistry::default(),
         }
     }
 
@@ -330,6 +425,74 @@ mod tests {
             hive.record_run(2, 0);
         }
         assert!(hive.guidance().contains("HIVE"));
+    }
+
+    #[test]
+    fn registry_routes_to_a_live_worker_then_to_its_transcript() {
+        let registry = WorkerRegistry::default();
+        assert!(registry.channel("nobody").is_none());
+
+        let queue = registry.open("recon");
+        // Running: a message steers the live worker.
+        match registry.channel("recon") {
+            Some(WorkerChannel::Live(live)) => {
+                live.push(crate::agent::Injection::UserMessage(
+                    "also check tests".into(),
+                ));
+            }
+            other => panic!("expected a live channel, got {}", other.is_some()),
+        }
+        assert_eq!(queue.drain().len(), 1, "the worker's own turn receives it");
+
+        // Finished: the channel switches to its conversation.
+        registry.close(
+            "recon",
+            vec![serde_json::json!({"role":"assistant","content":"found it"})],
+        );
+        match registry.channel("recon") {
+            Some(WorkerChannel::Finished(transcript)) => {
+                assert_eq!(transcript.len(), 1, "context is kept for a follow-up");
+            }
+            _ => panic!("expected a finished channel"),
+        }
+        assert_eq!(registry.roster(), vec![("recon".to_owned(), false)]);
+    }
+
+    #[test]
+    fn registry_bounds_retained_transcripts_oldest_first() {
+        let registry = WorkerRegistry::default();
+        for index in 0..(RESUMABLE_WORKERS + 3) {
+            let name = format!("w{index}");
+            registry.open(&name);
+            registry.close(&name, vec![serde_json::json!({"role":"assistant"})]);
+        }
+        let roster = registry.roster();
+        assert_eq!(roster.len(), RESUMABLE_WORKERS, "retention is bounded");
+        assert!(registry.channel("w0").is_none(), "oldest evicted first");
+        assert!(
+            registry
+                .channel(&format!("w{}", RESUMABLE_WORKERS + 2))
+                .is_some(),
+            "newest retained"
+        );
+    }
+
+    #[test]
+    fn a_running_worker_is_never_evicted() {
+        let registry = WorkerRegistry::default();
+        registry.open("long-runner");
+        for index in 0..(RESUMABLE_WORKERS + 4) {
+            let name = format!("w{index}");
+            registry.open(&name);
+            registry.close(&name, vec![serde_json::json!({"role":"assistant"})]);
+        }
+        assert!(
+            matches!(
+                registry.channel("long-runner"),
+                Some(WorkerChannel::Live(_))
+            ),
+            "eviction only takes finished workers"
+        );
     }
 
     #[test]

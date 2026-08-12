@@ -56,6 +56,11 @@ struct SubagentTask {
     /// different OpenRouter models). None uses the orchestrator's model.
     #[serde(default)]
     model: Option<String>,
+    /// Prior conversation for a resumed worker — never part of the tool call,
+    /// set only by `message_subagent` so the worker continues instead of
+    /// starting over.
+    #[serde(skip)]
+    resume_from: Option<Vec<Value>>,
 }
 
 /// What kind of worker a task gets. The role shapes both the worker's system
@@ -186,6 +191,115 @@ impl SubagentRuntime {
         })
     }
 
+    /// The tool for addressing one worker by name after it was spawned.
+    pub fn message_tool_spec() -> Value {
+        json!({
+            "type":"function",
+            "function":{
+                "name":"message_subagent",
+                "description":"Send a message to one worker you spawned, by name. If it is still running the message reaches it mid-task — use this to correct or extend a worker without killing it. If it already finished, it picks up where it left off with its conversation intact, in a fresh worktree seeded from the current workspace; its reply is delivered to you after a later tool call, like any background worker. Prefer this over re-spawning a worker for the same thread of work, because the worker keeps everything it already learned.",
+                "parameters":{
+                    "type":"object",
+                    "properties":{
+                        "name":{"type":"string","description":"The worker's name, exactly as given to spawn_subagents"},
+                        "message":{"type":"string","description":"What to tell it — a correction, extra context, or a follow-up task"}
+                    },
+                    "required":["name","message"],
+                    "additionalProperties":false
+                }
+            }
+        })
+    }
+
+    pub async fn message(&self, arguments: &str) -> String {
+        match self.message_inner(arguments).await {
+            Ok(output) => output,
+            Err(error) => format!("Error: {error:#}"),
+        }
+    }
+
+    async fn message_inner(&self, arguments: &str) -> Result<String> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct MessageArgs {
+            name: String,
+            message: String,
+        }
+        let args: MessageArgs =
+            serde_json::from_str(arguments).context("invalid message_subagent arguments")?;
+        let name = args.name.trim();
+        if args.message.trim().is_empty() {
+            bail!("message must not be empty");
+        }
+        let Some(channel) = self.hive.workers.channel(name) else {
+            let roster = self.hive.workers.roster();
+            if roster.is_empty() {
+                bail!("no worker named `{name}` — none have been spawned yet");
+            }
+            let known = roster
+                .iter()
+                .map(|(worker, running)| {
+                    format!(
+                        "{worker} ({})",
+                        if *running { "running" } else { "finished" }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!("no worker named `{name}`. Known workers: {known}");
+        };
+
+        match channel {
+            // Running: steer it, exactly as the user steers the main turn.
+            crate::hive::WorkerChannel::Live(injections) => {
+                injections.push(crate::agent::Injection::UserMessage(args.message));
+                Ok(format!(
+                    "Delivered to `{name}`, which is still running — it picks the message up \
+                     after its current step. Its report will reach you as usual."
+                ))
+            }
+            // Finished: continue the same thread of work with its context.
+            crate::hive::WorkerChannel::Finished(transcript) if !transcript.is_empty() => {
+                self.resume_worker(name.to_owned(), transcript, args.message)
+                    .await
+            }
+            crate::hive::WorkerChannel::Finished(_) => bail!(
+                "`{name}` finished without a usable conversation (it failed early); \
+                 spawn a fresh worker instead"
+            ),
+        }
+    }
+
+    /// Continue a finished worker: its own conversation plus the new message,
+    /// in a fresh worktree seeded from the workspace as it is now. Runs in the
+    /// background and reports back like any other worker.
+    async fn resume_worker(
+        &self,
+        name: String,
+        transcript: Vec<Value>,
+        message: String,
+    ) -> Result<String> {
+        let context = Arc::new(WorktreeContext::capture(&self.workspace).await?);
+        let runtime = self.clone();
+        let injections = self.injections.clone();
+        let reported = name.clone();
+        tokio::spawn(async move {
+            let report = match runtime
+                .run_resumed(context, &name, transcript, message)
+                .await
+            {
+                Ok(response) => format!("worker `{name}` (resumed): {response}"),
+                Err(error) => format!("worker `{name}` (resumed) failed: {error:#}"),
+            };
+            injections.push(crate::agent::Injection::SubagentReport(report));
+        });
+        Ok(format!(
+            "`{reported}` finished earlier; it has been restarted with its previous \
+             conversation and your message. Keep working — its reply will be delivered \
+             after a later tool call."
+        ))
+    }
+
     pub fn approval_details(arguments: &str) -> String {
         match parse_args(arguments) {
             Ok(args) => {
@@ -304,6 +418,49 @@ impl SubagentRuntime {
         format!("{}\n\n{record}", format_results(&results, apply))
     }
 
+    /// Run a resumed worker to completion in its own worktree, replaying its
+    /// prior conversation so it continues rather than restarts.
+    async fn run_resumed(
+        &self,
+        context: Arc<WorktreeContext>,
+        name: &str,
+        transcript: Vec<Value>,
+        message: String,
+    ) -> Result<String> {
+        let (worker_provider, worker_tokens) = self.provider.with_detached_counter();
+        let board_id = self
+            .hive
+            .board
+            .begin(name, "resumed", worker_tokens.clone());
+        let injections = self.hive.workers.open(name);
+        let task = SubagentTask {
+            name: name.to_owned(),
+            prompt: message,
+            role: SubagentRole::Worker,
+            model: None,
+            resume_from: Some(transcript.clone()),
+        };
+        let outcome = self
+            .run_one_inner(&context, &task, board_id, worker_provider, injections)
+            .await;
+        self.provider
+            .add_tokens(worker_tokens.load(std::sync::atomic::Ordering::Relaxed));
+        match outcome {
+            Ok((response, _patch, new_transcript)) => {
+                self.hive.board.finish(board_id, true);
+                // The continued conversation replaces the old one, so a second
+                // follow-up builds on this round too.
+                self.hive.workers.close(name, new_transcript);
+                Ok(response)
+            }
+            Err(error) => {
+                self.hive.board.finish(board_id, false);
+                self.hive.workers.close(name, transcript);
+                Err(error)
+            }
+        }
+    }
+
     async fn run_one(&self, context: Arc<WorktreeContext>, task: SubagentTask) -> SubagentResult {
         let name = task.name.clone();
         let (mut worker_provider, worker_tokens) = self.provider.with_detached_counter();
@@ -318,16 +475,28 @@ impl SubagentRuntime {
             .hive
             .board
             .begin(&name, task.role.label(), worker_tokens.clone());
+        // Register before starting so a message addressed to this worker mid-run
+        // reaches the turn that is about to begin.
+        let worker_injections = self.hive.workers.open(&name);
         let outcome = self
-            .run_one_inner(&context, &task, board_id, worker_provider)
+            .run_one_inner(
+                &context,
+                &task,
+                board_id,
+                worker_provider,
+                worker_injections,
+            )
             .await;
         // Fold the worker's usage into the session total — the per-worker
         // counter exists for the board, not to hide cost.
         self.provider
             .add_tokens(worker_tokens.load(std::sync::atomic::Ordering::Relaxed));
         match outcome {
-            Ok((response, patch)) => {
+            Ok((response, patch, transcript)) => {
                 self.hive.board.finish(board_id, true);
+                // Keep the conversation so the orchestrator can follow up with
+                // this worker and have it continue where it left off.
+                self.hive.workers.close(&name, transcript);
                 SubagentResult {
                     name,
                     response,
@@ -337,6 +506,7 @@ impl SubagentRuntime {
             }
             Err(error) => {
                 self.hive.board.finish(board_id, false);
+                self.hive.workers.close(&name, Vec::new());
                 SubagentResult {
                     name,
                     response: String::new(),
@@ -353,7 +523,8 @@ impl SubagentRuntime {
         task: &SubagentTask,
         board_id: u64,
         provider: Provider,
-    ) -> Result<(String, String)> {
+        injections: crate::agent::InjectionQueue,
+    ) -> Result<(String, String, Vec<Value>)> {
         let worker_root = std::env::temp_dir().join("abacus-worktrees").join(format!(
             "{}-{}",
             safe_name(&task.name),
@@ -371,7 +542,7 @@ impl SubagentRuntime {
 
         let mut guard = WorktreeGuard::new(context.repo_root.clone(), worker_root.clone());
         let result = self
-            .run_in_worktree(context, &worker_root, task, board_id, provider)
+            .run_in_worktree(context, &worker_root, task, board_id, provider, injections)
             .await;
         let cleanup = context.remove(&worker_root).await;
         if cleanup.is_ok() {
@@ -391,13 +562,32 @@ impl SubagentRuntime {
         task: &SubagentTask,
         board_id: u64,
         provider: Provider,
-    ) -> Result<(String, String)> {
+        injections: crate::agent::InjectionQueue,
+    ) -> Result<(String, String, Vec<Value>)> {
         let worker_workspace = worker_root.join(&context.workspace_relative);
-        let mut messages = initial_messages(&worker_workspace);
-        messages.push(json!({
-            "role":"system",
-            "content": task.role.system_prompt()
-        }));
+        // A resumed worker keeps its own conversation; a fresh one starts from
+        // the standard preamble. Either way the new prompt is the last word.
+        let mut messages = match &task.resume_from {
+            Some(prior) if !prior.is_empty() => {
+                let mut messages = prior.clone();
+                messages.push(json!({
+                    "role":"system",
+                    "content":"Continuing your earlier task in a fresh worktree seeded from the \
+                               current workspace. Your own file changes from before are not here \
+                               unless they were applied; re-read what you need. Everything you \
+                               learned above still stands."
+                }));
+                messages
+            }
+            _ => {
+                let mut messages = initial_messages(&worker_workspace);
+                messages.push(json!({
+                    "role":"system",
+                    "content": task.role.system_prompt()
+                }));
+                messages
+            }
+        };
         messages.push(json!({"role":"user","content":task.prompt}));
         let (events, mut receiver) = mpsc::unbounded_channel();
         let services = Arc::new(self.services.for_workspace(worker_workspace.clone()));
@@ -436,7 +626,7 @@ impl SubagentRuntime {
                 tether: crate::tether::TetherState::default(),
                 hive: crate::hive::HiveHandle::default(),
                 aux_model: None,
-                injections: crate::agent::InjectionQueue::default(),
+                injections,
             },
             events,
         );
@@ -460,9 +650,10 @@ impl SubagentRuntime {
         if let Some(error) = failure {
             bail!("subagent stopped: {error}");
         }
-        let response = final_assistant_text(&final_messages.unwrap_or_default());
+        let transcript = final_messages.unwrap_or_default();
+        let response = final_assistant_text(&transcript);
         let patch = context.diff(worker_root).await?;
-        Ok((response, patch))
+        Ok((response, patch, transcript))
     }
 }
 

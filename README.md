@@ -560,6 +560,13 @@ Besides its role, each task takes an optional **model** slug on the same
 endpoint — so one call can fan a swarm across several models. It defaults to the
 orchestrator's own model; set it when you want particular models per worker.
 
+The orchestrator can also address a worker by name with `message_subagent`. A
+running worker receives the message mid-task — a correction or extra context
+without killing it — while a finished one picks up where it left off, its
+conversation intact, in a fresh worktree seeded from the current workspace; its
+reply arrives in the background like any other report. The eight most recent
+finished workers stay reachable.
+
 While a swarm runs, each worker is pinned above the composer with its role, live
 activity, and token count; swarms past three cluster into a one-line summary, and
 `Ctrl+P` opens a scrollable board with every worker's state, elapsed time, and
