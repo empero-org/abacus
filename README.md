@@ -14,6 +14,7 @@ Written in Rust. Runs on macOS, Linux, and Windows. Supports streaming OpenAI-co
 - **You stay in control of changes.** A compact, auditable tool set; every mutation is approval-gated and shown first as a semantic, per-file diff. Nothing touches your repo without a yes.
 - **Intent before action.** The AUTO workflow makes the model explicitly choose read-only PLAN or mutating BUILD each turn before it can edit, run commands, or delegate — no surprise writes.
 - **Built for long, autonomous runs.** Persistent goals, Ralph loops, parallel git-worktree subagents, and tiered context compaction keep a multi-hour session coherent instead of degrading.
+- **It improves itself as it works.** Failure lessons with tripwires (papercuts), curated durable memories, a reflection pass after heavy turns (rethink), drift control against the session's intent (tethering), and delegation confidence earned from recorded swarm outcomes (the hive) — every session leaves the next one starting further ahead.
 - **Extensible without bloat.** Agent Skills, declarative plugins, and MCP servers add capabilities on demand, while the core stays a focused coding tool — no chat integrations, no web app.
 - **One fast binary.** Persistent sessions, scheduled cron jobs, and a scriptable headless/CI mode, all from a single Rust executable.
 
@@ -119,6 +120,18 @@ Consecutive successful read-only tool calls — reads, greps, globs, git inspect
 Typing `/` or `@` opens a suggestion list: `Up`/`Down` move the highlight, `Tab` or `Enter` inserts it, and `Esc` dismisses it. Once a command is complete the list closes, so `Enter` sends it. `Esc` otherwise stops a running turn, enters normal mode when Vim keybindings are on, or clears the draft. On an idle, empty composer, pressing `Esc` twice rewinds the session to your previous prompt: the prompt returns to the composer for editing and the turn it produced is discarded — a fork, not an undo — with the first press only arming it and any other key disarming. Repeat to step further back, one prompt at a time. `Ctrl+c` (or `Esc`) asks a running turn to stop — it finishes its current tool and keeps everything it did in the conversation; pressing it again forces an immediate stop. With no turn running, `Ctrl+c` clears the prompt, and twice in a row exits. `Ctrl+q` exits immediately. `F1` (or `?` in normal mode) opens the key reference.
 
 Set `ABACUS_ASCII=1` to swap the box-drawing, braille, and block glyphs for ASCII stand-ins of the same width, for terminals whose fonts lack them. Colour depth is detected from `COLORTERM` and `TERM` and the palette is quantized to match — truecolor, 256, or a role-mapped sixteen — with `ABACUS_COLOR=none|16|256|truecolor` to override. `NO_COLOR` is honoured: the interface drops to the terminal's own palette and leans on structure, bold, and reverse video instead.
+
+## Self-improvement
+
+Five mechanisms form a loop that makes Abacus better at *your* repository the longer it works there. Each is detailed in its own section; together they read like this:
+
+- **[Papercuts](#papercuts)** remember *failures*: what went wrong, the fix that worked, and tripwires that re-inject the lesson the moment the same snag reappears — more often the more often it is needed, fading as it stops being.
+- **[Memories](#memories-and-rethink)** remember *knowledge*: architecture facts, decisions and reasons, conventions — recorded and curated by the model itself, injected at the start of every turn.
+- **[Rethink](#memories-and-rethink)** is the *reflection*: after turns with many actions, and always before compaction erases the verbatim evidence, a bounded look back distills what happened into papercuts, memories, and the working-notes block in `AGENTS.md`.
+- **[Tethering](#tethering)** is the *anchor*: a snapshot of the session's intent, checked every ~35 steps against a compact history (including the model's thinking), with off-track verdicts becoming targeted course corrections.
+- **[The hive](#goals-loops-and-subagents)** is *earned delegation*: every swarm outcome updates a persistent record, and the derived tier — probing, swarm, hive — decides how aggressively work is delegated to role-typed subagents (scouts, drones, workers), each visible live above the composer and in the `Ctrl+P` board.
+
+Everything persists locally under `~/.abacus/` (`papercuts.json`, `memories.json`, `hive.json`, session intent in the session files) and inside the workspace only via the clearly-delimited notes block in `AGENTS.md`. Deleting a file resets that mechanism; nothing leaves the machine.
 
 ## Papercuts
 
