@@ -305,6 +305,7 @@ every request.
 | `/plan` | Toggle the read-only PLAN pin |
 | `/effort [minimal\|low\|medium\|high\|auto]` | How hard the model thinks; `auto` leaves it to the provider |
 | `/thinking [on\|off]` | Show or hide the model's reasoning (display only; still recorded) |
+| `/btw <note>` | Note a side question mid-turn without derailing the work in progress |
 | `/goal [objective]` | Show or create a persistent session goal |
 | `/goal pause\|resume\|edit <text>\|clear` | Manage the active goal |
 | `/loop "<prompt>" [options]` | Start a promise-driven Ralph loop |
@@ -326,7 +327,10 @@ the reasoning stream carries bold section headers, the latest one streams live �
 "Checking the parser" rather than a generic "thinking" — with a subtle shimmer
 (the `/config` animation toggle disables it). A message typed mid-turn is queued
 (flagged on the composer border) and sent the moment the turn ends, so an
-interrupted run can always be steered. A provider error is shown in the
+interrupted run can always be steered. `/btw <note>` is the softer form: the
+note reaches the model after its next tool call, framed as context rather than
+an instruction, so it informs how the work proceeds without redirecting it —
+useful for "does this handle Windows paths?" while a long refactor runs. A provider error is shown in the
 transcript with a hint when the history is the likely cause; `/repair` fixes
 exactly that — truncated tool calls are dropped (a note stays in the prose),
 unanswered calls get a synthetic "interrupted" result, and orphaned results are
@@ -348,6 +352,9 @@ wheel scrolling and clickable rows, and it is also what stops your terminal
 doing click-drag selection. **F2** hands the mouse back — drag to select and
 copy exactly as you would anywhere else — and F2 again takes it for the wheel.
 (Many terminals also let you hold **Shift** to bypass capture without toggling.)
+Scrolling never depends on the mouse: **PgUp/PgDn** move a page at a time and
+keep working in selection mode, **Alt+↑/↓** nudge a line, and **Ctrl+End** jumps
+back to live.
 
 You can also copy without the mouse at all. In normal mode `y` copies the
 selected block — the *full* tool output, not the truncated preview — and `Y`

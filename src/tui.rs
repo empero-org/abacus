@@ -108,6 +108,10 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/effort",
         "Set reasoning effort: minimal, low, medium, high, xhigh, max, auto",
     ),
+    (
+        "/btw",
+        "Note a side question without derailing the running turn",
+    ),
     ("/model", "Inspect or switch model"),
     (
         "/providers",
@@ -1588,6 +1592,36 @@ impl App {
             }
             "/quit" | "/q" | "/exit" => {
                 self.quit = true;
+                true
+            }
+            "/btw" => {
+                let note = argument.trim().to_owned();
+                if note.is_empty() {
+                    self.push_entry(Entry::new(
+                        EntryKind::Error,
+                        "Usage: /btw <side question or remark>".to_owned(),
+                    ));
+                    self.follow = true;
+                    return true;
+                }
+                if self.running.is_none() {
+                    // With nothing running there is nothing to avoid derailing,
+                    // and a note the model only sees "later" would just be lost.
+                    self.push_entry(Entry::new(
+                        EntryKind::System,
+                        "/btw is for while a turn is running — ask it directly instead.".to_owned(),
+                    ));
+                    self.follow = true;
+                    return true;
+                }
+                self.push_entry(Entry::new(
+                    EntryKind::System,
+                    format!("Noted, by the way: {note}"),
+                ));
+                self.injections
+                    .push(crate::agent::Injection::SideNote(note));
+                self.status = "noted · delivered after the current step".to_owned();
+                self.follow = true;
                 true
             }
             "/effort" => {
@@ -3739,10 +3773,22 @@ impl App {
         let mut delivered = false;
         for injection in pending {
             let crate::agent::Injection::SubagentReport(report) = injection else {
-                // A steering message with no turn to steer is just a prompt.
-                if let crate::agent::Injection::UserMessage(text) = injection {
-                    self.submit_prompt(text);
-                    delivered = true;
+                match injection {
+                    // A steering message with no turn to steer is just a prompt.
+                    crate::agent::Injection::UserMessage(text) => {
+                        self.submit_prompt(text);
+                        delivered = true;
+                    }
+                    // A side note whose turn ended before it landed has nothing
+                    // to nudge; surface it rather than dropping it silently.
+                    crate::agent::Injection::SideNote(note) => {
+                        self.push_entry(Entry::new(
+                            EntryKind::System,
+                            format!("Side note not delivered — the turn ended first: {note}"),
+                        ));
+                        delivered = true;
+                    }
+                    crate::agent::Injection::SubagentReport(_) => {}
                 }
                 continue;
             };
@@ -4052,7 +4098,8 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         } else if app.mouse_captured {
             "mouse captured — wheel scrolls, rows click · F2 to select text".to_owned()
         } else {
-            "selection mode — drag to select and copy · F2 to restore the mouse".to_owned()
+            "selection mode — drag to select · PgUp/PgDn still scroll · F2 restores the mouse"
+                .to_owned()
         };
         return;
     }
@@ -4587,6 +4634,12 @@ fn handle_insert_key(app: &mut App, key: KeyEvent) {
             if !app.input.move_down_wrapped(width) {
                 app.history_next();
             }
+        }
+        // Ctrl+Home/End jump the transcript; plain Home/End stay line motions.
+        KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => app.scroll_up(u16::MAX),
+        KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.follow = true;
+            app.clear_cursor();
         }
         KeyCode::Home => app.input.move_start(),
         KeyCode::End => app.input.move_end(),
@@ -5806,6 +5859,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         &[
             ("/", "commands"),
             ("@", "files"),
+            ("PgUp/PgDn", "scroll"),
             ("⇧⇥", "mode"),
             ("F2", "select text"),
             ("F1", "help"),
@@ -5918,6 +5972,9 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
                     "copy the selection (or interrupt when nothing is selected)",
                 ),
                 ("Ctrl+Z · Ctrl+Y", "undo and redo"),
+                ("PgUp · PgDn", "scroll the transcript a page"),
+                ("Alt/Shift+↑ ↓", "scroll the transcript a few lines"),
+                ("Ctrl+Home · Ctrl+End", "jump to the top, or back to live"),
                 ("Esc", "clear the draft"),
             ],
         ),
@@ -7707,6 +7764,34 @@ mod tests {
         assert!(app.slash_command("/effort ludicrous"));
         assert_eq!(app.entries.last().unwrap().kind, EntryKind::Error);
         assert!(app.config.reasoning_effort.is_none());
+    }
+
+    #[tokio::test]
+    async fn btw_notes_a_side_question_without_derailing_the_turn() {
+        // Registered, so completion offers it — a command nobody can find is
+        // no command at all.
+        assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/btw"));
+
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        // With nothing running it declines rather than losing the note.
+        assert!(app.slash_command("/btw is this thread safe?"));
+        assert!(app.injections.is_empty());
+        assert!(
+            app.entries.last().unwrap().text.contains("ask it directly"),
+            "{}",
+            app.entries.last().unwrap().text
+        );
+
+        app.start_turn("do the thing".into(), "do the thing".into(), false);
+        assert!(app.slash_command("/btw is this thread safe?"));
+        assert!(!app.injections.is_empty(), "handed to the running turn");
+        assert!(app.status.contains("noted"), "{}", app.status);
+        // The turn is untouched — a side note is not an interrupt.
+        assert!(app.running.is_some());
+
+        // Empty notes are rejected.
+        assert!(app.slash_command("/btw   "));
+        assert_eq!(app.entries.last().unwrap().kind, EntryKind::Error);
     }
 
     #[tokio::test]

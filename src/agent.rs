@@ -134,6 +134,10 @@ pub enum Injection {
     UserMessage(String),
     /// A background subagent finished and its report is ready.
     SubagentReport(String),
+    /// A side note from the user — something they care about, delivered after
+    /// the current tool call finishes. Explicitly *not* a new instruction: it
+    /// tells the model what matters without derailing what it is doing.
+    SideNote(String),
 }
 
 /// A queue of pending injections, shared between the TUI (user steering), the
@@ -1542,6 +1546,15 @@ fn deliver_injections(
                 let _ = events.send(AgentEvent::Notice(format!("steering — {text}")));
                 text.clone()
             }
+            Injection::SideNote(note) => {
+                let _ = events.send(AgentEvent::Notice(format!("noted — {note}")));
+                format!(
+                    "[side note from the user — context, not an instruction] {note}\n\n\
+                     Do not change course or act on this now, and do not answer it yet: \
+                     finish the work already in progress. Let it inform how you proceed, \
+                     and address it once the current task is done."
+                )
+            }
             Injection::SubagentReport(report) => {
                 let _ = events.send(AgentEvent::Notice(
                     "a background subagent finished; its report was delivered".to_owned(),
@@ -1710,6 +1723,38 @@ mod tests {
         }
         assert_eq!(notices.len(), 2);
         assert!(notices[0].starts_with("steering —"), "{}", notices[0]);
+    }
+
+    #[test]
+    fn a_side_note_is_delivered_as_context_not_as_an_instruction() {
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        let queue = InjectionQueue::default();
+        queue.push(Injection::SideNote(
+            "does this handle windows paths?".into(),
+        ));
+        let options = test_turn_options(queue);
+        let mut messages = vec![json!({"role":"user","content":"refactor the parser"})];
+
+        deliver_injections(&options, &mut messages, &events);
+
+        assert_eq!(messages.len(), 2);
+        let delivered = messages[1]["content"].as_str().unwrap();
+        assert!(delivered.contains("does this handle windows paths?"));
+        // The framing is what separates a nudge from a new task.
+        assert!(delivered.contains("not an instruction"), "{delivered}");
+        assert!(delivered.contains("Do not change course"), "{delivered}");
+        assert!(
+            delivered.contains("finish the work already in progress"),
+            "{delivered}"
+        );
+        // And the user sees it was noted.
+        let notice = std::iter::from_fn(|| receiver.try_recv().ok())
+            .find_map(|event| match event {
+                AgentEvent::Notice(text) => Some(text),
+                _ => None,
+            })
+            .expect("a notice");
+        assert!(notice.starts_with("noted —"), "{notice}");
     }
 
     /// Minimal options for the injection tests — nothing here reaches a model.
