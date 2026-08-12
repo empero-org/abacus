@@ -530,8 +530,9 @@ required extra headers, forced body fields, or keys to strip — a **scripted
 endpoint** turns any HTTP target into a normal profile. Drop a YAML file in
 `~/.abacus/endpoints/` describing the auth source (literal, env var, JSON file,
 or a refresh command), the extra headers, body overrides and removals, and a
-protocol. Examples ship for the Anthropic OAuth and ChatGPT/Codex backends in
-`docs/endpoints/`.
+protocol. Examples ship in `docs/endpoints/` for the Anthropic OAuth and
+ChatGPT/Codex backends and for xAI's Grok over the public `api.x.ai` key —
+the Grok one doubles as a commented tour of every auth source.
 
 ```yaml
 name: Custom Backend

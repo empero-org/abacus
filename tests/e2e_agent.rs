@@ -1061,6 +1061,114 @@ async fn reflection_stops_after_one_call_when_every_record_lands() {
     );
 }
 
+/// The Grok example is a copy-paste starting point, so it is worth proving it
+/// end to end rather than just parsing it: load the shipped file, point it at
+/// a mock, and check what actually goes out on the wire.
+#[tokio::test]
+async fn shipped_grok_example_sends_a_bearer_key_to_an_openai_shaped_endpoint() {
+    let directory = tempdir().unwrap();
+    let workspace = directory.path().join("project");
+    std::fs::create_dir(&workspace).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let captured: Arc<std::sync::Mutex<String>> = Arc::default();
+    let probe = captured.clone();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        *probe.lock().unwrap() = String::from_utf8(read_request(&mut stream).await).unwrap();
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hello from grok\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+    });
+
+    // The shipped example, verbatim except for the host and a key source the
+    // test can control — everything else (protocol, model, auth shape) is the
+    // file as users copy it.
+    let shipped = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/endpoints/grok.example.yaml"),
+    )
+    .unwrap();
+    let key_file = directory.path().join("xai-key");
+    std::fs::write(&key_file, "xai-test-key-123\n").unwrap();
+    let adapted = shipped
+        .replace(
+            "https://api.x.ai/v1/chat/completions",
+            &format!("http://{address}/v1/chat/completions"),
+        )
+        .replace(
+            "  env: XAI_API_KEY",
+            &format!("  file: {}", key_file.display()),
+        );
+    let endpoints = directory.path().join("endpoints");
+    std::fs::create_dir(&endpoints).unwrap();
+    std::fs::write(endpoints.join("grok.yaml"), adapted).unwrap();
+
+    let mut config = test_config(&directory, &workspace, address);
+    let endpoint = abacus_agent::endpoint::ScriptedEndpoint::resolve("grok", &endpoints).unwrap();
+    // What `Config::resolve` does when the profile leaves its model blank: the
+    // endpoint supplies it. Taken from the file so a bad slug fails here.
+    config.model = endpoint
+        .model
+        .clone()
+        .expect("the example declares a model");
+    config.endpoint = Some(endpoint);
+    let provider = Provider::new(&config).unwrap();
+
+    let (events, mut receiver) = mpsc::unbounded_channel();
+    let agent = tokio::spawn(run_turn(
+        provider,
+        vec![json!({"role":"user","content":"hi"})],
+        base_options(&workspace),
+        events,
+    ));
+    while let Some(event) = receiver.recv().await {
+        match event {
+            AgentEvent::Done { .. } => break,
+            AgentEvent::Failed { error, .. } => panic!("agent failed: {error}"),
+            _ => {}
+        }
+    }
+    agent.await.unwrap();
+    server.await.unwrap();
+
+    let request = captured.lock().unwrap().clone();
+    let (headers, body) = request.split_once("\r\n\r\n").expect("a request body");
+    assert!(
+        headers.contains("POST /v1/chat/completions"),
+        "the url is used verbatim: {headers}"
+    );
+    assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains("authorization: bearer xai-test-key-123"),
+        "the key goes out as a bearer: {headers}"
+    );
+    // OpenAI-shaped, not Anthropic: messages at the top level, no anthropic-version.
+    let body: serde_json::Value = serde_json::from_str(body).expect("json body");
+    assert_eq!(
+        body["model"], "grok-4.5",
+        "the model comes from the endpoint"
+    );
+    assert!(
+        body["messages"].is_array(),
+        "chat-completions shape: {body}"
+    );
+    assert!(
+        !headers.to_ascii_lowercase().contains("anthropic-version"),
+        "no anthropic headers on an OpenAI endpoint: {headers}"
+    );
+}
+
 /// Defaults for tests that only care about one or two options.
 fn base_options(workspace: &std::path::Path) -> TurnOptions {
     TurnOptions {

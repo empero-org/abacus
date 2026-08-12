@@ -296,6 +296,29 @@ mod tests {
         std::fs::write(dir.join(format!("{name}.yaml")), yaml).unwrap();
     }
 
+    /// The shipped examples are copy-paste starting points, so a typo in one
+    /// is a user-facing bug. Parse every one of them, from the real directory.
+    #[test]
+    fn every_shipped_example_parses() {
+        let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/endpoints");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&examples).expect("docs/endpoints") {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+                continue;
+            }
+            let endpoint = ScriptedEndpoint::resolve(path.to_str().unwrap(), &examples)
+                .unwrap_or_else(|error| panic!("{} does not parse: {error:#}", path.display()));
+            assert!(
+                endpoint.url.starts_with("https://"),
+                "{} must call a https url",
+                path.display()
+            );
+            seen += 1;
+        }
+        assert!(seen >= 3, "expected the shipped examples, found {seen}");
+    }
+
     #[test]
     fn resolves_by_name_and_applies_body_and_auth() {
         let dir = tempfile::tempdir().unwrap();

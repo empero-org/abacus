@@ -1,0 +1,79 @@
+# Scripted endpoint: xAI Grok over the public API (api.x.ai).
+#
+# Copy to ~/.abacus/endpoints/grok.yaml, then in ~/.abacus/config.toml:
+#
+#   [profiles.grok]
+#   name = "Grok"
+#   endpoint = "grok"              # names this file (no path, no .yaml)
+#
+# Note that xAI is also a built-in provider (`abacus setup` → xAI), which is
+# the shorter path if all you want is a key and a model. Use this file when you
+# want the extra control a scripted endpoint gives: pinned body fields, extra
+# headers, a gateway or proxy URL in front of the API, or a key that lives
+# somewhere other than an environment variable.
+
+name: Grok
+url: https://api.x.ai/v1/chat/completions   # verbatim request URL
+protocol: chat-completions                  # xAI's API is OpenAI-shaped
+model: grok-4.5
+
+# Populates the /config model picker. Optional — omit and the picker falls
+# back to whatever the profile has.
+models_url: https://api.x.ai/v1/models
+
+# The API key, from https://console.x.ai. Any of these work:
+#
+#   env:  XAI_API_KEY              read from the environment (shown below)
+#   file: ~/.config/xai/key        read the file, trimmed
+#   token: xai-...                 inline literal (avoid — it lands in the file)
+#   command: [pass, show, xai/api] run it, use stdout
+#
+# `command` is the one to reach for with a password manager or a key that
+# needs minting; it runs per request, so a rotating key is picked up without
+# restarting abacus.
+auth:
+  env: XAI_API_KEY
+  header: Authorization           # default; shown for clarity
+  format: "Bearer {token}"        # default; {token} is substituted
+
+# Body fields deep-merged over what abacus builds, so these win. Nested
+# objects merge; unmentioned keys survive.
+#
+# Prefer /effort (or reasoning_effort in the profile) over pinning it here —
+# then it stays switchable per turn instead of being frozen in the file.
+# body:
+#   reasoning_effort: high        # reasoning models only (grok-4.5, grok-3-mini)
+#   temperature: 0.2
+#   max_tokens: 32000
+#   search_parameters:            # xAI's server-side live search
+#     mode: auto
+
+# Fields abacus adds that a given deployment does not accept. Nothing needs
+# removing against api.x.ai itself — this is here for gateways in front of it
+# that are stricter than the real API.
+# remove:
+#   - parallel_tool_calls
+
+# Extra headers, if a gateway in front of the API wants them. {uuid} becomes a
+# fresh per-session hex id, {session} the current session id.
+# headers:
+#   X-Team: platform
+
+# --- Grok subscriptions (grok login) are NOT usable here ---------------------
+#
+# This file covers API keys, which is what xAI issues for third-party clients.
+# A Grok *subscription* token — the one `grok login` obtains for xAI's own CLI
+# — is a different credential: the backend only honours it alongside a header
+# identifying the caller as xAI's first-party client, and xAI obfuscates that
+# header in its binary specifically so other clients cannot send it. Abacus
+# does not ship it, and a config that forges it would be impersonating xAI's
+# client to spend a subscription outside the product it was sold for.
+#
+# Enterprise deployment keys are a different matter: they are bare bearer
+# tokens meant for programmatic use, with no client identifier attached. If a
+# team admin issued you one, swap the auth block above for:
+#
+#   auth:
+#     env: GROK_DEPLOYMENT_KEY
+#
+# and point `url` at whatever host your team was given.
