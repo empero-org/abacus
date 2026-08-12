@@ -435,6 +435,7 @@ impl Config {
         match self.protocol {
             ProviderProtocol::ChatCompletions => format!("{}/chat/completions", self.base_url),
             ProviderProtocol::Responses => format!("{}/responses", self.base_url),
+            ProviderProtocol::Anthropic => format!("{}/v1/messages", self.base_url),
         }
     }
 
@@ -621,6 +622,10 @@ pub enum ProviderProtocol {
     #[default]
     ChatCompletions,
     Responses,
+    /// The Anthropic Messages API — a different wire shape from the two
+    /// OpenAI formats: a top-level `system` array, `max_tokens` required,
+    /// tools with `input_schema`, and a `content_block_*` SSE stream.
+    Anthropic,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

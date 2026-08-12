@@ -53,6 +53,11 @@ pub struct Provider {
     /// A custom endpoint definition (URL already folded into `endpoint`): its
     /// auth, extra headers, and body overrides are applied per request.
     scripted: Option<crate::endpoint::ScriptedEndpoint>,
+    /// `max_tokens` for the Anthropic protocol, which requires it and has no
+    /// default. The configured/detected cap when set, else a safe fallback.
+    anthropic_max_tokens: usize,
+    /// A per-session random id for `{uuid}` header substitution.
+    session_id: String,
 }
 
 /// A piece of streamed output. Reasoning is kept separate from the answer all
@@ -143,6 +148,14 @@ impl Provider {
             strips_reasoning: Arc::new(AtomicBool::new(false)),
             context_tokens: Arc::new(AtomicU64::new(0)),
             scripted: config.endpoint.clone(),
+            // A configured/detected cap when there is one, else a value that is
+            // safe on every current Claude model without a beta output header.
+            anthropic_max_tokens: config
+                .model_limits
+                .configured_output_tokens
+                .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS)
+                .clamp(1, DEFAULT_ANTHROPIC_MAX_TOKENS),
+            session_id: uuid::Uuid::new_v4().simple().to_string(),
         })
     }
 
@@ -234,6 +247,10 @@ impl Provider {
             }
             ProviderProtocol::Responses => {
                 self.complete_responses(messages, tools, deltas, cancel)
+                    .await
+            }
+            ProviderProtocol::Anthropic => {
+                self.complete_anthropic(messages, tools, deltas, cancel)
                     .await
             }
         }
@@ -485,6 +502,89 @@ impl Provider {
         finish_completion(content, reasoning, calls, cancelled, false)
     }
 
+    async fn complete_anthropic(
+        &self,
+        messages: &[Value],
+        tools: &[Value],
+        deltas: mpsc::UnboundedSender<Chunk>,
+        cancel: &AtomicBool,
+    ) -> Result<Completion> {
+        let system_prefix = self
+            .scripted
+            .as_ref()
+            .and_then(|scripted| scripted.system_prefix.as_deref());
+        let (system, converted) = anthropic_messages(messages, system_prefix);
+        let mut body = json!({
+            "model": self.model,
+            // Required, no default; scripted body may override it.
+            "max_tokens": self.effective_output_tokens().unwrap_or(self.anthropic_max_tokens),
+            "system": system,
+            "messages": converted,
+            "stream": true,
+        });
+        if !tools.is_empty() {
+            body["tools"] = json!(anthropic_tools(tools));
+            body["tool_choice"] = json!({"type": "auto"});
+        }
+        self.apply_scripted_body(&mut body);
+
+        let response = tokio::select! {
+            biased;
+            sent = self.post_stream(&body) => sent?,
+            () = wait_for_cancel(cancel) => return Ok(Completion::cancelled()),
+        };
+        let mut decoder = SseDecoder::default();
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut calls: BTreeMap<usize, PartialToolCall> = BTreeMap::new();
+        let mut reported_usage: Option<Usage> = None;
+        let mut truncated = false;
+        let mut text = TextStream::default();
+        let mut stream = response.bytes_stream();
+        let mut cancelled = false;
+        loop {
+            let Some(chunk) = (tokio::select! {
+                biased;
+                chunk = stream.next() => chunk,
+                () = wait_for_cancel(cancel) => {
+                    cancelled = true;
+                    break;
+                }
+            }) else {
+                break;
+            };
+            let chunk = chunk.context("provider stream failed")?;
+            for data in decoder.push(&chunk)? {
+                apply_anthropic_event(
+                    &data,
+                    &mut content,
+                    &mut reasoning,
+                    &mut calls,
+                    &deltas,
+                    self.tool_format,
+                    &mut text,
+                    &mut reported_usage,
+                    &mut truncated,
+                )?;
+            }
+        }
+        for data in decoder.finish()?.into_iter().take_while(|_| !cancelled) {
+            apply_anthropic_event(
+                &data,
+                &mut content,
+                &mut reasoning,
+                &mut calls,
+                &deltas,
+                self.tool_format,
+                &mut text,
+                &mut reported_usage,
+                &mut truncated,
+            )?;
+        }
+        self.record_tokens(reported_usage, messages, &content, &calls);
+        finish_completion(content, reasoning, calls, cancelled, truncated)
+    }
+
     /// Whether this endpoint accepts upstream provider routing.
     ///
     /// Matched on the host rather than a config flag so a profile pointed at an
@@ -520,9 +620,13 @@ impl Provider {
                 .post(&self.endpoint)
                 .header(header::ACCEPT, "text/event-stream")
                 .json(&body);
+            // The Messages API requires a version header on every request.
+            if self.protocol == ProviderProtocol::Anthropic {
+                request = request.header("anthropic-version", "2023-06-01");
+            }
             let mut scripted_auth = false;
             if let Some(scripted) = &self.scripted {
-                for (name, value) in &scripted.headers {
+                for (name, value) in scripted.resolved_headers(&self.session_id) {
                     request = request.header(name.as_str(), value);
                 }
                 match scripted.auth_header() {
@@ -535,7 +639,13 @@ impl Provider {
                 }
             }
             if !scripted_auth && let Some(key) = &self.api_key {
-                request = request.bearer_auth(key);
+                // Anthropic authenticates an API key with `x-api-key`, not a
+                // bearer; a scripted OAuth endpoint provides its own header.
+                if self.protocol == ProviderProtocol::Anthropic {
+                    request = request.header("x-api-key", key.as_str());
+                } else {
+                    request = request.bearer_auth(key);
+                }
             }
             match request.send().await {
                 Ok(response)
@@ -956,6 +1066,219 @@ fn responses_tools(tools: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// `max_tokens` sent to the Anthropic Messages API when none is configured —
+/// the field is required and safe on every current Claude model without a beta
+/// output-length header.
+const DEFAULT_ANTHROPIC_MAX_TOKENS: usize = 32_000;
+
+/// Translate Abacus's OpenAI-shaped history into the Anthropic Messages
+/// request: system text blocks (billing/prefix first) and a `messages` array
+/// of content blocks. Tool calls become `tool_use` blocks and tool results
+/// become `tool_result` blocks in a following user turn; consecutive same-role
+/// turns are coalesced so the result alternates as the API requires.
+fn anthropic_messages(messages: &[Value], system_prefix: Option<&str>) -> (Vec<Value>, Vec<Value>) {
+    let mut system: Vec<Value> = Vec::new();
+    if let Some(prefix) = system_prefix.filter(|prefix| !prefix.trim().is_empty()) {
+        system.push(json!({"type": "text", "text": prefix}));
+    }
+    // (role, content-blocks) pairs, coalescing consecutive same-role turns.
+    let mut turns: Vec<(String, Vec<Value>)> = Vec::new();
+    let mut push = |role: &str, blocks: Vec<Value>| {
+        if blocks.is_empty() {
+            return;
+        }
+        match turns.last_mut() {
+            Some((last, existing)) if last == role => existing.extend(blocks),
+            _ => turns.push((role.to_owned(), blocks)),
+        }
+    };
+
+    for message in messages {
+        match message["role"].as_str().unwrap_or_default() {
+            "system" => {
+                if let Some(text) = message["content"].as_str().filter(|text| !text.is_empty()) {
+                    system.push(json!({"type": "text", "text": text}));
+                }
+            }
+            "user" => push("user", anthropic_content_blocks(&message["content"])),
+            "assistant" => {
+                let mut blocks = anthropic_content_blocks(&message["content"]);
+                if let Some(tool_calls) = message["tool_calls"].as_array() {
+                    for call in tool_calls {
+                        let arguments = call
+                            .pointer("/function/arguments")
+                            .and_then(Value::as_str)
+                            .unwrap_or("{}");
+                        blocks.push(json!({
+                            "type": "tool_use",
+                            "id": call["id"],
+                            "name": call.pointer("/function/name"),
+                            "input": serde_json::from_str::<Value>(arguments)
+                                .unwrap_or_else(|_| json!({})),
+                        }));
+                    }
+                }
+                push("assistant", blocks);
+            }
+            // A tool result belongs in a user turn as a `tool_result` block.
+            "tool" => push(
+                "user",
+                vec![json!({
+                    "type": "tool_result",
+                    "tool_use_id": message["tool_call_id"],
+                    "content": message["content"].as_str().unwrap_or_default(),
+                })],
+            ),
+            _ => {}
+        }
+    }
+    let converted = turns
+        .into_iter()
+        .map(|(role, content)| json!({"role": role, "content": content}))
+        .collect();
+    (system, converted)
+}
+
+/// Convert one message's `content` (a string or Abacus's vision-part array)
+/// into Anthropic content blocks.
+fn anthropic_content_blocks(content: &Value) -> Vec<Value> {
+    match content {
+        Value::String(text) if !text.is_empty() => vec![json!({"type": "text", "text": text})],
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| match part["type"].as_str() {
+                Some("text") => Some(json!({"type": "text", "text": part["text"]})),
+                Some("image_url") => {
+                    // `data:<media_type>;base64,<data>` → an Anthropic image block.
+                    let url = part.pointer("/image_url/url").and_then(Value::as_str)?;
+                    let rest = url.strip_prefix("data:")?;
+                    let (media_type, data) = rest.split_once(";base64,")?;
+                    Some(json!({
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": media_type, "data": data},
+                    }))
+                }
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn anthropic_tools(tools: &[Value]) -> Vec<Value> {
+    tools
+        .iter()
+        .filter_map(|tool| {
+            let function = tool.get("function")?;
+            Some(json!({
+                "name": function["name"],
+                "description": function["description"],
+                "input_schema": function["parameters"],
+            }))
+        })
+        .collect()
+}
+
+/// Parse one Anthropic SSE event, accumulating text, reasoning, tool calls,
+/// usage, and the truncation flag. The content-block `index` keys the tool-call
+/// map, exactly as the OpenAI paths key on their delta index.
+#[allow(clippy::too_many_arguments)]
+fn apply_anthropic_event(
+    data: &str,
+    content: &mut String,
+    reasoning: &mut String,
+    calls: &mut BTreeMap<usize, PartialToolCall>,
+    deltas: &mpsc::UnboundedSender<Chunk>,
+    format: ToolFormat,
+    stream: &mut TextStream,
+    usage: &mut Option<Usage>,
+    truncated: &mut bool,
+) -> Result<()> {
+    let value: Value = serde_json::from_str(data).context("invalid JSON in provider stream")?;
+    match value["type"].as_str().unwrap_or_default() {
+        "message_start" => {
+            if let Some(found) = usage_total(&value["message"]["usage"]) {
+                *usage = Some(found);
+            }
+        }
+        "content_block_start" => {
+            let index = value["index"].as_u64().unwrap_or(0) as usize;
+            let block = &value["content_block"];
+            if block["type"] == "tool_use" {
+                let call = calls.entry(index).or_default();
+                if let Some(id) = block["id"].as_str() {
+                    call.id = id.to_owned();
+                }
+                if let Some(name) = block["name"].as_str() {
+                    call.name = name.to_owned();
+                }
+            }
+        }
+        "content_block_delta" => {
+            let index = value["index"].as_u64().unwrap_or(0) as usize;
+            let delta = &value["delta"];
+            match delta["type"].as_str().unwrap_or_default() {
+                "text_delta" => {
+                    if let Some(piece) = delta["text"].as_str() {
+                        content.push_str(piece);
+                        if !stream.suppressed {
+                            let cut = match tool_format::marker_index(format, content) {
+                                Some(marker) => {
+                                    stream.suppressed = true;
+                                    marker
+                                }
+                                None => content.len(),
+                            };
+                            if cut > stream.emitted {
+                                let _ = deltas
+                                    .send(Chunk::Text(content[stream.emitted..cut].to_owned()));
+                                stream.emitted = cut;
+                            }
+                        }
+                    }
+                }
+                "thinking_delta" => {
+                    // The readable field of an extended-thinking block; often
+                    // empty (the real CoT is in the `signature` ciphertext).
+                    if let Some(piece) =
+                        delta["thinking"].as_str().filter(|piece| !piece.is_empty())
+                    {
+                        reasoning.push_str(piece);
+                        let _ = deltas.send(Chunk::Reasoning(piece.to_owned()));
+                    }
+                }
+                "input_json_delta" => {
+                    if let Some(piece) = delta["partial_json"].as_str() {
+                        calls.entry(index).or_default().arguments.push_str(piece);
+                    }
+                }
+                // `signature_delta` (thinking ciphertext) is intentionally ignored.
+                _ => {}
+            }
+        }
+        "message_delta" => {
+            if value.pointer("/delta/stop_reason").and_then(Value::as_str) == Some("max_tokens") {
+                *truncated = true;
+            }
+            // The final usage carries output_tokens; fold it onto the input
+            // count captured at message_start.
+            if let Some(output) = value
+                .pointer("/usage/output_tokens")
+                .and_then(Value::as_u64)
+            {
+                let prompt = usage.map(|usage| usage.prompt).unwrap_or(0);
+                *usage = Some(Usage {
+                    prompt,
+                    total: prompt + output,
+                });
+            }
+        }
+        "error" => bail!("provider stream error: {}", value["error"]),
+        _ => {}
+    }
+    Ok(())
+}
+
 fn finish_completion(
     content: String,
     reasoning: String,
@@ -1065,6 +1388,125 @@ fn truncate_error(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anthropic_messages_extracts_system_and_shapes_the_tool_round_trip() {
+        let history = vec![
+            json!({"role": "system", "content": "You are Abacus."}),
+            json!({"role": "user", "content": "read the file"}),
+            json!({"role": "assistant", "content": "On it.", "reasoning_content": "opaque",
+                   "tool_calls": [{"id": "call_1", "type": "function",
+                       "function": {"name": "read_file", "arguments": "{\"path\":\"a.rs\"}"}}]}),
+            json!({"role": "tool", "tool_call_id": "call_1", "content": "fn a() {}"}),
+        ];
+        let (system, messages) =
+            anthropic_messages(&history, Some("x-anthropic-billing-header: cc"));
+
+        // Billing prefix is the first system block, then the system prompt.
+        assert_eq!(system[0]["text"], "x-anthropic-billing-header: cc");
+        assert_eq!(system[1]["text"], "You are Abacus.");
+
+        // user, then assistant (text + tool_use), then a user turn holding the
+        // tool_result — the alternation the Messages API requires.
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"][0]["text"], "read the file");
+
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"][0]["text"], "On it.");
+        let tool_use = &messages[1]["content"][1];
+        assert_eq!(tool_use["type"], "tool_use");
+        assert_eq!(tool_use["id"], "call_1");
+        assert_eq!(tool_use["name"], "read_file");
+        assert_eq!(
+            tool_use["input"]["path"], "a.rs",
+            "arguments parsed to an object"
+        );
+
+        assert_eq!(messages[2]["role"], "user");
+        let result = &messages[2]["content"][0];
+        assert_eq!(result["type"], "tool_result");
+        assert_eq!(result["tool_use_id"], "call_1");
+        assert_eq!(result["content"], "fn a() {}");
+    }
+
+    #[test]
+    fn anthropic_tools_use_input_schema_and_images_convert() {
+        let tools = vec![json!({
+            "type": "function",
+            "function": {"name": "grep", "description": "search",
+                "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}}
+        })];
+        let converted = anthropic_tools(&tools);
+        assert_eq!(converted[0]["name"], "grep");
+        assert!(converted[0].get("input_schema").is_some());
+        assert!(
+            converted[0].get("parameters").is_none(),
+            "renamed, not duplicated"
+        );
+
+        // A vision part becomes an Anthropic base64 image block.
+        let content = json!([
+            {"type": "text", "text": "look"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}}
+        ]);
+        let blocks = anthropic_content_blocks(&content);
+        assert_eq!(blocks[0]["text"], "look");
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+        assert_eq!(blocks[1]["source"]["data"], "QUJD");
+    }
+
+    #[test]
+    fn anthropic_stream_parses_text_tools_usage_and_truncation() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut calls = BTreeMap::new();
+        let mut text = TextStream::default();
+        let mut usage = None;
+        let mut truncated = false;
+        let events = [
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":40}}}"#,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi "}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"there"}}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_9","name":"grep"}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"q\":"}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"x\"}"}}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":12}}"#,
+        ];
+        for event in events {
+            apply_anthropic_event(
+                event,
+                &mut content,
+                &mut reasoning,
+                &mut calls,
+                &tx,
+                ToolFormat::None,
+                &mut text,
+                &mut usage,
+                &mut truncated,
+            )
+            .unwrap();
+        }
+        assert_eq!(content, "Hi there");
+        assert_eq!(calls[&1].id, "call_9");
+        assert_eq!(calls[&1].name, "grep");
+        assert_eq!(calls[&1].arguments, r#"{"q":"x"}"#);
+        assert!(truncated, "max_tokens stop reason marks truncation");
+        let usage = usage.unwrap();
+        assert_eq!(usage.prompt, 40);
+        assert_eq!(usage.total, 52, "input + output");
+        // Text was streamed to the UI as it arrived.
+        let mut streamed = String::new();
+        while let Ok(chunk) = rx.try_recv() {
+            if let Chunk::Text(piece) = chunk {
+                streamed.push_str(&piece);
+            }
+        }
+        assert_eq!(streamed, "Hi there");
+    }
 
     #[test]
     fn rejected_output_cap_reads_the_real_ceiling_from_the_message() {

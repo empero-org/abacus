@@ -2574,9 +2574,12 @@ impl App {
             }
             ConfigKey::Protocol => {
                 let profile = self.active_profile_mut()?;
+                // Rotate through all three, wrapping at the end:
+                // chat-completions → responses → anthropic → chat-completions.
                 profile.protocol = match profile.protocol {
                     ProviderProtocol::ChatCompletions => ProviderProtocol::Responses,
-                    ProviderProtocol::Responses => ProviderProtocol::ChatCompletions,
+                    ProviderProtocol::Responses => ProviderProtocol::Anthropic,
+                    ProviderProtocol::Anthropic => ProviderProtocol::ChatCompletions,
                 };
             }
             ConfigKey::Permission => {

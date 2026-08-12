@@ -51,9 +51,16 @@ pub struct ScriptedEndpoint {
     /// (or none).
     #[serde(default)]
     pub auth: Option<Auth>,
-    /// Extra static headers sent on every request.
+    /// Extra static headers sent on every request. Values may contain
+    /// `{uuid}`/`{session}`, replaced with a per-session random hex UUID — for
+    /// headers like `X-Claude-Code-Session-Id` that want a fresh id.
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+    /// Text prepended as the first system block (Anthropic) or to the system
+    /// message (OpenAI). This is how the Anthropic billing-attribution line is
+    /// injected: it must be its own leading system block.
+    #[serde(default)]
+    pub system_prefix: Option<String>,
     /// Body fields deep-merged onto every request after Abacus builds it —
     /// scripted values win, so this is how a required `store: false` or
     /// `reasoning: {effort: low}` is forced.
@@ -135,6 +142,21 @@ impl ScriptedEndpoint {
 
     pub fn display_name(&self) -> &str {
         self.name.as_deref().unwrap_or("scripted endpoint")
+    }
+
+    /// Static headers with `{uuid}`/`{session}` substituted for a per-session id.
+    pub fn resolved_headers(&self, session: &str) -> Vec<(String, String)> {
+        self.headers
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.clone(),
+                    value
+                        .replace("{uuid}", session)
+                        .replace("{session}", session),
+                )
+            })
+            .collect()
     }
 
     /// The request URL — always the verbatim `url`, the `protocol` argument is

@@ -1,0 +1,41 @@
+# Scripted endpoint: Anthropic Messages API via a Claude Code/Desktop OAuth token.
+#
+# Copy to ~/.abacus/endpoints/claude-oauth.yaml, then in ~/.abacus/config.toml:
+#
+#   [profiles.claude]
+#   name = "Claude OAuth"
+#   endpoint = "claude-oauth"
+#
+# Uses protocol: anthropic — the Messages API wire format (system array,
+# max_tokens, input_schema tools, content_block SSE), not OpenAI-shaped.
+
+name: Claude OAuth
+url: https://api.anthropic.com/v1/messages
+protocol: anthropic
+model: claude-opus-4-8
+
+# OAuth bearer from the Claude Desktop/Code credential file, read fresh each
+# request. Point `file` at wherever your claudeAiOauth token is stored and
+# `file_field` at the access-token path within it.
+auth:
+  file: ~/.claude/.credentials.json
+  file_field: claudeAiOauth.accessToken
+  # header/format default to Authorization + "Bearer {token}".
+
+# The billing-attribution line MUST be its own leading system block, or raw
+# OAuth calls are rate-limited (HTTP 429). system_prefix places it first.
+system_prefix: "x-anthropic-billing-header: cc_version=2.1.215; cc_entrypoint=cli; cch=00000;"
+
+# First-party Claude Code headers. {uuid} becomes a fresh per-session hex id.
+headers:
+  x-app: cli
+  User-Agent: "claude-cli/2.1.215 (external, cli, agent-sdk/0.3.215)"
+  X-Claude-Code-Session-Id: "{uuid}"
+  anthropic-dangerous-direct-browser-access: "true"
+
+# Optional: cap output, enable extended thinking, etc.
+# body:
+#   max_tokens: 16000
+#   thinking:
+#     type: enabled
+#     budget_tokens: 16000
