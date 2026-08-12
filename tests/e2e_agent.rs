@@ -74,6 +74,8 @@ async fn streamed_agent_searches_workspace_and_finishes() {
         trace_enabled: false,
         routing: Default::default(),
         web_search: abacus_agent::web::WebConfig::default(),
+        endpoint: None,
+        aux_model: None,
         paths: AbacusPaths::under(directory.path().join("home")),
     };
     let provider = Provider::new(&config).unwrap();
@@ -102,6 +104,7 @@ async fn streamed_agent_searches_workspace_and_finishes() {
             memories: abacus_agent::memories::MemoryStore::default(),
             tether: abacus_agent::tether::TetherState::default(),
             hive: abacus_agent::hive::HiveHandle::default(),
+            aux_model: None,
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -191,6 +194,8 @@ async fn a_cancelled_turn_keeps_the_work_it_already_did() {
         trace_enabled: false,
         routing: Default::default(),
         web_search: abacus_agent::web::WebConfig::default(),
+        endpoint: None,
+        aux_model: None,
         paths: AbacusPaths::under(directory.path().join("home")),
     };
     let provider = Provider::new(&config).unwrap();
@@ -220,6 +225,7 @@ async fn a_cancelled_turn_keeps_the_work_it_already_did() {
             memories: abacus_agent::memories::MemoryStore::default(),
             tether: abacus_agent::tether::TetherState::default(),
             hive: abacus_agent::hive::HiveHandle::default(),
+            aux_model: None,
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -304,6 +310,8 @@ async fn responses_protocol_uses_responses_endpoint_and_stream_format() {
         trace_enabled: false,
         routing: Default::default(),
         web_search: abacus_agent::web::WebConfig::default(),
+        endpoint: None,
+        aux_model: None,
         paths: AbacusPaths::under(directory.path().join("home")),
     };
     let provider = Provider::new(&config).unwrap();
@@ -371,6 +379,8 @@ async fn edit_requires_reviewable_approval_before_atomic_write() {
         trace_enabled: false,
         routing: Default::default(),
         web_search: abacus_agent::web::WebConfig::default(),
+        endpoint: None,
+        aux_model: None,
         paths: AbacusPaths::under(directory.path().join("home")),
     };
     let provider = Provider::new(&config).unwrap();
@@ -399,6 +409,7 @@ async fn edit_requires_reviewable_approval_before_atomic_write() {
             memories: abacus_agent::memories::MemoryStore::default(),
             tether: abacus_agent::tether::TetherState::default(),
             hive: abacus_agent::hive::HiveHandle::default(),
+            aux_model: None,
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -491,6 +502,7 @@ async fn text_emitted_tool_calls_are_parsed_when_native_calls_absent() {
             memories: abacus_agent::memories::MemoryStore::default(),
             tether: abacus_agent::tether::TetherState::default(),
             hive: abacus_agent::hive::HiveHandle::default(),
+            aux_model: None,
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -582,6 +594,7 @@ async fn auto_mode_blocks_mutation_until_model_selects_build() {
             memories: abacus_agent::memories::MemoryStore::default(),
             tether: abacus_agent::tether::TetherState::default(),
             hive: abacus_agent::hive::HiveHandle::default(),
+            aux_model: None,
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -663,6 +676,7 @@ async fn auto_mode_selection_enables_later_tool_in_same_completion() {
             memories: abacus_agent::memories::MemoryStore::default(),
             tether: abacus_agent::tether::TetherState::default(),
             hive: abacus_agent::hive::HiveHandle::default(),
+            aux_model: None,
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -776,6 +790,7 @@ async fn rolling_summary_compaction_fires_on_large_context() {
             memories: abacus_agent::memories::MemoryStore::default(),
             tether: abacus_agent::tether::TetherState::default(),
             hive: abacus_agent::hive::HiveHandle::default(),
+            aux_model: None,
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -848,6 +863,8 @@ fn test_config(
         trace_enabled: false,
         routing: Default::default(),
         web_search: abacus_agent::web::WebConfig::default(),
+        endpoint: None,
+        aux_model: None,
         paths: AbacusPaths::under(directory.path().join("home")),
     }
 }

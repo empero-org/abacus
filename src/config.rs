@@ -310,6 +310,8 @@ pub struct Config {
     pub web_search: crate::web::WebConfig,
     /// A custom endpoint definition, when the active profile names one.
     pub endpoint: Option<crate::endpoint::ScriptedEndpoint>,
+    /// The auxiliary model for secondary calls, or None to reuse `model`.
+    pub aux_model: Option<String>,
     pub paths: AbacusPaths,
 }
 
@@ -424,6 +426,9 @@ impl Config {
             },
             web_search: settings.search.resolve(),
             endpoint,
+            aux_model: profile
+                .and_then(|profile| profile.aux_model.clone())
+                .filter(|model| !model.trim().is_empty()),
             paths,
         })
     }
@@ -591,6 +596,11 @@ pub struct ProviderProfile {
     pub protocol: ProviderProtocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
+    /// A cheaper/secondary model used for background calls (rethink, draft
+    /// recommendations, tether, compaction summary, command classification)
+    /// on this same endpoint. None means "use the main model".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aux_model: Option<String>,
     /// Name (or path) of a scripted endpoint YAML under ~/.abacus/endpoints.
     /// When set, its URL, auth, headers, and body overrides drive the request
     /// and `base_url`/`protocol` here are only fallbacks.
@@ -972,6 +982,7 @@ mod tests {
                 model: "codestral".into(),
                 protocol: ProviderProtocol::ChatCompletions,
                 api_key_env: None,
+                aux_model: None,
                 endpoint: None,
                 providers: Vec::new(),
                 allow_fallbacks: true,

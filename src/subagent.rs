@@ -361,6 +361,7 @@ impl SubagentRuntime {
                 memories: crate::memories::MemoryStore::default(),
                 tether: crate::tether::TetherState::default(),
                 hive: crate::hive::HiveHandle::default(),
+                aux_model: None,
             },
             events,
         );

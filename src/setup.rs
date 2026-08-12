@@ -349,6 +349,7 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
             model: model.clone(),
             protocol,
             api_key_env: env_key.clone(),
+            aux_model: None,
             endpoint: None,
             providers: Vec::new(),
             allow_fallbacks: true,

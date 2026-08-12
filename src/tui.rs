@@ -337,6 +337,7 @@ struct UsageStats {
 enum ConfigKey {
     Profile,
     Model,
+    AuxModel,
     BaseUrl,
     Protocol,
     Providers,
@@ -373,6 +374,7 @@ const CONFIG_ROWS: &[ConfigRow] = &[
     ConfigRow::Heading("PROVIDER"),
     ConfigRow::Key(ConfigKey::Profile),
     ConfigRow::Key(ConfigKey::Model),
+    ConfigRow::Key(ConfigKey::AuxModel),
     ConfigRow::Key(ConfigKey::BaseUrl),
     ConfigRow::Key(ConfigKey::Protocol),
     ConfigRow::Key(ConfigKey::Providers),
@@ -408,6 +410,9 @@ fn config_help(key: ConfigKey) -> &'static str {
     match key {
         ConfigKey::Profile => "Which stored provider profile this session talks to.",
         ConfigKey::Model => "Model ID sent to the provider. /model lists what the endpoint offers.",
+        ConfigKey::AuxModel => {
+            "Cheaper model on this same endpoint for background calls (rethink, drafts, tether, command checks). Blank = same as the main model."
+        }
         ConfigKey::BaseUrl => "OpenAI-compatible endpoint, including the /v1 suffix.",
         ConfigKey::Protocol => {
             "Chat Completions suits most providers; Responses is OpenAI and xAI."
@@ -464,6 +469,7 @@ fn config_help(key: ConfigKey) -> &'static str {
 const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey::Profile,
     ConfigKey::Model,
+    ConfigKey::AuxModel,
     ConfigKey::BaseUrl,
     ConfigKey::Protocol,
     ConfigKey::Providers,
@@ -521,6 +527,9 @@ struct App {
     settings: Settings,
     credentials: Credentials,
     provider: Provider,
+    /// The auxiliary-model provider for secondary calls (drafts here; the
+    /// agent loop builds its own for rethink/tether/classification).
+    aux_provider: Provider,
     messages: Vec<Value>,
     session: Option<Session>,
     session_store: Option<SessionStore>,
@@ -677,6 +686,7 @@ impl App {
                     model: config.model.clone(),
                     protocol: config.protocol,
                     api_key_env: None,
+                    aux_model: None,
                     endpoint: None,
                     providers: Vec::new(),
                     allow_fallbacks: true,
@@ -699,6 +709,7 @@ impl App {
             .unwrap_or(0);
         let tokens = Arc::new(AtomicU64::new(initial_tokens));
         let provider = Provider::with_tokens(&config, tokens.clone())?;
+        let aux_provider = aux_provider_for(&config, &provider);
         let goal = GoalState::new(session.as_ref().and_then(|session| session.goal.clone()));
         let tether = crate::tether::TetherState::new(
             session.as_ref().and_then(|session| session.intent.clone()),
@@ -751,6 +762,7 @@ impl App {
             settings,
             credentials,
             provider,
+            aux_provider,
             messages,
             session,
             session_store,
@@ -952,7 +964,9 @@ impl App {
         if let Some(task) = self.draft_task.take() {
             task.abort();
         }
-        let provider = self.provider.clone();
+        // The next-message recommendation is a secondary call — use the aux
+        // model so a heavy main model does not pay for a throwaway guess.
+        let provider = self.aux_provider.clone();
         let messages = self.messages.clone();
         let sender = self.draft_tx.clone();
         self.draft_task = Some(tokio::spawn(async move {
@@ -1475,6 +1489,7 @@ impl App {
             memories: self.memories.clone(),
             tether: self.tether.clone(),
             hive: self.hive.clone(),
+            aux_model: self.config.aux_model.clone(),
             tasks: self.tasks.clone(),
             compaction: self.compaction.clone(),
             compaction_budget: self.config.model_limits.compaction_budget(),
@@ -2478,6 +2493,10 @@ impl App {
         let prior_key = self.config.api_key.clone();
         self.config.profile = profile_name.clone();
         self.config.model = profile.model;
+        self.config.aux_model = profile
+            .aux_model
+            .clone()
+            .filter(|model| !model.trim().is_empty());
         self.config.base_url = profile.base_url.trim_end_matches('/').to_owned();
         self.config.protocol = profile.protocol;
         // Re-resolve the scripted endpoint for the new profile — without this a
@@ -2543,6 +2562,7 @@ impl App {
             self.mode = InputMode::Insert;
         }
         self.provider = Provider::with_tokens(&self.config, self.tokens.clone())?;
+        self.aux_provider = aux_provider_for(&self.config, &self.provider);
         if let Some(session) = &mut self.session {
             session.profile = self.config.profile.clone();
             session.model = self.config.model.clone();
@@ -2708,6 +2728,10 @@ impl App {
             ConfigKey::Model => self.active_profile_mut().map(|profile| {
                 profile.model = value.trim().to_owned();
             }),
+            ConfigKey::AuxModel => self.active_profile_mut().map(|profile| {
+                let trimmed = value.trim();
+                profile.aux_model = (!trimmed.is_empty()).then(|| trimmed.to_owned());
+            }),
             ConfigKey::BaseUrl => self.active_profile_mut().map(|profile| {
                 profile.base_url = value.trim().trim_end_matches('/').to_owned();
             }),
@@ -2783,6 +2807,10 @@ impl App {
         match key {
             ConfigKey::Profile => self.settings.default_profile.clone(),
             ConfigKey::Model => profile.map(|value| value.model.clone()).unwrap_or_default(),
+            ConfigKey::AuxModel => profile
+                .and_then(|value| value.aux_model.clone())
+                .filter(|model| !model.trim().is_empty())
+                .unwrap_or_else(|| "(same as main)".to_owned()),
             ConfigKey::BaseUrl => profile
                 .map(|value| value.base_url.clone())
                 .unwrap_or_default(),
@@ -3012,6 +3040,7 @@ impl App {
                 model: model.clone(),
                 protocol: endpoint.protocol,
                 api_key_env: None,
+                aux_model: None,
                 endpoint: Some(name.to_owned()),
                 providers: Vec::new(),
                 allow_fallbacks: true,
@@ -3122,6 +3151,7 @@ impl App {
                 model: String::new(),
                 protocol,
                 api_key_env: env_key.clone(),
+                aux_model: None,
                 endpoint: None,
                 providers: Vec::new(),
                 allow_fallbacks: true,
@@ -7071,6 +7101,7 @@ fn config_label(key: ConfigKey) -> &'static str {
     match key {
         ConfigKey::Profile => "Active profile",
         ConfigKey::Model => "Model",
+        ConfigKey::AuxModel => "Auxiliary model",
         ConfigKey::BaseUrl => "Provider URL",
         ConfigKey::Protocol => "Wire protocol",
         ConfigKey::Providers => "Upstream providers",
@@ -7115,10 +7146,22 @@ fn limit_source_label(source: crate::model_info::LimitSource) -> &'static str {
     }
 }
 
+/// The provider secondary calls use: the main one with the model swapped to
+/// the configured aux model, or the main provider itself when none is set.
+fn aux_provider_for(config: &Config, provider: &Provider) -> Provider {
+    match config.aux_model.as_deref() {
+        Some(model) if !model.trim().is_empty() && model != provider.model() => {
+            provider.with_model(model)
+        }
+        _ => provider.clone(),
+    }
+}
+
 fn config_key_is_editable(key: ConfigKey) -> bool {
     matches!(
         key,
         ConfigKey::Model
+            | ConfigKey::AuxModel
             | ConfigKey::BaseUrl
             | ConfigKey::Providers
             | ConfigKey::ApiKey
@@ -7360,6 +7403,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn aux_model_drives_the_secondary_provider_and_defaults_to_main() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        // No aux model set → the aux provider mirrors the main model.
+        assert_eq!(app.aux_provider.model(), app.provider.model());
+
+        // Setting it via the config commit path rebuilds the aux provider on
+        // the same endpoint with the cheaper model.
+        let mut input = InputBuffer::new();
+        input.insert_str("cheap/model");
+        app.config_panel = Some(ConfigPanel {
+            selected: 0,
+            editing: Some((ConfigKey::AuxModel, input)),
+        });
+        app.commit_config_edit();
+        assert_eq!(app.aux_provider.model(), "cheap/model");
+        assert_eq!(app.provider.model(), "test-model", "main model untouched");
+        assert_eq!(
+            app.config_value(ConfigKey::AuxModel),
+            "cheap/model",
+            "config shows the set value"
+        );
+
+        // Clearing it returns to "(same as main)".
+        let mut blank = InputBuffer::new();
+        blank.insert_str("  ");
+        app.config_panel = Some(ConfigPanel {
+            selected: 0,
+            editing: Some((ConfigKey::AuxModel, blank)),
+        });
+        app.commit_config_edit();
+        assert_eq!(app.aux_provider.model(), app.provider.model());
+        assert_eq!(app.config_value(ConfigKey::AuxModel), "(same as main)");
+    }
+
+    #[tokio::test]
     async fn switching_away_from_a_scripted_profile_drops_the_endpoint() {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
         let dir = &app.config.paths.endpoints_dir;
@@ -7378,6 +7456,7 @@ mod tests {
                 model: "claude-opus-4-8".into(),
                 protocol: ProviderProtocol::Anthropic,
                 api_key_env: None,
+                aux_model: None,
                 endpoint: Some("claude".into()),
                 providers: Vec::new(),
                 allow_fallbacks: true,
@@ -7391,6 +7470,7 @@ mod tests {
                 model: "some/model".into(),
                 protocol: ProviderProtocol::ChatCompletions,
                 api_key_env: None,
+                aux_model: None,
                 endpoint: None,
                 providers: Vec::new(),
                 allow_fallbacks: true,
@@ -7508,6 +7588,7 @@ mod tests {
                 model: "other-model".into(),
                 protocol: ProviderProtocol::ChatCompletions,
                 api_key_env: None,
+                aux_model: None,
                 endpoint: None,
                 providers: Vec::new(),
                 allow_fallbacks: true,
@@ -7678,6 +7759,7 @@ mod tests {
                 model: "other".into(),
                 protocol: ProviderProtocol::ChatCompletions,
                 api_key_env: None,
+                aux_model: None,
                 endpoint: None,
                 providers: Vec::new(),
                 allow_fallbacks: true,
@@ -9164,6 +9246,7 @@ mod tests {
                 model: "test-model".into(),
                 protocol: ProviderProtocol::ChatCompletions,
                 api_key_env: None,
+                aux_model: None,
                 endpoint: None,
                 providers: Vec::new(),
                 allow_fallbacks: true,
@@ -9187,6 +9270,7 @@ mod tests {
             routing: Default::default(),
             web_search: crate::web::WebConfig::default(),
             endpoint: None,
+            aux_model: None,
             paths,
         };
         let app = App::new(

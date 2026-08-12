@@ -148,6 +148,10 @@ pub struct TurnOptions {
     pub tether: crate::tether::TetherState,
     /// Delegation record and the live subagent board.
     pub hive: crate::hive::HiveHandle,
+    /// Model for secondary calls (rethink, tether, command classification,
+    /// draft recommendations) on the same endpoint. Compaction stays on the
+    /// main model. None reuses the main model.
+    pub aux_model: Option<String>,
     /// Appends one training record per model call, when enabled.
     pub trace: Option<crate::sft::TraceWriter>,
     /// Raised to ask the turn to stop. Checked between steps, after each tool,
@@ -197,6 +201,17 @@ async fn run_turn_inner(
         options.web_search.clone(),
         options.hive.clone(),
     );
+    // The auxiliary model: the same endpoint with a different model, used for
+    // secondary calls (rethink, tether drift, command classification) so a big
+    // main model does not pay for them. Compaction deliberately stays on the
+    // main model — the rolling summary is load-bearing for the whole session.
+    // Falls back to the main provider when no aux model is set.
+    let aux = match options.aux_model.as_deref() {
+        Some(model) if !model.trim().is_empty() && model != provider.model() => {
+            provider.with_model(model)
+        }
+        _ => provider.clone(),
+    };
     let mut repeated_calls: HashMap<String, usize> = HashMap::new();
     // Consecutive failed tool results this turn — two in a row triggers a
     // forced papercut recall on the theory the model is stuck on a known snag.
@@ -238,12 +253,12 @@ async fn run_turn_inner(
             )
         {
             rethought = true;
-            run_rethink(&provider, &messages, &options, active_mode, &events).await;
+            run_rethink(&aux, &messages, &options, active_mode, &events).await;
             // Refresh the tether snapshot while the evidence is verbatim —
             // the user may have redirected since it was taken.
             if options.session_id.is_some()
                 && let Some(intent) = crate::tether::capture_intent(
-                    &provider,
+                    &aux,
                     &messages,
                     options.tether.intent().as_deref(),
                     &options.cancel,
@@ -374,7 +389,7 @@ async fn run_turn_inner(
         if options.tether.step_and_check_due()
             && let Some(intent) = options.tether.intent()
             && let Some(correction) =
-                crate::tether::check_drift(&provider, &intent, &messages, &options.cancel).await
+                crate::tether::check_drift(&aux, &intent, &messages, &options.cancel).await
         {
             options.tether.set_correction(correction.clone());
             let _ = events.send(AgentEvent::Notice(format!("tether — {correction}")));
@@ -392,14 +407,14 @@ async fn run_turn_inner(
             // A turn with many actions earns a look back before it ends;
             // conversational turns end unexamined.
             if !rethought && tool_calls_executed >= crate::rethink::LONG_TURN_TOOL_CALLS {
-                run_rethink(&provider, &messages, &options, active_mode, &events).await;
+                run_rethink(&aux, &messages, &options, active_mode, &events).await;
             }
             // First answered prompt: snapshot the session intent the tether
             // will hold the rest of the session against.
             if options.session_id.is_some()
                 && options.tether.intent().is_none()
                 && let Some(intent) =
-                    crate::tether::capture_intent(&provider, &messages, None, &options.cancel).await
+                    crate::tether::capture_intent(&aux, &messages, None, &options.cancel).await
             {
                 options.tether.set_intent(intent.clone());
                 let _ = events.send(AgentEvent::Notice(format!("tethered — {intent}")));
@@ -504,7 +519,7 @@ async fn run_turn_inner(
                     let verdict = match command_verdicts.get(&command) {
                         Some(known) => *known,
                         None => {
-                            let safe = command_is_safe_to_inspect(&provider, &command).await;
+                            let safe = command_is_safe_to_inspect(&aux, &command).await;
                             command_verdicts.insert(command.clone(), safe);
                             safe
                         }
@@ -677,7 +692,7 @@ async fn run_turn_inner(
     // A limit-length turn is by definition long, so it earns the reflection
     // pass on the way out.
     if !rethought {
-        run_rethink(&provider, &messages, &options, active_mode, &events).await;
+        run_rethink(&aux, &messages, &options, active_mode, &events).await;
     }
     let _ = events.send(AgentEvent::Done {
         messages,

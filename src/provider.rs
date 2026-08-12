@@ -228,6 +228,20 @@ impl Provider {
         &self.model
     }
 
+    /// A sibling provider that differs only in the model — same endpoint,
+    /// auth, protocol, and scripted config. For the auxiliary model used by
+    /// secondary calls (rethink, drafts, tether, compaction). The billing
+    /// counter is shared so aux calls count toward the session total; the
+    /// context-size gauge is fresh so an aux call over the whole history does
+    /// not overwrite the main conversation's "window full" figure.
+    pub fn with_model(&self, model: &str) -> Provider {
+        Provider {
+            model: model.to_owned(),
+            context_tokens: Arc::new(AtomicU64::new(0)),
+            ..self.clone()
+        }
+    }
+
     /// Tokens in the last request's prompt, or 0 before the first reply or when
     /// the provider reports no usage.
     pub fn context_tokens(&self) -> u64 {
