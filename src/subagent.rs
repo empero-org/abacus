@@ -141,7 +141,7 @@ impl SubagentRuntime {
             "type":"function",
             "function":{
                 "name":"spawn_subagents",
-                "description":"Delegate independent coding tasks to parallel agents in isolated git worktrees. Prefer this when the request splits into two or more genuinely separable units of work — independent files, modules, or fixes that need no shared intermediate state — and run them in one call; it is the efficient way to parallelize. Do NOT use it for a single task, for tightly-coupled or sequential edits, or for pure investigation — do that work directly. Each worker starts from the current workspace state and cannot spawn its own subagents. Returns each worker's result and patch; set apply=true to apply non-conflicting patches to the parent workspace.",
+                "description":"Delegate tasks to parallel agents in isolated git worktrees. Prefer this when the request splits into two or more genuinely separable units — independent files, modules, fixes, or research questions that need no shared intermediate state — and run them in one call; it is the efficient way to parallelize. Use scout roles to parallelize investigation (repo crawls, research, web searches); a quick single lookup is still faster done directly. Do NOT use it for a single indivisible task or for tightly-coupled sequential edits. Each worker starts from the current workspace state and cannot spawn its own subagents. Returns each worker's result and patch; set apply=true to apply non-conflicting patches to the parent workspace.",
                 "parameters":{
                     "type":"object",
                     "properties":{
