@@ -32,6 +32,72 @@ const MIN_STRENGTH: f64 = 0.2;
 const BASE_COOLDOWN_MINUTES: f64 = 240.0;
 const MIN_COOLDOWN_MINUTES: f64 = 5.0;
 
+/// A tripwire must be at least this long. Short strings match everywhere and
+/// turn a lesson into spam.
+const MIN_TRIPWIRE_CHARS: usize = 8;
+
+/// Phrases that appear in practically every failure. A tripwire that IS one of
+/// these (after trimming punctuation and case) identifies nothing — models
+/// reach for them because they are the most visible part of the error text.
+/// A longer tripwire that merely *contains* one ("error: DATABASE_URL must be
+/// set") stays valid.
+const GENERIC_TRIPWIRES: &[&str] = &[
+    "not found",
+    "command not found",
+    "no such file",
+    "no such file or directory",
+    "does not exist",
+    "permission denied",
+    "operation not permitted",
+    "failed",
+    "failure",
+    "error occurred",
+    "an error occurred",
+    "syntax error",
+    "compilation error",
+    "compile error",
+    "build failed",
+    "test failed",
+    "tests failed",
+    "exit code",
+    "exit status",
+    "non-zero exit",
+    "timed out",
+    "timeout",
+    "connection refused",
+    "connection reset",
+    "broken pipe",
+    "out of memory",
+    "segmentation fault",
+    "stack overflow",
+    "panicked at",
+    "traceback",
+    "exception",
+    "unexpected",
+    "invalid argument",
+    "invalid input",
+    "undefined",
+    "null pointer",
+    "cannot open",
+    "cannot find",
+    "unable to",
+    "warning:",
+    "stderr:",
+    "stdout:",
+];
+
+/// Whether a proposed tripwire is one of the generic phrases, once case and
+/// surrounding punctuation are stripped away.
+fn is_generic_tripwire(tripwire: &str) -> bool {
+    let normalized = tripwire
+        .trim()
+        .trim_matches(|ch: char| ch.is_ascii_punctuation() || ch.is_whitespace())
+        .to_ascii_lowercase();
+    GENERIC_TRIPWIRES
+        .iter()
+        .any(|generic| normalized == *generic)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Papercut {
     pub id: Uuid,
@@ -157,7 +223,7 @@ impl PapercutStore {
                             "description": {"type": "string", "description": "What went wrong and why"},
                             "fix": {"type": "string", "description": "The fix that actually worked, as an instruction"},
                             "references": {"type": "array", "items": {"type": "string"}, "description": "Optional file paths, URLs, or commands worth consulting"},
-                            "tripwires": {"type": "array", "items": {"type": "string"}, "description": "1-6 distinctive substrings of the failure (error text, flag names) that should trigger this reminder. Each at least 6 characters; avoid generic words."},
+                            "tripwires": {"type": "array", "items": {"type": "string"}, "description": "1-6 distinctive substrings of the failure that should trigger this reminder. Each at least 8 characters, and never a generic phrase alone ('not found', 'permission denied') — include the identifier the error names, e.g. 'frobnicate: not found'."},
                             "scope": {"type": "string", "enum": ["workspace", "global"], "description": "workspace (default) limits recall to this project; global recalls everywhere"}
                         },
                         "required": ["title", "description", "fix", "tripwires"]
@@ -219,8 +285,21 @@ impl PapercutStore {
         }
         // A too-short tripwire matches everything and turns the lesson into
         // spam; the floor forces something distinctive.
-        if let Some(short) = tripwires.iter().find(|value| value.chars().count() < 6) {
-            bail!("tripwire `{short}` is too short — use a distinctive string of 6+ characters");
+        if let Some(short) = tripwires
+            .iter()
+            .find(|value| value.chars().count() < MIN_TRIPWIRE_CHARS)
+        {
+            bail!(
+                "tripwire `{short}` is too short — use a distinctive string of \
+                 {MIN_TRIPWIRE_CHARS}+ characters from this specific failure"
+            );
+        }
+        if let Some(generic) = tripwires.iter().find(|value| is_generic_tripwire(value)) {
+            bail!(
+                "tripwire `{generic}` is too generic — it appears in nearly every failure. \
+                 Use a longer string distinctive to this snag, e.g. the exact error message \
+                 including the identifier it names"
+            );
         }
         let workspace = match arguments.scope.as_deref() {
             Some("global") => None,
@@ -473,17 +552,41 @@ mod tests {
     }
 
     #[test]
-    fn rejects_generic_tripwires() {
+    fn rejects_short_and_generic_tripwires_but_keeps_distinctive_ones() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
-        let output = store
-            .execute(
-                "papercut_record",
-                &json!({"title": "x", "description": "d", "fix": "f", "tripwires": ["error"]})
-                    .to_string(),
-            )
-            .unwrap();
-        assert!(output.starts_with("Error:"), "{output}");
+        let attempt = |tripwire: &str| {
+            store
+                .execute(
+                    "papercut_record",
+                    &json!({"title": "x", "description": "d", "fix": "f", "tripwires": [tripwire]})
+                        .to_string(),
+                )
+                .unwrap()
+        };
+        // Below the length floor.
+        assert!(attempt("error").starts_with("Error:"));
+        assert!(attempt("ENOENT").starts_with("Error:"));
+        // Long enough but generic — exactly the phrases models reach for.
+        for generic in [
+            "not found",
+            "Not Found",
+            "'not found'",
+            "permission denied",
+            "command not found",
+            "segmentation fault",
+            "  timed out  ",
+        ] {
+            let output = attempt(generic);
+            assert!(
+                output.starts_with("Error:") && output.contains("generic"),
+                "`{generic}` must be rejected as generic: {output}"
+            );
+        }
+        // A phrase that *contains* a generic marker plus an identifier is the
+        // recommended shape and must pass.
+        assert!(attempt("frobnicate: not found").contains("recorded"));
+        assert_eq!(store.snapshot().len(), 1);
     }
 
     #[test]
