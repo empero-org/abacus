@@ -637,6 +637,11 @@ pub struct ProviderProfile {
 /// sent and the provider's own default applies — the levels are only useful on
 /// models that expose reasoning, and sending one to a model that does not is
 /// how you collect 400s.
+///
+/// The ladder spans both worlds: OpenAI-shaped protocols know
+/// `minimal|low|medium|high`, while the Anthropic Messages API knows
+/// `low|medium|high|xhigh|max`. Each end is mapped to what it accepts rather
+/// than sending a level the endpoint would reject.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
@@ -645,6 +650,11 @@ pub enum ReasoningEffort {
     Low,
     Medium,
     High,
+    /// Extended capability for long-horizon agentic and coding work.
+    /// Anthropic's recommended starting point for coding on current Opus.
+    XHigh,
+    /// Absolute maximum capability, no constraint on token spend.
+    Max,
 }
 
 impl ReasoningEffort {
@@ -654,6 +664,8 @@ impl ReasoningEffort {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
         }
     }
 
@@ -662,19 +674,45 @@ impl ReasoningEffort {
             "minimal" | "min" | "none" => Some(Self::Minimal),
             "low" => Some(Self::Low),
             "medium" | "med" => Some(Self::Medium),
-            "high" | "max" => Some(Self::High),
+            "high" => Some(Self::High),
+            "xhigh" | "x-high" | "extra-high" => Some(Self::XHigh),
+            "max" | "maximum" => Some(Self::Max),
             _ => None,
         }
     }
 
+    /// The level as OpenAI-shaped protocols (`reasoning_effort`,
+    /// `reasoning.effort`) accept it. They top out at `high`, so the two
+    /// Anthropic-only rungs above it clamp down rather than 400.
+    pub fn openai_label(self) -> &'static str {
+        match self {
+            Self::XHigh | Self::Max => "high",
+            other => other.label(),
+        }
+    }
+
+    /// The level as the Anthropic Messages API accepts it in
+    /// `output_config.effort`. Anthropic has no `minimal`, so the floor is
+    /// `low`; thinking itself is left off for minimal by the caller.
+    pub fn anthropic_effort(self) -> &'static str {
+        match self {
+            Self::Minimal => "low",
+            other => other.label(),
+        }
+    }
+
     /// Thinking budget for the Anthropic protocol, which takes a token budget
-    /// rather than a level. `None` for minimal — thinking is simply not enabled.
+    /// rather than a level. `None` for minimal — thinking is simply not
+    /// enabled. Only used on Claude 4.5 and earlier, where manual extended
+    /// thinking is the sole available mode; newer models take an effort level.
+    /// The ceiling stays at 32k: past that Anthropic recommends batch
+    /// processing, since long-running requests hit connection limits.
     pub fn thinking_budget(self) -> Option<usize> {
         match self {
             Self::Minimal => None,
             Self::Low => Some(4_096),
             Self::Medium => Some(16_384),
-            Self::High => Some(32_768),
+            Self::High | Self::XHigh | Self::Max => Some(32_768),
         }
     }
 }
@@ -993,9 +1031,20 @@ mod tests {
     fn effort_parses_aliases_and_maps_to_a_thinking_budget() {
         assert_eq!(ReasoningEffort::parse("HIGH"), Some(ReasoningEffort::High));
         assert_eq!(ReasoningEffort::parse("med"), Some(ReasoningEffort::Medium));
-        assert_eq!(ReasoningEffort::parse("max"), Some(ReasoningEffort::High));
         assert_eq!(ReasoningEffort::parse(" low "), Some(ReasoningEffort::Low));
         assert_eq!(ReasoningEffort::parse("ludicrous"), None);
+
+        // The two Anthropic-only rungs above `high`. `max` is now its own
+        // level, not an alias for `high` — it means unconstrained spend.
+        assert_eq!(ReasoningEffort::parse("max"), Some(ReasoningEffort::Max));
+        assert_eq!(
+            ReasoningEffort::parse("xhigh"),
+            Some(ReasoningEffort::XHigh)
+        );
+        assert_eq!(
+            ReasoningEffort::parse("x-high"),
+            Some(ReasoningEffort::XHigh)
+        );
 
         // Anthropic takes a budget, and minimal means "do not enable thinking".
         assert_eq!(ReasoningEffort::Minimal.thinking_budget(), None);
@@ -1003,6 +1052,24 @@ mod tests {
             ReasoningEffort::Low.thinking_budget() < ReasoningEffort::High.thinking_budget(),
             "budgets rise with effort"
         );
+    }
+
+    /// Each protocol only knows its own rungs: sending `xhigh` to an
+    /// OpenAI-shaped endpoint, or `minimal` to Anthropic, is a 400.
+    #[test]
+    fn effort_levels_map_to_what_each_protocol_accepts() {
+        // OpenAI-shaped tops out at high; the rungs above clamp down.
+        assert_eq!(ReasoningEffort::XHigh.openai_label(), "high");
+        assert_eq!(ReasoningEffort::Max.openai_label(), "high");
+        assert_eq!(ReasoningEffort::Minimal.openai_label(), "minimal");
+        assert_eq!(ReasoningEffort::Medium.openai_label(), "medium");
+
+        // Anthropic has no `minimal`, so the floor is `low`, and it keeps the
+        // two levels above `high` that OpenAI does not have.
+        assert_eq!(ReasoningEffort::Minimal.anthropic_effort(), "low");
+        assert_eq!(ReasoningEffort::XHigh.anthropic_effort(), "xhigh");
+        assert_eq!(ReasoningEffort::Max.anthropic_effort(), "max");
+        assert_eq!(ReasoningEffort::High.anthropic_effort(), "high");
     }
 
     #[test]

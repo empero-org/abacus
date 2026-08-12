@@ -59,9 +59,16 @@ headers:
   X-Claude-Code-Session-Id: "{uuid}"
   anthropic-dangerous-direct-browser-access: "true"
 
-# Optional: cap output, enable extended thinking, etc.
+# Optional: cap output, steer thinking depth, etc.
+#
+# Claude 4.6 and later take *adaptive* thinking plus an effort level. The
+# older `thinking: {type: enabled, budget_tokens: N}` shape is deprecated on
+# 4.6 and returns a 400 on 4.7+ ("thinking.type.enabled is not supported").
+# Prefer /effort (or reasoning_effort in the profile) over hardcoding either
+# here — Abacus picks the right shape for the model automatically.
 # body:
-#   max_tokens: 16000
+#   max_tokens: 64000
 #   thinking:
-#     type: enabled
-#     budget_tokens: 16000
+#     type: adaptive
+#   output_config:
+#     effort: xhigh          # low | medium | high | xhigh | max

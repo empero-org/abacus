@@ -60,6 +60,13 @@ pub struct Provider {
     session_id: String,
     /// Reasoning effort, sent in whatever shape this protocol expects.
     reasoning_effort: Option<crate::config::ReasoningEffort>,
+    /// Set once the endpoint rejects manual extended thinking
+    /// (`thinking.type: "enabled"` with `budget_tokens`), so the rest of the
+    /// session goes straight to adaptive thinking + `output_config.effort`.
+    /// Claude 4.7 and later 400 on the manual shape; the family check below
+    /// catches the known ones, and this catches everything it does not.
+    /// Shared across clones for the same reason `learned_output_cap` is.
+    prefers_adaptive_thinking: Arc<AtomicBool>,
 }
 
 /// A piece of streamed output. Reasoning is kept separate from the answer all
@@ -159,6 +166,7 @@ impl Provider {
                 .clamp(1, DEFAULT_ANTHROPIC_MAX_TOKENS),
             session_id: uuid::Uuid::new_v4().simple().to_string(),
             reasoning_effort: config.reasoning_effort,
+            prefers_adaptive_thinking: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -300,7 +308,7 @@ impl Provider {
             body[self.output_tokens_field()] = json!(max_tokens);
         }
         if let Some(effort) = self.reasoning_effort {
-            body["reasoning_effort"] = json!(effort.label());
+            body["reasoning_effort"] = json!(effort.openai_label());
         }
         // Routing is an OpenRouter extension. Sending it to an endpoint that
         // does not know the field risks a 400 from the stricter servers, and it
@@ -474,7 +482,7 @@ impl Provider {
             body["max_output_tokens"] = json!(max_tokens);
         }
         if let Some(effort) = self.reasoning_effort {
-            body["reasoning"] = json!({"effort": effort.label()});
+            body["reasoning"] = json!({"effort": effort.openai_label()});
         }
         self.apply_scripted_body(&mut body);
         let response = tokio::select! {
@@ -549,18 +557,8 @@ impl Provider {
             body["tools"] = json!(anthropic_tools(tools));
             body["tool_choice"] = json!({"type": "auto"});
         }
-        // Anthropic takes a thinking *budget*, not a level, and the budget has
-        // to fit under max_tokens with room for an actual answer — so the cap
-        // is raised to fit rather than the budget silently exceeding it.
-        if let Some(budget) = self
-            .reasoning_effort
-            .and_then(|effort| effort.thinking_budget())
-        {
-            let max_tokens = body["max_tokens"].as_u64().unwrap_or(0) as usize;
-            if max_tokens <= budget {
-                body["max_tokens"] = json!(budget + ANTHROPIC_ANSWER_HEADROOM);
-            }
-            body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
+        if let Some(effort) = self.reasoning_effort {
+            self.apply_anthropic_thinking(&mut body, effort);
         }
         self.apply_scripted_body(&mut body);
 
@@ -578,6 +576,24 @@ impl Provider {
         // the chat path does, and remember it for the rest of the session.
         let response = match response {
             Ok(response) => response,
+            // Claude 4.7+ reject manual extended thinking outright. The family
+            // check above catches the models we know; this catches the ones we
+            // do not — learn it, rewrite the request as adaptive, and retry
+            // once, so a new model is a single wasted call rather than a dead
+            // turn for the rest of the session.
+            Err(error) if is_manual_thinking_rejection(&error) => {
+                self.prefers_adaptive_thinking
+                    .store(true, Ordering::Relaxed);
+                if let Some(effort) = self.reasoning_effort {
+                    self.apply_anthropic_thinking(&mut body, effort);
+                    self.apply_scripted_body(&mut body);
+                }
+                tokio::select! {
+                    biased;
+                    sent = self.post_stream(&body) => sent?,
+                    () = wait_for_cancel(cancel) => return Ok(Completion::cancelled()),
+                }
+            }
             Err(error) if rejected_output_cap(&error, self.effective_output_tokens()).is_some() => {
                 let cap = rejected_output_cap(&error, self.effective_output_tokens())
                     .expect("guard checked");
@@ -660,6 +676,49 @@ impl Provider {
         } else {
             "max_tokens"
         }
+    }
+
+    /// Write the thinking configuration for an Anthropic request.
+    ///
+    /// Two incompatible shapes exist. Manual extended thinking
+    /// (`{type: "enabled", budget_tokens: N}`) is the only mode on Claude 4.5
+    /// and earlier; it is deprecated on 4.6 and **rejected with a 400** on 4.7
+    /// and later. Adaptive thinking (`{type: "adaptive"}` plus
+    /// `output_config: {effort: ...}`) is the replacement and the recommended
+    /// control wherever it exists. Newer models are the ones we will keep
+    /// meeting, so adaptive is the default and the budget is the fallback for
+    /// families known to predate it.
+    fn apply_anthropic_thinking(&self, body: &mut Value, effort: crate::config::ReasoningEffort) {
+        if self.uses_adaptive_thinking() {
+            // Effort governs all token spend — thinking, text, and tool calls —
+            // so it applies even at minimal, where thinking itself stays off.
+            body["output_config"] = json!({"effort": effort.anthropic_effort()});
+            body["thinking"] = match effort {
+                crate::config::ReasoningEffort::Minimal => json!({"type": "disabled"}),
+                _ => json!({"type": "adaptive"}),
+            };
+            return;
+        }
+        // Manual mode takes a *budget*, and the budget has to fit under
+        // max_tokens with room for an actual answer — so the cap is raised to
+        // fit rather than the budget silently exceeding it.
+        if let Some(budget) = effort.thinking_budget() {
+            let max_tokens = body["max_tokens"].as_u64().unwrap_or(0) as usize;
+            if max_tokens <= budget {
+                body["max_tokens"] = json!(budget + ANTHROPIC_ANSWER_HEADROOM);
+            }
+            body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
+        }
+    }
+
+    /// Whether this model takes adaptive thinking + `output_config.effort`
+    /// rather than a manual token budget. True once a rejection has taught us
+    /// so, and by default for every model outside the known legacy families —
+    /// guessing "new" is the safe direction, since the manual shape is a hard
+    /// 400 on current models while adaptive is what the rest accept.
+    fn uses_adaptive_thinking(&self) -> bool {
+        self.prefers_adaptive_thinking.load(Ordering::Relaxed)
+            || !is_legacy_thinking_model(&self.model)
     }
 
     /// Fold in a scripted endpoint's body overrides and removals, if any.
@@ -861,6 +920,43 @@ fn strip_reasoning_content(messages: &[Value]) -> Vec<Value> {
             message
         })
         .collect()
+}
+
+/// Whether a provider error is Anthropic's rejection of manual extended
+/// thinking. Claude 4.7 and later return a 400 whose message starts with
+/// `"thinking.type.enabled" is not supported`; the model then wants adaptive
+/// thinking instead. Matched loosely so a reworded message still lands.
+fn is_manual_thinking_rejection(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    text.contains("thinking.type.enabled") && text.contains("not supported")
+}
+
+/// Whether a Claude model predates adaptive thinking and so takes a manual
+/// `budget_tokens` instead. Adaptive arrived with the 4.6 generation, so the
+/// legacy set is closed and will not grow: Claude 4.5 and earlier, plus the
+/// Claude 3 family. Matching the closed old set rather than the open new one
+/// is what keeps this from going stale as models ship — the same reasoning as
+/// the family table in `model_info`.
+fn is_legacy_thinking_model(model: &str) -> bool {
+    let name = model.to_ascii_lowercase();
+    if !name.contains("claude") {
+        return false;
+    }
+    // Claude 3.x, and the 4.0–4.5 generation in either naming style
+    // (`claude-opus-4-5`, `claude-3-7-sonnet`, `claude-sonnet-4`).
+    const LEGACY: [&str; 12] = [
+        "claude-3", "claude-4", "-3-5-", "-3-7-", "-4-0", "-4-1", "-4-5", "opus-4", "sonnet-4",
+        "haiku-4", "-4-20", "-4.5",
+    ];
+    // A 4.6-or-later marker wins outright: `claude-opus-4-6` contains
+    // `opus-4`, but it is emphatically not legacy.
+    const MODERN: [&str; 8] = [
+        "-4-6", "-4-7", "-4-8", "-4-9", "-4.6", "-4.7", "-4.8", "-4.9",
+    ];
+    if MODERN.iter().any(|marker| name.contains(marker)) {
+        return false;
+    }
+    LEGACY.iter().any(|marker| name.contains(marker))
 }
 
 /// Whether a provider error is the "use max_completion_tokens instead" 400 that
@@ -1567,6 +1663,128 @@ mod tests {
             }
         }
         assert_eq!(streamed, "Hi there");
+    }
+
+    /// The body is the whole contract: an adaptive model must get
+    /// `output_config.effort`, and a legacy one must get `budget_tokens`.
+    #[test]
+    fn anthropic_thinking_body_matches_the_model_generation() {
+        fn provider_for(model: &str) -> Provider {
+            let directory = tempfile::tempdir().unwrap();
+            let config = Config {
+                workspace: directory.path().to_path_buf(),
+                profile: "test".into(),
+                model: model.into(),
+                base_url: "https://api.anthropic.com".into(),
+                protocol: ProviderProtocol::Anthropic,
+                api_key: None,
+                max_steps: 8,
+                tool_output_limit: 30_000,
+                yes: false,
+                no_session: true,
+                model_limits: crate::model_info::ModelLimits::default(),
+                tool_format: ToolFormat::default(),
+                mode: None,
+                trace_enabled: false,
+                routing: Default::default(),
+                web_search: crate::web::WebConfig::default(),
+                endpoint: None,
+                aux_model: None,
+                reasoning_effort: None,
+                paths: crate::config::AbacusPaths::under(directory.path().join("home")),
+            };
+            Provider::new(&config).unwrap()
+        }
+
+        // Claude 4.7+: adaptive thinking plus an effort level. Sending the
+        // manual shape here is a 400.
+        let modern = provider_for("claude-opus-4-8");
+        let mut body = json!({"max_tokens": 32_000});
+        modern.apply_anthropic_thinking(&mut body, crate::config::ReasoningEffort::XHigh);
+        assert_eq!(body["thinking"], json!({"type": "adaptive"}));
+        assert_eq!(body["output_config"], json!({"effort": "xhigh"}));
+        assert!(
+            body["thinking"].get("budget_tokens").is_none(),
+            "the deprecated budget must not be sent to an adaptive model"
+        );
+        assert_eq!(body["max_tokens"], json!(32_000), "no budget, no juggling");
+
+        // Minimal turns thinking off, but effort still shapes total spend.
+        let mut body = json!({"max_tokens": 32_000});
+        modern.apply_anthropic_thinking(&mut body, crate::config::ReasoningEffort::Minimal);
+        assert_eq!(body["thinking"], json!({"type": "disabled"}));
+        assert_eq!(body["output_config"], json!({"effort": "low"}));
+
+        // Claude 4.5 and earlier: the manual budget is the only mode.
+        let legacy = provider_for("claude-opus-4-5");
+        let mut body = json!({"max_tokens": 32_000});
+        legacy.apply_anthropic_thinking(&mut body, crate::config::ReasoningEffort::Medium);
+        assert_eq!(
+            body["thinking"],
+            json!({"type": "enabled", "budget_tokens": 16_384})
+        );
+        assert!(
+            body.get("output_config").is_none(),
+            "a legacy model does not know output_config"
+        );
+
+        // A budget at or above max_tokens raises the cap so the answer has room.
+        let mut body = json!({"max_tokens": 4_096});
+        legacy.apply_anthropic_thinking(&mut body, crate::config::ReasoningEffort::Low);
+        assert_eq!(body["max_tokens"], json!(4_096 + ANTHROPIC_ANSWER_HEADROOM));
+
+        // Once a rejection teaches us, even a legacy-looking model goes adaptive.
+        legacy
+            .prefers_adaptive_thinking
+            .store(true, Ordering::Relaxed);
+        let mut body = json!({"max_tokens": 32_000});
+        legacy.apply_anthropic_thinking(&mut body, crate::config::ReasoningEffort::High);
+        assert_eq!(body["thinking"], json!({"type": "adaptive"}));
+        assert_eq!(body["output_config"], json!({"effort": "high"}));
+    }
+
+    /// The manual-thinking shape is a hard 400 on Claude 4.7+, so which shape
+    /// a model gets is the difference between a working turn and a dead one.
+    #[test]
+    fn thinking_shape_follows_the_model_family() {
+        // Legacy: manual extended thinking is the only mode there.
+        assert!(is_legacy_thinking_model("claude-opus-4-5"));
+        assert!(is_legacy_thinking_model("claude-sonnet-4-5-20250929"));
+        assert!(is_legacy_thinking_model("claude-3-7-sonnet-latest"));
+        assert!(is_legacy_thinking_model("claude-opus-4-20250514"));
+
+        // 4.6 and later take adaptive thinking. `claude-opus-4-6` contains
+        // "opus-4", so the modern marker has to win over the legacy one.
+        assert!(!is_legacy_thinking_model("claude-opus-4-6"));
+        assert!(!is_legacy_thinking_model("claude-opus-4-7"));
+        assert!(!is_legacy_thinking_model("claude-opus-4-8"));
+        assert!(!is_legacy_thinking_model("claude-sonnet-4-6-20260101"));
+
+        // Unknown and future names default to adaptive: guessing "new" is the
+        // safe direction, since manual is a 400 on everything current.
+        assert!(!is_legacy_thinking_model("claude-opus-5"));
+        assert!(!is_legacy_thinking_model("claude-sonnet-5"));
+        assert!(!is_legacy_thinking_model("claude-fable-5"));
+        assert!(!is_legacy_thinking_model("gpt-5"));
+    }
+
+    /// A model we guessed wrong about must teach us, not kill the session.
+    #[test]
+    fn manual_thinking_rejection_is_recognized() {
+        let error = anyhow!(
+            "provider returned 400 Bad Request: {{\"error\":{{\"type\":\"invalid_request_error\",\
+             \"message\":\"`thinking.type.enabled` is not supported on this model. Use \
+             `thinking.type.adaptive` instead.\"}}}}"
+        );
+        assert!(is_manual_thinking_rejection(&error));
+
+        // Unrelated 400s must not trigger the adaptive fallback.
+        let error = anyhow!("provider returned 400: model not found: claude-opus-9");
+        assert!(!is_manual_thinking_rejection(&error));
+        let error = anyhow!(
+            "provider returned 400: max_tokens: 393216 > 128000, which is the maximum allowed"
+        );
+        assert!(!is_manual_thinking_rejection(&error));
     }
 
     #[test]

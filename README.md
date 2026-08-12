@@ -610,16 +610,27 @@ tokens. `/swarm <objective>` is the user-facing shortcut into the same path.
 
 ### Reasoning effort
 
-`/effort minimal|low|medium|high` dials how hard the model thinks, per profile;
-`/effort auto` clears it and leaves the provider's own default alone, which is
-what a fresh profile does. The same knob is **Reasoning effort** in `/config`.
+`/effort minimal|low|medium|high|xhigh|max` dials how hard the model thinks, per
+profile; `/effort auto` clears it and leaves the provider's own default alone,
+which is what a fresh profile does. The same knob is **Reasoning effort** in
+`/config`.
 
-Each protocol wants it in a different shape, so Abacus translates: chat
-completions get `reasoning_effort`, the Responses API gets `reasoning.effort`,
-and the Anthropic Messages API gets a thinking *budget* (`minimal` disables
-thinking; `low`/`medium`/`high` map to rising `budget_tokens`) with `max_tokens`
-raised if needed so the budget never leaves the answer without room. Models
-without reasoning ignore the field.
+Each protocol wants it in a different shape, so Abacus translates. Chat
+completions get `reasoning_effort` and the Responses API gets `reasoning.effort`
+— both top out at `high`, so `xhigh` and `max` clamp down to it rather than
+sending a level those endpoints would reject.
+
+The Anthropic Messages API has two shapes, and which one a model accepts is not
+optional: Claude 4.6 and later take **adaptive thinking**
+(`thinking: {type: "adaptive"}` plus `output_config: {effort: …}`, where
+`minimal` disables thinking outright), while Claude 4.5 and earlier take the
+older manual **budget** (`thinking: {type: "enabled", budget_tokens: N}`, with
+`max_tokens` raised if needed so the budget never leaves the answer without
+room). The manual shape is deprecated on 4.6 and returns a hard 400 on 4.7+, so
+Abacus picks by model family — defaulting to adaptive for anything it does not
+recognize — and if a model rejects the manual shape anyway, it learns from the
+rejection, switches to adaptive, and retries once. Models without reasoning
+ignore the field.
 
 ### The auxiliary model
 

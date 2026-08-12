@@ -106,7 +106,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/thinking", "Show or hide the model's reasoning"),
     (
         "/effort",
-        "Set reasoning effort: minimal, low, medium, high, auto",
+        "Set reasoning effort: minimal, low, medium, high, xhigh, max, auto",
     ),
     ("/model", "Inspect or switch model"),
     (
@@ -1546,7 +1546,8 @@ impl App {
                         EntryKind::System,
                         format!(
                             "Reasoning effort: {current}. Set it with /effort \
-                             minimal|low|medium|high, or /effort auto to leave it to the provider."
+                             minimal|low|medium|high|xhigh|max, or /effort auto to leave it to the \
+                             provider."
                         ),
                     ));
                     self.follow = true;
@@ -1560,7 +1561,7 @@ impl App {
                 if !cleared && parsed.is_none() {
                     self.push_entry(Entry::new(
                         EntryKind::Error,
-                        "Usage: /effort minimal|low|medium|high|auto".to_owned(),
+                        "Usage: /effort minimal|low|medium|high|xhigh|max|auto".to_owned(),
                     ));
                     self.follow = true;
                     return true;
@@ -2816,7 +2817,7 @@ impl App {
                     && parsed.is_none()
                 {
                     Err(anyhow::anyhow!(
-                        "effort must be minimal, low, medium, high, or auto"
+                        "effort must be minimal, low, medium, high, xhigh, max, or auto"
                     ))
                 } else {
                     self.active_profile_mut().map(|profile| {
