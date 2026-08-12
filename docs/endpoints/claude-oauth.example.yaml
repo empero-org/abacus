@@ -14,13 +14,39 @@ url: https://api.anthropic.com/v1/messages
 protocol: anthropic
 model: claude-opus-4-8
 
-# OAuth bearer from the Claude Desktop/Code credential file, read fresh each
-# request. Point `file` at wherever your claudeAiOauth token is stored and
-# `file_field` at the access-token path within it.
+# OAuth bearer, read fresh each request. Resolution mirrors claude_cot.py:
+# (1) ANTHROPIC_AUTH_TOKEN or CLAUDE_CODE_OAUTH_TOKEN from the environment,
+# (2) the token in the environment of the NEWEST live Claude Code/Desktop
+# process, (3) the stored ~/.claude/.credentials.json token. The stored copy
+# EXPIRES (observed 2026-03-30, then HTTP 401 "OAuth access token is
+# invalid"/429), so a live process is preferred, but the file keeps working
+# after a fresh `claude` login.
 auth:
-  file: ~/.claude/.credentials.json
-  file_field: claudeAiOauth.accessToken
-  # header/format default to Authorization + "Bearer {token}".
+  command:
+    - bash
+    - -c
+    - |
+      # Mirror claude_cot.py's credential resolution order: env, then the
+      # newest live process, then the stored credential file.
+      v="${ANTHROPIC_AUTH_TOKEN:-${CLAUDE_CODE_OAUTH_TOKEN:-}}"
+      [ -n "$v" ] && { printf '%s' "$v"; exit 0; }
+      best=""
+      for p in /proc/[0-9]*; do
+        v=$(tr '\0' '\n' < "$p/environ" 2>/dev/null | sed -n 's/^CLAUDE_CODE_OAUTH_TOKEN=//p' | head -n1)
+        [ -n "$v" ] || continue
+        t=$(stat -c %Y "$p" 2>/dev/null || echo 0)
+        if [ -z "$best" ] || [ "$t" -gt "${best%% *}" ]; then best="$t $v"; fi
+      done 2>/dev/null
+      if [ -n "$best" ]; then printf '%s' "${best#* }"; exit 0; fi
+      f="$HOME/.claude/.credentials.json"
+      if [ -f "$f" ] &&
+        v=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["claudeAiOauth"]["accessToken"])' "$f" 2>/dev/null) &&
+        [ -n "$v" ]
+      then
+        printf '%s' "$v"; exit 0
+      fi
+      echo "no Claude OAuth token: set ANTHROPIC_AUTH_TOKEN or CLAUDE_CODE_OAUTH_TOKEN, or start a Claude session" >&2
+      exit 1
 
 # The billing-attribution line MUST be its own leading system block, or raw
 # OAuth calls are rate-limited (HTTP 429). system_prefix places it first.
