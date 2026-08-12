@@ -58,6 +58,8 @@ pub struct Provider {
     anthropic_max_tokens: usize,
     /// A per-session random id for `{uuid}` header substitution.
     session_id: String,
+    /// Reasoning effort, sent in whatever shape this protocol expects.
+    reasoning_effort: Option<crate::config::ReasoningEffort>,
 }
 
 /// A piece of streamed output. Reasoning is kept separate from the answer all
@@ -156,6 +158,7 @@ impl Provider {
                 .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS)
                 .clamp(1, DEFAULT_ANTHROPIC_MAX_TOKENS),
             session_id: uuid::Uuid::new_v4().simple().to_string(),
+            reasoning_effort: config.reasoning_effort,
         })
     }
 
@@ -295,6 +298,9 @@ impl Provider {
         }
         if let Some(max_tokens) = self.effective_output_tokens() {
             body[self.output_tokens_field()] = json!(max_tokens);
+        }
+        if let Some(effort) = self.reasoning_effort {
+            body["reasoning_effort"] = json!(effort.label());
         }
         // Routing is an OpenRouter extension. Sending it to an endpoint that
         // does not know the field risks a 400 from the stricter servers, and it
@@ -467,6 +473,9 @@ impl Provider {
         if let Some(max_tokens) = self.effective_output_tokens() {
             body["max_output_tokens"] = json!(max_tokens);
         }
+        if let Some(effort) = self.reasoning_effort {
+            body["reasoning"] = json!({"effort": effort.label()});
+        }
         self.apply_scripted_body(&mut body);
         let response = tokio::select! {
             biased;
@@ -539,6 +548,19 @@ impl Provider {
         if !tools.is_empty() {
             body["tools"] = json!(anthropic_tools(tools));
             body["tool_choice"] = json!({"type": "auto"});
+        }
+        // Anthropic takes a thinking *budget*, not a level, and the budget has
+        // to fit under max_tokens with room for an actual answer — so the cap
+        // is raised to fit rather than the budget silently exceeding it.
+        if let Some(budget) = self
+            .reasoning_effort
+            .and_then(|effort| effort.thinking_budget())
+        {
+            let max_tokens = body["max_tokens"].as_u64().unwrap_or(0) as usize;
+            if max_tokens <= budget {
+                body["max_tokens"] = json!(budget + ANTHROPIC_ANSWER_HEADROOM);
+            }
+            body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
         }
         self.apply_scripted_body(&mut body);
 
@@ -1101,6 +1123,9 @@ fn responses_tools(tools: &[Value]) -> Vec<Value> {
         })
         .collect()
 }
+
+/// Tokens left for the answer itself above an Anthropic thinking budget.
+const ANTHROPIC_ANSWER_HEADROOM: usize = 8_192;
 
 /// `max_tokens` sent to the Anthropic Messages API when none is configured —
 /// the field is required and safe on every current Claude model without a beta

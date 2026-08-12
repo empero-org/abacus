@@ -312,6 +312,8 @@ pub struct Config {
     pub endpoint: Option<crate::endpoint::ScriptedEndpoint>,
     /// The auxiliary model for secondary calls, or None to reuse `model`.
     pub aux_model: Option<String>,
+    /// Reasoning effort sent with every request, when set.
+    pub reasoning_effort: Option<ReasoningEffort>,
     pub paths: AbacusPaths,
 }
 
@@ -429,6 +431,7 @@ impl Config {
             aux_model: profile
                 .and_then(|profile| profile.aux_model.clone())
                 .filter(|model| !model.trim().is_empty()),
+            reasoning_effort: profile.and_then(|profile| profile.reasoning_effort),
             paths,
         })
     }
@@ -601,6 +604,10 @@ pub struct ProviderProfile {
     /// on this same endpoint. None means "use the main model".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aux_model: Option<String>,
+    /// How hard this profile's model should think. Unset leaves it to the
+    /// provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// Name (or path) of a scripted endpoint YAML under ~/.abacus/endpoints.
     /// When set, its URL, auth, headers, and body overrides drive the request
     /// and `base_url`/`protocol` here are only fallbacks.
@@ -624,6 +631,52 @@ pub struct ProviderProfile {
     /// request fails rather than quietly landing somewhere else.
     #[serde(default = "default_true")]
     pub allow_fallbacks: bool,
+}
+
+/// How hard the model should think before answering. Left unset, nothing is
+/// sent and the provider's own default applies — the levels are only useful on
+/// models that expose reasoning, and sending one to a model that does not is
+/// how you collect 400s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    /// As little as the model allows — fastest and cheapest.
+    Minimal,
+    Low,
+    Medium,
+    High,
+}
+
+impl ReasoningEffort {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "minimal" | "min" | "none" => Some(Self::Minimal),
+            "low" => Some(Self::Low),
+            "medium" | "med" => Some(Self::Medium),
+            "high" | "max" => Some(Self::High),
+            _ => None,
+        }
+    }
+
+    /// Thinking budget for the Anthropic protocol, which takes a token budget
+    /// rather than a level. `None` for minimal — thinking is simply not enabled.
+    pub fn thinking_budget(self) -> Option<usize> {
+        match self {
+            Self::Minimal => None,
+            Self::Low => Some(4_096),
+            Self::Medium => Some(16_384),
+            Self::High => Some(32_768),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
@@ -937,6 +990,22 @@ mod tests {
     /// The pin is only meaningful if it reaches the request, and only safe if
     /// it stays off requests to endpoints that do not know the field.
     #[test]
+    fn effort_parses_aliases_and_maps_to_a_thinking_budget() {
+        assert_eq!(ReasoningEffort::parse("HIGH"), Some(ReasoningEffort::High));
+        assert_eq!(ReasoningEffort::parse("med"), Some(ReasoningEffort::Medium));
+        assert_eq!(ReasoningEffort::parse("max"), Some(ReasoningEffort::High));
+        assert_eq!(ReasoningEffort::parse(" low "), Some(ReasoningEffort::Low));
+        assert_eq!(ReasoningEffort::parse("ludicrous"), None);
+
+        // Anthropic takes a budget, and minimal means "do not enable thinking".
+        assert_eq!(ReasoningEffort::Minimal.thinking_budget(), None);
+        assert!(
+            ReasoningEffort::Low.thinking_budget() < ReasoningEffort::High.thinking_budget(),
+            "budgets rise with effort"
+        );
+    }
+
+    #[test]
     fn routing_becomes_a_provider_object_only_when_pinned() {
         let none = Routing::default();
         assert!(!none.is_pinned());
@@ -985,6 +1054,7 @@ mod tests {
                 protocol: ProviderProtocol::ChatCompletions,
                 api_key_env: None,
                 aux_model: None,
+                reasoning_effort: None,
                 endpoint: None,
                 providers: Vec::new(),
                 allow_fallbacks: true,

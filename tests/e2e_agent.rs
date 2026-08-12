@@ -76,6 +76,7 @@ async fn streamed_agent_searches_workspace_and_finishes() {
         web_search: abacus_agent::web::WebConfig::default(),
         endpoint: None,
         aux_model: None,
+        reasoning_effort: None,
         paths: AbacusPaths::under(directory.path().join("home")),
     };
     let provider = Provider::new(&config).unwrap();
@@ -106,6 +107,7 @@ async fn streamed_agent_searches_workspace_and_finishes() {
             hive: abacus_agent::hive::HiveHandle::default(),
             aux_model: None,
             injections: abacus_agent::agent::InjectionQueue::default(),
+            modes: abacus_agent::modes::ModeCoach::default(),
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -197,6 +199,7 @@ async fn a_cancelled_turn_keeps_the_work_it_already_did() {
         web_search: abacus_agent::web::WebConfig::default(),
         endpoint: None,
         aux_model: None,
+        reasoning_effort: None,
         paths: AbacusPaths::under(directory.path().join("home")),
     };
     let provider = Provider::new(&config).unwrap();
@@ -228,6 +231,7 @@ async fn a_cancelled_turn_keeps_the_work_it_already_did() {
             hive: abacus_agent::hive::HiveHandle::default(),
             aux_model: None,
             injections: abacus_agent::agent::InjectionQueue::default(),
+            modes: abacus_agent::modes::ModeCoach::default(),
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -314,6 +318,7 @@ async fn responses_protocol_uses_responses_endpoint_and_stream_format() {
         web_search: abacus_agent::web::WebConfig::default(),
         endpoint: None,
         aux_model: None,
+        reasoning_effort: None,
         paths: AbacusPaths::under(directory.path().join("home")),
     };
     let provider = Provider::new(&config).unwrap();
@@ -383,6 +388,7 @@ async fn edit_requires_reviewable_approval_before_atomic_write() {
         web_search: abacus_agent::web::WebConfig::default(),
         endpoint: None,
         aux_model: None,
+        reasoning_effort: None,
         paths: AbacusPaths::under(directory.path().join("home")),
     };
     let provider = Provider::new(&config).unwrap();
@@ -413,6 +419,7 @@ async fn edit_requires_reviewable_approval_before_atomic_write() {
             hive: abacus_agent::hive::HiveHandle::default(),
             aux_model: None,
             injections: abacus_agent::agent::InjectionQueue::default(),
+            modes: abacus_agent::modes::ModeCoach::default(),
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -507,6 +514,7 @@ async fn text_emitted_tool_calls_are_parsed_when_native_calls_absent() {
             hive: abacus_agent::hive::HiveHandle::default(),
             aux_model: None,
             injections: abacus_agent::agent::InjectionQueue::default(),
+            modes: abacus_agent::modes::ModeCoach::default(),
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -600,6 +608,7 @@ async fn auto_mode_blocks_mutation_until_model_selects_build() {
             hive: abacus_agent::hive::HiveHandle::default(),
             aux_model: None,
             injections: abacus_agent::agent::InjectionQueue::default(),
+            modes: abacus_agent::modes::ModeCoach::default(),
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -683,6 +692,7 @@ async fn auto_mode_selection_enables_later_tool_in_same_completion() {
             hive: abacus_agent::hive::HiveHandle::default(),
             aux_model: None,
             injections: abacus_agent::agent::InjectionQueue::default(),
+            modes: abacus_agent::modes::ModeCoach::default(),
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -798,6 +808,7 @@ async fn rolling_summary_compaction_fires_on_large_context() {
             hive: abacus_agent::hive::HiveHandle::default(),
             aux_model: None,
             injections: abacus_agent::agent::InjectionQueue::default(),
+            modes: abacus_agent::modes::ModeCoach::default(),
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -872,6 +883,7 @@ fn test_config(
         web_search: abacus_agent::web::WebConfig::default(),
         endpoint: None,
         aux_model: None,
+        reasoning_effort: None,
         paths: AbacusPaths::under(directory.path().join("home")),
     }
 }

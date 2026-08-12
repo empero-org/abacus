@@ -303,6 +303,7 @@ every request.
 | `/usage` | Local activity heatmap, usage totals, model breakdown |
 | `/mode [auto\|plan\|build]` | Inspect or pin the workflow mode |
 | `/plan` | Toggle the read-only PLAN pin |
+| `/effort [minimal\|low\|medium\|high\|auto]` | How hard the model thinks; `auto` leaves it to the provider |
 | `/thinking [on\|off]` | Show or hide the model's reasoning (display only; still recorded) |
 | `/goal [objective]` | Show or create a persistent session goal |
 | `/goal pause\|resume\|edit <text>\|clear` | Manage the active goal |
@@ -606,6 +607,19 @@ While a swarm runs, each worker is pinned above the composer with its role, live
 activity, and token count; swarms past three cluster into a one-line summary, and
 `Ctrl+P` opens a scrollable board with every worker's state, elapsed time, and
 tokens. `/swarm <objective>` is the user-facing shortcut into the same path.
+
+### Reasoning effort
+
+`/effort minimal|low|medium|high` dials how hard the model thinks, per profile;
+`/effort auto` clears it and leaves the provider's own default alone, which is
+what a fresh profile does. The same knob is **Reasoning effort** in `/config`.
+
+Each protocol wants it in a different shape, so Abacus translates: chat
+completions get `reasoning_effort`, the Responses API gets `reasoning.effort`,
+and the Anthropic Messages API gets a thinking *budget* (`minimal` disables
+thinking; `low`/`medium`/`high` map to rising `budget_tokens`) with `max_tokens`
+raised if needed so the budget never leaves the answer without room. Models
+without reasoning ignore the field.
 
 ### The auxiliary model
 

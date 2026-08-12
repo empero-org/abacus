@@ -350,6 +350,7 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
             protocol,
             api_key_env: env_key.clone(),
             aux_model: None,
+            reasoning_effort: None,
             endpoint: None,
             providers: Vec::new(),
             allow_fallbacks: true,

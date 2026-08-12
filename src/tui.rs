@@ -104,6 +104,10 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/mode", "Set auto, plan, or build mode"),
     ("/plan", "Toggle plan pin"),
     ("/thinking", "Show or hide the model's reasoning"),
+    (
+        "/effort",
+        "Set reasoning effort: minimal, low, medium, high, auto",
+    ),
     ("/model", "Inspect or switch model"),
     (
         "/providers",
@@ -338,6 +342,7 @@ enum ConfigKey {
     Profile,
     Model,
     AuxModel,
+    Effort,
     BaseUrl,
     Protocol,
     Providers,
@@ -375,6 +380,7 @@ const CONFIG_ROWS: &[ConfigRow] = &[
     ConfigRow::Key(ConfigKey::Profile),
     ConfigRow::Key(ConfigKey::Model),
     ConfigRow::Key(ConfigKey::AuxModel),
+    ConfigRow::Key(ConfigKey::Effort),
     ConfigRow::Key(ConfigKey::BaseUrl),
     ConfigRow::Key(ConfigKey::Protocol),
     ConfigRow::Key(ConfigKey::Providers),
@@ -412,6 +418,9 @@ fn config_help(key: ConfigKey) -> &'static str {
         ConfigKey::Model => "Model ID sent to the provider. /model lists what the endpoint offers.",
         ConfigKey::AuxModel => {
             "Cheaper model on this same endpoint for background calls (rethink, drafts, tether, command checks). Blank = same as the main model."
+        }
+        ConfigKey::Effort => {
+            "How hard the model thinks: minimal, low, medium, high — or blank to leave it to the provider. Models without reasoning ignore it."
         }
         ConfigKey::BaseUrl => "OpenAI-compatible endpoint, including the /v1 suffix.",
         ConfigKey::Protocol => {
@@ -470,6 +479,7 @@ const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey::Profile,
     ConfigKey::Model,
     ConfigKey::AuxModel,
+    ConfigKey::Effort,
     ConfigKey::BaseUrl,
     ConfigKey::Protocol,
     ConfigKey::Providers,
@@ -690,6 +700,7 @@ impl App {
                     protocol: config.protocol,
                     api_key_env: None,
                     aux_model: None,
+                    reasoning_effort: None,
                     endpoint: None,
                     providers: Vec::new(),
                     allow_fallbacks: true,
@@ -1521,6 +1532,64 @@ impl App {
             }
             "/quit" | "/q" | "/exit" => {
                 self.quit = true;
+                true
+            }
+            "/effort" => {
+                let argument = argument.trim();
+                if argument.is_empty() {
+                    let current = self
+                        .config
+                        .reasoning_effort
+                        .map(|effort| effort.label().to_owned())
+                        .unwrap_or_else(|| "auto (provider default)".to_owned());
+                    self.push_entry(Entry::new(
+                        EntryKind::System,
+                        format!(
+                            "Reasoning effort: {current}. Set it with /effort \
+                             minimal|low|medium|high, or /effort auto to leave it to the provider."
+                        ),
+                    ));
+                    self.follow = true;
+                    return true;
+                }
+                let cleared = matches!(
+                    argument.to_ascii_lowercase().as_str(),
+                    "auto" | "default" | "unset"
+                );
+                let parsed = crate::config::ReasoningEffort::parse(argument);
+                if !cleared && parsed.is_none() {
+                    self.push_entry(Entry::new(
+                        EntryKind::Error,
+                        "Usage: /effort minimal|low|medium|high|auto".to_owned(),
+                    ));
+                    self.follow = true;
+                    return true;
+                }
+                if let Ok(profile) = self.active_profile_mut() {
+                    profile.reasoning_effort = parsed;
+                }
+                match self.save_and_apply_settings() {
+                    Ok(()) => {
+                        let described = parsed
+                            .map(|effort| effort.label().to_owned())
+                            .unwrap_or_else(|| "auto".to_owned());
+                        self.status = format!("effort {described}");
+                        self.push_entry(Entry::new(
+                            EntryKind::System,
+                            match parsed {
+                                Some(_) => format!(
+                                    "Reasoning effort set to {described}. Sent with every request \
+                                     on this profile; models without reasoning ignore it."
+                                ),
+                                None => "Reasoning effort cleared — the provider's own default \
+                                         applies."
+                                    .to_owned(),
+                            },
+                        ));
+                    }
+                    Err(error) => self.status = format!("configuration error: {error:#}"),
+                }
+                self.follow = true;
                 true
             }
             "/model" => {
@@ -2503,6 +2572,7 @@ impl App {
             .aux_model
             .clone()
             .filter(|model| !model.trim().is_empty());
+        self.config.reasoning_effort = profile.reasoning_effort;
         self.config.base_url = profile.base_url.trim_end_matches('/').to_owned();
         self.config.protocol = profile.protocol;
         // Re-resolve the scripted endpoint for the new profile — without this a
@@ -2738,6 +2808,22 @@ impl App {
                 let trimmed = value.trim();
                 profile.aux_model = (!trimmed.is_empty()).then(|| trimmed.to_owned());
             }),
+            ConfigKey::Effort => {
+                let trimmed = value.trim();
+                let parsed = crate::config::ReasoningEffort::parse(trimmed);
+                if !trimmed.is_empty()
+                    && !matches!(trimmed.to_ascii_lowercase().as_str(), "auto" | "default")
+                    && parsed.is_none()
+                {
+                    Err(anyhow::anyhow!(
+                        "effort must be minimal, low, medium, high, or auto"
+                    ))
+                } else {
+                    self.active_profile_mut().map(|profile| {
+                        profile.reasoning_effort = parsed;
+                    })
+                }
+            }
             ConfigKey::BaseUrl => self.active_profile_mut().map(|profile| {
                 profile.base_url = value.trim().trim_end_matches('/').to_owned();
             }),
@@ -2817,6 +2903,10 @@ impl App {
                 .and_then(|value| value.aux_model.clone())
                 .filter(|model| !model.trim().is_empty())
                 .unwrap_or_else(|| "(same as main)".to_owned()),
+            ConfigKey::Effort => profile
+                .and_then(|value| value.reasoning_effort)
+                .map(|effort| effort.label().to_owned())
+                .unwrap_or_else(|| "auto".to_owned()),
             ConfigKey::BaseUrl => profile
                 .map(|value| value.base_url.clone())
                 .unwrap_or_default(),
@@ -3047,6 +3137,7 @@ impl App {
                 protocol: endpoint.protocol,
                 api_key_env: None,
                 aux_model: None,
+                reasoning_effort: None,
                 endpoint: Some(name.to_owned()),
                 providers: Vec::new(),
                 allow_fallbacks: true,
@@ -3158,6 +3249,7 @@ impl App {
                 protocol,
                 api_key_env: env_key.clone(),
                 aux_model: None,
+                reasoning_effort: None,
                 endpoint: None,
                 providers: Vec::new(),
                 allow_fallbacks: true,
@@ -7120,6 +7212,7 @@ fn config_label(key: ConfigKey) -> &'static str {
         ConfigKey::Profile => "Active profile",
         ConfigKey::Model => "Model",
         ConfigKey::AuxModel => "Auxiliary model",
+        ConfigKey::Effort => "Reasoning effort",
         ConfigKey::BaseUrl => "Provider URL",
         ConfigKey::Protocol => "Wire protocol",
         ConfigKey::Providers => "Upstream providers",
@@ -7180,6 +7273,7 @@ fn config_key_is_editable(key: ConfigKey) -> bool {
         key,
         ConfigKey::Model
             | ConfigKey::AuxModel
+            | ConfigKey::Effort
             | ConfigKey::BaseUrl
             | ConfigKey::Providers
             | ConfigKey::ApiKey
@@ -7421,6 +7515,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn effort_command_sets_clears_and_reports() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        // Unset: reported as auto, and nothing is sent.
+        assert!(app.slash_command("/effort"));
+        assert!(
+            app.entries.last().unwrap().text.contains("auto"),
+            "{}",
+            app.entries.last().unwrap().text
+        );
+        assert!(app.config.reasoning_effort.is_none());
+
+        assert!(app.slash_command("/effort high"));
+        assert_eq!(
+            app.config.reasoning_effort,
+            Some(crate::config::ReasoningEffort::High)
+        );
+        assert_eq!(app.config_value(ConfigKey::Effort), "high");
+        assert!(app.status.contains("high"), "{}", app.status);
+
+        // Aliases resolve, and `auto` clears back to the provider default.
+        assert!(app.slash_command("/effort med"));
+        assert_eq!(
+            app.config.reasoning_effort,
+            Some(crate::config::ReasoningEffort::Medium)
+        );
+        assert!(app.slash_command("/effort auto"));
+        assert!(app.config.reasoning_effort.is_none());
+        assert_eq!(app.config_value(ConfigKey::Effort), "auto");
+
+        // Garbage is rejected without changing anything.
+        assert!(app.slash_command("/effort ludicrous"));
+        assert_eq!(app.entries.last().unwrap().kind, EntryKind::Error);
+        assert!(app.config.reasoning_effort.is_none());
+    }
+
+    #[tokio::test]
     async fn typing_during_a_turn_steers_instead_of_queueing() {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
         app.start_turn("do the thing".into(), "do the thing".into(), false);
@@ -7516,6 +7646,7 @@ mod tests {
                 protocol: ProviderProtocol::Anthropic,
                 api_key_env: None,
                 aux_model: None,
+                reasoning_effort: None,
                 endpoint: Some("claude".into()),
                 providers: Vec::new(),
                 allow_fallbacks: true,
@@ -7530,6 +7661,7 @@ mod tests {
                 protocol: ProviderProtocol::ChatCompletions,
                 api_key_env: None,
                 aux_model: None,
+                reasoning_effort: None,
                 endpoint: None,
                 providers: Vec::new(),
                 allow_fallbacks: true,
@@ -7648,6 +7780,7 @@ mod tests {
                 protocol: ProviderProtocol::ChatCompletions,
                 api_key_env: None,
                 aux_model: None,
+                reasoning_effort: None,
                 endpoint: None,
                 providers: Vec::new(),
                 allow_fallbacks: true,
@@ -7819,6 +7952,7 @@ mod tests {
                 protocol: ProviderProtocol::ChatCompletions,
                 api_key_env: None,
                 aux_model: None,
+                reasoning_effort: None,
                 endpoint: None,
                 providers: Vec::new(),
                 allow_fallbacks: true,
@@ -9306,6 +9440,7 @@ mod tests {
                 protocol: ProviderProtocol::ChatCompletions,
                 api_key_env: None,
                 aux_model: None,
+                reasoning_effort: None,
                 endpoint: None,
                 providers: Vec::new(),
                 allow_fallbacks: true,
@@ -9330,6 +9465,7 @@ mod tests {
             web_search: crate::web::WebConfig::default(),
             endpoint: None,
             aux_model: None,
+            reasoning_effort: None,
             paths,
         };
         let app = App::new(
