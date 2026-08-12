@@ -49,8 +49,8 @@ compaction that keep long runways from degrading:
   to drive agents — not just a log of what happened.
 
 The through-line is one sentence: **Abacus compounds.** Its mechanisms persist
-locally under `~/.abacus/` — `papercuts.json`, `memories.json`, `hive.json`, and
-the session files — and inside the workspace only via a clearly delimited notes
+locally under `~/.abacus/` — `papercuts.json`, `memories.json`, `hive.json`,
+`modes.json`, and the session files — and inside the workspace only via a clearly delimited notes
 block in `AGENTS.md`. Nothing leaves your machine unless you send it.
 
 ### Papercuts
@@ -224,7 +224,16 @@ which API keys it already found in your environment. It writes:
 ~/.abacus/plugins/          installed plugins
 ~/.abacus/cron/             scheduled jobs and bounded logs
 ~/.abacus/traces/           per-session JSONL training traces
+~/.abacus/endpoints/        scripted endpoint definitions (YAML)
+~/.abacus/attachments/      images pasted into the composer
+~/.abacus/papercuts.json    failure lessons with tripwires
+~/.abacus/memories.json     durable knowledge injected each turn
+~/.abacus/hive.json         delegation record behind the maturity tier
+~/.abacus/modes.json        mode-discipline counts
 ```
+
+Every file above is local and inert on its own: delete one and that mechanism
+resets. Nothing is uploaded.
 
 Environment variables take precedence over stored credentials — the common ones
 are `OPENAI_API_KEY`, `XAI_API_KEY`, and `OPENROUTER_API_KEY`. `ABACUS_HOME`
@@ -495,6 +504,32 @@ or a refresh command), the extra headers, body overrides and removals, and a
 protocol. Examples ship for the Anthropic OAuth and ChatGPT/Codex backends in
 `docs/endpoints/`.
 
+```yaml
+name: Custom Backend
+url: https://api.example.test/v1/messages   # used verbatim
+protocol: anthropic                          # chat-completions | responses | anthropic
+model: some-model
+auth:
+  file: ~/.some-tool/auth.json               # or: env / command / token
+  file_field: tokens.access_token            # dotted path or /json/pointer
+  header: Authorization                      # defaults shown
+  format: "Bearer {token}"
+system_prefix: "required-first-system-block"  # e.g. an attribution header
+headers:
+  X-Session-Id: "{uuid}"                     # fresh per session
+body:                                        # deep-merged over the request
+  store: false
+  reasoning:
+    effort: low
+remove:                                      # fields this backend rejects
+  - parallel_tool_calls
+```
+
+The token is re-read on every request, so a credential that refreshes on disk is
+picked up without restarting. Once the file exists it shows up in
+`/config` → Profile → **Add a provider** beside the built-in presets, and
+selecting it creates a working profile.
+
 Such files are loaded **only** from user-owned state — never auto-discovered from
 a workspace — because a scripted endpoint can run a token command and send a
 bearer token to an arbitrary URL. Their YAML is parsed strictly: a typo is
@@ -653,7 +688,7 @@ default_profile = "local"
 name = "Ollama"
 base_url = "http://localhost:11434/v1"
 model = "your-tool-capable-model"
-protocol = "chat-completions"
+protocol = "chat-completions"   # chat-completions | responses | anthropic
 # aux_model = "a-smaller-model"   # secondary calls; blank = same as `model`
 
 [ui]
