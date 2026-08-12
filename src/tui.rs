@@ -174,6 +174,9 @@ struct PendingProvider {
 /// than selecting something.
 const NEW_PROVIDER_SENTINEL: &str = "\u{0}new-provider";
 const CUSTOM_PROVIDER_SENTINEL: &str = "\u{0}custom-provider";
+/// Prefix marking a provider-picker row that selects a scripted endpoint from
+/// ~/.abacus/endpoints; the rest of the value is the endpoint name.
+const ENDPOINT_SENTINEL_PREFIX: &str = "\u{0}endpoint:";
 
 /// Fingerprint deciding whether the memoised transcript is still valid: the
 /// entries revision, the render width, and the spinner phase. The phase only
@@ -2909,6 +2912,15 @@ impl App {
                 )
             })
             .collect::<Vec<_>>();
+        // Scripted endpoints from ~/.abacus/endpoints, so a YAML-defined
+        // provider (OAuth, custom headers, Anthropic protocol) is selectable
+        // here rather than only by hand-editing config.toml.
+        for name in self.scripted_endpoint_names() {
+            items.push((
+                format!("  {name:<18}scripted endpoint (~/.abacus/endpoints)"),
+                format!("{ENDPOINT_SENTINEL_PREFIX}{name}"),
+            ));
+        }
         items.push((
             "  Custom OpenAI-compatible endpoint".to_owned(),
             CUSTOM_PROVIDER_SENTINEL.to_owned(),
@@ -2919,6 +2931,98 @@ impl App {
             selected: 0,
             action: PickerAction::AddProvider,
         });
+    }
+
+    /// Names of the scripted endpoints defined under ~/.abacus/endpoints,
+    /// sorted, for the provider picker.
+    fn scripted_endpoint_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&self.config.paths.endpoints_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let extension = path.extension().and_then(|value| value.to_str());
+                if matches!(extension, Some("yaml") | Some("yml"))
+                    && let Some(stem) = path.file_stem().and_then(|value| value.to_str())
+                {
+                    names.push(stem.to_owned());
+                }
+            }
+        }
+        names.sort();
+        names
+    }
+
+    /// Create a profile that references a scripted endpoint. The endpoint's
+    /// URL, model, and protocol are copied onto the profile so it validates and
+    /// applies immediately; the `endpoint` reference drives auth, headers, and
+    /// body overrides. When the endpoint declares no model, the model field is
+    /// opened for the user to fill.
+    fn add_scripted_provider(&mut self, name: &str) {
+        let endpoint = match crate::endpoint::ScriptedEndpoint::resolve(
+            name,
+            &self.config.paths.endpoints_dir,
+        ) {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                self.status = format!("could not load endpoint {name}: {error:#}");
+                return;
+            }
+        };
+        let mut profile_id = name.to_owned();
+        let mut suffix = 2;
+        while self.settings.profiles.contains_key(&profile_id) {
+            profile_id = format!("{name}-{suffix}");
+            suffix += 1;
+        }
+        let model = endpoint.model.clone().unwrap_or_default();
+        self.settings.profiles.insert(
+            profile_id.clone(),
+            crate::config::ProviderProfile {
+                name: endpoint.display_name().to_owned(),
+                base_url: endpoint.url.clone(),
+                model: model.clone(),
+                protocol: endpoint.protocol,
+                api_key_env: None,
+                endpoint: Some(name.to_owned()),
+                providers: Vec::new(),
+                allow_fallbacks: true,
+            },
+        );
+        let previous = self.settings.default_profile.clone();
+        self.settings.default_profile = profile_id.clone();
+
+        // With a model from the endpoint the profile is complete — apply it.
+        // Without one, persist-but-don't-apply and open the model field, the
+        // same contract the preset path uses.
+        if model.trim().is_empty() {
+            self.pending_provider = Some(PendingProvider {
+                profile: profile_id.clone(),
+                previous,
+            });
+            if let Err(error) = self.settings.save(&self.config.paths) {
+                self.status = format!("could not add endpoint: {error:#}");
+                return;
+            }
+            self.status = format!("{profile_id} added — set a model");
+            if self.config_panel.is_some()
+                && let Some(index) = CONFIG_KEYS.iter().position(|key| *key == ConfigKey::Model)
+            {
+                if let Some(panel) = &mut self.config_panel {
+                    panel.selected = index;
+                }
+                self.begin_config_edit(ConfigKey::Model);
+            }
+        } else {
+            match self.save_and_apply_settings() {
+                Ok(()) => {
+                    self.status = format!("{profile_id} active — {}", endpoint.display_name())
+                }
+                Err(error) => {
+                    self.settings.default_profile = previous;
+                    self.status = format!("could not apply endpoint: {error:#}");
+                }
+            }
+        }
     }
 
     /// Accept the highlighted picker row, or `index` when a click named one.
@@ -2952,6 +3056,9 @@ impl App {
     /// Create a profile from a preset (or a blank custom one), make it active,
     /// and open the field that most needs filling in next.
     fn add_provider(&mut self, id: &str) {
+        if let Some(name) = id.strip_prefix(ENDPOINT_SENTINEL_PREFIX) {
+            return self.add_scripted_provider(name);
+        }
         let preset = crate::setup::PRESETS.iter().find(|preset| preset.id == id);
         let (name, base_url, protocol, env_key) = match preset {
             Some(preset) => (
@@ -7221,6 +7328,43 @@ mod tests {
         let preview = tool_preview(&output);
         assert!(preview.lines().count() <= 9);
         assert!(preview.ends_with('…'));
+    }
+
+    #[test]
+    fn scripted_endpoints_are_listed_and_selectable_in_the_provider_picker() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        // Drop a scripted endpoint into the app's endpoints dir.
+        let dir = &app.config.paths.endpoints_dir;
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("claude-oauth.yaml"),
+            "url: https://api.anthropic.com/v1/messages\nprotocol: anthropic\nmodel: claude-opus-4-8\n",
+        )
+        .unwrap();
+
+        // It shows up as a provider-picker row with the endpoint sentinel.
+        app.open_provider_picker();
+        let picker = app.picker.as_ref().expect("provider picker");
+        let row = picker
+            .items
+            .iter()
+            .find(|(_, value)| value == &format!("{ENDPOINT_SENTINEL_PREFIX}claude-oauth"))
+            .expect("claude-oauth is listed");
+        assert!(row.0.contains("claude-oauth"), "{}", row.0);
+
+        // Selecting it creates a live profile referencing the endpoint, with
+        // the model/url/protocol copied from the YAML so it validates.
+        app.add_provider(&format!("{ENDPOINT_SENTINEL_PREFIX}claude-oauth"));
+        let profile = app
+            .settings
+            .profiles
+            .get(&app.settings.default_profile)
+            .expect("the new profile is active");
+        assert_eq!(profile.endpoint.as_deref(), Some("claude-oauth"));
+        assert_eq!(profile.model, "claude-opus-4-8");
+        assert_eq!(profile.protocol, ProviderProtocol::Anthropic);
+        assert!(profile.base_url.contains("anthropic.com"));
+        assert!(app.status.contains("active"), "{}", app.status);
     }
 
     #[test]
