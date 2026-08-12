@@ -1997,7 +1997,7 @@ impl App {
                 // One ordering for display and delete alike, or the numbers
                 // the user sees would target different entries.
                 let mut snapshot = self.memories.snapshot();
-                snapshot.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                snapshot.sort_by_key(|memory| std::cmp::Reverse(memory.updated_at));
                 if let Some(target) = argument.strip_prefix("delete") {
                     let target = target.trim();
                     let removed = target

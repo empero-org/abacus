@@ -241,7 +241,7 @@ impl MemoryStore {
         if in_scope.is_empty() {
             return String::new();
         }
-        in_scope.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        in_scope.sort_by_key(|memory| std::cmp::Reverse(memory.updated_at));
         let mut context = String::from(
             "Memories from earlier sessions (keep them current with memory_record / memory_forget):",
         );
