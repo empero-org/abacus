@@ -2480,6 +2480,35 @@ impl App {
         self.config.model = profile.model;
         self.config.base_url = profile.base_url.trim_end_matches('/').to_owned();
         self.config.protocol = profile.protocol;
+        // Re-resolve the scripted endpoint for the new profile — without this a
+        // switch away from a scripted profile (e.g. an Anthropic OAuth one)
+        // left the old endpoint's URL, auth, and wire format attached, so the
+        // "switched" profile kept talking to the previous endpoint.
+        self.config.endpoint = match &profile.endpoint {
+            Some(reference) => {
+                match crate::endpoint::ScriptedEndpoint::resolve(
+                    reference,
+                    &self.config.paths.endpoints_dir,
+                ) {
+                    Ok(endpoint) => {
+                        // A scripted endpoint is the authority on its own URL,
+                        // protocol, and (when the profile omits it) model.
+                        self.config.base_url = endpoint.url.trim_end_matches('/').to_owned();
+                        self.config.protocol = endpoint.protocol;
+                        if self.config.model.trim().is_empty()
+                            && let Some(model) = &endpoint.model
+                        {
+                            self.config.model = model.clone();
+                        }
+                        Some(endpoint)
+                    }
+                    Err(error) => {
+                        return Err(error).context("scripted endpoint for this profile");
+                    }
+                }
+            }
+            None => None,
+        };
         self.config.api_key = profile
             .api_key_env
             .as_deref()
@@ -7328,6 +7357,58 @@ mod tests {
         let preview = tool_preview(&output);
         assert!(preview.lines().count() <= 9);
         assert!(preview.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn switching_away_from_a_scripted_profile_drops_the_endpoint() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        let dir = &app.config.paths.endpoints_dir;
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("claude.yaml"),
+            "url: https://api.anthropic.com/v1/messages\nprotocol: anthropic\nmodel: claude-opus-4-8\n",
+        )
+        .unwrap();
+        // A scripted (Anthropic) profile and a plain chat-completions one.
+        app.settings.profiles.insert(
+            "claude".into(),
+            ProviderProfile {
+                name: "Claude".into(),
+                base_url: "https://api.anthropic.com/v1/messages".into(),
+                model: "claude-opus-4-8".into(),
+                protocol: ProviderProtocol::Anthropic,
+                api_key_env: None,
+                endpoint: Some("claude".into()),
+                providers: Vec::new(),
+                allow_fallbacks: true,
+            },
+        );
+        app.settings.profiles.insert(
+            "plain".into(),
+            ProviderProfile {
+                name: "Plain".into(),
+                base_url: "https://openrouter.ai/api/v1".into(),
+                model: "some/model".into(),
+                protocol: ProviderProtocol::ChatCompletions,
+                api_key_env: None,
+                endpoint: None,
+                providers: Vec::new(),
+                allow_fallbacks: true,
+            },
+        );
+
+        app.settings.default_profile = "claude".into();
+        app.apply_settings().unwrap();
+        assert!(app.config.endpoint.is_some(), "scripted endpoint attached");
+        assert_eq!(app.config.protocol, ProviderProtocol::Anthropic);
+
+        // Switching to the plain profile must drop the scripted endpoint and
+        // its wire format — the bug was it stayed attached.
+        app.settings.default_profile = "plain".into();
+        app.apply_settings().unwrap();
+        assert!(app.config.endpoint.is_none(), "endpoint dropped on switch");
+        assert_eq!(app.config.protocol, ProviderProtocol::ChatCompletions);
+        assert!(app.config.base_url.contains("openrouter"));
     }
 
     #[test]
