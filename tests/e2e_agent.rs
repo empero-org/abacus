@@ -99,6 +99,7 @@ async fn streamed_agent_searches_workspace_and_finishes() {
             compaction_budget: CompactionBudget::default(),
             allow_subagents: true,
             papercuts: abacus_agent::papercuts::PapercutStore::default(),
+            memories: abacus_agent::memories::MemoryStore::default(),
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -214,6 +215,7 @@ async fn a_cancelled_turn_keeps_the_work_it_already_did() {
             compaction_budget: CompactionBudget::default(),
             allow_subagents: true,
             papercuts: abacus_agent::papercuts::PapercutStore::default(),
+            memories: abacus_agent::memories::MemoryStore::default(),
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -390,6 +392,7 @@ async fn edit_requires_reviewable_approval_before_atomic_write() {
             compaction_budget: CompactionBudget::default(),
             allow_subagents: true,
             papercuts: abacus_agent::papercuts::PapercutStore::default(),
+            memories: abacus_agent::memories::MemoryStore::default(),
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -479,6 +482,7 @@ async fn text_emitted_tool_calls_are_parsed_when_native_calls_absent() {
             compaction_budget: CompactionBudget::default(),
             allow_subagents: true,
             papercuts: abacus_agent::papercuts::PapercutStore::default(),
+            memories: abacus_agent::memories::MemoryStore::default(),
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -567,6 +571,7 @@ async fn auto_mode_blocks_mutation_until_model_selects_build() {
             compaction_budget: CompactionBudget::default(),
             allow_subagents: true,
             papercuts: abacus_agent::papercuts::PapercutStore::default(),
+            memories: abacus_agent::memories::MemoryStore::default(),
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -645,6 +650,7 @@ async fn auto_mode_selection_enables_later_tool_in_same_completion() {
             compaction_budget: CompactionBudget::default(),
             allow_subagents: true,
             papercuts: abacus_agent::papercuts::PapercutStore::default(),
+            memories: abacus_agent::memories::MemoryStore::default(),
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -686,6 +692,9 @@ async fn rolling_summary_compaction_fires_on_large_context() {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request = String::from_utf8(read_request(&mut stream).await).unwrap();
             let is_summary = request.contains("context-aware state summary");
+            // The reflection pass runs before summary compaction; answer it
+            // with NOTHING so no side effects fire and the flow continues.
+            let is_rethink = request.contains("REFLECTION PASS");
             let payload = if is_summary {
                 saw_summary_server.store(true, Ordering::Relaxed);
                 let summary_text = "1. Primary Request and Intent: do the thing. \
@@ -694,6 +703,12 @@ async fn rolling_summary_compaction_fires_on_large_context() {
                     serde_json::to_string(&json!({"choices":[{"delta":{"content":summary_text}}]}))
                         .unwrap();
                 format!("data: {chunk}\n\ndata: [DONE]\n\n")
+            } else if is_rethink {
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"NOTHING\"}}]}\n\n",
+                    "data: [DONE]\n\n"
+                )
+                .to_owned()
             } else {
                 concat!(
                     "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n",
@@ -708,7 +723,7 @@ async fn rolling_summary_compaction_fires_on_large_context() {
             );
             stream.write_all(response.as_bytes()).await.unwrap();
             stream.shutdown().await.unwrap();
-            if !is_summary {
+            if !is_summary && !is_rethink {
                 break;
             }
         }
@@ -746,6 +761,7 @@ async fn rolling_summary_compaction_fires_on_large_context() {
             compaction_budget: CompactionBudget::default(),
             allow_subagents: true,
             papercuts: abacus_agent::papercuts::PapercutStore::default(),
+            memories: abacus_agent::memories::MemoryStore::default(),
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,

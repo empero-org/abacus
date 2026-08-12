@@ -95,6 +95,7 @@ Before a mutation, Abacus opens a semantic review with per-file statistics, line
 | `/feedback` | Send product feedback to the configured Empero endpoint |
 | `/compact` | Compact old conversation context |
 | `/papercuts` / `/papercuts delete <n>` | List or delete recorded lessons from past snags |
+| `/memories` / `/memories delete <n>` | List or delete the durable memories injected into every session |
 | `/repair` | Fix corrupted session history — truncated or unanswered tool calls that make strict providers reject every request |
 | `/tools` / `/skills` / `/plugins` / `/mcps` | Inspect active capabilities |
 | `/help` / `/quit` (`/q`, `/exit`) | Show help or exit |
@@ -136,6 +137,14 @@ Lessons from earlier snags that match this situation:
 Two consecutive failed tool results, or a blocked call loop, force-recall the strongest lessons even inside their cooldown. Strength decays with a two-week half-life, so a papercut that stops being encountered fades to an occasional reminder instead of permanent noise — the more often a lesson is needed, the more often it appears, and vice versa.
 
 Papercuts are workspace-scoped by default (the model can record `scope: global` for lessons that apply everywhere) and live in `~/.abacus/papercuts.json`. `/papercuts` lists them with trip counts and strengths; `/papercuts delete <n>` removes one. The model records them itself via the `papercut_record` tool — the system prompt asks it to do so whenever it recovers from a non-obvious failure — and can consult `papercut_list`.
+
+## Memories and rethink
+
+Alongside papercuts (failure lessons), Abacus keeps **memories**: durable knowledge — architecture facts, decisions and their reasons, conventions, roadmap changes, things figured out the hard way. The model records and curates them itself with `memory_record`, `memory_list`, and `memory_forget`; re-recording a title updates it, and stale memories are meant to be forgotten, not accumulated. Memories for the workspace (plus any recorded `global`) are injected as a bounded context layer at the start of every turn, newest first, so each session starts where the last one left off.
+
+After a turn with many actions — and, unconditionally, before rolling-summary compaction erases the verbatim evidence — a **rethink** pass looks back over what actually happened: snags worked through, decisions taken, papercut reminders that were right or wrong, goals accomplished. With a restricted toolset (`memory_record`/`memory_forget`, `papercut_record`, `working_notes_update`) it records what a future session would genuinely need, or nothing; the reflection itself is discarded, only the records persist. When it records something, a `rethink — …` notice appears in the transcript.
+
+Working notes live in a clearly delimited, Abacus-managed block inside the workspace's `AGENTS.md` — the current direction and active constraints, injected into the system prompt like the rest of the file. Only the block between the `abacus:notes` markers is ever rewritten; your own content is preserved byte for byte, and notes are only writable when the turn itself was allowed to mutate (never under a PLAN pin). Memories persist in `~/.abacus/memories.json`; `/memories` lists them and `/memories delete <n>` removes one.
 
 ## Training traces
 

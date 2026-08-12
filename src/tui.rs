@@ -115,6 +115,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/compact", "Compact conversation context"),
     ("/repair", "Fix corrupted session history"),
     ("/papercuts", "List or delete recorded lessons"),
+    ("/memories", "List or delete stored memories"),
     ("/skills", "Browse Agent Skills"),
     ("/plugins", "Inspect plugins"),
     ("/mcps", "Inspect MCP tools"),
@@ -523,6 +524,7 @@ struct App {
     services: Arc<AgentServices>,
     goal: GoalState,
     papercuts: crate::papercuts::PapercutStore,
+    memories: crate::memories::MemoryStore,
     tasks: TaskList,
     compaction: CompactionState,
     ralph_loop: Option<RalphLoop>,
@@ -727,6 +729,10 @@ impl App {
             config.paths.papercuts_file.clone(),
             &config.workspace,
         );
+        let memories = crate::memories::MemoryStore::load(
+            config.paths.memories_file.clone(),
+            &config.workspace,
+        );
         Ok(Self {
             config,
             settings,
@@ -738,6 +744,7 @@ impl App {
             services,
             goal,
             papercuts,
+            memories,
             tasks,
             compaction,
             ralph_loop,
@@ -1447,6 +1454,7 @@ impl App {
             session_id: self.session.as_ref().map(|session| session.id.to_string()),
             goal: self.goal.clone(),
             papercuts: self.papercuts.clone(),
+            memories: self.memories.clone(),
             tasks: self.tasks.clone(),
             compaction: self.compaction.clone(),
             compaction_budget: self.config.model_limits.compaction_budget(),
@@ -1867,6 +1875,61 @@ impl App {
                         ));
                     }
                     lines.push("Delete one with /papercuts delete <number>.".to_owned());
+                    self.push_entry(Entry::new(EntryKind::System, lines.join("\n")));
+                }
+                self.follow = true;
+                true
+            }
+            "/memories" => {
+                let argument = argument.trim();
+                // One ordering for display and delete alike, or the numbers
+                // the user sees would target different entries.
+                let mut snapshot = self.memories.snapshot();
+                snapshot.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                if let Some(target) = argument.strip_prefix("delete") {
+                    let target = target.trim();
+                    let removed = target
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|number| snapshot.get(number.saturating_sub(1)))
+                        .map(|memory| (memory.title.clone(), memory.id));
+                    match removed {
+                        Some((title, id)) if self.memories.remove(id) => {
+                            self.push_entry(Entry::new(
+                                EntryKind::System,
+                                format!("Memory \"{title}\" deleted."),
+                            ));
+                        }
+                        _ => {
+                            self.push_entry(Entry::new(
+                                EntryKind::Error,
+                                "Usage: /memories delete <number> — numbers from /memories"
+                                    .to_owned(),
+                            ));
+                        }
+                    }
+                } else if snapshot.is_empty() {
+                    self.push_entry(Entry::new(
+                        EntryKind::System,
+                        "No memories yet. Abacus records durable knowledge here — on its \
+                         own after long turns (rethink), or whenever the model calls \
+                         memory_record — and injects it into future sessions."
+                            .to_owned(),
+                    ));
+                } else {
+                    let mut lines = vec![format!(
+                        "{} memori(es) for this workspace, newest first:",
+                        snapshot.len()
+                    )];
+                    for (index, memory) in snapshot.iter().enumerate() {
+                        lines.push(format!(
+                            "{}. {} — {}",
+                            index + 1,
+                            memory.title,
+                            crate::ui::truncate(&memory.body, 120),
+                        ));
+                    }
+                    lines.push("Delete one with /memories delete <number>.".to_owned());
                     self.push_entry(Entry::new(EntryKind::System, lines.join("\n")));
                 }
                 self.follow = true;

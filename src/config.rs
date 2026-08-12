@@ -778,6 +778,7 @@ pub struct AbacusPaths {
     pub traces_dir: PathBuf,
     pub attachments_dir: PathBuf,
     pub papercuts_file: PathBuf,
+    pub memories_file: PathBuf,
 }
 
 impl AbacusPaths {
@@ -800,6 +801,7 @@ impl AbacusPaths {
             traces_dir: root.join("traces"),
             attachments_dir: root.join("attachments"),
             papercuts_file: root.join("papercuts.json"),
+            memories_file: root.join("memories.json"),
             root,
         }
     }

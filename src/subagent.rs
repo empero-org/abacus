@@ -262,6 +262,7 @@ impl SubagentRuntime {
                 // Inert: a subagent's snags belong to its delegated task, and
                 // its worktree paths would pollute workspace scoping.
                 papercuts: crate::papercuts::PapercutStore::default(),
+                memories: crate::memories::MemoryStore::default(),
             },
             events,
         );

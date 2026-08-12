@@ -482,6 +482,10 @@ fn turn_options(
             config.paths.papercuts_file.clone(),
             &config.workspace,
         ),
+        memories: crate::memories::MemoryStore::load(
+            config.paths.memories_file.clone(),
+            &config.workspace,
+        ),
         web_search: config.web_search.clone(),
     }
 }

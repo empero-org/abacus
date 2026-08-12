@@ -93,6 +93,19 @@ impl CompactionState {
 /// Run microcompaction (every turn) and rolling-summary compaction (when over
 /// threshold). Mutates `messages` in place and updates `state`. The budgets are
 /// derived from the chosen model's context window (see `model_info`).
+/// Whether the next `compact` call is likely to run rolling-summary
+/// compaction — the tier that erases verbatim history. Exposed so the agent
+/// can run its reflection pass first, while the evidence still exists.
+/// Microcompaction inside `compact` may still relieve the pressure, in which
+/// case the reflection simply ran a little early.
+pub fn needs_summary(
+    messages: &[Value],
+    state: &CompactionState,
+    budget: &CompactionBudget,
+) -> bool {
+    under_pressure(messages, state, budget) && messages.len() > KEEP_FIRST + 1
+}
+
 pub async fn compact(
     provider: &Provider,
     messages: &mut Vec<Value>,
