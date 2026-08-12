@@ -553,6 +553,10 @@ struct App {
     injections: crate::agent::InjectionQueue,
     /// Mode-discipline counts behind the escalating reminder.
     modes: crate::modes::ModeCoach,
+    /// Whether Abacus is holding the mouse. Holding it enables wheel scrolling
+    /// and clickable rows but takes click-drag away from the terminal, which is
+    /// how you select and copy text — so it is releasable.
+    mouse_captured: bool,
     /// Ctrl+P: the subagent detail overlay.
     hive_overlay: bool,
     hive_scroll: u16,
@@ -652,6 +656,9 @@ struct App {
     follow: bool,
     scroll: u16,
     transcript_height: u16,
+    /// Text width of the composer from the last frame, so key handling can
+    /// move by wrapped rows the same way the renderer lays them out.
+    composer_width: u16,
     status: String,
     /// Live estimate of context-window usage in chars, updated from streaming
     /// events so the footer's `ctx %` reflects what's happening *during* a turn,
@@ -789,6 +796,7 @@ impl App {
             hive,
             injections: crate::agent::InjectionQueue::default(),
             modes,
+            mouse_captured: true,
             hive_overlay: false,
             hive_scroll: 0,
             tasks,
@@ -845,6 +853,7 @@ impl App {
             follow: true,
             scroll: 0,
             transcript_height: 1,
+            composer_width: 40,
             status: "ready".to_owned(),
             ctx_chars,
             input_history: Vec::new(),
@@ -1399,6 +1408,53 @@ impl App {
         self.follow = true;
         self.persist_session();
         self.status = "rewound — edit and resend, or esc esc to step further back".to_owned();
+    }
+
+    /// Copy the block under the transcript cursor to the system clipboard —
+    /// the full tool output where there is one, not the truncated preview.
+    fn yank_selected_block(&mut self) {
+        let Some(index) = self.cursor else {
+            self.status = "no block selected — j/k to pick one".to_owned();
+            return;
+        };
+        let Some(entry) = self.entries.get(index) else {
+            return;
+        };
+        let text = match &entry.tool {
+            Some(call) if !call.full.is_empty() => call.full.clone(),
+            Some(call) => format!("{} {}\n{}", call.name, call.summary, call.output),
+            None => entry.text.clone(),
+        };
+        self.copy_to_clipboard(&text, "block");
+    }
+
+    /// Copy the most recent assistant reply — the thing most often wanted.
+    fn yank_last_reply(&mut self) {
+        let Some(entry) = self
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| entry.kind == EntryKind::Assistant)
+        else {
+            self.status = "no reply to copy yet".to_owned();
+            return;
+        };
+        let text = entry.text.clone();
+        self.copy_to_clipboard(&text, "reply");
+    }
+
+    fn copy_to_clipboard(&mut self, text: &str, what: &str) {
+        if text.trim().is_empty() {
+            self.status = format!("{what} is empty");
+            return;
+        }
+        match crate::clipboard::write_text(text) {
+            Ok(()) => {
+                let lines = text.lines().count();
+                self.status = format!("copied {what} — {lines} line(s)");
+            }
+            Err(error) => self.status = format!("could not copy: {error:#}"),
+        }
     }
 
     /// Ctrl+V. An image on the clipboard is saved under the attachments
@@ -3936,6 +3992,13 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     if !is_ctrl_c {
         app.last_ctrl_c = None;
     }
+    // With a selection up, Ctrl+C means copy — the meaning it has everywhere
+    // else. Without one it keeps its terminal meaning of interrupt/clear/quit.
+    if is_ctrl_c && let Some(selected) = app.input.selected_text() {
+        app.copy_to_clipboard(&selected, "selection");
+        app.input.clear_selection();
+        return;
+    }
     // Likewise an armed rewind: only an immediate second Esc may fire it.
     if key.code != KeyCode::Esc {
         app.rewind_armed = None;
@@ -3970,6 +4033,27 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('g') {
         app.follow = true;
         app.clear_cursor();
+        return;
+    }
+    // F2: hand the mouse back to the terminal so click-drag selects text the
+    // way it does anywhere else, and take it back when you want the wheel and
+    // clickable rows again. A TUI that holds the mouse cannot be copied out of,
+    // which makes it useless as a place to read from.
+    if key.code == KeyCode::F(2) {
+        app.mouse_captured = !app.mouse_captured;
+        let mut out = io::stdout();
+        let switched = if app.mouse_captured {
+            execute!(out, EnableMouseCapture).is_ok()
+        } else {
+            execute!(out, DisableMouseCapture).is_ok()
+        };
+        app.status = if !switched {
+            "could not switch mouse mode".to_owned()
+        } else if app.mouse_captured {
+            "mouse captured — wheel scrolls, rows click · F2 to select text".to_owned()
+        } else {
+            "selection mode — drag to select and copy · F2 to restore the mouse".to_owned()
+        };
         return;
     }
     // Ctrl+P: the subagent board overlay. Approval and question dialogs keep
@@ -4490,8 +4574,20 @@ fn handle_insert_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Left => app.input.move_left(),
         KeyCode::Right => app.input.move_right(),
-        KeyCode::Up => app.history_prev(),
-        KeyCode::Down => app.history_next(),
+        // Within a multi-line draft the arrows move through it; only at the
+        // top or bottom edge do they reach for prompt history.
+        KeyCode::Up => {
+            let width = app.composer_width as usize;
+            if !app.input.move_up_wrapped(width) {
+                app.history_prev();
+            }
+        }
+        KeyCode::Down => {
+            let width = app.composer_width as usize;
+            if !app.input.move_down_wrapped(width) {
+                app.history_next();
+            }
+        }
         KeyCode::Home => app.input.move_start(),
         KeyCode::End => app.input.move_end(),
         KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -4513,6 +4609,22 @@ fn handle_insert_key(app: &mut App, key: KeyEvent) {
                 app.clear_draft();
             } else {
                 app.accept_completion();
+            }
+        }
+        // Editor keys people expect from every other text box. Ctrl+A selects
+        // all, Ctrl+Z/Ctrl+Y walk the undo history.
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.input.select_all();
+            app.status = "selected all — ^C copies, typing replaces".to_owned();
+        }
+        KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if !app.input.undo() {
+                app.status = "nothing to undo".to_owned();
+            }
+        }
+        KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if !app.input.redo() {
+                app.status = "nothing to redo".to_owned();
             }
         }
         // Ctrl+V: paste from the system clipboard. Images first — a terminal's
@@ -4579,6 +4691,12 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
         // one-row nudges, which the wheel and PgUp/PgDn already cover.
         (_, KeyCode::Char('j')) | (_, KeyCode::Down) => app.move_cursor(1),
         (_, KeyCode::Char('k')) | (_, KeyCode::Up) => app.move_cursor(-1),
+        // Copy without needing the terminal at all: `y` takes the selected
+        // block, `Y` the last assistant reply.
+        (_, KeyCode::Char('y')) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.yank_selected_block()
+        }
+        (_, KeyCode::Char('Y')) => app.yank_last_reply(),
         (_, KeyCode::Char('o')) | (_, KeyCode::Char(' ')) => {
             app.toggle_cursor_fold(None);
         }
@@ -4638,7 +4756,12 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
 fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
     app.hits.borrow_mut().clear();
-    let input_height = (app.input.line_count() as u16 + 2).clamp(3, 9);
+    // Grow with the text as it wraps, not just with explicit newlines: the
+    // composer text column is the frame minus borders, padding, and the prompt
+    // gutter. Capped so a long draft never crowds out the transcript.
+    let composer_text_width = area.width.saturating_sub(6).max(1) as usize;
+    app.composer_width = composer_text_width as u16;
+    let input_height = (app.input.wrapped_line_count(composer_text_width) as u16 + 2).clamp(3, 12);
     let task_height = u16::from(app.goal.snapshot().is_some() || app.ralph_loop.is_some()) * 2
         + u16::from(!app.tasks.is_empty())
         + app.hive.board.strip_rows();
@@ -5453,21 +5576,25 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ..inner
     };
 
-    let text = app.input.text();
-    let (cursor_row, cursor_col) = app.input.cursor_position();
+    let composed = app.input.text();
     let inner_width = text_area.width.max(1) as usize;
     let visible_rows = text_area.height.max(1) as usize;
+    // Text wraps rather than scrolling sideways, so the cursor's position is
+    // measured in wrapped rows.
+    let rows = app.input.wrapped_rows(inner_width);
+    let (cursor_row, cursor_col) = app.input.wrapped_cursor(inner_width);
     let input_scroll = cursor_row.saturating_sub(visible_rows.saturating_sub(1));
+    let characters: Vec<char> = composed.chars().collect();
+    let selection = app.input.selection();
+    let display_col = {
+        let row = rows.get(cursor_row).copied().unwrap_or((0, 0));
+        let prefix: String = characters[row.0..(row.0 + cursor_col).min(characters.len())]
+            .iter()
+            .collect();
+        UnicodeWidthStr::width(prefix.as_str())
+    };
 
-    // Cell width of the text before the cursor on its line. A long line is
-    // scrolled horizontally so the cursor (and the text around it) stays on
-    // screen instead of running off the right edge invisibly.
-    let cursor_line = text.split('\n').nth(cursor_row).unwrap_or("");
-    let cursor_prefix: String = cursor_line.chars().take(cursor_col).collect();
-    let display_col = UnicodeWidthStr::width(cursor_prefix.as_str());
-    let h_scroll = display_col.saturating_sub(inner_width.saturating_sub(1));
-
-    let paragraph = if text.is_empty() {
+    let paragraph = if composed.is_empty() {
         // A predicted follow-up stands in for the hint when there is one, with
         // the key that accepts it spelled out — otherwise it reads as text the
         // composer already contains.
@@ -5489,9 +5616,28 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
             )),
         }
     } else {
-        Paragraph::new(text.as_str())
+        // One rendered line per wrapped row, with any selection tinted so
+        // select-all is visible rather than invisible state.
+        let lines: Vec<Line<'static>> = rows
+            .iter()
+            .map(|&(start, end)| {
+                let slice: String = characters[start..end.min(characters.len())]
+                    .iter()
+                    .collect();
+                match selection {
+                    Some((from, to)) if from < end && to > start => Line::from(Span::styled(
+                        slice,
+                        Style::default()
+                            .fg(text())
+                            .bg(crate::theme::active().selection),
+                    )),
+                    _ => Line::from(Span::styled(slice, Style::default().fg(text()))),
+                }
+            })
+            .collect();
+        Paragraph::new(Text::from(lines))
     }
-    .scroll((input_scroll as u16, h_scroll as u16));
+    .scroll((input_scroll as u16, 0));
     frame.render_widget(paragraph, text_area);
 
     if app.approval.is_none()
@@ -5501,7 +5647,7 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
         && app.feedback_form.is_none()
         && app.usage_panel.is_none()
     {
-        let x = text_area.x + (display_col - h_scroll) as u16;
+        let x = (text_area.x + display_col as u16).min(text_area.right().saturating_sub(1));
         let visible_row = cursor_row.saturating_sub(input_scroll) as u16;
         let y = (text_area.y + visible_row).min(text_area.bottom().saturating_sub(1));
         frame.set_cursor_position((x, y));
@@ -5661,6 +5807,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
             ("/", "commands"),
             ("@", "files"),
             ("⇧⇥", "mode"),
+            ("F2", "select text"),
             ("F1", "help"),
         ]
     } else {
@@ -5764,13 +5911,23 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
                 ("Ctrl+J · Ctrl+O · Shift+Enter", "insert a newline"),
                 ("Tab", "accept the highlighted suggestion"),
                 ("↑ ↓", "browse prompt history, or the suggestion list"),
-                ("Ctrl+V", "paste from the clipboard"),
+                ("Ctrl+V", "paste text or an image from the clipboard"),
+                ("Ctrl+A", "select the whole draft"),
+                (
+                    "Ctrl+C",
+                    "copy the selection (or interrupt when nothing is selected)",
+                ),
+                ("Ctrl+Z · Ctrl+Y", "undo and redo"),
                 ("Esc", "clear the draft"),
             ],
         ),
         (
             "TRANSCRIPT (normal mode)",
             &[
+                (
+                    "F2",
+                    "release the mouse so the terminal can select and copy text",
+                ),
                 ("j · k", "move between blocks"),
                 ("o · space · enter", "fold or unfold a tool result"),
                 ("h · l", "fold or unfold explicitly"),
@@ -5778,6 +5935,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
                 ("Ctrl+U · Ctrl+D", "scroll half a page"),
                 ("Ctrl+Y · Ctrl+E", "scroll one line"),
                 ("gg · G", "jump to the top, or back to live"),
+                ("y · Y", "copy the selected block, or the last reply"),
                 ("Esc", "drop the selection"),
                 ("i a A I", "return to insert mode"),
             ],

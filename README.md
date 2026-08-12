@@ -341,6 +341,20 @@ back for tool-call continuity (Kimi thinking builds) it is; where one rejects
 the field instead, it is stripped on first rejection and stays stripped for the
 session.
 
+### Selecting and copying
+
+A TUI that holds the mouse cannot be copied out of: capture is what gives you
+wheel scrolling and clickable rows, and it is also what stops your terminal
+doing click-drag selection. **F2** hands the mouse back — drag to select and
+copy exactly as you would anywhere else — and F2 again takes it for the wheel.
+(Many terminals also let you hold **Shift** to bypass capture without toggling.)
+
+You can also copy without the mouse at all. In normal mode `y` copies the
+selected block — the *full* tool output, not the truncated preview — and `Y`
+copies the last assistant reply. In the composer, `Ctrl+A` selects the draft and
+`Ctrl+C` copies it; with nothing selected `Ctrl+C` keeps its terminal meaning of
+interrupt.
+
 The prompt starts in insert mode. `Enter` sends (or queues while a turn runs);
 `Ctrl+J` (or `Shift+Enter`) inserts a newline; `Up`/`Down` recall earlier
 prompts. Scroll with the mouse wheel, a trackpad, `PageUp`/`PageDown`, or

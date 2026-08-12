@@ -37,6 +37,43 @@ pub fn read_image() -> Result<Option<ClipboardImage>> {
     }
 }
 
+/// Put text on the system clipboard. Tries the native backend first, then the
+/// platform utilities, so copying works on setups arboard cannot reach.
+pub fn write_text(text: &str) -> Result<()> {
+    let native = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text));
+    if native.is_ok() {
+        return Ok(());
+    }
+    let candidates: [(&str, &[&str]); 4] = [
+        ("wl-copy", &[]),
+        ("xclip", &["-selection", "clipboard"]),
+        ("xsel", &["--clipboard", "--input"]),
+        ("pbcopy", &[]),
+    ];
+    for (program, args) in candidates {
+        let Ok(mut child) = Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        else {
+            continue;
+        };
+        if let Some(stdin) = child.stdin.as_mut() {
+            use std::io::Write as _;
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        if child.wait().map(|status| status.success()).unwrap_or(false) {
+            return Ok(());
+        }
+    }
+    match native {
+        Err(error) => Err(error).context("no clipboard backend accepted the text"),
+        Ok(()) => Ok(()),
+    }
+}
+
 fn arboard_image() -> Result<Option<ClipboardImage>> {
     let mut clipboard = arboard::Clipboard::new().context("open clipboard")?;
     let image = match clipboard.get_image() {
