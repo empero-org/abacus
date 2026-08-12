@@ -59,15 +59,15 @@ auth:
 # headers:
 #   X-Team: platform
 
-# --- Grok subscriptions (grok login) are NOT usable here ---------------------
+# --- Grok subscriptions (grok login) ARE usable — see grok-oauth.example.yaml ---
 #
 # This file covers API keys, which is what xAI issues for third-party clients.
 # A Grok *subscription* token — the one `grok login` obtains for xAI's own CLI
-# — is a different credential: the backend only honours it alongside a header
-# identifying the caller as xAI's first-party client, and xAI obfuscates that
-# header in its binary specifically so other clients cannot send it. Abacus
-# does not ship it, and a config that forges it would be impersonating xAI's
-# client to spend a subscription outside the product it was sold for.
+# — is a different credential and a different backend: the CLI stores its
+# OAuth JWT in ~/.grok/auth.json and talks to cli-chat-proxy.grok.com, which
+# accepts it as a plain `Authorization: Bearer` plus a client-version header
+# (no secret first-party identifier — verified against grok 1.0.3). If you
+# have a subscription, use grok-oauth.example.yaml instead of this file.
 #
 # Enterprise deployment keys are a different matter: they are bare bearer
 # tokens meant for programmatic use, with no client identifier attached. If a

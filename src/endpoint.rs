@@ -316,7 +316,7 @@ mod tests {
             );
             seen += 1;
         }
-        assert!(seen >= 3, "expected the shipped examples, found {seen}");
+        assert!(seen >= 4, "expected the shipped examples, found {seen}");
     }
 
     #[test]
@@ -421,5 +421,34 @@ mod tests {
         assert_eq!(token, "tok");
         let dotted = token_from_file(&auth_file, Some("a.b")).unwrap();
         assert_eq!(dotted, "tok");
+    }
+
+    /// The shipped grok-oauth example must stay a command-based bearer against
+    /// the grok CLI's proxy — the parts the proxy verifies: the OAuth JWT from
+    /// ~/.grok/auth.json plus the client-version header.
+    #[test]
+    fn shipped_grok_oauth_example_shape() {
+        let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/endpoints");
+        let path = examples.join("grok-oauth.example.yaml");
+        let endpoint = ScriptedEndpoint::resolve(path.to_str().unwrap(), &examples)
+            .unwrap_or_else(|error| panic!("grok-oauth does not parse: {error:#}"));
+        assert_eq!(endpoint.protocol, ProviderProtocol::ChatCompletions);
+        assert_eq!(
+            endpoint.request_url(),
+            "https://cli-chat-proxy.grok.com/v1/chat/completions"
+        );
+        let auth = endpoint.auth.as_ref().expect("grok-oauth has auth");
+        assert!(auth.command.is_some(), "token comes from a command, not a literal");
+        assert!(auth.token.is_none(), "no inline token in the shipped file");
+        assert_eq!(auth.header, "Authorization");
+        assert_eq!(auth.format, "Bearer {token}");
+        let version = endpoint
+            .headers
+            .get("X-Grok-Client-Version")
+            .expect("proxy requires the client-version header");
+        assert!(
+            !version.is_empty() && !version.contains("{token}"),
+            "version header is static: {version}"
+        );
     }
 }

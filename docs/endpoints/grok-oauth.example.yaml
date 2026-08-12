@@ -1,0 +1,89 @@
+# Scripted endpoint: Grok via the grok CLI's own OAuth login.
+#
+# Copy to ~/.abacus/endpoints/grok-oauth.yaml, then in ~/.abacus/config.toml:
+#
+#   [profiles.grok]
+#   name = "Grok (subscription)"
+#   endpoint = "grok-oauth"          # names this file (no path, no .yaml)
+#
+# This is the credential `grok login` stores — your Grok subscription, spent
+# through the same OpenAI-shaped proxy the grok CLI talks to
+# (cli-chat-proxy.grok.com). It is NOT the api.x.ai API-key path; see
+# grok.example.yaml for that.
+#
+# Verified against grok 1.0.3 (2026-08-12): the CLI stores its OAuth JWT in
+# ~/.grok/auth.json and the proxy accepts it as a plain `Authorization: Bearer`.
+# The only extra requirement is the client-version header below — there is no
+# secret first-party identifier, and the proxy answers /v1/models, chat
+# completions, SSE streaming, and tool calls with it.
+
+name: Grok OAuth
+url: https://cli-chat-proxy.grok.com/v1/chat/completions   # verbatim request URL
+protocol: chat-completions     # OpenAI wire format; the proxy SSE-streams too
+model: grok-4.6                # top of your tier; grok-4.5 if 4.6 is not on it
+
+# No models_url: the proxy's /v1/models is bearer-protected, and abacus's
+# limit-detection probe sends only the profile's plain API key, not a scripted
+# endpoint's token — so the probe would 401 and be silently skipped. Limits
+# fall back to the heuristic/defaults. The tier's models are grok-4.6 and
+# grok-4.5; pick either in the profile.
+
+# The OAuth JWT, read fresh from ~/.grok/auth.json on every request so a
+# refreshed token is picked up without restarting. The file is a map keyed per
+# issuer/client (https://auth.x.ai::<client-id>), so the entry key is not
+# predictable — a command (not file_field) extracts the FIRST account's `key`.
+#
+# The access token lives ~6h; the grok CLI silently refreshes it from the
+# stored refresh_token every time it launches, so after an expiry, running
+# `grok` once is all it takes. The command below fails fast with that hint
+# instead of letting the proxy 401.
+auth:
+  command:
+    - bash
+    - -c
+    - |
+      f="$HOME/.grok/auth.json"
+      if [ ! -f "$f" ]; then
+        echo "no $f — run 'grok' once to sign in" >&2
+        exit 1
+      fi
+      python3 - "$f" <<'PY'
+      import json, sys
+      from datetime import datetime, timezone
+      d = json.load(open(sys.argv[1]))
+      for entry in d.values():
+          if not isinstance(entry, dict) or not entry.get("key"):
+              continue
+          exp = entry.get("expires_at")
+          if exp:
+              try:
+                  expired = datetime.fromisoformat(exp.replace("Z", "+00:00")) < datetime.now(timezone.utc)
+              except ValueError:
+                  expired = False   # unparseable expiry: let the proxy decide
+              if expired:
+                  print(f"grok OAuth token expired at {exp}; run 'grok' once to refresh it", file=sys.stderr)
+                  sys.exit(1)
+          print(entry["key"])
+          sys.exit(0)
+      print(f"no access token in {sys.argv[1]}", file=sys.stderr)
+      sys.exit(1)
+      PY
+  header: Authorization           # default; shown for clarity
+  format: "Bearer {token}"        # default; {token} is substituted
+
+# Required by the proxy: without it, chat requests 426 "Your Grok CLI version
+# (none) is outdated. Please update to version 0.1.202 or later". Any value
+# >= 0.1.202 passes and there is no upper bound, so the floor is safe to ship.
+# Your installed version is in ~/.grok/version.json — bump this header if the
+# proxy ever asks for a newer one. (Header values are static strings, so this
+# cannot read version.json at request time.)
+headers:
+  X-Grok-Client-Version: "0.1.202"
+
+# Everything abacus sends on this protocol — stream_options, tools,
+# parallel_tool_calls, reasoning_effort — is accepted as-is, so no body
+# overrides or removals are needed against the proxy. Reasoning effort stays
+# switchable per turn with /effort (grok-4.6: xhigh | high | medium | low;
+# grok-4.5: high | medium | low).
+# body:
+#   temperature: 0.2

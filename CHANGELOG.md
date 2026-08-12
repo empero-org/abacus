@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Grok subscription endpoint.** A third worked scripted-endpoint example,
+  `grok-oauth`, spends a `grok login` OAuth token — read fresh from
+  `~/.grok/auth.json` — through the grok CLI's own chat proxy
+  (cli-chat-proxy.grok.com), and the `grok.example.yaml` note claiming Grok
+  subscriptions were unusable is corrected to point at it.
+
 ## 0.6.0 — 2026-08-12
 
 ### The self-improvement loop

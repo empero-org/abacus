@@ -531,8 +531,9 @@ endpoint** turns any HTTP target into a normal profile. Drop a YAML file in
 `~/.abacus/endpoints/` describing the auth source (literal, env var, JSON file,
 or a refresh command), the extra headers, body overrides and removals, and a
 protocol. Examples ship in `docs/endpoints/` for the Anthropic OAuth and
-ChatGPT/Codex backends and for xAI's Grok over the public `api.x.ai` key —
-the Grok one doubles as a commented tour of every auth source.
+ChatGPT/Codex backends, for xAI's Grok over the public `api.x.ai` key — that
+one doubles as a commented tour of every auth source — and for a Grok
+*subscription* (`grok login`) spent through the grok CLI's own proxy.
 
 ```yaml
 name: Custom Backend
