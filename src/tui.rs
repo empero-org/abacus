@@ -955,10 +955,7 @@ impl App {
     /// while the user is mid-thought, would be noise.
     fn start_draft(&mut self) {
         self.draft = None;
-        if !self.settings.ui.draft_replies
-            || !self.input.is_empty()
-            || self.running.is_some()
-        {
+        if !self.settings.ui.draft_replies || !self.input.is_empty() || self.running.is_some() {
             return;
         }
         if let Some(task) = self.draft_task.take() {
@@ -3350,7 +3347,7 @@ impl App {
         self.last_ctrl_c = Some(now);
         if self.running.is_some() {
             let escalated = self.request_interrupt();
-                self.status = if escalated {
+            self.status = if escalated {
                 "interrupted · Ctrl+C again to exit".to_owned()
             } else {
                 "interrupting… · Ctrl+C again to force".to_owned()
