@@ -541,6 +541,8 @@ struct App {
     hive: crate::hive::HiveHandle,
     /// Mid-turn arrivals: user steering and finished background subagents.
     injections: crate::agent::InjectionQueue,
+    /// Mode-discipline counts behind the escalating reminder.
+    modes: crate::modes::ModeCoach,
     /// Ctrl+P: the subagent detail overlay.
     hive_overlay: bool,
     hive_scroll: u16,
@@ -716,6 +718,7 @@ impl App {
             session.as_ref().and_then(|session| session.intent.clone()),
         );
         let hive = crate::hive::HiveHandle::load(config.paths.hive_file.clone());
+        let modes = crate::modes::ModeCoach::load(config.paths.modes_file.clone());
         let tasks = TaskList::new(
             session
                 .as_ref()
@@ -774,6 +777,7 @@ impl App {
             tether,
             hive,
             injections: crate::agent::InjectionQueue::default(),
+            modes,
             hive_overlay: false,
             hive_scroll: 0,
             tasks,
@@ -1492,6 +1496,7 @@ impl App {
             hive: self.hive.clone(),
             aux_model: self.config.aux_model.clone(),
             injections: self.injections.clone(),
+            modes: self.modes.clone(),
             tasks: self.tasks.clone(),
             compaction: self.compaction.clone(),
             compaction_budget: self.config.model_limits.compaction_budget(),

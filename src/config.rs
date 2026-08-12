@@ -839,6 +839,7 @@ pub struct AbacusPaths {
     pub memories_file: PathBuf,
     pub hive_file: PathBuf,
     pub endpoints_dir: PathBuf,
+    pub modes_file: PathBuf,
 }
 
 impl AbacusPaths {
@@ -864,6 +865,7 @@ impl AbacusPaths {
             memories_file: root.join("memories.json"),
             hive_file: root.join("hive.json"),
             endpoints_dir: root.join("endpoints"),
+            modes_file: root.join("modes.json"),
             root,
         }
     }

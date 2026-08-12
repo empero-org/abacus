@@ -18,6 +18,7 @@ pub mod markdown;
 pub mod mcp;
 pub mod memories;
 pub mod model_info;
+pub mod modes;
 pub mod papercuts;
 pub mod provider;
 pub mod ralph;

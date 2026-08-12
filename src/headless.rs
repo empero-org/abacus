@@ -500,6 +500,7 @@ fn turn_options(
         hive: crate::hive::HiveHandle::load(config.paths.hive_file.clone()),
         aux_model: config.aux_model.clone(),
         injections: crate::agent::InjectionQueue::default(),
+        modes: crate::modes::ModeCoach::load(config.paths.modes_file.clone()),
         web_search: config.web_search.clone(),
     }
 }

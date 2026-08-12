@@ -627,6 +627,7 @@ impl SubagentRuntime {
                 hive: crate::hive::HiveHandle::default(),
                 aux_model: None,
                 injections,
+                modes: crate::modes::ModeCoach::default(),
             },
             events,
         );

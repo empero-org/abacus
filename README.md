@@ -584,6 +584,22 @@ model: its rolling summary is load-bearing for the rest of the session. The
 auxiliary provider shares the session's billing counter, so its cost is visible
 rather than hidden.
 
+### Mode discipline
+
+Every session's first system prompt spells the modes out: exactly which actions
+need BUILD (writes, patches, path changes, `git commit`/`restore`/`checkout`,
+state-changing commands, delegation), which never do (reads, greps, git
+inspection, builds, linters, tests), and the ideal order of work — **scout and
+plan** in PLAN mode, writing the plan or spec first, then **build and follow**
+it in BUILD. Switch before the first mutating call, not after one is blocked.
+
+Models still slip, so slips are counted. A call blocked for mutating before
+switching to BUILD is recorded in `~/.abacus/modes.json`; past a couple of them
+a standing reminder joins every request, and past a handful it turns emphatic.
+Getting it right pays the debt back down — three self-directed mode switches
+forgive an earlier slip — so a model that learns stops being nagged instead of
+carrying its first mistakes forever.
+
 ### Context compaction
 
 Long loops and goals accumulate context until the model window fills. Abacus
