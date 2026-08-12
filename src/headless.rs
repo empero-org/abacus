@@ -499,6 +499,7 @@ fn turn_options(
         tether: tether.clone(),
         hive: crate::hive::HiveHandle::load(config.paths.hive_file.clone()),
         aux_model: config.aux_model.clone(),
+        injections: crate::agent::InjectionQueue::default(),
         web_search: config.web_search.clone(),
     }
 }

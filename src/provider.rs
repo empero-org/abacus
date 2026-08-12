@@ -544,8 +544,30 @@ impl Provider {
 
         let response = tokio::select! {
             biased;
-            sent = self.post_stream(&body) => sent?,
+            sent = self.post_stream(&body) => sent,
             () = wait_for_cancel(cancel) => return Ok(Completion::cancelled()),
+        };
+        // Anthropic requires `max_tokens` and has no `max_completion_tokens`
+        // variant, so a ceiling rejection is the authoritative source of the
+        // model's real output cap: "max_tokens: 393216 > 128000, which is the
+        // maximum allowed number of output tokens for claude-opus-4-8". A
+        // detected or leftover configured cap above the ceiling must not kill
+        // the session — learn the real cap, clamp, and retry once, exactly like
+        // the chat path does, and remember it for the rest of the session.
+        let response = match response {
+            Ok(response) => response,
+            Err(error) if rejected_output_cap(&error, self.effective_output_tokens()).is_some() => {
+                let cap = rejected_output_cap(&error, self.effective_output_tokens())
+                    .expect("guard checked");
+                self.learned_output_cap.store(cap as u64, Ordering::Relaxed);
+                body["max_tokens"] = json!(cap);
+                tokio::select! {
+                    biased;
+                    sent = self.post_stream(&body) => sent?,
+                    () = wait_for_cancel(cancel) => return Ok(Completion::cancelled()),
+                }
+            }
+            Err(error) => return Err(error),
         };
         let mut decoder = SseDecoder::default();
         let mut content = String::new();
@@ -1537,6 +1559,14 @@ mod tests {
             "provider returned 400: max_tokens must be less than or equal to 65536, got 262144"
         );
         assert_eq!(rejected_output_cap(&error, Some(262_144)), Some(65_536));
+
+        // Anthropic Messages API phrasing (claude-opus-4-8, 128k ceiling).
+        let error = anyhow!(
+            "provider returned 400 Bad Request: {{\"type\":\"error\",\"error\":{{\"type\":\
+             \"invalid_request_error\",\"message\":\"max_tokens: 393216 > 128000, which is the \
+             maximum allowed number of output tokens for claude-opus-4-8\"}}}}"
+        );
+        assert_eq!(rejected_output_cap(&error, Some(393_216)), Some(128_000));
 
         // Not an output-limit error: no cap, no retry.
         let error = anyhow!("provider returned 400: model not found: deepseek-v99");

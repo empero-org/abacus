@@ -539,6 +539,8 @@ struct App {
     memories: crate::memories::MemoryStore,
     tether: crate::tether::TetherState,
     hive: crate::hive::HiveHandle,
+    /// Mid-turn arrivals: user steering and finished background subagents.
+    injections: crate::agent::InjectionQueue,
     /// Ctrl+P: the subagent detail overlay.
     hive_overlay: bool,
     hive_scroll: u16,
@@ -772,6 +774,7 @@ impl App {
             memories,
             tether,
             hive,
+            injections: crate::agent::InjectionQueue::default(),
             hive_overlay: false,
             hive_scroll: 0,
             tasks,
@@ -1304,12 +1307,18 @@ impl App {
                 let prompt = self.input.take();
                 self.slash_command(prompt.trim());
             } else {
+                // Steering, not queueing: the message is handed to the running
+                // turn, which picks it up after its current tool call. Waiting
+                // for the whole turn to end makes a correction arrive too late
+                // to change what it was correcting.
                 let prompt = self.input.take();
                 let prompt = prompt.trim().to_owned();
-                self.queued_message = Some(prompt.clone());
-                self.push_entry(Entry::new(EntryKind::System, format!("Queued: {prompt}")));
+                self.record_history(&prompt);
+                self.push_entry(Entry::new(EntryKind::User, prompt.clone()));
+                self.injections
+                    .push(crate::agent::Injection::UserMessage(prompt));
                 self.follow = true;
-                self.status = "Queued · runs when agent finishes".to_owned();
+                self.status = "steering · delivered after the current step".to_owned();
             }
             return;
         }
@@ -1490,6 +1499,7 @@ impl App {
             tether: self.tether.clone(),
             hive: self.hive.clone(),
             aux_model: self.config.aux_model.clone(),
+            injections: self.injections.clone(),
             tasks: self.tasks.clone(),
             compaction: self.compaction.clone(),
             compaction_budget: self.config.model_limits.compaction_budget(),
@@ -3582,6 +3592,39 @@ impl App {
             self.submit_prompt(prompt);
         }
     }
+
+    /// A background subagent that finished after its turn ended still has a
+    /// report to deliver. Start a turn to hand it over, the same way a running
+    /// turn would have picked it up between tool calls.
+    fn deliver_pending_injections(&mut self) -> bool {
+        if self.running.is_some() || self.injections.is_empty() {
+            return false;
+        }
+        let pending = self.injections.drain();
+        let mut delivered = false;
+        for injection in pending {
+            let crate::agent::Injection::SubagentReport(report) = injection else {
+                // A steering message with no turn to steer is just a prompt.
+                if let crate::agent::Injection::UserMessage(text) = injection {
+                    self.submit_prompt(text);
+                    delivered = true;
+                }
+                continue;
+            };
+            self.push_entry(Entry::new(
+                EntryKind::System,
+                "A background subagent finished.".to_owned(),
+            ));
+            self.submit_prompt(format!(
+                "[background subagent finished] {report}\n\nFold this into the work; if it \
+                 changes the plan, say so."
+            ));
+            delivered = true;
+            // One turn at a time: anything still queued rides the next idle tick.
+            break;
+        }
+        delivered
+    }
 }
 
 pub async fn run(
@@ -3735,6 +3778,8 @@ async fn event_loop(
         dirty |= app.drain_feedback_events();
         dirty |= app.drain_services_events();
         dirty |= app.drain_draft_events();
+        // A worker that finished after its turn ended delivers here.
+        dirty |= app.deliver_pending_injections();
         // A running turn animates (spinner, shimmer, elapsed) even while the
         // stream is silent — e.g. during a long tool call — so redraw on every
         // poll tick rather than only when an event arrives.
@@ -5268,7 +5313,7 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let frame_color = if running { rail() } else { accent };
 
     let mut top_right = vec![Span::styled(
-        if running { " ⏎ queue" } else { " ⏎ send" },
+        if running { " ⏎ steer" } else { " ⏎ send" },
         Style::default().fg(rail()),
     )];
     // Count `@file` mentions so the composer can say what will be attached
@@ -5369,7 +5414,7 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 Span::styled("  ⇥ use", Style::default().fg(rail())),
             ])),
             (_, true) => Paragraph::new(Span::styled(
-                "Type to queue a message for when this turn finishes…",
+                "Type to steer — delivered after the current step…",
                 Style::default().fg(rail()),
             )),
             (None, false) => Paragraph::new(Span::styled(
@@ -5534,7 +5579,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         // Typing during a turn queues rather than being lost — worth saying,
         // since most tools silently drop input here.
         &[
-            ("⏎", "queue message"),
+            ("⏎", "steer"),
             ("esc", "to interrupt"),
             ("^C", "twice to quit"),
         ]
@@ -7400,6 +7445,51 @@ mod tests {
         let preview = tool_preview(&output);
         assert!(preview.lines().count() <= 9);
         assert!(preview.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn typing_during_a_turn_steers_instead_of_queueing() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.start_turn("do the thing".into(), "do the thing".into(), false);
+        assert!(app.running.is_some());
+
+        app.input.insert_str("actually use the other module");
+        app.submit();
+
+        // It goes to the running turn, not to the old wait-for-the-end queue.
+        assert!(
+            app.queued_message.is_none(),
+            "no longer parked until the end"
+        );
+        assert!(!app.injections.is_empty(), "handed to the running turn");
+        assert!(app.status.contains("steering"), "{}", app.status);
+        assert!(app.input.is_empty(), "composer cleared");
+        // The user sees their own message immediately.
+        let last = app.entries.last().expect("an entry");
+        assert_eq!(last.kind, EntryKind::User);
+        assert_eq!(last.text, "actually use the other module");
+    }
+
+    #[tokio::test]
+    async fn a_background_report_arriving_while_idle_starts_a_delivery_turn() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        assert!(app.running.is_none());
+        // Nothing pending → nothing happens.
+        assert!(!app.deliver_pending_injections());
+
+        app.injections.push(crate::agent::Injection::SubagentReport(
+            "alpha: done".into(),
+        ));
+        assert!(app.deliver_pending_injections(), "a turn was started");
+        assert!(app.running.is_some());
+        let delivered = app
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| message["content"].as_str())
+            .unwrap_or_default();
+        assert!(delivered.contains("alpha: done"), "{delivered}");
+        assert!(delivered.contains("background subagent finished"));
     }
 
     #[tokio::test]

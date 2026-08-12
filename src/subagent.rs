@@ -35,6 +35,11 @@ struct SpawnArgs {
     tasks: Vec<SubagentTask>,
     #[serde(default)]
     apply: bool,
+    /// Block the turn until every worker finishes. Off by default: workers run
+    /// in the background and report back after a later tool call, so the
+    /// orchestrator keeps working instead of idling.
+    #[serde(default)]
+    wait: bool,
     #[serde(default = "default_concurrency")]
     max_concurrency: usize,
 }
@@ -117,6 +122,8 @@ pub struct SubagentRuntime {
     tool_output_limit: usize,
     web_search: crate::web::WebConfig,
     hive: crate::hive::HiveHandle,
+    /// Where a background swarm delivers its report when it finishes.
+    injections: crate::agent::InjectionQueue,
 }
 
 impl SubagentRuntime {
@@ -129,6 +136,7 @@ impl SubagentRuntime {
         tool_output_limit: usize,
         web_search: crate::web::WebConfig,
         hive: crate::hive::HiveHandle,
+        injections: crate::agent::InjectionQueue,
     ) -> Self {
         Self {
             workspace,
@@ -138,6 +146,7 @@ impl SubagentRuntime {
             tool_output_limit,
             web_search,
             hive,
+            injections,
         }
     }
 
@@ -146,7 +155,7 @@ impl SubagentRuntime {
             "type":"function",
             "function":{
                 "name":"spawn_subagents",
-                "description":"Delegate tasks to parallel agents in isolated git worktrees. Prefer this when the request splits into two or more genuinely separable units — independent files, modules, fixes, or research questions that need no shared intermediate state — and run them in one call; it is the efficient way to parallelize. Use scout roles to parallelize investigation (repo crawls, research, web searches); a quick single lookup is still faster done directly. Do NOT use it for a single indivisible task or for tightly-coupled sequential edits. Each worker starts from the current workspace state and cannot spawn its own subagents. Returns each worker's result and patch; set apply=true to apply non-conflicting patches to the parent workspace.",
+                "description":"Delegate tasks to parallel agents in isolated git worktrees. Prefer this when the request splits into two or more genuinely separable units — independent files, modules, fixes, or research questions that need no shared intermediate state — and run them in one call; it is the efficient way to parallelize. Use scout roles to parallelize investigation (repo crawls, research, web searches); a quick single lookup is still faster done directly. Do NOT use it for a single indivisible task or for tightly-coupled sequential edits. Each worker starts from the current workspace state and cannot spawn its own subagents.\n\nWorkers run in the BACKGROUND by default: this returns immediately with the roster, and each swarm's report is delivered to you automatically after a later tool call. Keep working while they run — do not idle, and never invent or predict a pending worker's findings; wait for the delivered report. Pass wait=true only when you genuinely cannot proceed without the results. Set apply=true to apply non-conflicting patches to the parent workspace.",
                 "parameters":{
                     "type":"object",
                     "properties":{
@@ -167,6 +176,7 @@ impl SubagentRuntime {
                             }
                         },
                         "apply":{"type":"boolean","description":"Apply each clean patch to the parent workspace after workers finish (default false)"},
+                        "wait":{"type":"boolean","description":"Block until every worker finishes instead of getting the report later (default false). Use only when you cannot continue without the results."},
                         "max_concurrency":{"type":"integer","minimum":1,"maximum":MAX_SUBAGENTS}
                     },
                     "required":["tasks"],
@@ -211,11 +221,58 @@ impl SubagentRuntime {
 
     async fn execute_inner(&self, arguments: &str) -> Result<String> {
         let args = parse_args(arguments)?;
-        let context = WorktreeContext::capture(&self.workspace).await?;
+        // The parent snapshot is taken now, in the foreground, so background
+        // workers start from the workspace as it was when they were spawned
+        // rather than from whatever the main agent edits next.
+        let context = Arc::new(WorktreeContext::capture(&self.workspace).await?);
         let concurrency = args.max_concurrency.clamp(1, MAX_SUBAGENTS);
+        let apply = args.apply;
+        let roster = args
+            .tasks
+            .iter()
+            .map(
+                |task| match task.model.as_deref().filter(|m| !m.trim().is_empty()) {
+                    Some(model) => format!("{} ({}, {model})", task.name, task.role.label()),
+                    None => format!("{} ({})", task.name, task.role.label()),
+                },
+            )
+            .collect::<Vec<_>>()
+            .join(", ");
+        let count = args.tasks.len();
         let runtime = self.clone();
-        let context = Arc::new(context);
-        let mut results = stream::iter(args.tasks.into_iter().map(|task| {
+        let tasks = args.tasks;
+
+        if args.wait {
+            return Ok(runtime.run_swarm(context, tasks, concurrency, apply).await);
+        }
+        // Background: hand the swarm to a detached task and return at once.
+        // The report is pushed onto the injection queue, which the running
+        // turn drains after its next tool call — the model keeps working in
+        // the meantime instead of blocking on workers.
+        let injections = self.injections.clone();
+        tokio::spawn(async move {
+            let report = runtime.run_swarm(context, tasks, concurrency, apply).await;
+            injections.push(crate::agent::Injection::SubagentReport(report));
+        });
+        Ok(format!(
+            "Started {count} background worker(s): {roster}.\nThey are running now; their \
+             report will be delivered to you automatically after a later tool call. Continue \
+             with other work in the meantime — do not wait, and do not guess what they will \
+             find. Pass wait=true if you ever need results before continuing."
+        ))
+    }
+
+    /// Run a swarm to completion and format its report. Shared by the blocking
+    /// and background paths so both record the same delegation stats.
+    async fn run_swarm(
+        &self,
+        context: Arc<WorktreeContext>,
+        tasks: Vec<SubagentTask>,
+        concurrency: usize,
+        apply: bool,
+    ) -> String {
+        let runtime = self.clone();
+        let mut results = stream::iter(tasks.into_iter().map(|task| {
             let runtime = runtime.clone();
             let context = context.clone();
             async move { runtime.run_one(context, task).await }
@@ -225,7 +282,7 @@ impl SubagentRuntime {
         .await;
         results.sort_by(|left, right| left.name.cmp(&right.name));
 
-        if args.apply {
+        if apply {
             for result in &mut results {
                 if result.error.is_none()
                     && !result.patch.trim().is_empty()
@@ -244,10 +301,7 @@ impl SubagentRuntime {
             .filter(|result| result.error.is_some())
             .count();
         let record = self.hive.record_run(results.len() as u32, failures as u32);
-        Ok(format!(
-            "{}\n\n{record}",
-            format_results(&results, args.apply)
-        ))
+        format!("{}\n\n{record}", format_results(&results, apply))
     }
 
     async fn run_one(&self, context: Arc<WorktreeContext>, task: SubagentTask) -> SubagentResult {
@@ -382,6 +436,7 @@ impl SubagentRuntime {
                 tether: crate::tether::TetherState::default(),
                 hive: crate::hive::HiveHandle::default(),
                 aux_model: None,
+                injections: crate::agent::InjectionQueue::default(),
             },
             events,
         );
@@ -836,6 +891,14 @@ mod tests {
             parse_args(r#"{"tasks":[{"name":"test","prompt":"verify it"}],"max_concurrency":2}"#)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn background_is_the_default_and_wait_is_opt_in() {
+        let background = parse_args(r#"{"tasks":[{"name":"a","prompt":"x"}]}"#).unwrap();
+        assert!(!background.wait, "workers run in the background by default");
+        let blocking = parse_args(r#"{"tasks":[{"name":"a","prompt":"x"}],"wait":true}"#).unwrap();
+        assert!(blocking.wait, "wait is the explicit opt-in");
     }
 
     #[test]

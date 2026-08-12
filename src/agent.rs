@@ -124,6 +124,48 @@ pub enum DoneReason {
     Interrupted,
 }
 
+/// Something that arrives *during* a turn and should reach the model at the
+/// next opportunity rather than after the turn ends.
+#[derive(Debug, Clone)]
+pub enum Injection {
+    /// A message the user sent while the turn was running — steering, not a
+    /// new turn: it lands after the current tool call so the model can adjust
+    /// course immediately.
+    UserMessage(String),
+    /// A background subagent finished and its report is ready.
+    SubagentReport(String),
+}
+
+/// A queue of pending injections, shared between the TUI (user steering), the
+/// subagent runtime (finished background workers), and the running turn, which
+/// drains it between tool calls.
+///
+/// A plain shared queue rather than a channel because injections outlive a
+/// single turn: a worker that finishes after its turn ended still has a report
+/// to deliver, and the next turn picks it up.
+#[derive(Clone, Default)]
+pub struct InjectionQueue(Arc<std::sync::Mutex<Vec<Injection>>>);
+
+impl InjectionQueue {
+    pub fn push(&self, injection: Injection) {
+        if let Ok(mut queue) = self.0.lock() {
+            queue.push(injection);
+        }
+    }
+
+    /// Take everything pending, leaving the queue empty.
+    pub fn drain(&self) -> Vec<Injection> {
+        self.0
+            .lock()
+            .map(|mut queue| std::mem::take(&mut *queue))
+            .unwrap_or_default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.lock().map(|queue| queue.is_empty()).unwrap_or(true)
+    }
+}
+
 pub struct TurnOptions {
     pub workspace: std::path::PathBuf,
     pub max_steps: usize,
@@ -152,6 +194,9 @@ pub struct TurnOptions {
     /// draft recommendations) on the same endpoint. Compaction stays on the
     /// main model. None reuses the main model.
     pub aux_model: Option<String>,
+    /// Mid-turn arrivals — user steering and finished background workers —
+    /// drained between tool calls.
+    pub injections: InjectionQueue,
     /// Appends one training record per model call, when enabled.
     pub trace: Option<crate::sft::TraceWriter>,
     /// Raised to ask the turn to stop. Checked between steps, after each tool,
@@ -200,6 +245,7 @@ async fn run_turn_inner(
         options.tool_output_limit,
         options.web_search.clone(),
         options.hive.clone(),
+        options.injections.clone(),
     );
     // The auxiliary model: the same endpoint with a different model, used for
     // secondary calls (rethink, tether drift, command classification) so a big
@@ -404,6 +450,14 @@ async fn run_turn_inner(
             return;
         }
         if completion.tool_calls.is_empty() {
+            // The model wants to stop — but if steering arrived or a background
+            // worker reported while it was answering, that is new input it has
+            // not seen. Deliver it and keep going rather than ending a turn
+            // that is about to be immediately restarted.
+            if !options.injections.is_empty() {
+                deliver_injections(&options, &mut messages, &events);
+                continue;
+            }
             // A turn with many actions earns a look back before it ends;
             // conversational turns end unexamined.
             if !rethought && tool_calls_executed >= crate::rethink::LONG_TURN_TOOL_CALLS {
@@ -682,6 +736,12 @@ async fn run_turn_inner(
             });
             return;
         }
+        // Everything that arrived while those tools ran lands here, before the
+        // next model call: the user's steering message and any background
+        // worker that finished. Delivering between tool calls (rather than at
+        // the end of the turn) is what lets a correction change the very next
+        // action instead of arriving too late to matter.
+        deliver_injections(&options, &mut messages, &events);
     }
 
     // The step limit is a safety valve, not an error: emit Done so the turn ends
@@ -1452,6 +1512,35 @@ async fn run_rethink(
     }
 }
 
+/// Move pending injections into the conversation as user messages, and tell
+/// the UI what landed. Steering is labelled so the model treats it as the
+/// user's live instruction; a worker report is labelled as the delivery of
+/// something it started earlier.
+fn deliver_injections(
+    options: &TurnOptions,
+    messages: &mut Vec<Value>,
+    events: &mpsc::UnboundedSender<AgentEvent>,
+) {
+    for injection in options.injections.drain() {
+        let content = match &injection {
+            Injection::UserMessage(text) => {
+                let _ = events.send(AgentEvent::Notice(format!("steering — {text}")));
+                text.clone()
+            }
+            Injection::SubagentReport(report) => {
+                let _ = events.send(AgentEvent::Notice(
+                    "a background subagent finished; its report was delivered".to_owned(),
+                ));
+                format!(
+                    "[background subagent finished] {report}\n\nFold this into what you are \
+                     doing; if it changes the plan, say so."
+                )
+            }
+        };
+        messages.push(json!({"role": "user", "content": content}));
+    }
+}
+
 /// Whether a tool result reads as a failure, for the papercut streak counter.
 fn tool_result_failed(output: &str) -> bool {
     let head = output.trim_start();
@@ -1550,6 +1639,87 @@ mod tests {
             json!({"role":"user","content":"hey"}),
         ];
         assert_eq!(merge_system_messages(messages.clone()), messages);
+    }
+
+    #[test]
+    fn injection_queue_drains_once_and_reports_emptiness() {
+        let queue = InjectionQueue::default();
+        assert!(queue.is_empty());
+        queue.push(Injection::UserMessage("actually, do X".into()));
+        queue.push(Injection::SubagentReport("scout found Y".into()));
+        assert!(!queue.is_empty());
+
+        let drained = queue.drain();
+        assert_eq!(drained.len(), 2);
+        assert!(
+            queue.is_empty(),
+            "draining takes the items — a second turn must not replay them"
+        );
+        assert!(queue.drain().is_empty());
+        assert!(matches!(drained[0], Injection::UserMessage(_)));
+        assert!(matches!(drained[1], Injection::SubagentReport(_)));
+    }
+
+    #[test]
+    fn delivered_injections_become_user_messages_the_model_can_act_on() {
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        let queue = InjectionQueue::default();
+        queue.push(Injection::UserMessage("stop and do X instead".into()));
+        queue.push(Injection::SubagentReport(
+            "worker alpha: done, 3 files".into(),
+        ));
+        let options = test_turn_options(queue);
+        let mut messages = vec![json!({"role":"user","content":"original ask"})];
+
+        deliver_injections(&options, &mut messages, &events);
+
+        assert_eq!(messages.len(), 3, "both injections landed");
+        // Steering arrives verbatim, so the model reads it as the user talking.
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "stop and do X instead");
+        // A worker report is labelled as the delivery it is.
+        let report = messages[2]["content"].as_str().unwrap();
+        assert!(
+            report.starts_with("[background subagent finished]"),
+            "{report}"
+        );
+        assert!(report.contains("worker alpha: done, 3 files"));
+        // Both are surfaced to the user as notices.
+        let mut notices = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            if let AgentEvent::Notice(text) = event {
+                notices.push(text);
+            }
+        }
+        assert_eq!(notices.len(), 2);
+        assert!(notices[0].starts_with("steering —"), "{}", notices[0]);
+    }
+
+    /// Minimal options for the injection tests — nothing here reaches a model.
+    fn test_turn_options(injections: InjectionQueue) -> TurnOptions {
+        TurnOptions {
+            workspace: std::path::PathBuf::from("."),
+            max_steps: 1,
+            tool_output_limit: 2_000,
+            mode: AgentMode::Build,
+            allow_mutations: Arc::new(AtomicBool::new(true)),
+            services: Arc::new(AgentServices::empty(std::path::PathBuf::from("."))),
+            session_id: None,
+            goal: GoalState::default(),
+            tasks: TaskList::default(),
+            compaction: CompactionState::default(),
+            compaction_budget: CompactionBudget::default(),
+            allow_subagents: false,
+            web_search: crate::web::WebConfig::default(),
+            papercuts: crate::papercuts::PapercutStore::default(),
+            memories: crate::memories::MemoryStore::default(),
+            tether: crate::tether::TetherState::default(),
+            hive: crate::hive::HiveHandle::default(),
+            aux_model: None,
+            injections,
+            trace: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     #[test]
