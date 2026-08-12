@@ -263,6 +263,7 @@ impl SubagentRuntime {
                 // its worktree paths would pollute workspace scoping.
                 papercuts: crate::papercuts::PapercutStore::default(),
                 memories: crate::memories::MemoryStore::default(),
+                tether: crate::tether::TetherState::default(),
             },
             events,
         );

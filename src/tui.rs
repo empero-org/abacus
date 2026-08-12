@@ -525,6 +525,7 @@ struct App {
     goal: GoalState,
     papercuts: crate::papercuts::PapercutStore,
     memories: crate::memories::MemoryStore,
+    tether: crate::tether::TetherState,
     tasks: TaskList,
     compaction: CompactionState,
     ralph_loop: Option<RalphLoop>,
@@ -691,6 +692,9 @@ impl App {
         let tokens = Arc::new(AtomicU64::new(initial_tokens));
         let provider = Provider::with_tokens(&config, tokens.clone())?;
         let goal = GoalState::new(session.as_ref().and_then(|session| session.goal.clone()));
+        let tether = crate::tether::TetherState::new(
+            session.as_ref().and_then(|session| session.intent.clone()),
+        );
         let tasks = TaskList::new(
             session
                 .as_ref()
@@ -745,6 +749,7 @@ impl App {
             goal,
             papercuts,
             memories,
+            tether,
             tasks,
             compaction,
             ralph_loop,
@@ -1455,6 +1460,7 @@ impl App {
             goal: self.goal.clone(),
             papercuts: self.papercuts.clone(),
             memories: self.memories.clone(),
+            tether: self.tether.clone(),
             tasks: self.tasks.clone(),
             compaction: self.compaction.clone(),
             compaction_budget: self.config.model_limits.compaction_budget(),
@@ -1987,6 +1993,7 @@ impl App {
             return;
         };
         session.update_messages(self.messages.clone());
+        session.intent = self.tether.intent();
         session.goal = self.goal.snapshot();
         session.tasks = self.tasks.snapshot();
         session.compaction = Some(self.compaction.clone());

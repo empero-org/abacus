@@ -121,6 +121,10 @@ pub async fn run(
         _ => None,
     };
 
+    let tether = crate::tether::TetherState::new(
+        session.as_ref().and_then(|session| session.intent.clone()),
+    );
+
     let mut failure: Option<String> = None;
 
     // Loop mode drives its own prompt replay; non-loop mode expects the caller to
@@ -146,6 +150,7 @@ pub async fn run(
                 &compaction,
                 session_id.clone(),
                 trace.clone(),
+                &tether,
             ),
             events.clone(),
         )))
@@ -313,6 +318,7 @@ pub async fn run(
                         &compaction,
                         session_id.clone(),
                         trace.clone(),
+                        &tether,
                     ),
                     events.clone(),
                 )));
@@ -331,6 +337,7 @@ pub async fn run(
         store,
         PersistedRun {
             messages: final_messages,
+            intent: tether.intent(),
             goal: &goal,
             tasks: &tasks,
             compaction: &compaction,
@@ -412,6 +419,7 @@ pub async fn run(
 
 struct PersistedRun<'a> {
     messages: Vec<Value>,
+    intent: Option<String>,
     goal: &'a GoalState,
     tasks: &'a TaskList,
     compaction: &'a CompactionState,
@@ -440,6 +448,7 @@ fn persist_session(
         )?
     };
     session_value.update_messages(run.messages);
+    session_value.intent = run.intent;
     session_value.goal = run.goal.snapshot();
     session_value.tasks = run.tasks.snapshot();
     session_value.compaction = Some(run.compaction.clone());
@@ -460,6 +469,7 @@ fn turn_options(
     compaction: &CompactionState,
     session_id: Option<String>,
     trace: Option<crate::sft::TraceWriter>,
+    tether: &crate::tether::TetherState,
 ) -> TurnOptions {
     TurnOptions {
         trace,
@@ -486,6 +496,7 @@ fn turn_options(
             config.paths.memories_file.clone(),
             &config.workspace,
         ),
+        tether: tether.clone(),
         web_search: config.web_search.clone(),
     }
 }
@@ -533,6 +544,7 @@ mod tests {
             Some(store.clone()),
             PersistedRun {
                 messages,
+                intent: None,
                 goal: &GoalState::default(),
                 tasks: &TaskList::default(),
                 compaction: &CompactionState::default(),
@@ -580,6 +592,7 @@ mod tests {
                     json!({"role":"system","content":"x"}),
                     json!({"role":"user","content":"continue"}),
                 ],
+                intent: None,
                 goal: &GoalState::default(),
                 tasks: &TaskList::default(),
                 compaction: &CompactionState::default(),

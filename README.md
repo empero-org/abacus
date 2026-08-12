@@ -146,6 +146,12 @@ After a turn with many actions — and, unconditionally, before rolling-summary 
 
 Working notes live in a clearly delimited, Abacus-managed block inside the workspace's `AGENTS.md` — the current direction and active constraints, injected into the system prompt like the rest of the file. Only the block between the `abacus:notes` markers is ever rewritten; your own content is preserved byte for byte, and notes are only writable when the turn itself was allowed to mutate (never under a PLAN pin). Memories persist in `~/.abacus/memories.json`; `/memories` lists them and `/memories delete <n>` removes one.
 
+## Tethering
+
+Long sessions drift: a bug fix becomes a refactor becomes a rewrite. After the first prompt is answered, a quick model call snapshots the session's **intent** — what the user is trying to achieve and under which constraints — shown as a `tethered — …` notice and persisted with the session, so resume keeps it. The snapshot refreshes before every rolling-summary compaction, while the evidence of any redirection is still verbatim.
+
+Every ~35 model steps, a drift check runs: the intent plus a compact history — user prompts, assistant text *and its recorded thinking*, and tool-call names, never tool outputs — and a strict-but-fair question: is the recent activity still serving the intent? An `ON_TRACK` verdict costs one small call and changes nothing. An `OFF_TRACK` verdict comes with a course correction written by the checking call itself, which is injected as a system layer into the next few requests and surfaced as a `tether — …` notice. Thinking is included in the analysis deliberately: drift shows up in the reasoning before it shows up in the actions. An auditor reply that doesn't follow the verdict format is discarded — it gets no steering power.
+
 ## Training traces
 
 With `[trace] enabled` (the default), each session appends one JSON object per model call to `~/.abacus/traces/<session-id>.jsonl`:

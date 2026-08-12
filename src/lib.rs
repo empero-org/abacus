@@ -26,6 +26,7 @@ pub mod setup;
 pub mod sft;
 pub mod subagent;
 pub mod task;
+pub mod tether;
 pub mod theme;
 pub mod tool_format;
 pub mod tools;

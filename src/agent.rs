@@ -144,6 +144,8 @@ pub struct TurnOptions {
     /// Durable knowledge from earlier sessions, injected as a context layer
     /// and curated by the model.
     pub memories: crate::memories::MemoryStore,
+    /// Session intent snapshot and drift-check bookkeeping.
+    pub tether: crate::tether::TetherState,
     /// Appends one training record per model call, when enabled.
     pub trace: Option<crate::sft::TraceWriter>,
     /// Raised to ask the turn to stop. Checked between steps, after each tool,
@@ -234,6 +236,19 @@ async fn run_turn_inner(
         {
             rethought = true;
             run_rethink(&provider, &messages, &options, active_mode, &events).await;
+            // Refresh the tether snapshot while the evidence is verbatim —
+            // the user may have redirected since it was taken.
+            if options.session_id.is_some()
+                && let Some(intent) = crate::tether::capture_intent(
+                    &provider,
+                    &messages,
+                    options.tether.intent().as_deref(),
+                    &options.cancel,
+                )
+                .await
+            {
+                options.tether.set_intent(intent);
+            }
         }
         // Tiered compaction (microcompact + rolling LLM summary) runs before each
         // model call so a long loop never overruns the context window. It mutates
@@ -350,6 +365,17 @@ async fn run_turn_inner(
                 &completion.tool_calls,
             ));
         }
+        // Tether drift check every ~35 model steps: a quick call judges the
+        // recent activity against the session intent, and an off-track
+        // verdict becomes a course-correction layer in the next requests.
+        if options.tether.step_and_check_due()
+            && let Some(intent) = options.tether.intent()
+            && let Some(correction) =
+                crate::tether::check_drift(&provider, &intent, &messages, &options.cancel).await
+        {
+            options.tether.set_correction(correction.clone());
+            let _ = events.send(AgentEvent::Notice(format!("tether — {correction}")));
+        }
         // A cancelled stream still produced (and was billed for) whatever it
         // got through, so it is kept in history before the turn reports back.
         if completion.cancelled || options.cancel.load(Ordering::Relaxed) {
@@ -364,6 +390,16 @@ async fn run_turn_inner(
             // conversational turns end unexamined.
             if !rethought && tool_calls_executed >= crate::rethink::LONG_TURN_TOOL_CALLS {
                 run_rethink(&provider, &messages, &options, active_mode, &events).await;
+            }
+            // First answered prompt: snapshot the session intent the tether
+            // will hold the rest of the session against.
+            if options.session_id.is_some()
+                && options.tether.intent().is_none()
+                && let Some(intent) =
+                    crate::tether::capture_intent(&provider, &messages, None, &options.cancel).await
+            {
+                options.tether.set_intent(intent.clone());
+                let _ = events.send(AgentEvent::Notice(format!("tethered — {intent}")));
             }
             let _ = events.send(AgentEvent::Done {
                 messages,
@@ -1292,6 +1328,9 @@ fn build_provider_messages(
     let memory_context = options.memories.prompt_context();
     if !memory_context.is_empty() {
         provider_messages.push(json!({"role":"system","content":memory_context}));
+    }
+    if let Some(correction) = options.tether.correction_layer() {
+        provider_messages.push(json!({"role":"system","content":correction}));
     }
     let goal_context = options.goal.prompt_context();
     if !goal_context.is_empty() {

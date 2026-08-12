@@ -33,6 +33,10 @@ pub struct Session {
     pub tasks: Vec<Task>,
     #[serde(default)]
     pub compaction: Option<CompactionState>,
+    /// Tether snapshot: what this session is trying to achieve. Captured after
+    /// the first answered prompt, refreshed before compaction.
+    #[serde(default)]
+    pub intent: Option<String>,
     /// Approximate provider-reported token total accumulated across resumes.
     #[serde(default)]
     pub tokens_used: u64,
@@ -58,6 +62,7 @@ impl Session {
             ralph_loop: None,
             tasks: Vec::new(),
             compaction: None,
+            intent: None,
             tokens_used: 0,
             active_secs: 0,
         }
