@@ -301,6 +301,7 @@ every request.
 | `/cancel-loop` | Cancel the active Ralph loop |
 | `/swarm <objective>` | Delegate an objective to parallel subagents |
 | `/config` / `/config raw` | Change settings live: profiles, providers, API keys, limits |
+| `Auxiliary model` (in `/config`) | A cheaper model on the same endpoint for background calls; blank = same as the main model |
 | `/theme [auto\|dark\|light]` | Switch the Empero-derived palette; `auto` detects the terminal |
 | `/feedback` | Send product feedback |
 | `/compact` | Compact old conversation context |
@@ -545,11 +546,36 @@ approval, Abacus creates detached git worktrees for up to eight workers, seeds
 each with the parent's tracked and untracked state, runs them concurrently
 without nested delegation, and returns their summaries and patches — optionally
 applying only patches that pass `git apply --check`. Worker commits are temporary
-and never modify parent history; worktrees are removed afterward. While a swarm
-runs, each worker is pinned above the composer with its role, live activity, and
-token count; swarms past three cluster into a one-line summary, and `Ctrl+P`
-opens a scrollable board with every worker's state, elapsed time, and tokens.
-`/swarm <objective>` is the user-facing shortcut into the same path.
+and never modify parent history; worktrees are removed afterward.
+
+Workers run in the **background**: the call returns immediately with the roster
+and the swarm's report is delivered after a later tool call, so the orchestrator
+keeps working instead of idling — and it is told never to guess a pending
+worker's findings. `wait: true` restores blocking for the cases that genuinely
+need results first. A report that lands after its turn ended opens a short
+delivery turn, so nothing is lost. The parent snapshot is taken when the swarm
+is spawned, so workers start from the workspace as it was at that moment.
+
+Besides its role, each task takes an optional **model** slug on the same
+endpoint — so one call can fan a swarm across several models. It defaults to the
+orchestrator's own model; set it when you want particular models per worker.
+
+While a swarm runs, each worker is pinned above the composer with its role, live
+activity, and token count; swarms past three cluster into a one-line summary, and
+`Ctrl+P` opens a scrollable board with every worker's state, elapsed time, and
+tokens. `/swarm <objective>` is the user-facing shortcut into the same path.
+
+### The auxiliary model
+
+Not every model call is the main event. Rethink, the next-message
+recommendation, the tether's intent snapshot and drift checks, and command-risk
+classification are all *secondary* — useful, frequent, and wasteful on a frontier
+model. Set **Auxiliary model** in `/config` (or `aux_model` on the profile) to a
+cheaper model on the same endpoint and those calls go there instead; leave it
+blank and they use the main model. Compaction deliberately stays on the main
+model: its rolling summary is load-bearing for the rest of the session. The
+auxiliary provider shares the session's billing counter, so its cost is visible
+rather than hidden.
 
 ### Context compaction
 
@@ -605,6 +631,7 @@ name = "Ollama"
 base_url = "http://localhost:11434/v1"
 model = "your-tool-capable-model"
 protocol = "chat-completions"
+# aux_model = "a-smaller-model"   # secondary calls; blank = same as `model`
 
 [ui]
 permission_mode = "ask"

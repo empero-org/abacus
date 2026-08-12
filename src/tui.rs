@@ -652,7 +652,6 @@ struct App {
     input_history_index: Option<usize>,
     /// Prompt queued while a turn is running so it fires the moment the agent
     /// finishes. Only one slot — the latest queued message wins.
-    queued_message: Option<String>,
     show_help: bool,
     normal_prefix: Option<char>,
     agent_mode: AgentMode,
@@ -835,7 +834,6 @@ impl App {
             ctx_chars,
             input_history: Vec::new(),
             input_history_index: None,
-            queued_message: None,
             show_help: false,
             normal_prefix: None,
             agent_mode: AgentMode::Auto,
@@ -954,12 +952,11 @@ impl App {
 
     /// Kick off a prediction of the user's next message. Only when the composer
     /// is genuinely idle: a draft that appears over something half-typed, or
-    /// while a queued message is waiting, would be noise.
+    /// while the user is mid-thought, would be noise.
     fn start_draft(&mut self) {
         self.draft = None;
         if !self.settings.ui.draft_replies
             || !self.input.is_empty()
-            || self.queued_message.is_some()
             || self.running.is_some()
         {
             return;
@@ -1205,7 +1202,6 @@ impl App {
                     ) {
                         self.status = "ready".to_owned();
                     }
-                    self.drain_queued_message();
                 }
                 AgentEvent::Failed { error, messages } => {
                     self.messages = messages;
@@ -1237,7 +1233,6 @@ impl App {
                     }
                     self.persist_session();
                     self.follow = true;
-                    self.queued_message = None;
                 }
             }
         }
@@ -2294,7 +2289,6 @@ impl App {
         self.push_entry(Entry::new(EntryKind::System, "New session.".to_owned()));
         self.scroll = 0;
         self.follow = true;
-        self.queued_message = None;
         self.ctx_chars = message_chars(&self.messages);
     }
 
@@ -3356,8 +3350,7 @@ impl App {
         self.last_ctrl_c = Some(now);
         if self.running.is_some() {
             let escalated = self.request_interrupt();
-            self.queued_message = None;
-            self.status = if escalated {
+                self.status = if escalated {
                 "interrupted · Ctrl+C again to exit".to_owned()
             } else {
                 "interrupting… · Ctrl+C again to force".to_owned()
@@ -3584,15 +3577,6 @@ impl App {
 
     /// Fire a message queued with `submit` while a turn was running. Called once
     /// the agent finishes (Done) so the user can steer without retyping.
-    fn drain_queued_message(&mut self) {
-        if self.running.is_some() {
-            return;
-        }
-        if let Some(prompt) = self.queued_message.take() {
-            self.submit_prompt(prompt);
-        }
-    }
-
     /// A background subagent that finished after its turn ended still has a
     /// report to deliver. Start a turn to hand it over, the same way a running
     /// turn would have picked it up between tool calls.
@@ -5335,7 +5319,7 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
     top_right.push(Span::raw(" "));
 
-    let mut block = Block::default()
+    let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(frame_color))
@@ -5346,19 +5330,6 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Span::raw(" "),
         ]))
         .title_top(Line::from(top_right).right_aligned());
-    if let Some(queued) = &app.queued_message {
-        block = block.title_bottom(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(
-                format!("{} queued", ui::glyphs().queued),
-                Style::default().fg(warning()),
-            ),
-            Span::styled(
-                format!("  {} ", ui::truncate(queued, 48)),
-                Style::default().fg(muted()),
-            ),
-        ]));
-    }
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -7457,10 +7428,6 @@ mod tests {
         app.submit();
 
         // It goes to the running turn, not to the old wait-for-the-end queue.
-        assert!(
-            app.queued_message.is_none(),
-            "no longer parked until the end"
-        );
         assert!(!app.injections.is_empty(), "handed to the running turn");
         assert!(app.status.contains("steering"), "{}", app.status);
         assert!(app.input.is_empty(), "composer cleared");
