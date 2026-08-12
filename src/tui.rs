@@ -526,6 +526,10 @@ struct App {
     papercuts: crate::papercuts::PapercutStore,
     memories: crate::memories::MemoryStore,
     tether: crate::tether::TetherState,
+    hive: crate::hive::HiveHandle,
+    /// Ctrl+P: the subagent detail overlay.
+    hive_overlay: bool,
+    hive_scroll: u16,
     tasks: TaskList,
     compaction: CompactionState,
     ralph_loop: Option<RalphLoop>,
@@ -695,6 +699,7 @@ impl App {
         let tether = crate::tether::TetherState::new(
             session.as_ref().and_then(|session| session.intent.clone()),
         );
+        let hive = crate::hive::HiveHandle::load(config.paths.hive_file.clone());
         let tasks = TaskList::new(
             session
                 .as_ref()
@@ -750,6 +755,9 @@ impl App {
             papercuts,
             memories,
             tether,
+            hive,
+            hive_overlay: false,
+            hive_scroll: 0,
             tasks,
             compaction,
             ralph_loop,
@@ -1404,6 +1412,7 @@ impl App {
         }
         self.turn_started = Some(Instant::now());
         self.turn_output_chars = 0;
+        self.hive.board.clear();
         self.turn_reasoning.clear();
         self.turn_had_tools = false;
         self.receiving_thinking = false;
@@ -1461,6 +1470,7 @@ impl App {
             papercuts: self.papercuts.clone(),
             memories: self.memories.clone(),
             tether: self.tether.clone(),
+            hive: self.hive.clone(),
             tasks: self.tasks.clone(),
             compaction: self.compaction.clone(),
             compaction_budget: self.config.model_limits.compaction_budget(),
@@ -3667,6 +3677,30 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         app.clear_cursor();
         return;
     }
+    // Ctrl+P: the subagent board overlay. Approval and question dialogs keep
+    // priority — a swarm detail view must never shadow a pending decision.
+    let dialog_open = (app.approval.is_some() || app.question.is_some()) && !app.overlay_hidden;
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.code == KeyCode::Char('p')
+        && !dialog_open
+    {
+        app.hive_overlay = !app.hive_overlay;
+        app.hive_scroll = 0;
+        return;
+    }
+    if app.hive_overlay && !dialog_open {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => app.hive_overlay = false,
+            KeyCode::Char('j') | KeyCode::Down => {
+                app.hive_scroll = app.hive_scroll.saturating_add(1)
+            }
+            KeyCode::Char('k') | KeyCode::Up => app.hive_scroll = app.hive_scroll.saturating_sub(1),
+            KeyCode::PageDown => app.hive_scroll = app.hive_scroll.saturating_add(10),
+            KeyCode::PageUp => app.hive_scroll = app.hive_scroll.saturating_sub(10),
+            _ => {}
+        }
+        return;
+    }
     if app.approval.is_some() && !app.overlay_hidden {
         match key.code {
             KeyCode::Char('y') | KeyCode::Enter => app.decide(ApprovalDecision::Once),
@@ -4311,7 +4345,8 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     app.hits.borrow_mut().clear();
     let input_height = (app.input.line_count() as u16 + 2).clamp(3, 9);
     let task_height = u16::from(app.goal.snapshot().is_some() || app.ralph_loop.is_some()) * 2
-        + u16::from(!app.tasks.is_empty());
+        + u16::from(!app.tasks.is_empty())
+        + app.hive.board.strip_rows();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -4352,6 +4387,8 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         draw_approval(frame, area, app);
     } else if app.question.is_some() && !app.overlay_hidden {
         draw_user_question(frame, area, app);
+    } else if app.hive_overlay {
+        draw_hive(frame, area, app);
     }
 }
 
@@ -4784,12 +4821,157 @@ fn draw_task_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
         }
         lines.push(Line::from(spans));
     }
+    // The subagent board: each worker pinned with its live activity while a
+    // small swarm runs; a large swarm clusters into one summary line and the
+    // detail lives behind Ctrl+P.
+    let workers = app.hive.board.snapshot();
+    if !workers.is_empty() {
+        let set = ui::glyphs();
+        if workers.len() <= crate::hive::CLUSTER_THRESHOLD {
+            for worker in &workers {
+                let (glyph, color) = match worker.state {
+                    crate::hive::WorkerState::Running => (
+                        ui::spinner_frame(worker.started.elapsed(), app.settings.ui.animations),
+                        primary(),
+                    ),
+                    crate::hive::WorkerState::Done => (set.ok, success()),
+                    crate::hive::WorkerState::Failed => (set.failed, danger()),
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!(" {glyph} "),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{} {}  ", worker.role, worker.name),
+                        Style::default().fg(text()).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        ui::truncate(
+                            &worker.activity,
+                            (area.width as usize)
+                                .saturating_sub(worker.role.len() + worker.name.len() + 20),
+                        ),
+                        Style::default().fg(muted()),
+                    ),
+                    Span::styled(
+                        format!("  {}", ui::format_count(worker.tokens_used())),
+                        Style::default().fg(rail()),
+                    ),
+                ]));
+            }
+        } else {
+            let running = workers
+                .iter()
+                .filter(|worker| worker.state == crate::hive::WorkerState::Running)
+                .count();
+            let failed = workers
+                .iter()
+                .filter(|worker| worker.state == crate::hive::WorkerState::Failed)
+                .count();
+            let done = workers.len() - running - failed;
+            let swarm_tokens: u64 = workers.iter().map(|worker| worker.tokens_used()).sum();
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {} HIVE  ", set.tasks),
+                    Style::default().fg(primary()).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        "{} subagent(s) · {running} running · {done} done · {failed} failed · {}",
+                        workers.len(),
+                        ui::format_count(swarm_tokens)
+                    ),
+                    Style::default().fg(text()),
+                ),
+                Span::styled("   ^P details", Style::default().fg(rail())),
+            ]));
+        }
+    }
     while lines.len() < area.height as usize {
         lines.push(Line::from(""));
     }
     frame.render_widget(
         Paragraph::new(Text::from(lines)).style(Style::default().bg(surface())),
         area,
+    );
+}
+
+/// The Ctrl+P overlay: every worker in the current swarm with role, state,
+/// elapsed time, and latest activity, plus the workspace's delegation record.
+fn draw_hive(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let popup = ui::centered(
+        area.width.saturating_sub(6).min(100),
+        area.height.saturating_sub(4).max(8),
+        area,
+    );
+    let hints: &[(&str, &str)] = &[("j/k", "scroll"), ("esc", "close")];
+    let inner = open_overlay(frame, popup, "SUBAGENTS", primary(), hints);
+
+    let workers = app.hive.board.snapshot();
+    let set = ui::glyphs();
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if workers.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No subagents in this turn yet. The board fills when the model calls spawn_subagents.",
+            Style::default().fg(muted()),
+        )));
+    }
+    for worker in &workers {
+        let (glyph, color, state) = match worker.state {
+            crate::hive::WorkerState::Running => (
+                ui::spinner_frame(worker.started.elapsed(), app.settings.ui.animations),
+                primary(),
+                "running",
+            ),
+            crate::hive::WorkerState::Done => (set.ok, success(), "done"),
+            crate::hive::WorkerState::Failed => (set.failed, danger(), "failed"),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{glyph} "),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{} ", worker.role),
+                Style::default()
+                    .fg(secondary())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                worker.name.clone(),
+                Style::default().fg(text()).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "  {state} · {} · {} tok",
+                    ui::format_elapsed(worker.started.elapsed().as_millis() as u64),
+                    ui::format_count(worker.tokens_used())
+                ),
+                Style::default().fg(muted()),
+            ),
+        ]));
+        lines.push(Line::from(Span::styled(
+            format!("    {}", ui::truncate(&worker.activity, 90)),
+            Style::default().fg(muted()),
+        )));
+        lines.push(Line::from(""));
+    }
+    let stats = app.hive.stats();
+    lines.push(Line::from(Span::styled(
+        format!(
+            "delegation record: {} swarm(s), {} clean · {} worker(s), {} failed · tier {}",
+            stats.runs,
+            stats.clean_runs,
+            stats.workers,
+            stats.worker_failures,
+            stats.tier().label()
+        ),
+        Style::default().fg(rail()),
+    )));
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).scroll((app.hive_scroll, 0)),
+        inner,
     );
 }
 

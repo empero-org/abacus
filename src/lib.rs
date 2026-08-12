@@ -11,6 +11,7 @@ pub mod extensions;
 pub mod feedback;
 pub mod goal;
 pub mod headless;
+pub mod hive;
 pub mod input;
 pub mod markdown;
 pub mod mcp;

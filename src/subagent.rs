@@ -44,6 +44,55 @@ struct SpawnArgs {
 struct SubagentTask {
     name: String,
     prompt: String,
+    #[serde(default)]
+    role: SubagentRole,
+}
+
+/// What kind of worker a task gets. The role shapes both the worker's system
+/// prompt and its privileges: scouts run read-only (PLAN mode, no mutations),
+/// drones and workers may build.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum SubagentRole {
+    /// Builder: executes a concrete change and verifies it.
+    Drone,
+    /// Researcher: reads, crawls, searches — never modifies.
+    Scout,
+    /// Generic: the full standard toolset.
+    #[default]
+    Worker,
+}
+
+impl SubagentRole {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Drone => "drone",
+            Self::Scout => "scout",
+            Self::Worker => "worker",
+        }
+    }
+
+    fn system_prompt(self) -> &'static str {
+        match self {
+            Self::Drone => {
+                "You are a DRONE: a builder. Execute exactly the delegated change, run the \
+                 narrowest checks that verify it, and report what you changed and what you ran. \
+                 Do not investigate beyond what the change requires. Do not spawn subagents, \
+                 commit, push, or modify paths outside the workspace."
+            }
+            Self::Scout => {
+                "You are a SCOUT: a researcher. Investigate the delegated question — read code, \
+                 crawl the repository, search the web where allowed — and report findings with \
+                 exact file paths and evidence. You must NOT modify anything; your value is the \
+                 fidelity of what you bring back. Do not spawn subagents."
+            }
+            Self::Worker => {
+                "You are an isolated subagent. Complete only the delegated task. You may edit \
+                 and test this worktree. Do not spawn more subagents, commit, push, or modify \
+                 paths outside the workspace. Finish with a concise summary and exact checks run."
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -62,9 +111,11 @@ pub struct SubagentRuntime {
     max_steps: usize,
     tool_output_limit: usize,
     web_search: crate::web::WebConfig,
+    hive: crate::hive::HiveHandle,
 }
 
 impl SubagentRuntime {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         workspace: PathBuf,
         provider: Provider,
@@ -72,6 +123,7 @@ impl SubagentRuntime {
         max_steps: usize,
         tool_output_limit: usize,
         web_search: crate::web::WebConfig,
+        hive: crate::hive::HiveHandle,
     ) -> Self {
         Self {
             workspace,
@@ -80,6 +132,7 @@ impl SubagentRuntime {
             max_steps,
             tool_output_limit,
             web_search,
+            hive,
         }
     }
 
@@ -100,7 +153,8 @@ impl SubagentRuntime {
                                 "type":"object",
                                 "properties":{
                                     "name":{"type":"string","description":"Short unique worker name"},
-                                    "prompt":{"type":"string","description":"Self-contained coding assignment with expected verification"}
+                                    "prompt":{"type":"string","description":"Self-contained coding assignment with expected verification"},
+                                    "role":{"type":"string","enum":["drone","scout","worker"],"description":"drone = builder executing a concrete change; scout = read-only research/repo-crawl/web (cannot modify anything); worker = generic (default)"}
                                 },
                                 "required":["name","prompt"],
                                 "additionalProperties":false
@@ -122,7 +176,7 @@ impl SubagentRuntime {
                 let names = args
                     .tasks
                     .iter()
-                    .map(|task| task.name.as_str())
+                    .map(|task| format!("{} ({})", task.name, task.role.label()))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(
@@ -169,24 +223,53 @@ impl SubagentRuntime {
             }
         }
 
-        Ok(format_results(&results, args.apply))
+        // The delegation record grows with every swarm, and the model sees
+        // its own track record in the result — confidence is earned, in
+        // writing.
+        let failures = results
+            .iter()
+            .filter(|result| result.error.is_some())
+            .count();
+        let record = self.hive.record_run(results.len() as u32, failures as u32);
+        Ok(format!(
+            "{}\n\n{record}",
+            format_results(&results, args.apply)
+        ))
     }
 
     async fn run_one(&self, context: Arc<WorktreeContext>, task: SubagentTask) -> SubagentResult {
         let name = task.name.clone();
-        match self.run_one_inner(&context, &task).await {
-            Ok((response, patch)) => SubagentResult {
-                name,
-                response,
-                patch,
-                error: None,
-            },
-            Err(error) => SubagentResult {
-                name,
-                response: String::new(),
-                patch: String::new(),
-                error: Some(format!("{error:#}")),
-            },
+        let (worker_provider, worker_tokens) = self.provider.with_detached_counter();
+        let board_id = self
+            .hive
+            .board
+            .begin(&name, task.role.label(), worker_tokens.clone());
+        let outcome = self
+            .run_one_inner(&context, &task, board_id, worker_provider)
+            .await;
+        // Fold the worker's usage into the session total — the per-worker
+        // counter exists for the board, not to hide cost.
+        self.provider
+            .add_tokens(worker_tokens.load(std::sync::atomic::Ordering::Relaxed));
+        match outcome {
+            Ok((response, patch)) => {
+                self.hive.board.finish(board_id, true);
+                SubagentResult {
+                    name,
+                    response,
+                    patch,
+                    error: None,
+                }
+            }
+            Err(error) => {
+                self.hive.board.finish(board_id, false);
+                SubagentResult {
+                    name,
+                    response: String::new(),
+                    patch: String::new(),
+                    error: Some(format!("{error:#}")),
+                }
+            }
         }
     }
 
@@ -194,6 +277,8 @@ impl SubagentRuntime {
         &self,
         context: &WorktreeContext,
         task: &SubagentTask,
+        board_id: u64,
+        provider: Provider,
     ) -> Result<(String, String)> {
         let worker_root = std::env::temp_dir().join("abacus-worktrees").join(format!(
             "{}-{}",
@@ -211,7 +296,9 @@ impl SubagentRuntime {
         }
 
         let mut guard = WorktreeGuard::new(context.repo_root.clone(), worker_root.clone());
-        let result = self.run_in_worktree(context, &worker_root, task).await;
+        let result = self
+            .run_in_worktree(context, &worker_root, task, board_id, provider)
+            .await;
         let cleanup = context.remove(&worker_root).await;
         if cleanup.is_ok() {
             guard.disarm();
@@ -228,18 +315,20 @@ impl SubagentRuntime {
         context: &WorktreeContext,
         worker_root: &Path,
         task: &SubagentTask,
+        board_id: u64,
+        provider: Provider,
     ) -> Result<(String, String)> {
         let worker_workspace = worker_root.join(&context.workspace_relative);
         let mut messages = initial_messages(&worker_workspace);
         messages.push(json!({
             "role":"system",
-            "content":"You are an isolated subagent. Complete only the delegated task. You may edit and test this worktree. Do not spawn more subagents, commit, push, or modify paths outside the workspace. Finish with a concise summary and exact checks run."
+            "content": task.role.system_prompt()
         }));
         messages.push(json!({"role":"user","content":task.prompt}));
         let (events, mut receiver) = mpsc::unbounded_channel();
         let services = Arc::new(self.services.for_workspace(worker_workspace.clone()));
         let turn = run_turn(
-            self.provider.clone(),
+            provider,
             messages,
             TurnOptions {
                 // Subagent work is a different task shape from the main loop;
@@ -249,8 +338,15 @@ impl SubagentRuntime {
                 workspace: worker_workspace,
                 max_steps: self.max_steps,
                 tool_output_limit: self.tool_output_limit,
-                mode: AgentMode::Build,
-                allow_mutations: Arc::new(AtomicBool::new(true)),
+                // Scouts are mechanically read-only, not just instructed so:
+                // PLAN mode plus a mutation lock that nothing in the worker
+                // can flip.
+                mode: if task.role == SubagentRole::Scout {
+                    AgentMode::Plan
+                } else {
+                    AgentMode::Build
+                },
+                allow_mutations: Arc::new(AtomicBool::new(task.role != SubagentRole::Scout)),
                 services,
                 session_id: None,
                 goal: GoalState::default(),
@@ -264,6 +360,7 @@ impl SubagentRuntime {
                 papercuts: crate::papercuts::PapercutStore::default(),
                 memories: crate::memories::MemoryStore::default(),
                 tether: crate::tether::TetherState::default(),
+                hive: crate::hive::HiveHandle::default(),
             },
             events,
         );
@@ -275,6 +372,7 @@ impl SubagentRuntime {
                 () = &mut turn => break,
                 event = receiver.recv() => {
                     if let Some(event) = event {
+                        self.note_activity(board_id, &event);
                         capture_event(event, &mut final_messages, &mut failure);
                     }
                 }
@@ -289,6 +387,21 @@ impl SubagentRuntime {
         let response = final_assistant_text(&final_messages.unwrap_or_default());
         let patch = context.diff(worker_root).await?;
         Ok((response, patch))
+    }
+}
+
+impl SubagentRuntime {
+    /// Mirror a worker's visible activity onto the live board.
+    fn note_activity(&self, board_id: u64, event: &AgentEvent) {
+        match event {
+            AgentEvent::ToolStarted { name, summary } => {
+                self.hive
+                    .board
+                    .activity(board_id, &format!("{name} {summary}"));
+            }
+            AgentEvent::Delta(text) => self.hive.board.activity(board_id, text),
+            _ => {}
+        }
     }
 }
 

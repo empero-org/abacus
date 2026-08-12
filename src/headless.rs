@@ -497,6 +497,7 @@ fn turn_options(
             &config.workspace,
         ),
         tether: tether.clone(),
+        hive: crate::hive::HiveHandle::load(config.paths.hive_file.clone()),
         web_search: config.web_search.clone(),
     }
 }

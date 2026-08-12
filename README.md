@@ -341,6 +341,10 @@ For separable work, the model can request `spawn_subagents`. After one explicit 
 
 Subagents require a git repository. Worker commits are temporary and never modify parent history; worktrees are removed after completion.
 
+Workers take **roles**: a `scout` researches — reads, crawls the repository, searches the web — and is mechanically read-only (PLAN mode with mutations locked, not merely instructed); a `drone` is a builder executing one concrete change with the narrowest verifying checks; a `worker` is the generic default. While a swarm runs, each worker is pinned above the composer with its role, live activity, and its own token count; swarms past three workers cluster into a one-line summary, and `Ctrl+P` opens a scrollable overlay with every worker's state, elapsed time, tokens, and latest activity, plus the workspace's delegation record.
+
+Delegation confidence is **earned, in writing**. Every swarm's outcome updates a persistent record (`~/.abacus/hive.json` — runs, clean runs, workers, failures), the model sees its own track record appended to each `spawn_subagents` result, and a maturity tier derived from the record shapes the guidance injected into every turn: an inexperienced abacus is told to *probe* — delegate low-risk separable sub-work, scouts first; a proven one to *swarm* — prefer delegation for anything separable; and a veteran with a dozen clean runs and a low failure rate to act as a *hive* — clusters of parallel swarms per surface, scouts ahead of drones, its own effort spent on validating worker outcomes and inter-swarm coordination.
+
 `/swarm <objective>` is the user-facing shortcut: it asks the model to split the objective into independent units and delegate them in one `spawn_subagents` call. It reuses the same path, so the spawn still goes through a single approval, worktree isolation, and the eight-worker limit. The model is instructed to delegate only genuinely separable work and to complete non-separable objectives directly, so swarming stays encouraged without becoming spammy.
 
 ### Context compaction

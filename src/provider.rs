@@ -166,6 +166,23 @@ impl Provider {
         self.tokens.load(Ordering::Relaxed)
     }
 
+    /// A clone that counts into its own fresh counter — for a subagent whose
+    /// usage should be visible per worker. The caller folds the counter back
+    /// into the session total when the worker finishes.
+    pub fn with_detached_counter(&self) -> (Self, Arc<AtomicU64>) {
+        let counter = Arc::new(AtomicU64::new(0));
+        let mut detached = self.clone();
+        detached.tokens = counter.clone();
+        (detached, counter)
+    }
+
+    /// Fold a finished worker's usage into this provider's running total.
+    pub fn add_tokens(&self, tokens: u64) {
+        if tokens > 0 {
+            self.tokens.fetch_add(tokens, Ordering::Relaxed);
+        }
+    }
+
     fn record_tokens(
         &self,
         reported: Option<Usage>,

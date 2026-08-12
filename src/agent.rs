@@ -146,6 +146,8 @@ pub struct TurnOptions {
     pub memories: crate::memories::MemoryStore,
     /// Session intent snapshot and drift-check bookkeeping.
     pub tether: crate::tether::TetherState,
+    /// Delegation record and the live subagent board.
+    pub hive: crate::hive::HiveHandle,
     /// Appends one training record per model call, when enabled.
     pub trace: Option<crate::sft::TraceWriter>,
     /// Raised to ask the turn to stop. Checked between steps, after each tool,
@@ -193,6 +195,7 @@ async fn run_turn_inner(
         options.max_steps,
         options.tool_output_limit,
         options.web_search.clone(),
+        options.hive.clone(),
     );
     let mut repeated_calls: HashMap<String, usize> = HashMap::new();
     // Consecutive failed tool results this turn — two in a row triggers a
@@ -1331,6 +1334,9 @@ fn build_provider_messages(
     }
     if let Some(correction) = options.tether.correction_layer() {
         provider_messages.push(json!({"role":"system","content":correction}));
+    }
+    if options.allow_subagents {
+        provider_messages.push(json!({"role":"system","content":options.hive.guidance()}));
     }
     let goal_context = options.goal.prompt_context();
     if !goal_context.is_empty() {
