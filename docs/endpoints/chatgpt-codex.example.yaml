@@ -1,0 +1,37 @@
+# Scripted endpoint: ChatGPT/Codex backend (gpt-5.6-luna family) over OAuth.
+#
+# Copy to ~/.abacus/endpoints/chatgpt-codex.yaml, then in ~/.abacus/config.toml:
+#
+#   [profiles.codex]
+#   name = "ChatGPT Codex"
+#   endpoint = "chatgpt-codex"     # names this file (no path, no .yaml)
+#   # base_url / model / protocol may be omitted — the endpoint supplies them.
+#
+# Nothing here is special-cased: every field below is general-purpose.
+
+name: ChatGPT Codex
+url: https://chatgpt.com/backend-api/codex/responses   # verbatim request URL
+protocol: responses                                    # wire format abacus builds
+model: gpt-5.6-luna
+
+# OAuth bearer, read fresh from the ChatGPT auth file on every request so a
+# refreshed token is picked up without restarting.
+auth:
+  file: ~/.codex/auth.json
+  file_field: tokens.access_token     # dotted path (or a /json/pointer)
+  header: Authorization               # default; shown for clarity
+  format: "Bearer {token}"            # default; {token} is substituted
+
+# Body fields this backend requires — deep-merged over what abacus builds, so
+# these win. Nested objects merge; unmentioned keys survive.
+body:
+  store: false                        # backend rejects store=true
+  stream: true                        # backend rejects stream=false
+  reasoning:
+    effort: low                       # low | medium | high
+
+# Fields abacus adds that this backend does not expect. (The codex backend
+# accepts tools/tool_choice, so nothing needs removing here — left as an
+# illustration of the mechanism.)
+# remove:
+#   - parallel_tool_calls

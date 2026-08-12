@@ -308,6 +308,8 @@ pub struct Config {
     /// Upstream routing preferences, applied by providers that support them.
     pub routing: Routing,
     pub web_search: crate::web::WebConfig,
+    /// A custom endpoint definition, when the active profile names one.
+    pub endpoint: Option<crate::endpoint::ScriptedEndpoint>,
     pub paths: AbacusPaths,
 }
 
@@ -325,23 +327,48 @@ impl Config {
             .unwrap_or_else(|| settings.default_profile.clone());
         let profile = settings.profiles.get(&profile_name);
 
+        let scripted_model = profile
+            .and_then(|profile| profile.endpoint.as_deref())
+            .and_then(|reference| {
+                crate::endpoint::ScriptedEndpoint::resolve(reference, &paths.endpoints_dir).ok()
+            })
+            .and_then(|endpoint| endpoint.model.clone());
         let model = cli
             .model
             .clone()
             .or_else(|| profile.map(|value| value.model.clone()))
             .filter(|value| !value.trim().is_empty())
+            .or(scripted_model)
             .context("no model configured; run `abacus setup`")?;
+        // A scripted endpoint, when the profile names one, supplies the URL,
+        // protocol, and (optionally) model — so a scripted profile need not
+        // repeat them. It is loaded only from ~/.abacus/endpoints, never a
+        // workspace, since it can run a token command and carry a bearer.
+        let endpoint = profile
+            .and_then(|profile| profile.endpoint.as_deref())
+            .map(|reference| {
+                crate::endpoint::ScriptedEndpoint::resolve(reference, &paths.endpoints_dir)
+            })
+            .transpose()?;
+
         let base_url = cli
             .base_url
             .clone()
             .or_else(|| profile.map(|value| value.base_url.clone()))
             .filter(|value| !value.trim().is_empty())
+            .or_else(|| endpoint.as_ref().map(|endpoint| endpoint.url.clone()))
             .context("no provider URL configured; run `abacus setup`")?;
+        // A scripted endpoint is the authority on its own wire format, so it
+        // beats the profile's protocol (which is only the serde default when a
+        // scripted profile omits it). A CLI flag still wins over everything.
         let protocol = cli
             .protocol
+            .or_else(|| endpoint.as_ref().map(|endpoint| endpoint.protocol))
             .or_else(|| profile.map(|value| value.protocol))
             .unwrap_or_default();
 
+        // A scripted endpoint carries its own auth, so it does not need the
+        // standard API key; the ordinary sources still apply as a fallback.
         let api_key = cli.api_key.clone().or_else(|| {
             profile.and_then(|profile| {
                 profile
@@ -396,19 +423,28 @@ impl Config {
                 allow_fallbacks: profile.is_none_or(|profile| profile.allow_fallbacks),
             },
             web_search: settings.search.resolve(),
+            endpoint,
             paths,
         })
     }
 
     pub fn endpoint(&self) -> String {
+        if let Some(scripted) = &self.endpoint {
+            return scripted.request_url().to_owned();
+        }
         match self.protocol {
             ProviderProtocol::ChatCompletions => format!("{}/chat/completions", self.base_url),
             ProviderProtocol::Responses => format!("{}/responses", self.base_url),
         }
     }
 
-    pub fn models_endpoint(&self) -> String {
-        format!("{}/models", self.base_url)
+    /// The models-list URL, or `None` when a scripted endpoint declares none —
+    /// in which case limit detection is skipped rather than hitting a 404.
+    pub fn models_endpoint(&self) -> Option<String> {
+        if let Some(scripted) = &self.endpoint {
+            return scripted.models_url.clone();
+        }
+        Some(format!("{}/models", self.base_url))
     }
 
     pub fn workspace_name(&self) -> &str {
@@ -546,12 +582,19 @@ impl Settings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderProfile {
     pub name: String,
+    #[serde(default)]
     pub base_url: String,
+    #[serde(default)]
     pub model: String,
     #[serde(default)]
     pub protocol: ProviderProtocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
+    /// Name (or path) of a scripted endpoint YAML under ~/.abacus/endpoints.
+    /// When set, its URL, auth, headers, and body overrides drive the request
+    /// and `base_url`/`protocol` here are only fallbacks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
     /// Upstream providers to route to, most preferred first.
     ///
     /// OpenRouter fronts many suppliers for the same model and they differ in
@@ -780,6 +823,7 @@ pub struct AbacusPaths {
     pub papercuts_file: PathBuf,
     pub memories_file: PathBuf,
     pub hive_file: PathBuf,
+    pub endpoints_dir: PathBuf,
 }
 
 impl AbacusPaths {
@@ -804,6 +848,7 @@ impl AbacusPaths {
             papercuts_file: root.join("papercuts.json"),
             memories_file: root.join("memories.json"),
             hive_file: root.join("hive.json"),
+            endpoints_dir: root.join("endpoints"),
             root,
         }
     }
@@ -922,6 +967,7 @@ mod tests {
                 model: "codestral".into(),
                 protocol: ProviderProtocol::ChatCompletions,
                 api_key_env: None,
+                endpoint: None,
                 providers: Vec::new(),
                 allow_fallbacks: true,
             },

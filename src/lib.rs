@@ -7,6 +7,7 @@ pub mod console;
 pub mod context;
 pub mod cron;
 pub mod diff;
+pub mod endpoint;
 pub mod extensions;
 pub mod feedback;
 pub mod goal;

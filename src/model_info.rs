@@ -260,7 +260,7 @@ fn known_limits(model: &str) -> Option<(usize, usize)> {
 /// array, and per-model `context_length` as either a number or a `k`/`m`-
 /// suffixed string.
 pub async fn detect_limits(
-    base_url: &str,
+    models_url: &str,
     api_key: Option<&str>,
     model: &str,
 ) -> Option<(usize, Option<usize>)> {
@@ -272,7 +272,7 @@ pub async fn detect_limits(
         .build()
         .ok()?;
     let mut request = client
-        .get(format!("{}/models", base_url.trim_end_matches('/')))
+        .get(models_url)
         .header(header::ACCEPT, "application/json");
     if let Some(key) = api_key {
         request = request.bearer_auth(key);

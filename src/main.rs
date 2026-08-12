@@ -298,9 +298,9 @@ async fn main() -> Result<()> {
     // output cap so compaction thresholds and output limits scale with the
     // model. Non-fatal — we fall back to the heuristic/default estimates.
     if config.model_limits.source != model_info::LimitSource::Override
+        && let Some(models_url) = config.models_endpoint()
         && let Some((context, output)) =
-            model_info::detect_limits(&config.base_url, config.api_key.as_deref(), &config.model)
-                .await
+            model_info::detect_limits(&models_url, config.api_key.as_deref(), &config.model).await
     {
         config.model_limits.apply_detected(context, output);
     }
@@ -575,14 +575,34 @@ async fn doctor(config: &Config, settings: &Settings) -> Result<()> {
     console::section("Provider");
     console::field("profile", &config.profile);
     console::field("model", &config.model);
-    console::field("endpoint", &config.base_url);
+    console::field("endpoint", &config.endpoint());
+    if let Some(scripted) = &config.endpoint {
+        console::field("scripted endpoint", scripted.display_name());
+    }
     console::field("protocol", &format!("{:?}", config.protocol));
-    match &config.api_key {
-        Some(_) => record(Health::Pass, "credential", "available"),
-        None if config.base_url.contains("localhost") || config.base_url.contains("127.0.0.1") => {
+    // A scripted endpoint with an auth block carries its own token — resolve
+    // it to report health rather than flagging the absent standard credential.
+    let scripted_auth = config
+        .endpoint
+        .as_ref()
+        .map(|endpoint| endpoint.auth_header());
+    match (&config.api_key, scripted_auth) {
+        (_, Some(Ok(Some(_)))) => record(Health::Pass, "credential", "scripted endpoint auth"),
+        (_, Some(Ok(None))) if config.endpoint.is_some() => {
+            record(Health::Pass, "credential", "none (scripted endpoint)")
+        }
+        (_, Some(Err(error))) => record(
+            Health::Fail,
+            "credential",
+            &format!("scripted endpoint auth failed — {error:#}"),
+        ),
+        (Some(_), _) => record(Health::Pass, "credential", "available"),
+        (None, _)
+            if config.base_url.contains("localhost") || config.base_url.contains("127.0.0.1") =>
+        {
             record(Health::Pass, "credential", "none (local endpoint)")
         }
-        None => record(
+        (None, _) => record(
             Health::Fail,
             "credential",
             "missing — export the profile's key or run `abacus setup`",
@@ -619,9 +639,9 @@ async fn doctor(config: &Config, settings: &Settings) -> Result<()> {
     // heuristic/default estimate.
     let mut limits = config.model_limits;
     if limits.source != model_info::LimitSource::Override
+        && let Some(models_url) = config.models_endpoint()
         && let Some((context, output)) =
-            model_info::detect_limits(&config.base_url, config.api_key.as_deref(), &config.model)
-                .await
+            model_info::detect_limits(&models_url, config.api_key.as_deref(), &config.model).await
     {
         limits.apply_detected(context, output);
     }

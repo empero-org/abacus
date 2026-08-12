@@ -50,6 +50,9 @@ pub struct Provider {
     /// Prompt tokens from the most recent reply — how full the window actually
     /// was, as measured by the provider rather than estimated from characters.
     context_tokens: Arc<AtomicU64>,
+    /// A custom endpoint definition (URL already folded into `endpoint`): its
+    /// auth, extra headers, and body overrides are applied per request.
+    scripted: Option<crate::endpoint::ScriptedEndpoint>,
 }
 
 /// A piece of streamed output. Reasoning is kept separate from the answer all
@@ -139,6 +142,7 @@ impl Provider {
             learned_output_cap: Arc::new(AtomicU64::new(0)),
             strips_reasoning: Arc::new(AtomicBool::new(false)),
             context_tokens: Arc::new(AtomicU64::new(0)),
+            scripted: config.endpoint.clone(),
         })
     }
 
@@ -269,6 +273,10 @@ impl Provider {
         {
             body["provider"] = provider;
         }
+        // Scripted overrides win over everything Abacus put in the body, and
+        // its removals fire last — a required `store: false` or a rejected
+        // `parallel_tool_calls` is honoured no matter what was built above.
+        self.apply_scripted_body(&mut body);
         // The request has to be raced as well as the stream: `post_stream` waits
         // for response headers, and a server that accepts the connection then
         // stalls would otherwise hold the turn until the client timeout with no
@@ -428,6 +436,7 @@ impl Provider {
         if let Some(max_tokens) = self.effective_output_tokens() {
             body["max_output_tokens"] = json!(max_tokens);
         }
+        self.apply_scripted_body(&mut body);
         let response = tokio::select! {
             biased;
             sent = self.post_stream(&body) => sent?,
@@ -495,6 +504,13 @@ impl Provider {
         }
     }
 
+    /// Fold in a scripted endpoint's body overrides and removals, if any.
+    fn apply_scripted_body(&self, body: &mut Value) {
+        if let Some(scripted) = &self.scripted {
+            scripted.apply_to_body(body);
+        }
+    }
+
     async fn post_stream(&self, body: &Value) -> Result<reqwest::Response> {
         let mut attempt = 0_u32;
         let response = loop {
@@ -504,7 +520,21 @@ impl Provider {
                 .post(&self.endpoint)
                 .header(header::ACCEPT, "text/event-stream")
                 .json(&body);
-            if let Some(key) = &self.api_key {
+            let mut scripted_auth = false;
+            if let Some(scripted) = &self.scripted {
+                for (name, value) in &scripted.headers {
+                    request = request.header(name.as_str(), value);
+                }
+                match scripted.auth_header() {
+                    Ok(Some((name, value))) => {
+                        request = request.header(name.as_str(), value);
+                        scripted_auth = true;
+                    }
+                    Ok(None) => {}
+                    Err(error) => return Err(error).context("scripted endpoint auth"),
+                }
+            }
+            if !scripted_auth && let Some(key) = &self.api_key {
                 request = request.bearer_auth(key);
             }
             match request.send().await {
