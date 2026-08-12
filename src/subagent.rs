@@ -46,6 +46,11 @@ struct SubagentTask {
     prompt: String,
     #[serde(default)]
     role: SubagentRole,
+    /// An optional model slug for this worker, run on the same endpoint as the
+    /// orchestrator — so one swarm can fan out across several models (e.g. five
+    /// different OpenRouter models). None uses the orchestrator's model.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 /// What kind of worker a task gets. The role shapes both the worker's system
@@ -154,7 +159,8 @@ impl SubagentRuntime {
                                 "properties":{
                                     "name":{"type":"string","description":"Short unique worker name"},
                                     "prompt":{"type":"string","description":"Self-contained coding assignment with expected verification"},
-                                    "role":{"type":"string","enum":["drone","scout","worker"],"description":"drone = builder executing a concrete change; scout = read-only research/repo-crawl/web (cannot modify anything); worker = generic (default)"}
+                                    "role":{"type":"string","enum":["drone","scout","worker"],"description":"drone = builder executing a concrete change; scout = read-only research/repo-crawl/web (cannot modify anything); worker = generic (default)"},
+                                    "model":{"type":"string","description":"Optional model slug for this worker on the same endpoint. Omit to use your own (the main) model — that is the default and the right choice unless the user explicitly asked for specific models per worker (e.g. fanning a swarm across several OpenRouter models)."}
                                 },
                                 "required":["name","prompt"],
                                 "additionalProperties":false
@@ -176,7 +182,14 @@ impl SubagentRuntime {
                 let names = args
                     .tasks
                     .iter()
-                    .map(|task| format!("{} ({})", task.name, task.role.label()))
+                    .map(
+                        |task| match task.model.as_deref().filter(|m| !m.trim().is_empty()) {
+                            Some(model) => {
+                                format!("{} ({}, {model})", task.name, task.role.label())
+                            }
+                            None => format!("{} ({})", task.name, task.role.label()),
+                        },
+                    )
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(
@@ -239,7 +252,14 @@ impl SubagentRuntime {
 
     async fn run_one(&self, context: Arc<WorktreeContext>, task: SubagentTask) -> SubagentResult {
         let name = task.name.clone();
-        let (worker_provider, worker_tokens) = self.provider.with_detached_counter();
+        let (mut worker_provider, worker_tokens) = self.provider.with_detached_counter();
+        if let Some(model) = task
+            .model
+            .as_deref()
+            .filter(|model| !model.trim().is_empty())
+        {
+            worker_provider = worker_provider.with_model(model);
+        }
         let board_id = self
             .hive
             .board
@@ -815,6 +835,26 @@ mod tests {
         assert!(
             parse_args(r#"{"tasks":[{"name":"test","prompt":"verify it"}],"max_concurrency":2}"#)
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn per_task_role_and_model_parse_with_main_model_default() {
+        let args = parse_args(
+            r#"{"tasks":[
+                {"name":"a","prompt":"read","role":"scout"},
+                {"name":"b","prompt":"build","role":"drone","model":"anthropic/claude-sonnet-4.6"}
+            ]}"#,
+        )
+        .unwrap();
+        // Default: no model → the orchestrator's (main) model is used.
+        assert_eq!(args.tasks[0].role, SubagentRole::Scout);
+        assert_eq!(args.tasks[0].model, None);
+        // Explicit slug is carried per worker.
+        assert_eq!(args.tasks[1].role, SubagentRole::Drone);
+        assert_eq!(
+            args.tasks[1].model.as_deref(),
+            Some("anthropic/claude-sonnet-4.6")
         );
     }
 
