@@ -3885,6 +3885,7 @@ pub async fn run(
             .await;
     }
     enable_raw_mode()?;
+    TERMINAL_CLAIMED.store(true, Ordering::SeqCst);
     let mut stdout = io::stdout();
     execute!(
         stdout,
@@ -3905,9 +3906,9 @@ pub async fn run(
                 | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
         )
     );
-    let restore = TerminalRestore {
-        keyboard_enhanced: true,
-    };
+    KEYBOARD_ENHANCED.store(true, Ordering::SeqCst);
+    let restore = TerminalRestore;
+    install_terminal_guards();
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -3971,23 +3972,78 @@ pub async fn run(
     Ok(())
 }
 
-struct TerminalRestore {
-    keyboard_enhanced: bool,
+/// Whether the terminal is currently handed over to the TUI, so a restore that
+/// runs twice (or before setup) does nothing.
+static TERMINAL_CLAIMED: AtomicBool = AtomicBool::new(false);
+/// Whether the kitty keyboard flags were pushed and still need popping.
+static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
+
+/// Give the terminal back exactly as it was found.
+///
+/// This used to live only in `Drop`, which covers a normal return and an
+/// unwinding panic but *not* a signal — and a signal is how a TUI usually
+/// dies: SIGHUP when an SSH session closes, SIGTERM when someone else on the
+/// box ends it. Neither unwinds, so the terminal was left in raw mode with the
+/// alternate screen still active. Every line printed afterwards then advanced
+/// without a carriage return, marching one column right per row: a diagonal
+/// staircase of shell prompts across a blank screen.
+///
+/// Idempotent, so `Drop`, the panic hook and a signal handler can all call it.
+fn restore_terminal() {
+    if !TERMINAL_CLAIMED.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    if KEYBOARD_ENHANCED.swap(false, Ordering::SeqCst) {
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    }
+    let _ = disable_raw_mode();
+    let _ = execute!(
+        io::stdout(),
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        LeaveAlternateScreen,
+        Show
+    );
 }
+
+/// Cover the two exits `Drop` cannot see: a panic, whose message would
+/// otherwise print *into* the raw-mode alternate screen where it is both
+/// illegible and invisible, and a termination signal.
+///
+/// The panic hook restores unconditionally rather than trying to tell a render
+/// panic from one in a background task. A panic is a bug either way, and the
+/// failure mode this picks — the message legible on a normal screen — beats
+/// the alternative of a wrecked terminal that outlives the process.
+fn install_terminal_guards() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        previous(info);
+    }));
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        // 128 + signal number, the shell's convention for a signalled exit.
+        for (kind, code) in [(SignalKind::hangup(), 129), (SignalKind::terminate(), 143)] {
+            let Ok(mut stream) = signal(kind) else {
+                continue;
+            };
+            tokio::spawn(async move {
+                stream.recv().await;
+                restore_terminal();
+                // The terminal is back; leave now rather than limping on with
+                // a session the caller has already ended.
+                std::process::exit(code);
+            });
+        }
+    }
+}
+
+struct TerminalRestore;
 
 impl Drop for TerminalRestore {
     fn drop(&mut self) {
-        if self.keyboard_enhanced {
-            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
-        }
-        let _ = disable_raw_mode();
-        let _ = execute!(
-            io::stdout(),
-            DisableMouseCapture,
-            DisableBracketedPaste,
-            LeaveAlternateScreen,
-            Show
-        );
+        restore_terminal();
     }
 }
 
@@ -7814,6 +7870,32 @@ mod tests {
         assert!(app.slash_command("/effort ludicrous"));
         assert_eq!(app.entries.last().unwrap().kind, EntryKind::Error);
         assert!(app.config.reasoning_effort.is_none());
+    }
+
+    /// A signal kills without unwinding, so `Drop` never runs and the terminal
+    /// was left in raw mode — the diagonal-staircase failure. The restore is
+    /// therefore reachable from a signal handler and a panic hook too, which
+    /// means it must tolerate being called twice, and out of order.
+    #[test]
+    fn restoring_the_terminal_is_idempotent_and_claim_gated() {
+        // Never claimed: restoring must not touch a terminal we do not own.
+        TERMINAL_CLAIMED.store(false, Ordering::SeqCst);
+        KEYBOARD_ENHANCED.store(false, Ordering::SeqCst);
+        restore_terminal();
+        assert!(!TERMINAL_CLAIMED.load(Ordering::SeqCst));
+
+        // Claimed once, restored twice: the second call is a no-op, so a
+        // signal handler racing `Drop` cannot double-pop the keyboard flags.
+        TERMINAL_CLAIMED.store(true, Ordering::SeqCst);
+        KEYBOARD_ENHANCED.store(true, Ordering::SeqCst);
+        restore_terminal();
+        assert!(!TERMINAL_CLAIMED.load(Ordering::SeqCst), "claim released");
+        assert!(
+            !KEYBOARD_ENHANCED.load(Ordering::SeqCst),
+            "flags popped once"
+        );
+        restore_terminal();
+        assert!(!TERMINAL_CLAIMED.load(Ordering::SeqCst), "still released");
     }
 
     /// The composer is drawn at the centred content cap, not the frame width.
