@@ -826,7 +826,7 @@ impl App {
             hive,
             injections: crate::agent::InjectionQueue::default(),
             modes,
-            mouse_captured: true,
+            mouse_captured: false,
             hive_overlay: false,
             hive_scroll: 0,
             tasks,
@@ -1061,6 +1061,8 @@ impl App {
                     if let Some(entry) = self.entries.last_mut() {
                         entry.text.push_str(&delta);
                     }
+                    // Mirrored where a panic or a signal can still reach it.
+                    crate::recovery::record_answer(&delta);
                     // Growing the open assistant entry in place is the one
                     // mutation that does not go through `push_entry`, so it
                     // invalidates the wrap itself.
@@ -1088,6 +1090,7 @@ impl App {
                     // reasoning itself is hidden — it is the footer's job to
                     // say what the model is doing either way.
                     self.turn_reasoning.push_str(&piece);
+                    crate::recovery::record_thinking(&piece);
                     self.status = reasoning_header(&self.turn_reasoning)
                         .unwrap_or_else(|| "thinking".to_owned());
                     if !self.settings.ui.show_thinking {
@@ -1172,6 +1175,9 @@ impl App {
                     self.status = format!("{} mode", mode.label().to_ascii_lowercase());
                 }
                 AgentEvent::Done { messages, reason } => {
+                    // Reported back, so there is no half-finished reply to
+                    // recover on the way out.
+                    crate::recovery::clear();
                     let assistant_output = latest_assistant_text(&messages);
                     self.messages = messages;
                     // Resynthe live ctx estimate from the authoritative messages.
@@ -1256,6 +1262,7 @@ impl App {
                     }
                 }
                 AgentEvent::Failed { error, messages } => {
+                    crate::recovery::clear();
                     self.messages = messages;
                     self.ctx_chars = message_chars(&self.messages);
                     self.running = None;
@@ -3526,6 +3533,25 @@ impl App {
         });
     }
 
+    /// Tell the user about a reply an earlier run died in the middle of. It is
+    /// shown once — `take` removes the file — because the point is to hand the
+    /// text back, not to keep reminding them a crash happened.
+    fn surface_recovered_reply(&mut self) {
+        let path = self.config.paths.recovery_file.clone();
+        let Some(content) = crate::recovery::take(&path) else {
+            return;
+        };
+        // The text goes back into the transcript rather than being left as a
+        // path to go and find. `take` removed the file, so this is now the only
+        // copy — which is exactly why it belongs where the user is looking.
+        self.push_entry(Entry::new(
+            EntryKind::System,
+            "A previous run stopped mid-reply. This is how far the model got:".to_owned(),
+        ));
+        self.push_entry(Entry::new(EntryKind::Assistant, content.trim().to_owned()));
+        self.follow = true;
+    }
+
     /// Surface a newer release once, as an ordinary transcript line. It is a
     /// notice, not a prompt: nothing is downloaded and nothing is blocked.
     fn drain_update_events(&mut self) -> bool {
@@ -3884,6 +3910,7 @@ pub async fn run(
             .report_start(&activity_session, &activity_model)
             .await;
     }
+    crate::recovery::arm(config.paths.recovery_file.clone(), session_id.clone());
     enable_raw_mode()?;
     TERMINAL_CLAIMED.store(true, Ordering::SeqCst);
     let mut stdout = io::stdout();
@@ -3891,7 +3918,10 @@ pub async fn run(
         stdout,
         EnterAlternateScreen,
         EnableBracketedPaste,
-        EnableMouseCapture,
+        // Mouse capture is NOT enabled here. Holding the mouse gives wheel
+        // scrolling and clickable rows, but it also stops the terminal doing
+        // drag-select — and copying text out matters more than the wheel.
+        // F2 grabs it when the wheel is wanted; PgUp/PgDn scroll regardless.
         SetTitle(format!("Abacus — {}", config.workspace_name()))
     )?;
     // Kitty keyboard protocol: lets the terminal distinguish Shift+Enter from
@@ -3940,6 +3970,9 @@ pub async fn run(
             }
         })
     });
+    // Before the first frame: a reply an earlier run died in the middle of is
+    // handed back at the top of the transcript.
+    app.surface_recovered_reply();
     let result = event_loop(&mut terminal, &mut app).await;
     if let Some(handle) = heartbeat {
         handle.abort();
@@ -4019,6 +4052,14 @@ fn install_terminal_guards() {
     std::panic::set_hook(Box::new(move |info| {
         restore_terminal();
         previous(info);
+        // After the panic message, so the pointer to the recovered text is the
+        // last thing on screen rather than buried above a backtrace.
+        if let Some(path) = crate::recovery::flush() {
+            eprintln!(
+                "\nThe reply in progress was saved to {} — it is not lost.",
+                path.display()
+            );
+        }
     }));
     #[cfg(unix)]
     {
@@ -4031,6 +4072,12 @@ fn install_terminal_guards() {
             tokio::spawn(async move {
                 stream.recv().await;
                 restore_terminal();
+                if let Some(path) = crate::recovery::flush() {
+                    eprintln!(
+                        "Interrupted mid-reply; the partial text is in {}",
+                        path.display()
+                    );
+                }
                 // The terminal is back; leave now rather than limping on with
                 // a session the caller has already ended.
                 std::process::exit(code);
@@ -4195,10 +4242,9 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         app.status = if !switched {
             "could not switch mouse mode".to_owned()
         } else if app.mouse_captured {
-            "mouse captured — wheel scrolls, rows click · F2 to select text".to_owned()
+            "mouse captured — wheel scrolls, rows click · F2 to select text again".to_owned()
         } else {
-            "selection mode — drag to select · PgUp/PgDn still scroll · F2 restores the mouse"
-                .to_owned()
+            "mouse released — drag to select and copy · F2 for wheel scrolling".to_owned()
         };
         return;
     }
@@ -5966,7 +6012,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
             ("@", "files"),
             ("PgUp/PgDn", "scroll"),
             ("⇧⇥", "mode"),
-            ("F2", "select text"),
+            ("F2", "mouse wheel"),
             ("F1", "help"),
         ]
     } else {
@@ -6088,7 +6134,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
             &[
                 (
                     "F2",
-                    "release the mouse so the terminal can select and copy text",
+                    "capture the mouse for wheel scrolling and clickable rows",
                 ),
                 ("j · k", "move between blocks"),
                 ("o · space · enter", "fold or unfold a tool result"),

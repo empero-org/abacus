@@ -22,6 +22,7 @@ pub mod modes;
 pub mod papercuts;
 pub mod provider;
 pub mod ralph;
+pub mod recovery;
 pub mod rethink;
 pub mod services;
 pub mod session;

@@ -703,16 +703,11 @@ pub fn transcript(
             }
             EntryKind::Rule => lines.push(rule_line(&entry.text, width)),
         }
-        // A selected non-tool block is marked by tinting its rows, since it has
-        // no status glyph to brighten.
-        if selected && entry.kind != EntryKind::Tool {
-            let fill = theme::active().selection;
-            for line in &mut lines[start..] {
-                for span in &mut line.spans {
-                    span.style = span.style.bg(fill);
-                }
-            }
-        }
+        // Selected blocks are deliberately not tinted. A click used to paint a
+        // whole block in the selection colour with no way to undo it — clicking
+        // again folded rather than released — and the tint fought the terminal's
+        // own selection, which is the one users actually copy with.
+        let _ = selected;
         spans.push((start, lines.len() - start));
         previous = Some(entry.kind);
     }

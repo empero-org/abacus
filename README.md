@@ -361,13 +361,23 @@ back for tool-call continuity (Kimi thinking builds) it is; where one rejects
 the field instead, it is stripped on first rejection and stays stripped for the
 session.
 
+### Recovering an interrupted reply
+
+A reply is only written to the session once the turn ends, so a process that
+dies mid-stream used to take the whole answer with it — worst of all for the
+long ones. The stream is now mirrored where a crash can still reach it, and the
+same handlers that put the terminal back write it out. On the next start the
+text is handed straight back into the transcript, once, and the file is removed.
+
 ### Selecting and copying
 
 A TUI that holds the mouse cannot be copied out of: capture is what gives you
 wheel scrolling and clickable rows, and it is also what stops your terminal
-doing click-drag selection. **F2** hands the mouse back — drag to select and
-copy exactly as you would anywhere else — and F2 again takes it for the wheel.
-(Many terminals also let you hold **Shift** to bypass capture without toggling.)
+doing click-drag selection. Copying wins, so Abacus **does not take the mouse**
+— drag to select and copy exactly as you would anywhere else, from the first
+frame. **F2** captures it when you want the wheel and clickable rows, and F2
+again gives it back. Blocks are never tinted on click: the only selection on
+screen is your terminal's own.
 Scrolling never depends on the mouse: **PgUp/PgDn** move a page at a time and
 keep working in selection mode, **Alt+↑/↓** nudge a line, and **Ctrl+End** jumps
 back to live.

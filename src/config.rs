@@ -938,6 +938,8 @@ pub struct AbacusPaths {
     pub modes_file: PathBuf,
     /// Caches the last release check so startup asks GitHub at most daily.
     pub update_file: PathBuf,
+    /// Where a turn cut short mid-stream is written, so the text survives.
+    pub recovery_file: PathBuf,
 }
 
 impl AbacusPaths {
@@ -965,6 +967,7 @@ impl AbacusPaths {
             endpoints_dir: root.join("endpoints"),
             modes_file: root.join("modes.json"),
             update_file: root.join("update.json"),
+            recovery_file: root.join("recovered.md"),
             root,
         }
     }
