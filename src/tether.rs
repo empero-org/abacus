@@ -30,6 +30,11 @@ pub const CHECK_EVERY_STEPS: usize = 35;
 const CORRECTION_REQUESTS: u8 = 3;
 /// Ceiling on the compact history handed to the intent and drift calls.
 const COMPACT_HISTORY_CHARS: usize = 6_000;
+/// Of that, the share reserved for user prompts. A build phase emits assistant
+/// lines fast enough to flush every user turn out of a plain tail window, which
+/// left the drift check rating a session against no user input at all — it saw
+/// only the agent talking to itself. Unused share falls through to activity.
+const USER_HISTORY_SHARE: usize = COMPACT_HISTORY_CHARS * 2 / 3;
 /// Each assistant excerpt in the compact history is clipped to this.
 const EXCERPT_CHARS: usize = 240;
 
@@ -104,12 +109,14 @@ impl TetherState {
 /// text and thinking (clipped), and tool-call names with their argument
 /// summaries — never tool outputs. Most recent kept when the budget bites.
 pub fn compact_history(messages: &[Value]) -> String {
-    let mut lines: Vec<String> = Vec::new();
+    // (is_user, text): what the user asked is the evidence both callers judge
+    // against, so it is budgeted separately from what the agent has been doing.
+    let mut lines: Vec<(bool, String)> = Vec::new();
     for message in messages {
         match message.get("role").and_then(Value::as_str) {
             Some("user") => {
                 if let Some(text) = message.get("content").and_then(Value::as_str) {
-                    lines.push(format!("user: {}", clip(text, EXCERPT_CHARS)));
+                    lines.push((true, format!("user: {}", clip(text, EXCERPT_CHARS))));
                 }
             }
             Some("assistant") => {
@@ -138,27 +145,47 @@ pub fn compact_history(messages: &[Value]) -> String {
                     }
                 }
                 if line != "assistant:" {
-                    lines.push(line);
+                    lines.push((false, line));
                 }
             }
             _ => {}
         }
     }
-    // Keep the tail: recent activity is what drift is judged on.
+    // Two passes, newest first. User prompts claim their reserved share before
+    // any activity is kept, so a redirect five minutes ago survives an hour of
+    // tool calls; recent activity then fills whatever is left.
+    let mut keep = vec![false; lines.len()];
     let mut total = 0_usize;
-    let mut kept: Vec<&String> = Vec::new();
-    for line in lines.iter().rev() {
-        total += line.len() + 1;
-        if total > COMPACT_HISTORY_CHARS {
-            break;
+    for (index, (is_user, line)) in lines.iter().enumerate().rev() {
+        if !is_user || total + line.len() + 1 > USER_HISTORY_SHARE {
+            continue;
         }
-        kept.push(line);
+        total += line.len() + 1;
+        keep[index] = true;
     }
-    kept.reverse();
-    kept.iter()
-        .map(|line| line.as_str())
-        .collect::<Vec<_>>()
-        .join("\n")
+    for (index, (is_user, line)) in lines.iter().enumerate().rev() {
+        if *is_user || total + line.len() + 1 > COMPACT_HISTORY_CHARS {
+            continue;
+        }
+        total += line.len() + 1;
+        keep[index] = true;
+    }
+    // Mark elisions: a reader that cannot see a gap reads what is left as the
+    // whole conversation, which is the failure this function just had.
+    let mut kept: Vec<&str> = Vec::new();
+    let mut skipped = false;
+    for (index, (_, line)) in lines.iter().enumerate() {
+        if keep[index] {
+            if skipped && !kept.is_empty() {
+                kept.push("…");
+            }
+            skipped = false;
+            kept.push(line.as_str());
+        } else {
+            skipped = true;
+        }
+    }
+    kept.join("\n")
 }
 
 fn clip(text: &str, limit: usize) -> String {
@@ -211,18 +238,56 @@ pub async fn capture_intent(
     quick_call(provider, conversation, cancel).await
 }
 
+/// The plan the user has already agreed to: the active goal and task list.
+/// Empty when neither exists.
+pub fn agreed_plan(goal: &crate::goal::GoalState, tasks: &crate::task::TaskList) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(goal) = goal
+        .snapshot()
+        .filter(|goal| goal.status == crate::goal::GoalStatus::Active)
+    {
+        parts.push(format!("Active goal: {}", goal.objective));
+    }
+    let items = tasks.snapshot();
+    if !items.is_empty() {
+        let rendered = items
+            .iter()
+            .map(|task| format!("- [{}] {}", if task.done { 'x' } else { ' ' }, task.text))
+            .collect::<Vec<_>>()
+            .join("\n");
+        parts.push(format!("Task list:\n{rendered}"));
+    }
+    parts.join("\n")
+}
+
 /// Run the drift check. `Some(correction)` means off track.
 pub async fn check_drift(
     provider: &Provider,
     intent: &str,
+    plan: &str,
     messages: &[Value],
     cancel: &AtomicBool,
 ) -> Option<String> {
+    // An agreed plan is the strongest evidence of what the user wants, and it
+    // postdates the intent snapshot. Without it the check flagged a running
+    // build — with an approved 9-task list open — as drift from the greeting
+    // that opened the session.
+    let plan = if plan.trim().is_empty() {
+        "(none recorded)".to_owned()
+    } else {
+        plan.to_owned()
+    };
     let conversation = vec![
         serde_json::json!({"role": "system", "content": "You audit a coding-agent session against its intent. Be strict about drift, tolerant of legitimate sub-work (tests, refactors, debugging serve the intent)."}),
         serde_json::json!({"role": "user", "content": format!(
-            "Session intent:\n{intent}\n\nRecent activity (assistant turns and tool calls only):\n{}\n\n\
-             Is the recent activity still serving the intent? Reply with exactly \
+            "Session intent:\n{intent}\n\nPlan the user has agreed to:\n{plan}\n\n\
+             Recent activity (assistant turns and tool calls; the history may be \
+             elided, marked …):\n{}\n\n\
+             Is the recent activity still serving the intent? Work that advances \
+             the agreed plan is ON_TRACK even when the intent snapshot is older \
+             and narrower than the plan — the snapshot is a summary taken earlier, \
+             not a limit on what the user may since have asked for. Only call \
+             OFF_TRACK for activity that serves neither. Reply with exactly \
              ON_TRACK, or OFF_TRACK: followed by one short paragraph addressed to \
              the agent telling it specifically what to stop and what to return to.",
             compact_history(messages)
@@ -281,6 +346,80 @@ mod tests {
             compact.contains("thinking: maybe I should refactor everything"),
             "{compact}"
         );
+    }
+
+    /// The reported failure: a long build phase flushed every user prompt out
+    /// of the window, so the drift check judged the session with no idea what
+    /// had ever been asked for — and flagged agreed work as drift.
+    #[test]
+    fn a_long_build_phase_cannot_flush_the_user_out_of_the_window() {
+        let mut messages = vec![
+            json!({"role":"user","content":"hi! use empero.org as the theme guide"}),
+            json!({"role":"assistant","content":"Sure — what would you like to build?"}),
+            json!({"role":"user","content":"build the full SaaS backend: auth, plans, billing, admin"}),
+        ];
+        for index in 0..400 {
+            messages.push(json!({
+                "role":"assistant",
+                "content": format!("writing module {index} {}", "x".repeat(200))
+            }));
+        }
+        let compact = compact_history(&messages);
+        assert!(
+            compact.contains("build the full SaaS backend"),
+            "the actual request must survive: {compact}"
+        );
+        assert!(
+            compact.contains("empero.org"),
+            "so must the opening prompt: {compact}"
+        );
+        // Recent activity still gets its share.
+        assert!(compact.contains("writing module 399"), "{compact}");
+        // And the gap is visible, so nothing reads the remainder as the whole.
+        assert!(compact.contains('…'), "{compact}");
+        assert!(compact.len() <= COMPACT_HISTORY_CHARS + 300);
+    }
+
+    /// User prompts claim their share first, but never the whole window — a
+    /// chatty user must not blind the check to what the agent is doing.
+    #[test]
+    fn activity_keeps_its_share_when_the_user_talks_a_lot() {
+        let mut messages = Vec::new();
+        for index in 0..400 {
+            messages
+                .push(json!({"role":"user","content":format!("note {index} {}", "u".repeat(200))}));
+        }
+        for index in 0..50 {
+            messages.push(
+                json!({"role":"assistant","content":format!("doing {index} {}", "a".repeat(200))}),
+            );
+        }
+        let compact = compact_history(&messages);
+        assert!(
+            compact.contains("doing 49"),
+            "recent activity survives: {compact}"
+        );
+        assert!(
+            compact.contains("note 399"),
+            "newest prompts survive: {compact}"
+        );
+        assert!(compact.len() <= COMPACT_HISTORY_CHARS + 300);
+    }
+
+    #[test]
+    fn the_agreed_plan_is_rendered_for_the_drift_check() {
+        let goal = crate::goal::GoalState::default();
+        let tasks = crate::task::TaskList::default();
+        assert_eq!(
+            agreed_plan(&goal, &tasks),
+            "",
+            "nothing agreed, nothing said"
+        );
+
+        tasks.execute("task_create", r#"{"tasks":["scaffold repo","add auth"]}"#);
+        let plan = agreed_plan(&goal, &tasks);
+        assert!(plan.contains("scaffold repo"), "{plan}");
+        assert!(plan.contains("[ ] add auth"), "{plan}");
     }
 
     #[test]

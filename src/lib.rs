@@ -35,4 +35,5 @@ pub mod tool_format;
 pub mod tools;
 pub mod tui;
 pub mod ui;
+pub mod update;
 pub mod web;

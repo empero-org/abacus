@@ -120,10 +120,18 @@ turn rather than after it: the intent is yours and the prompt already states it,
 so the call overlaps the answer and the notice lands with it instead of holding
 the turn open for a couple of seconds.
 
-Every ~35 model steps, a drift check runs: the intent plus a compact history —
-user prompts, assistant text *and its recorded thinking*, and tool-call names,
-never tool outputs — and a strict-but-fair question: is the recent activity still
-serving the intent? An `ON_TRACK` verdict costs one small call and changes
+The snapshot refreshes on every turn, because every turn is a new prompt and
+that is exactly when intent can change. (It used to refresh only under
+compaction pressure, so on a big-context model it never refreshed at all — a
+snapshot taken from an opening "hi" stayed the yardstick for a whole session.)
+
+Every ~35 model steps, a drift check runs: the intent, the plan you have already
+agreed to (active goal and task list), and a compact history — user prompts,
+assistant text *and its recorded thinking*, and tool-call names, never tool
+outputs — and a strict-but-fair question: is the recent activity still serving
+the intent? Your prompts get a reserved share of that history so a long build
+phase cannot flush them out of the window and leave the check judging the
+session with no idea what was ever asked for; elisions are marked `…`. An `ON_TRACK` verdict costs one small call and changes
 nothing. An `OFF_TRACK` verdict arrives with a course correction written by the
 checking call itself, injected as a system layer into the next few requests and
 surfaced as a `tether — …` notice. The check runs detached for the same reason:
@@ -327,6 +335,7 @@ every request.
 | `/memories` / `/memories delete <n>` | List or delete durable memories |
 | `/repair` | Fix corrupted session history |
 | `/tools` / `/skills` / `/plugins` / `/mcps` | Inspect active capabilities |
+| `Update reminder` (in `/config`) | Daily check for a newer version tag; notice only, never downloads |
 | `/help` / `/quit` (`/q`, `/exit`) | Show help or exit |
 
 While a turn runs, the status header shows what the model is actually doing: when

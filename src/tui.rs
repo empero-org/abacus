@@ -361,6 +361,7 @@ enum ConfigKey {
     Animations,
     Tooltips,
     DraftReplies,
+    CheckUpdates,
     TraceLogging,
     MaxSteps,
     ToolOutputLimit,
@@ -404,6 +405,7 @@ const CONFIG_ROWS: &[ConfigRow] = &[
     ConfigRow::Key(ConfigKey::Animations),
     ConfigRow::Key(ConfigKey::Tooltips),
     ConfigRow::Key(ConfigKey::DraftReplies),
+    ConfigRow::Key(ConfigKey::CheckUpdates),
     ConfigRow::Key(ConfigKey::TraceLogging),
     ConfigRow::Heading("PRIVACY"),
     ConfigRow::Key(ConfigKey::FeedbackEnabled),
@@ -449,6 +451,9 @@ fn config_help(key: ConfigKey) -> &'static str {
         ConfigKey::Tooltips => "The guidance block on the welcome screen.",
         ConfigKey::DraftReplies => {
             "Predict a likely follow-up in the empty composer. One short model call per turn."
+        }
+        ConfigKey::CheckUpdates => {
+            "Check GitHub daily for a newer version tag and say so. Never downloads anything."
         }
         ConfigKey::TraceLogging => {
             "Append every model call to ~/.abacus/traces as JSONL for fine-tuning. Stays local."
@@ -501,6 +506,7 @@ const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey::Animations,
     ConfigKey::Tooltips,
     ConfigKey::DraftReplies,
+    ConfigKey::CheckUpdates,
     ConfigKey::TraceLogging,
     ConfigKey::FeedbackEnabled,
     ConfigKey::FeedbackDiagnostics,
@@ -588,6 +594,8 @@ struct App {
     services_reloading: bool,
     services_tx: mpsc::UnboundedSender<ServicesResult>,
     services_rx: mpsc::UnboundedReceiver<ServicesResult>,
+    /// Delivers a newer-release notice from the startup check, if there is one.
+    update_rx: mpsc::UnboundedReceiver<crate::update::Available>,
     allow_mutations: Arc<AtomicBool>,
     receiving_delta: bool,
     /// When the in-flight tool call started, so the settled row can report how
@@ -773,6 +781,24 @@ impl App {
         let (feedback_tx, feedback_rx) = mpsc::unbounded_channel();
         let (services_tx, services_rx) = mpsc::unbounded_channel();
         let (draft_tx, draft_rx) = mpsc::unbounded_channel();
+        // Detached, so a slow or unreachable GitHub never delays the first
+        // frame, and silent on failure — being offline is not a problem worth
+        // reporting.
+        let (update_tx, update_rx) = mpsc::unbounded_channel();
+        // `try_current` rather than `spawn`: the app is also constructed in
+        // synchronous tests, where there is no reactor to spawn onto.
+        if settings.ui.check_updates
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            let cache = config.paths.update_file.clone();
+            runtime.spawn(async move {
+                if let Ok(Some(available)) =
+                    crate::update::check(&cache, env!("CARGO_PKG_VERSION")).await
+                {
+                    let _ = update_tx.send(available);
+                }
+            });
+        }
         let yes = config.yes;
         let branch = git_branch(&config.workspace);
         let papercuts = crate::papercuts::PapercutStore::load(
@@ -827,6 +853,7 @@ impl App {
             services_reloading: false,
             services_tx,
             services_rx,
+            update_rx,
             allow_mutations: Arc::new(AtomicBool::new(yes)),
             receiving_delta: false,
             tool_started: None,
@@ -2818,6 +2845,9 @@ impl App {
             }
             ConfigKey::Animations => self.settings.ui.animations = !self.settings.ui.animations,
             ConfigKey::Tooltips => self.settings.ui.show_tooltips = !self.settings.ui.show_tooltips,
+            ConfigKey::CheckUpdates => {
+                self.settings.ui.check_updates = !self.settings.ui.check_updates
+            }
             ConfigKey::DraftReplies => {
                 self.settings.ui.draft_replies = !self.settings.ui.draft_replies;
                 if !self.settings.ui.draft_replies {
@@ -3045,6 +3075,7 @@ impl App {
             ConfigKey::Animations => on_off(self.settings.ui.animations),
             ConfigKey::Tooltips => on_off(self.settings.ui.show_tooltips),
             ConfigKey::DraftReplies => on_off(self.settings.ui.draft_replies),
+            ConfigKey::CheckUpdates => on_off(self.settings.ui.check_updates),
             ConfigKey::TraceLogging => match (&self.trace, self.settings.trace.enabled) {
                 (Some(trace), true) => format!("On · {} records", trace.steps()),
                 (None, true) => "On".to_owned(),
@@ -3493,6 +3524,17 @@ impl App {
                 .map_err(|error| format!("{error:#}"));
             let _ = sender.send(ServicesResult { result });
         });
+    }
+
+    /// Surface a newer release once, as an ordinary transcript line. It is a
+    /// notice, not a prompt: nothing is downloaded and nothing is blocked.
+    fn drain_update_events(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(available) = self.update_rx.try_recv() {
+            changed = true;
+            self.push_entry(Entry::new(EntryKind::System, available.message()));
+        }
+        changed
     }
 
     fn drain_services_events(&mut self) -> bool {
@@ -3958,6 +4000,7 @@ async fn event_loop(
         dirty |= app.drain_agent_events();
         dirty |= app.drain_feedback_events();
         dirty |= app.drain_services_events();
+        dirty |= app.drain_update_events();
         dirty |= app.drain_draft_events();
         // A worker that finished after its turn ended delivers here.
         dirty |= app.deliver_pending_injections();
@@ -4811,8 +4854,12 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     app.hits.borrow_mut().clear();
     // Grow with the text as it wraps, not just with explicit newlines: the
     // composer text column is the frame minus borders, padding, and the prompt
-    // gutter. Capped so a long draft never crowds out the transcript.
-    let composer_text_width = area.width.saturating_sub(6).max(1) as usize;
+    // gutter — measured at the width the composer is actually *drawn* at, which
+    // on a wide terminal is the centred content cap, not the whole frame.
+    // Measuring the frame instead counted fewer wrapped rows than were
+    // rendered, so past a certain draft length the box stopped growing and the
+    // earlier lines scrolled out of sight.
+    let composer_text_width = area.width.min(CONTENT_COLUMNS).saturating_sub(6).max(1) as usize;
     app.composer_width = composer_text_width as u16;
     let input_height = (app.input.wrapped_line_count(composer_text_width) as u16 + 2).clamp(3, 12);
     let task_height = u16::from(app.goal.snapshot().is_some() || app.ralph_loop.is_some()) * 2
@@ -4830,14 +4877,14 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .split(area);
 
     draw_header(frame, chunks[0], app);
-    let transcript = ui::measure(chunks[1], 112);
+    let transcript = ui::measure(chunks[1], CONTENT_COLUMNS);
     draw_transcript(frame, transcript, app);
     if task_height > 0 {
-        draw_task_bar(frame, ui::measure(chunks[2], 112), app);
+        draw_task_bar(frame, ui::measure(chunks[2], CONTENT_COLUMNS), app);
     }
-    let input = ui::measure(chunks[3], 112);
+    let input = ui::measure(chunks[3], CONTENT_COLUMNS);
     draw_input(frame, input, app);
-    draw_footer(frame, ui::measure(chunks[4], 112), app);
+    draw_footer(frame, ui::measure(chunks[4], CONTENT_COLUMNS), app);
     draw_completion_popup(frame, input, app);
     // The picker is checked first because it can be opened *from* the config
     // panel; behind it, the panel would be drawn over its own child and the
@@ -5136,6 +5183,8 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
 
 /// Columns held back for the scrollbar: one blank gap, one track.
 const SCROLLBAR_COLUMNS: u16 = 2;
+/// Content is centred and capped at this width on wide terminals.
+const CONTENT_COLUMNS: u16 = 112;
 
 /// A hairline scrollbar on the right edge of the transcript. Drawn only when
 /// the content actually overflows, so a short session has no chrome at all.
@@ -7441,6 +7490,7 @@ fn config_label(key: ConfigKey) -> &'static str {
         ConfigKey::Animations => "Animations",
         ConfigKey::Tooltips => "Welcome tips",
         ConfigKey::DraftReplies => "Draft next message",
+        ConfigKey::CheckUpdates => "Update reminder",
         ConfigKey::TraceLogging => "Training traces",
         ConfigKey::MaxSteps => "Maximum agent steps",
         ConfigKey::ContextWindow => "Context window",
@@ -7764,6 +7814,34 @@ mod tests {
         assert!(app.slash_command("/effort ludicrous"));
         assert_eq!(app.entries.last().unwrap().kind, EntryKind::Error);
         assert!(app.config.reasoning_effort.is_none());
+    }
+
+    /// The composer is drawn at the centred content cap, not the frame width.
+    /// Measuring the frame counted fewer wrapped rows than were rendered, so on
+    /// a wide terminal the box stopped growing and finished lines scrolled out
+    /// of sight — 320 characters rendered into a box with room for 214.
+    #[test]
+    fn composer_height_is_measured_at_the_width_it_is_drawn_at() {
+        // The two must agree for every terminal width, narrow or wide.
+        for frame_width in [40_u16, 80, 112, 150, 300] {
+            let measured = frame_width.min(CONTENT_COLUMNS).saturating_sub(6).max(1);
+            let drawn = ui::measure(
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: frame_width,
+                    height: 10,
+                },
+                CONTENT_COLUMNS,
+            )
+            .width
+            .saturating_sub(6)
+            .max(1);
+            assert_eq!(
+                measured, drawn,
+                "at {frame_width} columns the composer measures {measured} but draws {drawn}"
+            );
+        }
     }
 
     #[tokio::test]

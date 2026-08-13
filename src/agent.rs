@@ -277,15 +277,27 @@ async fn run_turn_inner(
     // call, not one per step.
     let mut command_verdicts: HashMap<String, bool> = HashMap::new();
     let mut active_mode = options.mode;
-    // The first intent snapshot runs *beside* the turn rather than after it.
-    // Intent is the user's, and the prompt already states it in full, so the
-    // call needs nothing the model is about to produce — starting it now and
+    // The intent snapshot runs *beside* the turn rather than after it. Intent
+    // is the user's, and the prompt already states it in full, so the call
+    // needs nothing the model is about to produce — starting it now and
     // collecting it at the end costs the user no waiting at all.
+    //
+    // It refreshes on every turn, because every turn is a new user prompt and
+    // that is exactly when the intent can change. Refreshing only before
+    // rolling-summary compaction meant a big-context model never refreshed at
+    // all: no pressure, no compaction, so a snapshot taken from an opening
+    // "hi" stayed the yardstick for an entire session of agreed work.
+    let first_snapshot = options.tether.intent().is_none();
     let mut intent_capture: Option<tokio::task::JoinHandle<Option<String>>> =
-        (options.session_id.is_some() && options.tether.intent().is_none()).then(|| {
-            let (aux, snapshot, cancel) = (aux.clone(), messages.clone(), options.cancel.clone());
+        options.session_id.is_some().then(|| {
+            let (aux, snapshot, previous, cancel) = (
+                aux.clone(),
+                messages.clone(),
+                options.tether.intent(),
+                options.cancel.clone(),
+            );
             tokio::spawn(async move {
-                crate::tether::capture_intent(&aux, &snapshot, None, &cancel).await
+                crate::tether::capture_intent(&aux, &snapshot, previous.as_deref(), &cancel).await
             })
         });
     // Best-effort: count this turn against the active goal's progress metric.
@@ -318,10 +330,10 @@ async fn run_turn_inner(
         {
             rethought = true;
             run_rethink(&aux, &messages, &options, active_mode, &events).await;
-            // Refresh the tether snapshot while the evidence is verbatim — the
-            // user may have redirected since it was taken. The snapshot is
-            // owned, so this can outlive the compaction that erases the
-            // history it was taken from, and the turn does not wait on it.
+            // Refresh the tether snapshot while the evidence is still
+            // verbatim — this is the one point mid-turn where history is about
+            // to be replaced by a summary. The snapshot is owned, so it can
+            // outlive that compaction, and the turn does not wait on it.
             if options.session_id.is_some() {
                 let (aux, snapshot, previous, tether, cancel) = (
                     aux.clone(),
@@ -465,16 +477,17 @@ async fn run_turn_inner(
         if options.tether.step_and_check_due()
             && let Some(intent) = options.tether.intent()
         {
-            let (aux, snapshot, tether, cancel, notices) = (
+            let (aux, snapshot, plan, tether, cancel, notices) = (
                 aux.clone(),
                 messages.clone(),
+                crate::tether::agreed_plan(&options.goal, &options.tasks),
                 options.tether.clone(),
                 options.cancel.clone(),
                 events.clone(),
             );
             tokio::spawn(async move {
                 if let Some(correction) =
-                    crate::tether::check_drift(&aux, &intent, &snapshot, &cancel).await
+                    crate::tether::check_drift(&aux, &intent, &plan, &snapshot, &cancel).await
                 {
                     tether.set_correction(correction.clone());
                     let _ = notices.send(AgentEvent::Notice(format!("tether — {correction}")));
@@ -510,10 +523,13 @@ async fn run_turn_inner(
             // notice lands with the answer instead of seconds behind it.
             if let Some(handle) = intent_capture.take()
                 && let Ok(Some(intent)) = handle.await
-                && options.tether.intent().is_none()
             {
                 options.tether.set_intent(intent.clone());
-                let _ = events.send(AgentEvent::Notice(format!("tethered — {intent}")));
+                // Only the first snapshot is announced; a refresh every turn
+                // would be noise.
+                if first_snapshot {
+                    let _ = events.send(AgentEvent::Notice(format!("tethered — {intent}")));
+                }
             }
             let _ = events.send(AgentEvent::Done {
                 messages,

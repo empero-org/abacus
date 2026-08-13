@@ -741,6 +741,10 @@ pub struct UiSettings {
     /// it apart from the answer.
     #[serde(default = "default_true")]
     pub show_thinking: bool,
+    /// Check GitHub for a newer version tag on startup, at most once a day,
+    /// and say so in the transcript. Never downloads or installs anything.
+    #[serde(default = "default_true")]
+    pub check_updates: bool,
     /// Show a live generation rate while a turn runs. Off by default — it is a
     /// diagnostic, and a number that moves every frame is a distraction when
     /// you are reading.
@@ -819,6 +823,7 @@ impl Default for UiSettings {
             show_tooltips: true,
             theme: crate::theme::ThemeChoice::Auto,
             show_thinking: true,
+            check_updates: true,
             show_token_rate: false,
             draft_replies: true,
         }
@@ -931,6 +936,8 @@ pub struct AbacusPaths {
     pub hive_file: PathBuf,
     pub endpoints_dir: PathBuf,
     pub modes_file: PathBuf,
+    /// Caches the last release check so startup asks GitHub at most daily.
+    pub update_file: PathBuf,
 }
 
 impl AbacusPaths {
@@ -957,6 +964,7 @@ impl AbacusPaths {
             hive_file: root.join("hive.json"),
             endpoints_dir: root.join("endpoints"),
             modes_file: root.join("modes.json"),
+            update_file: root.join("update.json"),
             root,
         }
     }

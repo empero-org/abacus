@@ -438,7 +438,10 @@ mod tests {
             "https://cli-chat-proxy.grok.com/v1/chat/completions"
         );
         let auth = endpoint.auth.as_ref().expect("grok-oauth has auth");
-        assert!(auth.command.is_some(), "token comes from a command, not a literal");
+        assert!(
+            auth.command.is_some(),
+            "token comes from a command, not a literal"
+        );
         assert!(auth.token.is_none(), "no inline token in the shipped file");
         assert_eq!(auth.header, "Authorization");
         assert_eq!(auth.format, "Bearer {token}");

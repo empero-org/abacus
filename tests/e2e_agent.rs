@@ -1169,6 +1169,110 @@ async fn shipped_grok_example_sends_a_bearer_key_to_an_openai_shaped_endpoint() 
     );
 }
 
+/// A snapshot taken from an opening "hi" used to be the yardstick forever: the
+/// only refresh ran before rolling-summary compaction, which a big-context
+/// model never reaches. Every turn now refreshes it, carrying the previous
+/// snapshot so the call updates rather than starts over.
+#[tokio::test]
+async fn a_later_turn_refreshes_a_stale_intent_snapshot() {
+    let directory = tempdir().unwrap();
+    let workspace = directory.path().join("project");
+    std::fs::create_dir(&workspace).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let intent_request: Arc<std::sync::Mutex<String>> = Arc::default();
+    let probe = intent_request.clone();
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let probe = probe.clone();
+            tokio::spawn(async move {
+                let request = String::from_utf8(read_request(&mut stream).await).unwrap();
+                let is_intent = request.contains("You summarise coding-agent sessions");
+                let body = if is_intent {
+                    *probe.lock().unwrap() = request;
+                    concat!(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"Build the SaaS backend: auth, plans, billing.\"}}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )
+                } else {
+                    concat!(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"on it\"}}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            });
+        }
+    });
+
+    let config = test_config(&directory, &workspace, address);
+    let provider = Provider::new(&config).unwrap();
+    // The session already carries the thin snapshot from its opening turn.
+    let stale = "The user greeted the agent and pointed it at empero.org as a theme guide.";
+    let tether = abacus_agent::tether::TetherState::new(Some(stale.to_owned()));
+
+    let mut messages = initial_messages(&workspace);
+    messages.push(json!({"role":"user","content":"hi! use empero.org as the theme guide"}));
+    messages.push(json!({"role":"assistant","content":"Sure — what shall we build?"}));
+    messages
+        .push(json!({"role":"user","content":"build the full SaaS backend: auth, plans, billing"}));
+
+    let (events, mut receiver) = mpsc::unbounded_channel();
+    let agent = tokio::spawn(run_turn(
+        provider,
+        messages,
+        TurnOptions {
+            session_id: Some("session-under-test".into()),
+            tether: tether.clone(),
+            ..base_options(&workspace)
+        },
+        events,
+    ));
+    let mut notices = Vec::new();
+    while let Some(event) = receiver.recv().await {
+        match event {
+            AgentEvent::Notice(text) => notices.push(text),
+            AgentEvent::Done { .. } => break,
+            AgentEvent::Failed { error, .. } => panic!("agent failed: {error}"),
+            _ => {}
+        }
+    }
+    agent.await.unwrap();
+    server.await.unwrap();
+
+    let request = intent_request.lock().unwrap().clone();
+    assert!(
+        !request.is_empty(),
+        "a later turn still snapshots the intent"
+    );
+    assert!(
+        request.contains("Previous intent snapshot"),
+        "the refresh updates rather than starting over: {request}"
+    );
+    assert!(
+        request.contains("build the full SaaS backend"),
+        "and it sees what the user has since asked for"
+    );
+    assert_eq!(
+        tether.intent().as_deref(),
+        Some("Build the SaaS backend: auth, plans, billing."),
+        "the stale snapshot is replaced"
+    );
+    assert!(
+        !notices.iter().any(|notice| notice.starts_with("tethered")),
+        "a refresh is silent — only the first snapshot is announced: {notices:?}"
+    );
+}
+
 /// Defaults for tests that only care about one or two options.
 fn base_options(workspace: &std::path::Path) -> TurnOptions {
     TurnOptions {
