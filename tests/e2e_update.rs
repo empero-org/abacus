@@ -1,6 +1,6 @@
 //! The release check against a stand-in for GitHub's tag API.
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 /// Serve one tag list and hand back the URL to point the checker at.
@@ -11,6 +11,25 @@ async fn tag_server(body: &'static str) -> (String, tokio::task::JoinHandle<usiz
         let mut served = 0;
         while let Ok((mut stream, _)) = listener.accept().await {
             served += 1;
+            // Drain the request (up to the end of the headers) before
+            // answering. Answering and closing while the client is still
+            // sending aborts its connection on Windows (WSAECONNABORTED,
+            // os error 10053), which fails the fetch.
+            let mut request = [0_u8; 8192];
+            let mut read = 0;
+            while read < request.len() {
+                let n = stream.read(&mut request[read..]).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                read += n;
+                if request[..read]
+                    .windows(4)
+                    .any(|window| window == b"\r\n\r\n")
+                {
+                    break;
+                }
+            }
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                 body.len(),
