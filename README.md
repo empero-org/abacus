@@ -396,6 +396,14 @@ pass as reference material, and credentials are refused outright: `~/.ssh`,
 files with no extension and formats that routinely hold tokens, is judged once
 and remembered. **Writing never leaves the workspace**, approved or not.
 
+Environment files follow the same shape. Committed templates —
+`.env.example`, `.env.sample`, `.env.template`, `.env.dist`, `.env.defaults` —
+are read without asking, since publishing placeholders is the point of them.
+`.env.production` and friends are refused outright. A real `.env` or
+`.env.local` is judged once rather than banned, because "what is this app
+configured with" is often the question a plan turns on. Writing to any of them
+is unchanged and still refused.
+
 The old rule banned every absolute path, in every mode. It did not stop the
 agent seeing those files — it had a shell — it taught it to reach them the
 expensive way, through an interpreter, which is the reward-hacking loop testers

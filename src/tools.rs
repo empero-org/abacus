@@ -278,7 +278,7 @@ impl ToolExecutor {
 
     fn read_file_range(&self, raw_path: &str, offset: usize, limit: usize) -> Result<String> {
         let path = self.resolve_for_read(raw_path)?;
-        guard_secret(&path)?;
+        guard_secret_read(&path, &self.outside_reads)?;
         if path.metadata()?.len() > 10_000_000 {
             bail!("file is larger than the 10 MB read limit");
         }
@@ -1766,6 +1766,29 @@ fn skip_vcs_dir(entry: &ignore::DirEntry) -> bool {
     )
 }
 
+/// The read-side guard. Templates pass, production files never do, and a real
+/// `.env` passes only once the safety layer has cleared it. Writes keep the
+/// strict `guard_secret` below — loosening reads is about answering config
+/// questions, not about editing anyone's credentials.
+fn guard_secret_read(path: &Path, approved: &OutsideReads) -> Result<()> {
+    match crate::safety::env_file_verdict(path) {
+        crate::safety::Verdict::Allow => Ok(()),
+        crate::safety::Verdict::Deny => {
+            bail!("access to production environment files is blocked")
+        }
+        crate::safety::Verdict::Unclear => {
+            if approved
+                .read()
+                .is_ok_and(|approved| approved.contains(path))
+            {
+                Ok(())
+            } else {
+                bail!("access to this environment file was not approved")
+            }
+        }
+    }
+}
+
 fn guard_secret(path: &Path) -> Result<()> {
     for component in path.components() {
         let name = component.as_os_str().to_string_lossy().to_ascii_lowercase();
@@ -2222,23 +2245,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blocks_dotenv_but_allows_example() {
+    async fn env_templates_are_readable_and_real_ones_need_clearing() {
         let dir = tempdir().unwrap();
-        fs::write(dir.path().join(".env"), "TOKEN=nope").unwrap();
-        fs::write(dir.path().join(".env.example"), "TOKEN=").unwrap();
-        let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
-        let blocked = ToolCall {
+        // Every one of these was refused by the old rule, which allowed only
+        // the exact name `.env.example` — the strictness testers hit.
+        for name in [
+            ".env.example",
+            ".env.sample",
+            ".env.template",
+            ".env.dist",
+            ".env.defaults",
+        ] {
+            fs::write(dir.path().join(name), format!("TOKEN= # {name}")).unwrap();
+        }
+        fs::write(dir.path().join(".env"), "TOKEN=live-value").unwrap();
+        fs::write(dir.path().join(".env.production"), "TOKEN=prod-value").unwrap();
+
+        let approved = OutsideReads::default();
+        let tools = ToolExecutor::new(dir.path().canonicalize().unwrap())
+            .with_outside_reads(approved.clone());
+        let read = |path: &str| ToolCall {
             id: "1".into(),
             name: "read_file".into(),
-            arguments: r#"{"path":".env"}"#.into(),
+            arguments: format!(r#"{{"path":"{path}"}}"#),
         };
-        let allowed = ToolCall {
-            id: "2".into(),
-            name: "read_file".into(),
-            arguments: r#"{"path":".env.example"}"#.into(),
-        };
-        assert!(tools.execute(&blocked).await.contains("blocked"));
-        assert!(tools.execute(&allowed).await.contains("TOKEN="));
+
+        for name in [
+            ".env.example",
+            ".env.sample",
+            ".env.template",
+            ".env.dist",
+            ".env.defaults",
+        ] {
+            let output = tools.execute(&read(name)).await;
+            assert!(output.contains("TOKEN="), "{name} should read: {output}");
+        }
+
+        // A real one is not banned outright — it waits to be cleared.
+        let pending = tools.execute(&read(".env")).await;
+        assert!(pending.contains("not approved"), "{pending}");
+        assert!(!pending.contains("live-value"), "no contents leaked");
+        approved
+            .write()
+            .unwrap()
+            .insert(dir.path().canonicalize().unwrap().join(".env"));
+        assert!(tools.execute(&read(".env")).await.contains("live-value"));
+
+        // Production is the one case still refused whatever anyone decides.
+        let production = tools.execute(&read(".env.production")).await;
+        assert!(production.contains("production"), "{production}");
+        assert!(!production.contains("prod-value"), "no contents leaked");
     }
 
     #[tokio::test]

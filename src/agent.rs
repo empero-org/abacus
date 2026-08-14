@@ -675,6 +675,34 @@ async fn run_turn_inner(
                 let Ok(canonical) = joined.canonicalize() else {
                     continue; // A missing path fails later, with a better message.
                 };
+                // Environment files are judged wherever they live: templates
+                // pass, production never does, and a real `.env` is cleared
+                // once rather than banned — a config question is often exactly
+                // what the plan needs answered.
+                let env_verdict = crate::safety::env_file_verdict(&canonical);
+                let env_cleared = match env_verdict {
+                    crate::safety::Verdict::Allow => true,
+                    crate::safety::Verdict::Deny => false,
+                    crate::safety::Verdict::Unclear => {
+                        crate::safety::env_file_is_readable(&safety_model, &safety, &canonical)
+                            .await
+                    }
+                };
+                if !env_cleared {
+                    path_refusal = Some(format!(
+                        "Refused to read {}: it looks like a live environment file rather than a \
+                         template. Ask the user for the values the plan needs.",
+                        canonical.display()
+                    ));
+                    break;
+                }
+                // A cleared-but-not-obvious env file is recorded, since the
+                // executor re-checks it and cannot ask a model itself.
+                if env_verdict == crate::safety::Verdict::Unclear
+                    && let Ok(mut approved) = outside_reads.write()
+                {
+                    approved.insert(canonical.clone());
+                }
                 if canonical.starts_with(&options.workspace) {
                     continue;
                 }
