@@ -8594,7 +8594,10 @@ mod tests {
 
         delta(&mut app, "the model was saying this");
         // The user steers; their message becomes its own block.
-        app.push_entry(Entry::new(EntryKind::User, "GLM-5.3 drops tomorrow".to_owned()));
+        app.push_entry(Entry::new(
+            EntryKind::User,
+            "GLM-5.3 drops tomorrow".to_owned(),
+        ));
         // The model keeps streaming.
         delta(&mut app, "and kept going afterwards");
 
@@ -8608,7 +8611,11 @@ mod tests {
             "the user's block must hold only what the user typed"
         );
         let last = app.entries.last().unwrap();
-        assert_eq!(last.kind, EntryKind::Assistant, "a fresh block for the model");
+        assert_eq!(
+            last.kind,
+            EntryKind::Assistant,
+            "a fresh block for the model"
+        );
         assert_eq!(last.text, "and kept going afterwards");
     }
 
@@ -8618,7 +8625,10 @@ mod tests {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
         app.settings.ui.show_thinking = true;
         reasoning(&mut app, "weighing the options");
-        app.push_entry(Entry::new(EntryKind::System, "noted — a side question".to_owned()));
+        app.push_entry(Entry::new(
+            EntryKind::System,
+            "noted — a side question".to_owned(),
+        ));
         reasoning(&mut app, "still weighing them");
 
         let system = app
