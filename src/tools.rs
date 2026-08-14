@@ -138,7 +138,13 @@ pub struct ToolExecutor {
     root: PathBuf,
     output_limit: usize,
     web: crate::web::WebConfig,
+    /// Canonical paths outside the workspace that the safety layer has cleared
+    /// for reading. Shared with the caller, which fills it in before dispatch.
+    outside_reads: OutsideReads,
 }
+
+/// Shared set of approved out-of-workspace read paths.
+pub type OutsideReads = std::sync::Arc<std::sync::RwLock<std::collections::HashSet<PathBuf>>>;
 
 impl ToolExecutor {
     pub fn new(root: PathBuf) -> Self {
@@ -146,6 +152,7 @@ impl ToolExecutor {
             root,
             output_limit: MAX_OUTPUT,
             web: crate::web::WebConfig::default(),
+            outside_reads: OutsideReads::default(),
         }
     }
 
@@ -154,7 +161,15 @@ impl ToolExecutor {
             root,
             output_limit: output_limit.clamp(2_000, 200_000),
             web: crate::web::WebConfig::default(),
+            outside_reads: OutsideReads::default(),
         }
+    }
+
+    /// Share the approved-read set with the caller, which decides what goes in
+    /// it before a tool runs.
+    pub fn with_outside_reads(mut self, approved: OutsideReads) -> Self {
+        self.outside_reads = approved;
+        self
     }
 
     /// Attach the resolved web-search configuration (enables `web_search` /
@@ -262,7 +277,7 @@ impl ToolExecutor {
     }
 
     fn read_file_range(&self, raw_path: &str, offset: usize, limit: usize) -> Result<String> {
-        let path = self.resolve_existing(raw_path)?;
+        let path = self.resolve_for_read(raw_path)?;
         guard_secret(&path)?;
         if path.metadata()?.len() > 10_000_000 {
             bail!("file is larger than the 10 MB read limit");
@@ -306,7 +321,7 @@ impl ToolExecutor {
         }
 
         let args: Args = parse_args(arguments)?;
-        let base = self.resolve_existing(&args.path)?;
+        let base = self.resolve_for_read(&args.path)?;
         let depth = args.depth.clamp(1, 8);
         let mut entries = Vec::new();
 
@@ -367,7 +382,7 @@ impl ToolExecutor {
         };
         let regex = Regex::new(&expression).context("invalid regular expression")?;
         let globs = build_globs(&args.glob)?;
-        let base = self.resolve_existing(&args.path)?;
+        let base = self.resolve_for_read(&args.path)?;
         let context = args.context.clamp(0, 10);
         let max_results = args.max_results.clamp(1, 2_000);
         let mut matches = Vec::new();
@@ -478,7 +493,7 @@ impl ToolExecutor {
         let matcher = Glob::new(&args.pattern)
             .context("invalid glob pattern")?
             .compile_matcher();
-        let base = self.resolve_existing(&args.path)?;
+        let base = self.resolve_for_read(&args.path)?;
         let max_results = args.max_results.clamp(1, 5_000);
         let mut results = Vec::new();
         for entry in WalkBuilder::new(base)
@@ -1303,6 +1318,37 @@ impl ToolExecutor {
         ))
     }
 
+    /// Resolve a path for *reading*. Unlike the write resolvers this may leave
+    /// the workspace, but only for a path the safety layer has already
+    /// approved. Banning outside reads outright did not stop the agent seeing
+    /// those files — it had a shell — it just taught it to reach them the
+    /// expensive way, through an interpreter.
+    fn resolve_for_read(&self, raw: &str) -> Result<PathBuf> {
+        let path = Path::new(raw);
+        let joined = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.root.join(path)
+        };
+        let canonical = joined
+            .canonicalize()
+            .with_context(|| format!("path does not exist: {raw}"))?;
+        if canonical.starts_with(&self.root) {
+            return Ok(canonical);
+        }
+        if self
+            .outside_reads
+            .read()
+            .is_ok_and(|approved| approved.contains(&canonical))
+        {
+            return Ok(canonical);
+        }
+        bail!(
+            "path is outside the workspace and was not approved for reading: {}",
+            canonical.display()
+        )
+    }
+
     fn resolve_existing(&self, raw: &str) -> Result<PathBuf> {
         let joined = workspace_join(&self.root, raw)?;
         let canonical = joined
@@ -2107,15 +2153,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blocks_paths_outside_workspace() {
-        let dir = tempdir().unwrap();
-        let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
+    async fn reads_outside_the_workspace_need_approval_first() {
+        let outer = tempdir().unwrap();
+        let workspace = outer.path().join("project");
+        fs::create_dir(&workspace).unwrap();
+        let secret = outer.path().join("notes.txt");
+        fs::write(&secret, "outside content").unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+
+        let approved = OutsideReads::default();
+        let tools = ToolExecutor::new(workspace).with_outside_reads(approved.clone());
         let call = ToolCall {
             id: "1".into(),
             name: "read_file".into(),
-            arguments: r#"{"path":"../secret"}"#.into(),
+            arguments: format!(r#"{{"path":"{}"}}"#, secret.display()),
         };
-        assert!(tools.execute(&call).await.contains("parent path traversal"));
+
+        // Nothing approved yet: the read is refused, and says why.
+        let refused = tools.execute(&call).await;
+        assert!(
+            refused.contains("outside the workspace"),
+            "unapproved: {refused}"
+        );
+        assert!(!refused.contains("outside content"), "no content leaked");
+
+        // The safety layer clears it, and the same call now works — this is
+        // the seam that stops the model shelling out to read the file instead.
+        approved
+            .write()
+            .unwrap()
+            .insert(secret.canonicalize().unwrap());
+        let allowed = tools.execute(&call).await;
+        assert!(allowed.contains("outside content"), "approved: {allowed}");
+    }
+
+    /// Approval covers reading only: an approved path is still not writable.
+    #[tokio::test]
+    async fn approval_does_not_extend_to_writing() {
+        let outer = tempdir().unwrap();
+        let workspace = outer.path().join("project");
+        fs::create_dir(&workspace).unwrap();
+        let target = outer.path().join("notes.txt");
+        fs::write(&target, "original").unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+
+        let approved = OutsideReads::default();
+        approved
+            .write()
+            .unwrap()
+            .insert(target.canonicalize().unwrap());
+        let tools = ToolExecutor::new(workspace).with_outside_reads(approved);
+        let call = ToolCall {
+            id: "1".into(),
+            name: "write_file".into(),
+            arguments: format!(
+                r#"{{"path":"{}","content":"overwritten"}}"#,
+                target.display()
+            ),
+        };
+        let result = tools.execute(&call).await;
+        assert!(
+            result.to_lowercase().contains("absolute")
+                || result.to_lowercase().contains("outside")
+                || result.to_lowercase().contains("escape"),
+            "writes stay confined: {result}"
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "original");
     }
 
     #[tokio::test]

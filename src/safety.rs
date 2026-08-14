@@ -464,7 +464,54 @@ pub fn read_path_verdict(path: &Path) -> Verdict {
     {
         return Verdict::Allow;
     }
+    // Source and documentation read as project material wherever they live — a
+    // sibling checkout is the ordinary reason to look outside at all. Charging
+    // a model call for each of those would rebuild, for paths, exactly the tax
+    // that made the shell side unusable.
+    const SOURCE_SUFFIXES: &[&str] = &[
+        ".rs", ".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".java", ".kt", ".rb", ".php", ".c",
+        ".h", ".cc", ".cpp", ".hpp", ".cs", ".swift", ".scala", ".clj", ".ex", ".exs", ".erl",
+        ".hs", ".ml", ".lua", ".sh", ".bash", ".zsh", ".fish", ".sql", ".proto", ".md", ".rst",
+        ".txt", ".adoc", ".toml", ".lock", ".cfg", ".ini", ".gradle", ".cmake", ".mk", ".css",
+        ".scss", ".html", ".vue", ".svelte",
+    ];
+    if SOURCE_SUFFIXES.iter().any(|suffix| text.ends_with(suffix)) {
+        return Verdict::Allow;
+    }
+    // Everything else — no extension, dotfiles, and the data formats that
+    // routinely hold tokens — is judged rather than presumed either way.
     Verdict::Unclear
+}
+
+/// The path arguments a read tool would open. Used to clear them before the
+/// tool runs, since the executor resolves paths synchronously and cannot ask a
+/// model anything.
+pub fn read_paths(name: &str, arguments: &str) -> Vec<String> {
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return Vec::new();
+    };
+    let one = |key: &str| {
+        args[key]
+            .as_str()
+            .map(str::to_owned)
+            .filter(|value| !value.trim().is_empty())
+            .into_iter()
+            .collect::<Vec<_>>()
+    };
+    match name {
+        "read_file" => one("path"),
+        "list_files" | "grep" | "glob" => one("path"),
+        "read_files" => args["paths"]
+            .as_array()
+            .map(|paths| {
+                paths
+                    .iter()
+                    .filter_map(|path| path.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
 }
 
 /// Memoised classifier answers, shared for the whole session so a command the
@@ -674,11 +721,23 @@ mod tests {
         for path in ["/usr/include/stdio.h", "/etc/os-release", "/proc/cpuinfo"] {
             assert_eq!(read_path_verdict(Path::new(path)), Verdict::Allow, "{path}");
         }
-        // A sibling checkout is the case worth judging rather than presuming.
+        // A sibling checkout reads as project material, with no model call.
         assert_eq!(
             read_path_verdict(Path::new("/home/op/other-project/src/main.rs")),
-            Verdict::Unclear
+            Verdict::Allow
         );
+        // Formats that routinely hold tokens are judged, not presumed.
+        for judged in [
+            "/home/op/other/credentials.json",
+            "/home/op/other/service-account.yaml",
+            "/home/op/.config/app/state",
+        ] {
+            assert_eq!(
+                read_path_verdict(Path::new(judged)),
+                Verdict::Unclear,
+                "{judged}"
+            );
+        }
     }
 
     #[test]

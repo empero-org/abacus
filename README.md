@@ -388,6 +388,19 @@ never reach a model:
 Verdicts are cached for the session, and `Safety classifier` in `/config`
 chooses whether the auxiliary or the main model does the judging.
 
+Reading is judged the same way, and it is no longer confined to the workspace.
+Source and documentation are read wherever they live — a sibling checkout is
+the ordinary reason to look outside — `/usr`, `/etc/os-release` and the like
+pass as reference material, and credentials are refused outright: `~/.ssh`,
+`.aws/credentials`, `.netrc`, `*.pem`, private keys. Anything else, including
+files with no extension and formats that routinely hold tokens, is judged once
+and remembered. **Writing never leaves the workspace**, approved or not.
+
+The old rule banned every absolute path, in every mode. It did not stop the
+agent seeing those files — it had a shell — it taught it to reach them the
+expensive way, through an interpreter, which is the reward-hacking loop testers
+were watching burn tokens.
+
 This replaces a rule that blocked every shell command unless a model call
 rescued it — and that call was told to refuse whenever it was unsure, so
 interpreters were refused on capability alone. Models noticed, recorded

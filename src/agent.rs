@@ -231,9 +231,13 @@ async fn run_turn_inner(
     mut options: TurnOptions,
     events: mpsc::UnboundedSender<AgentEvent>,
 ) {
+    // Paths outside the workspace that the safety layer has cleared for
+    // reading. The executor consults it; the loop below fills it in.
+    let outside_reads = crate::tools::OutsideReads::default();
     let tools =
         ToolExecutor::with_output_limit(options.workspace.clone(), options.tool_output_limit)
-            .with_web(options.web_search.clone());
+            .with_web(options.web_search.clone())
+            .with_outside_reads(outside_reads.clone());
     let mut specs = options.services.tool_specs();
     specs.extend(GoalState::tool_specs());
     specs.extend(TaskList::tool_specs());
@@ -656,7 +660,47 @@ async fn run_turn_inner(
                     };
                 }
             }
-            let approved = if loop_blocked || mode_blocked {
+            // Reads that leave the workspace are cleared here, before the
+            // executor resolves them: credentials are refused outright, plain
+            // reference material passes, and the rest is judged once and
+            // remembered. Writes never take this path — they stay confined.
+            let mut path_refusal = None;
+            for raw in crate::safety::read_paths(&call.name, &call.arguments) {
+                let candidate = std::path::Path::new(&raw);
+                let joined = if candidate.is_absolute() {
+                    candidate.to_path_buf()
+                } else {
+                    options.workspace.join(candidate)
+                };
+                let Ok(canonical) = joined.canonicalize() else {
+                    continue; // A missing path fails later, with a better message.
+                };
+                if canonical.starts_with(&options.workspace) {
+                    continue;
+                }
+                let cleared = match crate::safety::read_path_verdict(&canonical) {
+                    crate::safety::Verdict::Allow => true,
+                    crate::safety::Verdict::Deny => false,
+                    crate::safety::Verdict::Unclear => {
+                        crate::safety::path_is_readable(&safety_model, &safety, &canonical).await
+                    }
+                };
+                if cleared {
+                    if let Ok(mut approved) = outside_reads.write() {
+                        approved.insert(canonical);
+                    }
+                } else {
+                    path_refusal = Some(format!(
+                        "Refused to read {}: it is outside the workspace and looks like private \
+                         data rather than project material. Ask the user for it if the plan \
+                         needs it.",
+                        canonical.display()
+                    ));
+                    break;
+                }
+            }
+
+            let approved = if loop_blocked || mode_blocked || path_refusal.is_some() {
                 false
             } else if requires_approval && !options.allow_mutations.load(Ordering::Relaxed) {
                 let details = if call.name == "spawn_subagents" {
@@ -675,7 +719,9 @@ async fn run_turn_inner(
             if mode_blocked {
                 options.modes.record_block();
             }
-            let output = if loop_blocked {
+            let output = if let Some(refusal) = path_refusal {
+                refusal
+            } else if loop_blocked {
                 "Blocked: the same tool call was requested three times. Change the approach before retrying."
                     .to_owned()
             } else if mode_blocked {

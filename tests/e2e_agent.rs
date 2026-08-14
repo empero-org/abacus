@@ -1376,6 +1376,101 @@ async fn plan_mode_runs_inspection_without_a_classifier_call() {
     );
 }
 
+/// Reading outside the workspace used to be impossible, so models detoured
+/// through an interpreter to reach a sibling checkout — extra latency to end
+/// up in the same place. It is now allowed under the safety layer, while
+/// credentials stay refused whatever anyone thinks.
+#[tokio::test]
+async fn an_outside_read_is_cleared_but_a_credential_is_not() {
+    let directory = tempdir().unwrap();
+    let workspace = directory.path().join("project");
+    std::fs::create_dir(&workspace).unwrap();
+    // A sibling checkout, and a private key, both outside the workspace.
+    let sibling = directory.path().join("other/src");
+    std::fs::create_dir_all(&sibling).unwrap();
+    std::fs::write(sibling.join("lib.rs"), "pub fn shared() {}\n").unwrap();
+    let keys = directory.path().join(".ssh");
+    std::fs::create_dir_all(&keys).unwrap();
+    std::fs::write(keys.join("id_ed25519"), "PRIVATE KEY MATERIAL\n").unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+
+    let sibling_file = sibling.join("lib.rs").canonicalize().unwrap();
+    let key_file = keys.join("id_ed25519").canonicalize().unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let calls = [
+            format!(
+                "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"c1\",\"function\":{{\"name\":\"read_file\",\"arguments\":\"{{\\\"path\\\":\\\"{}\\\"}}\"}}}}]}}}}]}}\n\ndata: [DONE]\n\n",
+                sibling_file.display()
+            ),
+            format!(
+                "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"c2\",\"function\":{{\"name\":\"read_file\",\"arguments\":\"{{\\\"path\\\":\\\"{}\\\"}}\"}}}}]}}}}]}}\n\ndata: [DONE]\n\n",
+                key_file.display()
+            ),
+            "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n"
+                .to_owned(),
+        ];
+        for body in calls {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_request(&mut stream).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.shutdown().await.unwrap();
+        }
+    });
+
+    let config = test_config(&directory, &workspace, address);
+    let provider = Provider::new(&config).unwrap();
+    let mut messages = initial_messages(&workspace);
+    messages.push(json!({"role":"user","content":"look at the sibling project"}));
+
+    let (events, mut receiver) = mpsc::unbounded_channel();
+    let agent = tokio::spawn(run_turn(
+        provider,
+        messages,
+        TurnOptions {
+            mode: AgentMode::Plan,
+            ..base_options(&workspace)
+        },
+        events,
+    ));
+
+    let mut outputs = Vec::new();
+    while let Some(event) = receiver.recv().await {
+        match event {
+            AgentEvent::ToolFinished { output, .. } => outputs.push(output),
+            AgentEvent::Done { .. } => break,
+            AgentEvent::Failed { error, .. } => panic!("agent failed: {error}"),
+            _ => {}
+        }
+    }
+    agent.await.unwrap();
+    server.await.unwrap();
+
+    assert_eq!(outputs.len(), 2, "both reads were attempted: {outputs:?}");
+    assert!(
+        outputs[0].contains("pub fn shared()"),
+        "the sibling checkout is readable: {}",
+        outputs[0]
+    );
+    assert!(
+        !outputs[1].contains("PRIVATE KEY MATERIAL"),
+        "the key must never be returned: {}",
+        outputs[1]
+    );
+    assert!(
+        outputs[1].contains("private data"),
+        "and it says why: {}",
+        outputs[1]
+    );
+}
+
 /// Defaults for tests that only care about one or two options.
 fn base_options(workspace: &std::path::Path) -> TurnOptions {
     TurnOptions {
