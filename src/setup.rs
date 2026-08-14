@@ -386,9 +386,24 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
     if settings.search.enabled {
         console::blank();
         for (index, (name, requirement)) in [
-            ("DuckDuckGo", "no API key"),
-            ("Brave", "needs BRAVE_API_KEY"),
-            ("Tavily", "needs TAVILY_API_KEY"),
+            (
+                "Automatic",
+                "picks the best of the below that is configured",
+            ),
+            ("Brave", "needs BRAVE_API_KEY — full web search"),
+            (
+                "Tavily",
+                "needs TAVILY_API_KEY — full web search, free tier",
+            ),
+            ("DuckDuckGo", "no key, encyclopedic lookups only"),
+            (
+                "SearXNG",
+                "no key — your own instance, best if you self-host",
+            ),
+            (
+                "Marginalia",
+                "no key, small independent index; slow but decent",
+            ),
         ]
         .iter()
         .enumerate()
@@ -403,13 +418,39 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
         let default = match settings.search.backend {
             SearchBackend::Brave => "2",
             SearchBackend::Tavily => "3",
-            SearchBackend::Duckduckgo => "1",
+            SearchBackend::Duckduckgo => "4",
+            SearchBackend::Searxng => "5",
+            SearchBackend::Marginalia | SearchBackend::Auto => "1",
         };
         let (backend, env_var) = match console::prompt("Search backend", Some(default))?.trim() {
             "2" => (SearchBackend::Brave, Some("BRAVE_API_KEY")),
             "3" => (SearchBackend::Tavily, Some("TAVILY_API_KEY")),
-            _ => (SearchBackend::Duckduckgo, None),
+            "4" => (SearchBackend::Duckduckgo, None),
+            "5" => (SearchBackend::Searxng, None),
+            "6" => (SearchBackend::Marginalia, None),
+            _ => (SearchBackend::Auto, None),
         };
+        // A SearXNG instance is useless without its address, so ask here
+        // rather than leaving the backend selected but inert.
+        if backend == SearchBackend::Searxng {
+            let existing = settings.search.instance_url.clone();
+            let entered = console::prompt("SearXNG instance URL", existing.as_deref())?;
+            let entered = entered.trim().trim_end_matches('/').to_owned();
+            if entered.is_empty() {
+                println!(
+                    "      {}",
+                    console::warn("no URL given — set `[search] instance_url` before searching.")
+                );
+            } else {
+                println!(
+                    "      {}",
+                    console::dim(
+                        "the instance must allow JSON: `search: formats: [html, json]` in settings.yml"
+                    )
+                );
+                settings.search.instance_url = Some(entered);
+            }
+        }
         settings.search.backend = backend;
         if let Some(env_var) = env_var
             && std::env::var(env_var)

@@ -14,13 +14,32 @@ use serde_json::Value;
 
 const USER_AGENT: &str = concat!("abacus-agent/", env!("CARGO_PKG_VERSION"));
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// Marginalia runs on hobby hardware and rate-limits an agent's traffic
+/// quickly — measured here, it stopped answering after about ten queries and
+/// then hung rather than refusing. So the wait before falling through to
+/// DuckDuckGo is kept short: a fast miss beats a slow one.
+const MARGINALIA_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PAGE_CHARS: usize = 20_000;
 
 /// Which search backend `web_search` uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchBackend {
+    /// Use whichever backend the environment can support: Brave or Tavily
+    /// when their key is present, DuckDuckGo otherwise. The default, because
+    /// the alternative default — DuckDuckGo — cannot answer most queries and
+    /// silently returned nothing for them.
     #[default]
+    Auto,
+    /// Marginalia: a small independent index, no key. Favours technical and
+    /// non-commercial pages, which suits an agent — but it runs on modest
+    /// hardware, so it is slow and sometimes times out.
+    Marginalia,
+    /// A SearXNG instance, named by `[search] instance_url`. Self-hosted ones
+    /// are the best option here: no key, no quota, and the query never leaves
+    /// infrastructure you control. Public instances mostly refuse automated
+    /// JSON access, so this is only offered when a URL is configured.
+    Searxng,
     Duckduckgo,
     Brave,
     Tavily,
@@ -29,15 +48,19 @@ pub enum SearchBackend {
 impl SearchBackend {
     fn label(self) -> &'static str {
         match self {
+            SearchBackend::Auto => "auto",
+            SearchBackend::Marginalia => "marginalia",
+            SearchBackend::Searxng => "searxng",
             SearchBackend::Duckduckgo => "duckduckgo",
             SearchBackend::Brave => "brave",
             SearchBackend::Tavily => "tavily",
         }
     }
 
-    /// Whether this backend needs an API key to function.
+    /// Whether this backend needs an API key to function. `Auto` never does:
+    /// it has already resolved to something concrete by the time it is asked.
     fn needs_key(self) -> bool {
-        !matches!(self, SearchBackend::Duckduckgo)
+        matches!(self, SearchBackend::Brave | SearchBackend::Tavily)
     }
 }
 
@@ -50,6 +73,10 @@ pub struct SearchSettings {
     pub backend: SearchBackend,
     /// Environment variable holding the API key for key-backed providers.
     pub api_key_env: Option<String>,
+    /// Base URL of a SearXNG instance, e.g. `http://localhost:8888`. The
+    /// instance must have the JSON format enabled (`search.formats: [json]`
+    /// in its settings.yml) — it is off by default in SearXNG.
+    pub instance_url: Option<String>,
 }
 
 impl Default for SearchSettings {
@@ -58,6 +85,7 @@ impl Default for SearchSettings {
             enabled: true,
             backend: SearchBackend::default(),
             api_key_env: None,
+            instance_url: None,
         }
     }
 }
@@ -65,21 +93,68 @@ impl Default for SearchSettings {
 impl SearchSettings {
     /// Resolve the runtime config, reading the API key from the environment.
     pub fn resolve(&self) -> WebConfig {
-        let default_env = match self.backend {
-            SearchBackend::Brave => Some("BRAVE_API_KEY"),
-            SearchBackend::Tavily => Some("TAVILY_API_KEY"),
-            SearchBackend::Duckduckgo => None,
+        self.resolve_with(|name| std::env::var(name).ok())
+    }
+
+    /// `resolve` with the environment injected. A parameter rather than real
+    /// env vars so the tests cannot race each other — they share one process.
+    pub fn resolve_with(&self, lookup: impl Fn(&str) -> Option<String>) -> WebConfig {
+        let read = |name: &str| {
+            lookup(name)
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
         };
-        let api_key = self
-            .api_key_env
+        // `Auto` prefers a backend that can actually answer. DuckDuckGo is the
+        // fallback rather than the choice: its Instant Answer API only covers
+        // encyclopedic lookups, so it returns nothing for most real queries.
+        let instance = self
+            .instance_url
             .as_deref()
-            .or(default_env)
-            .and_then(|name| std::env::var(name).ok())
-            .filter(|value| !value.trim().is_empty());
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(|url| url.trim_end_matches('/').to_owned());
+        let (backend, api_key) = match self.backend {
+            // Someone who has stood up a SearXNG instance meant it: no quota,
+            // no key, and nothing leaves their own infrastructure.
+            SearchBackend::Auto if instance.is_some() => (SearchBackend::Searxng, None),
+            SearchBackend::Auto => {
+                if let Some(key) = self.api_key_env.as_deref().and_then(&read) {
+                    // A named variable is an explicit choice; honour it, and
+                    // guess the provider from whichever name was given.
+                    let named = self.api_key_env.as_deref().unwrap_or_default();
+                    let backend = if named.to_ascii_uppercase().contains("TAVILY") {
+                        SearchBackend::Tavily
+                    } else {
+                        SearchBackend::Brave
+                    };
+                    (backend, Some(key))
+                } else if let Some(key) = read("BRAVE_API_KEY") {
+                    (SearchBackend::Brave, Some(key))
+                } else if let Some(key) = read("TAVILY_API_KEY") {
+                    (SearchBackend::Tavily, Some(key))
+                } else {
+                    // No key: the best keyless index measured. It answered 4
+                    // of 7 sample queries where DuckDuckGo's Instant Answer
+                    // API answered 1, and `search` falls back to that anyway
+                    // when Marginalia is empty or slow.
+                    (SearchBackend::Marginalia, None)
+                }
+            }
+            chosen => {
+                let default_env = match chosen {
+                    SearchBackend::Brave => Some("BRAVE_API_KEY"),
+                    SearchBackend::Tavily => Some("TAVILY_API_KEY"),
+                    _ => None,
+                };
+                let key = self.api_key_env.as_deref().or(default_env).and_then(&read);
+                (chosen, key)
+            }
+        };
         WebConfig {
             enabled: self.enabled,
-            backend: self.backend,
+            backend,
             api_key,
+            instance_url: instance,
         }
     }
 }
@@ -90,6 +165,8 @@ pub struct WebConfig {
     pub enabled: bool,
     pub backend: SearchBackend,
     pub api_key: Option<String>,
+    /// Resolved SearXNG base URL, when that backend is in use.
+    pub instance_url: Option<String>,
 }
 
 impl WebConfig {
@@ -116,6 +193,30 @@ impl WebConfig {
         }
         let client = self.client()?;
         let results = match self.backend {
+            // `resolve` turns Auto into a concrete backend before a WebConfig
+            // ever exists; treating it as DuckDuckGo here would silently pick
+            // the weakest option if that ever stopped being true.
+            SearchBackend::Auto => bail!("search backend was not resolved"),
+            // Marginalia first, DuckDuckGo behind it: the small index is
+            // better on technical queries but times out often enough that
+            // failing the whole search on it would be worse than today.
+            SearchBackend::Marginalia => {
+                match marginalia_search(&client, query, max_results).await {
+                    Ok(results) if !results.is_empty() => results,
+                    _ => duckduckgo_search(&client, query, max_results)
+                        .await
+                        .unwrap_or_default(),
+                }
+            }
+            SearchBackend::Searxng => {
+                let base = self.instance_url.as_deref().ok_or_else(|| {
+                    anyhow!(
+                        "the searxng backend needs an instance URL; set `[search] instance_url` \
+                         to e.g. http://localhost:8888"
+                    )
+                })?;
+                searxng_search(&client, base, query, max_results).await?
+            }
             SearchBackend::Duckduckgo => duckduckgo_search(&client, query, max_results).await?,
             SearchBackend::Brave => {
                 brave_search(
@@ -137,6 +238,20 @@ impl WebConfig {
             }
         };
         if results.is_empty() {
+            if matches!(
+                self.backend,
+                SearchBackend::Duckduckgo | SearchBackend::Marginalia
+            ) {
+                return Ok(format!(
+                    "No results for {query:?}. This is the keyless search path: a \
+                     small independent index, with DuckDuckGo's Instant Answer API \
+                     behind it. Neither covers the whole web, so plenty of real \
+                     queries come back empty — a limit of the backend, not the \
+                     wording. Rephrasing rarely helps, so do not retry more than \
+                     once. Say so plainly, and mention that setting TAVILY_API_KEY \
+                     (free tier, no card) gives full web search."
+                ));
+            }
             return Ok(format!("No results for {query:?}."));
         }
         Ok(render_results(query, &results))
@@ -259,6 +374,113 @@ fn render_results(query: &str, results: &[SearchResult]) -> String {
 // query that instead. It surfaces a single abstract plus `Results` and
 // `RelatedTopics` lists; we flatten the most relevant entries into the common
 // `SearchResult` shape.
+
+/// Marginalia's public API. Keyless, JSON, and licensed CC-BY-NC-SA — it is a
+/// hobby-scale index, so it is queried with a short timeout and its failures
+/// are treated as "no results" rather than as errors worth surfacing.
+async fn marginalia_search(
+    client: &reqwest::Client,
+    query: &str,
+    max_results: usize,
+) -> Result<Vec<SearchResult>> {
+    #[derive(serde::Deserialize)]
+    struct Response {
+        #[serde(default)]
+        results: Vec<Entry>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        url: String,
+        #[serde(default)]
+        description: String,
+    }
+    // `path_segments_mut` percent-encodes the query for us, so no extra
+    // dependency and no hand-rolled escaping.
+    let mut url = reqwest::Url::parse("https://api.marginalia.nu/public/search/")?;
+    url.path_segments_mut()
+        .map_err(|_| anyhow!("marginalia url cannot take a path"))?
+        .pop_if_empty()
+        .push(query);
+    let response = client
+        .get(url)
+        // Well under the shared timeout: this index is often slow, and an
+        // agent waiting 20s for a maybe-empty answer is worse than a miss.
+        .timeout(MARGINALIA_TIMEOUT)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Response>()
+        .await?;
+    Ok(response
+        .results
+        .into_iter()
+        .filter(|entry| !entry.url.trim().is_empty())
+        .take(max_results)
+        .map(|entry| SearchResult {
+            title: entry.title,
+            url: entry.url,
+            snippet: entry.description,
+        })
+        .collect())
+}
+
+/// A SearXNG instance's JSON API. The instance must allow the JSON format —
+/// SearXNG ships with it disabled, so a working URL that returns HTML is the
+/// common misconfiguration, and the error says so rather than just failing to
+/// parse.
+async fn searxng_search(
+    client: &reqwest::Client,
+    base: &str,
+    query: &str,
+    max_results: usize,
+) -> Result<Vec<SearchResult>> {
+    #[derive(serde::Deserialize)]
+    struct Response {
+        #[serde(default)]
+        results: Vec<Entry>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        url: String,
+        #[serde(default)]
+        content: String,
+    }
+    let response = client
+        .get(format!("{base}/search"))
+        .query(&[("q", query), ("format", "json")])
+        .header("Accept", "application/json")
+        .send()
+        .await?
+        .error_for_status()?;
+    let body = response.text().await?;
+    let parsed: Response = serde_json::from_str(&body).map_err(|error| {
+        if body.trim_start().starts_with('<') {
+            anyhow!(
+                "{base} returned HTML, not JSON — enable the JSON format on the instance \
+                 (`search: formats: [html, json]` in its settings.yml)"
+            )
+        } else {
+            anyhow!("could not parse the SearXNG response: {error}")
+        }
+    })?;
+    Ok(parsed
+        .results
+        .into_iter()
+        .filter(|entry| !entry.url.trim().is_empty())
+        .take(max_results)
+        .map(|entry| SearchResult {
+            title: entry.title,
+            url: entry.url,
+            snippet: entry.content,
+        })
+        .collect())
+}
 
 async fn duckduckgo_search(
     client: &reqwest::Client,
@@ -709,6 +931,92 @@ mod tests {
         assert_eq!(results[4].title, "Multi-paradigm programming languages");
     }
 
+    /// The default backend used to be DuckDuckGo unconditionally, and its
+    /// Instant Answer API answers roughly one real query in seven. `Auto`
+    /// takes a backend that works whenever the environment offers one.
+    #[test]
+    fn auto_prefers_a_backend_that_can_actually_search() {
+        let settings = SearchSettings::default();
+        assert_eq!(settings.backend, SearchBackend::Auto, "auto is the default");
+
+        let resolved = settings.resolve_with(|name| match name {
+            "BRAVE_API_KEY" => Some("bk-1".into()),
+            _ => None,
+        });
+        assert_eq!(resolved.backend, SearchBackend::Brave);
+        assert_eq!(resolved.api_key.as_deref(), Some("bk-1"));
+
+        let resolved = settings.resolve_with(|name| match name {
+            "TAVILY_API_KEY" => Some("tv-1".into()),
+            _ => None,
+        });
+        assert_eq!(resolved.backend, SearchBackend::Tavily);
+
+        // Brave wins when both exist: one answer every run, not lookup order.
+        let resolved = settings.resolve_with(|_| Some("either".into()));
+        assert_eq!(resolved.backend, SearchBackend::Brave);
+
+        // No keys at all: the best keyless index, which falls through to
+        // DuckDuckGo inside `search` when it comes back empty.
+        let resolved = settings.resolve_with(|_| None);
+        assert_eq!(resolved.backend, SearchBackend::Marginalia);
+        assert!(resolved.api_key.is_none());
+        // A blank variable counts as absent, not as a key.
+        let blank = settings.resolve_with(|_| Some("   ".into()));
+        assert_eq!(blank.backend, SearchBackend::Marginalia);
+    }
+
+    /// A configured instance is an explicit decision — and the best option
+    /// available, since it has no quota and no third party.
+    #[test]
+    fn auto_prefers_a_configured_searxng_instance_over_everything() {
+        let settings = SearchSettings {
+            instance_url: Some("http://localhost:8888/".into()),
+            ..SearchSettings::default()
+        };
+        // Even with keys present, the self-hosted instance wins.
+        let resolved = settings.resolve_with(|_| Some("bk-1".into()));
+        assert_eq!(resolved.backend, SearchBackend::Searxng);
+        // The trailing slash is trimmed so `{base}/search` is not `//search`.
+        assert_eq!(
+            resolved.instance_url.as_deref(),
+            Some("http://localhost:8888")
+        );
+
+        // A blank URL is not a configuration.
+        let blank = SearchSettings {
+            instance_url: Some("   ".into()),
+            ..SearchSettings::default()
+        };
+        assert_eq!(
+            blank.resolve_with(|_| None).backend,
+            SearchBackend::Marginalia
+        );
+    }
+
+    /// An explicitly chosen backend is never second-guessed.
+    #[test]
+    fn an_explicit_backend_is_honoured_even_when_a_key_exists() {
+        let settings = SearchSettings {
+            backend: SearchBackend::Duckduckgo,
+            ..SearchSettings::default()
+        };
+        assert_eq!(
+            settings.resolve_with(|_| Some("bk-1".into())).backend,
+            SearchBackend::Duckduckgo
+        );
+
+        // A named variable under Auto is an explicit choice too.
+        let named = SearchSettings {
+            backend: SearchBackend::Auto,
+            api_key_env: Some("MY_TAVILY_KEY".into()),
+            ..SearchSettings::default()
+        };
+        let resolved = named.resolve_with(|name| (name == "MY_TAVILY_KEY").then(|| "tv-9".into()));
+        assert_eq!(resolved.backend, SearchBackend::Tavily);
+        assert_eq!(resolved.api_key.as_deref(), Some("tv-9"));
+    }
+
     #[test]
     fn ddg_skips_empty_abstract_and_empty_topics() {
         let value = serde_json::json!({
@@ -743,6 +1051,7 @@ mod tests {
             enabled: true,
             backend: SearchBackend::Brave,
             api_key: None,
+            instance_url: None,
         };
         // The async path bails before any network call; assert the precondition.
         assert!(cfg.backend.needs_key());

@@ -369,6 +369,34 @@ long ones. The stream is now mirrored where a crash can still reach it, and the
 same handlers that put the terminal back write it out. On the next start the
 text is handed straight back into the transcript, once, and the file is removed.
 
+### Web search
+
+`[search] backend` defaults to `auto`, which takes the best option available:
+your own SearXNG instance, then a Brave or Tavily key, then the keyless
+fallbacks. The keyless path is genuinely limited, and it is worth being blunt
+about why — measured over the same seven technical queries:
+
+| Backend | Key | Result |
+| --- | --- | --- |
+| `searxng` | none — your instance | Best keyless option. Unlimited, private, reliable. Needs `instance_url`, and the instance must allow JSON (`search: formats: [html, json]`). |
+| `tavily` | `TAVILY_API_KEY` | Full web search. Free tier, no card. |
+| `brave` | `BRAVE_API_KEY` | Full web search. The free tier ended in February 2026. |
+| `marginalia` | none | Answered 4 of 7 where DuckDuckGo answered 1 — but it is a hobby-scale index that rate-limits an agent quickly, so it is a bonus, not a foundation. |
+| `duckduckgo` | none | The Instant Answer API, not a web index: encyclopedic lookups only, empty for most technical queries. |
+
+With nothing configured, `auto` tries Marginalia and falls through to
+DuckDuckGo, so searches still mostly come back empty — that is a property of
+keyless search, not a bug. When they do, the tool says so plainly and tells the
+model not to keep rephrasing, which is what used to burn whole turns.
+
+Self-hosting SearXNG is the fix that costs nothing but a container:
+
+```toml
+[search]
+backend = "auto"                       # or "searxng" to pin it
+instance_url = "http://localhost:8888"
+```
+
 ### Selecting and copying
 
 A TUI that holds the mouse cannot be copied out of: capture is what gives you
@@ -450,10 +478,10 @@ dispatches through:
   (never pushes); `git_restore` reverts paths to HEAD; `git_checkout` creates or
   switches branches. The mutating Git tools are approval-gated, as is
   `run_command`, which executes a timed workspace command.
-- `web_search` queries the web (keyless DuckDuckGo by default — the Instant
-  Answer JSON API — or Brave/Tavily with a key) and `read_page` fetches an
-  `http(s)` URL as readable text. Both are read-only; `read_page` refuses
-  non-HTTP schemes and private/loopback hosts.
+- `web_search` queries the web and `read_page` fetches an `http(s)` URL as
+  readable text. Both are read-only; `read_page` refuses non-HTTP schemes and
+  private/loopback hosts. The backend defaults to `auto`, which picks the best
+  one you have configured — see [Web search](#web-search).
 - `skill_search`, `skill_load`, and `skill_read` load Agent Skills progressively.
 - `spawn_subagents` delegates independent work to parallel isolated git worktrees.
 - MCP tools surface as `mcp__<server>__<tool>`.
