@@ -373,21 +373,26 @@ text is handed straight back into the transcript, once, and the file is removed.
 
 `[search] backend` defaults to `auto`, which takes the best option available:
 your own SearXNG instance, then a Brave or Tavily key, then the keyless
-fallbacks. The keyless path is genuinely limited, and it is worth being blunt
-about why — measured over the same seven technical queries:
+chain. Keyless search is genuinely limited compared with a keyed backend, and
+it is worth being blunt about why:
 
 | Backend | Key | Result |
 | --- | --- | --- |
 | `searxng` | none — your instance | Best keyless option. Unlimited, private, reliable. Needs `instance_url`, and the instance must allow JSON (`search: formats: [html, json]`). |
 | `tavily` | `TAVILY_API_KEY` | Full web search. Free tier, no card. |
 | `brave` | `BRAVE_API_KEY` | Full web search. The free tier ended in February 2026. |
-| `marginalia` | none | Answered 4 of 7 where DuckDuckGo answered 1 — but it is a hobby-scale index that rate-limits an agent quickly, so it is a bonus, not a foundation. |
-| `duckduckgo` | none | The Instant Answer API, not a web index: encyclopedic lookups only, empty for most technical queries. |
+| `bing` | none | The engine behind DuckDuckGo, queried directly: DuckDuckGo's own html/lite pages now answer bots with an anti-bot challenge, so a keyless "DuckDuckGo search" is this. Public HTML, unofficial — may rate-limit an agent eventually. |
+| `mojeek` | none | Independent index, tolerant of automated queries, direct result links. The bot-friendly fallback. |
+| `marginalia` | none | Hobby-scale independent index; slow and rate-limits an agent quickly, so it is a bonus, not a foundation. |
+| `duckduckgo` | none | Its Instant Answer API (encyclopedic lookups only) first, then the keyless chain for real web results. |
 
-With nothing configured, `auto` tries Marginalia and falls through to
-DuckDuckGo, so searches still mostly come back empty — that is a property of
-keyless search, not a bug. When they do, the tool says so plainly and tells the
-model not to keep rephrasing, which is what used to burn whole turns.
+With nothing configured, `auto` tries Bing first and falls through to Mojeek,
+Marginalia and DuckDuckGo's Instant Answer API, so ordinary queries now get
+real results keylessly. These are public HTML endpoints, not official APIs —
+the chain exists precisely so one engine blocking or rate-limiting an agent
+falls through to the next. A query no keyless engine covers still comes back
+empty; when that happens the tool says so plainly and tells the model not to
+keep rephrasing, which is what used to burn whole turns.
 
 Self-hosting SearXNG is the fix that costs nothing but a container:
 
@@ -807,7 +812,8 @@ tool_output_limit = 30000
 
 [search]
 enabled = true
-backend = "duckduckgo"      # keyless default; or brave | tavily with an API key
+backend = "auto"              # keyless default: bing -> mojeek -> marginalia -> duckduckgo
+                              # or "searxng" with an instance_url, or brave | tavily with an API key
 ```
 
 `/config` is a keyboard-driven settings panel — profile, model, provider URL,

@@ -1,6 +1,20 @@
 # Changelog
 
-## Unreleased
+## 0.6.1 — 2026-08-14
+
+- **Keyless search works again.** DuckDuckGo's `html.duckduckgo.com/html/`
+  and `lite.duckduckgo.com/lite/` endpoints now answer automated requests
+  with an anti-bot challenge, and its only remaining keyless endpoint — the
+  Instant Answer API — cannot search the web (encyclopedic lookups only),
+  so the `duckduckgo` backend kept coming back empty. The keyless path is
+  now a chain of public engines: the `bing` and `mojeek` backends parse
+  their public HTML (Bing being the index DuckDuckGo's blocked pages used
+  to proxy, and Mojeek the bot-tolerant fallback), with Marginalia and the
+  Instant Answer API behind them. `auto` with no key now resolves to Bing
+  and falls through the chain, so a blocked or rate-limited public endpoint
+  no longer sinks the whole search. Bing's `ck/a` redirect links are
+  unwrapped back to the real URLs. New `bing` and `mojeek` `[search]`
+  backends, updated setup picker, and fixture tests for both parsers.
 
 - **Grok subscription endpoint.** A third worked scripted-endpoint example,
   `grok-oauth`, spends a `grok login` OAuth token — read fresh from

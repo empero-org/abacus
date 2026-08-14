@@ -395,7 +395,12 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
                 "Tavily",
                 "needs TAVILY_API_KEY — full web search, free tier",
             ),
-            ("DuckDuckGo", "no key, encyclopedic lookups only"),
+            (
+                "DuckDuckGo",
+                "no key, Instant Answer only; falls back to Bing",
+            ),
+            ("Bing", "no key — the index DuckDuckGo used to proxy"),
+            ("Mojeek", "no key — independent index, tolerates scripts"),
             (
                 "SearXNG",
                 "no key — your own instance, best if you self-host",
@@ -420,7 +425,10 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
             SearchBackend::Tavily => "3",
             SearchBackend::Duckduckgo => "4",
             SearchBackend::Searxng => "5",
-            SearchBackend::Marginalia | SearchBackend::Auto => "1",
+            SearchBackend::Marginalia => "6",
+            SearchBackend::Bing => "7",
+            SearchBackend::Mojeek => "8",
+            SearchBackend::Auto => "1",
         };
         let (backend, env_var) = match console::prompt("Search backend", Some(default))?.trim() {
             "2" => (SearchBackend::Brave, Some("BRAVE_API_KEY")),
@@ -428,6 +436,8 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
             "4" => (SearchBackend::Duckduckgo, None),
             "5" => (SearchBackend::Searxng, None),
             "6" => (SearchBackend::Marginalia, None),
+            "7" => (SearchBackend::Bing, None),
+            "8" => (SearchBackend::Mojeek, None),
             _ => (SearchBackend::Auto, None),
         };
         // A SearXNG instance is useless without its address, so ask here
