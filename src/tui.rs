@@ -903,6 +903,14 @@ impl App {
 
     /// Append a transcript entry, invalidating the memoised wrap.
     fn push_entry(&mut self, entry: Entry) {
+        // Any new block closes an open stream. Streaming appends to the *last*
+        // entry, so anything pushed mid-turn — a steering message, a notice, a
+        // side note — would otherwise swallow the tokens that came after it:
+        // the user's own card ending in the model's reasoning. The stream
+        // handlers set these flags again after pushing their own block, so
+        // resetting here only affects blocks that came from somewhere else.
+        self.receiving_delta = false;
+        self.receiving_thinking = false;
         self.entries_rev = self.entries_rev.wrapping_add(1);
         self.entries.push(entry);
     }
@@ -8568,6 +8576,60 @@ mod tests {
         app.cycle_config_value(ConfigKey::TraceLogging).unwrap();
         assert!(app.settings.trace.enabled);
         assert!(app.trace.is_some(), "re-enabling reopens it");
+    }
+
+    /// Steering a running turn puts the user's message into the transcript
+    /// while the model is mid-stream. The stream appends to the *last* entry,
+    /// so the model's next tokens continued inside the user's own box — one
+    /// card containing two authors, which is what testers saw.
+    #[tokio::test]
+    async fn steering_mid_stream_does_not_merge_the_user_into_the_model_block() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        let delta = |app: &mut App, text: &str| {
+            let _ = app
+                .event_tx
+                .send(crate::agent::AgentEvent::Delta(text.to_owned()));
+            app.drain_agent_events();
+        };
+
+        delta(&mut app, "the model was saying this");
+        // The user steers; their message becomes its own block.
+        app.push_entry(Entry::new(EntryKind::User, "GLM-5.3 drops tomorrow".to_owned()));
+        // The model keeps streaming.
+        delta(&mut app, "and kept going afterwards");
+
+        let user = app
+            .entries
+            .iter()
+            .find(|entry| entry.kind == EntryKind::User)
+            .expect("the steering message");
+        assert_eq!(
+            user.text, "GLM-5.3 drops tomorrow",
+            "the user's block must hold only what the user typed"
+        );
+        let last = app.entries.last().unwrap();
+        assert_eq!(last.kind, EntryKind::Assistant, "a fresh block for the model");
+        assert_eq!(last.text, "and kept going afterwards");
+    }
+
+    /// The same hazard for reasoning, which is the half the screenshot showed.
+    #[tokio::test]
+    async fn a_notice_mid_reasoning_does_not_capture_the_stream() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.settings.ui.show_thinking = true;
+        reasoning(&mut app, "weighing the options");
+        app.push_entry(Entry::new(EntryKind::System, "noted — a side question".to_owned()));
+        reasoning(&mut app, "still weighing them");
+
+        let system = app
+            .entries
+            .iter()
+            .find(|entry| entry.kind == EntryKind::System)
+            .expect("the notice");
+        assert_eq!(system.text, "noted — a side question");
+        let last = app.entries.last().unwrap();
+        assert_eq!(last.kind, EntryKind::Thinking);
+        assert_eq!(last.text, "still weighing them");
     }
 
     /// Push a reasoning chunk through the real event path.
