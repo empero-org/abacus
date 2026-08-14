@@ -745,6 +745,11 @@ pub struct UiSettings {
     /// and say so in the transcript. Never downloads or installs anything.
     #[serde(default = "default_true")]
     pub check_updates: bool,
+    /// Judge borderline commands and paths with the main model rather than the
+    /// auxiliary one. The decision gates what the agent may do, so a stronger
+    /// model is sometimes worth the cost.
+    #[serde(default)]
+    pub safety_uses_main: bool,
     /// Show a live generation rate while a turn runs. Off by default — it is a
     /// diagnostic, and a number that moves every frame is a distraction when
     /// you are reading.
@@ -824,6 +829,7 @@ impl Default for UiSettings {
             theme: crate::theme::ThemeChoice::Auto,
             show_thinking: true,
             check_updates: true,
+            safety_uses_main: false,
             show_token_rate: false,
             draft_replies: true,
         }

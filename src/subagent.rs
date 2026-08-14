@@ -595,6 +595,8 @@ impl SubagentRuntime {
             provider,
             messages,
             TurnOptions {
+                safety: crate::safety::SafetyCache::default(),
+                safety_uses_main: false,
                 // Subagent work is a different task shape from the main loop;
                 // mixing it into the same trace would blur the samples.
                 trace: None,

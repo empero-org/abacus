@@ -362,6 +362,7 @@ enum ConfigKey {
     Tooltips,
     DraftReplies,
     CheckUpdates,
+    SafetyModel,
     TraceLogging,
     MaxSteps,
     ToolOutputLimit,
@@ -406,6 +407,7 @@ const CONFIG_ROWS: &[ConfigRow] = &[
     ConfigRow::Key(ConfigKey::Tooltips),
     ConfigRow::Key(ConfigKey::DraftReplies),
     ConfigRow::Key(ConfigKey::CheckUpdates),
+    ConfigRow::Key(ConfigKey::SafetyModel),
     ConfigRow::Key(ConfigKey::TraceLogging),
     ConfigRow::Heading("PRIVACY"),
     ConfigRow::Key(ConfigKey::FeedbackEnabled),
@@ -454,6 +456,9 @@ fn config_help(key: ConfigKey) -> &'static str {
         }
         ConfigKey::CheckUpdates => {
             "Check GitHub daily for a newer version tag and say so. Never downloads anything."
+        }
+        ConfigKey::SafetyModel => {
+            "Which model judges whether a borderline command only inspects, in PLAN and AUTO."
         }
         ConfigKey::TraceLogging => {
             "Append every model call to ~/.abacus/traces as JSONL for fine-tuning. Stays local."
@@ -507,6 +512,7 @@ const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey::Tooltips,
     ConfigKey::DraftReplies,
     ConfigKey::CheckUpdates,
+    ConfigKey::SafetyModel,
     ConfigKey::TraceLogging,
     ConfigKey::FeedbackEnabled,
     ConfigKey::FeedbackDiagnostics,
@@ -596,6 +602,8 @@ struct App {
     services_rx: mpsc::UnboundedReceiver<ServicesResult>,
     /// Delivers a newer-release notice from the startup check, if there is one.
     update_rx: mpsc::UnboundedReceiver<crate::update::Available>,
+    /// Safety verdicts, kept for the session rather than the turn.
+    safety: crate::safety::SafetyCache,
     allow_mutations: Arc<AtomicBool>,
     receiving_delta: bool,
     /// When the in-flight tool call started, so the settled row can report how
@@ -854,6 +862,7 @@ impl App {
             services_tx,
             services_rx,
             update_rx,
+            safety: crate::safety::SafetyCache::default(),
             allow_mutations: Arc::new(AtomicBool::new(yes)),
             receiving_delta: false,
             tool_started: None,
@@ -1593,6 +1602,8 @@ impl App {
         let allow_mutations = self.allow_mutations.clone();
         let events = self.event_tx.clone();
         let options = TurnOptions {
+            safety: self.safety.clone(),
+            safety_uses_main: self.settings.ui.safety_uses_main,
             trace: self.trace.clone(),
             cancel: self.cancel.clone(),
             workspace: self.config.workspace.clone(),
@@ -2863,6 +2874,9 @@ impl App {
             ConfigKey::CheckUpdates => {
                 self.settings.ui.check_updates = !self.settings.ui.check_updates
             }
+            ConfigKey::SafetyModel => {
+                self.settings.ui.safety_uses_main = !self.settings.ui.safety_uses_main
+            }
             ConfigKey::DraftReplies => {
                 self.settings.ui.draft_replies = !self.settings.ui.draft_replies;
                 if !self.settings.ui.draft_replies {
@@ -3091,6 +3105,12 @@ impl App {
             ConfigKey::Tooltips => on_off(self.settings.ui.show_tooltips),
             ConfigKey::DraftReplies => on_off(self.settings.ui.draft_replies),
             ConfigKey::CheckUpdates => on_off(self.settings.ui.check_updates),
+            ConfigKey::SafetyModel => if self.settings.ui.safety_uses_main {
+                "Main model"
+            } else {
+                "Auxiliary model"
+            }
+            .to_owned(),
             ConfigKey::TraceLogging => match (&self.trace, self.settings.trace.enabled) {
                 (Some(trace), true) => format!("On · {} records", trace.steps()),
                 (None, true) => "On".to_owned(),
@@ -7601,6 +7621,7 @@ fn config_label(key: ConfigKey) -> &'static str {
         ConfigKey::Tooltips => "Welcome tips",
         ConfigKey::DraftReplies => "Draft next message",
         ConfigKey::CheckUpdates => "Update reminder",
+        ConfigKey::SafetyModel => "Safety classifier",
         ConfigKey::TraceLogging => "Training traces",
         ConfigKey::MaxSteps => "Maximum agent steps",
         ConfigKey::ContextWindow => "Context window",

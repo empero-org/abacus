@@ -108,6 +108,8 @@ async fn streamed_agent_searches_workspace_and_finishes() {
             aux_model: None,
             injections: abacus_agent::agent::InjectionQueue::default(),
             modes: abacus_agent::modes::ModeCoach::default(),
+            safety: abacus_agent::safety::SafetyCache::default(),
+            safety_uses_main: false,
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -232,6 +234,8 @@ async fn a_cancelled_turn_keeps_the_work_it_already_did() {
             aux_model: None,
             injections: abacus_agent::agent::InjectionQueue::default(),
             modes: abacus_agent::modes::ModeCoach::default(),
+            safety: abacus_agent::safety::SafetyCache::default(),
+            safety_uses_main: false,
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -420,6 +424,8 @@ async fn edit_requires_reviewable_approval_before_atomic_write() {
             aux_model: None,
             injections: abacus_agent::agent::InjectionQueue::default(),
             modes: abacus_agent::modes::ModeCoach::default(),
+            safety: abacus_agent::safety::SafetyCache::default(),
+            safety_uses_main: false,
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -515,6 +521,8 @@ async fn text_emitted_tool_calls_are_parsed_when_native_calls_absent() {
             aux_model: None,
             injections: abacus_agent::agent::InjectionQueue::default(),
             modes: abacus_agent::modes::ModeCoach::default(),
+            safety: abacus_agent::safety::SafetyCache::default(),
+            safety_uses_main: false,
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -609,6 +617,8 @@ async fn auto_mode_blocks_mutation_until_model_selects_build() {
             aux_model: None,
             injections: abacus_agent::agent::InjectionQueue::default(),
             modes: abacus_agent::modes::ModeCoach::default(),
+            safety: abacus_agent::safety::SafetyCache::default(),
+            safety_uses_main: false,
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -693,6 +703,8 @@ async fn auto_mode_selection_enables_later_tool_in_same_completion() {
             aux_model: None,
             injections: abacus_agent::agent::InjectionQueue::default(),
             modes: abacus_agent::modes::ModeCoach::default(),
+            safety: abacus_agent::safety::SafetyCache::default(),
+            safety_uses_main: false,
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -809,6 +821,8 @@ async fn rolling_summary_compaction_fires_on_large_context() {
             aux_model: None,
             injections: abacus_agent::agent::InjectionQueue::default(),
             modes: abacus_agent::modes::ModeCoach::default(),
+            safety: abacus_agent::safety::SafetyCache::default(),
+            safety_uses_main: false,
             web_search: abacus_agent::web::WebConfig::default(),
         },
         events,
@@ -1273,6 +1287,95 @@ async fn a_later_turn_refreshes_a_stale_intent_snapshot() {
     );
 }
 
+/// PLAN used to send every shell command to a classifier that was told to
+/// refuse when unsure, so `grep` cost a round trip and `python -c` was refused
+/// for what python can do rather than what the command does. Models papercut
+/// the mode as unusable. Inspection now runs directly: the mock serves the
+/// turn only, and a second connection would mean a classifier call happened.
+#[tokio::test]
+async fn plan_mode_runs_inspection_without_a_classifier_call() {
+    let directory = tempdir().unwrap();
+    let workspace = directory.path().join("project");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::write(workspace.join("notes.txt"), "the needle is here\n").unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = connections.clone();
+    let server = tokio::spawn(async move {
+        let first = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"run_command\",\"arguments\":\"{\\\"command\\\":\\\"grep -rn needle .\\\"}\"}}]}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let second = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"found it\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        for body in [first, second] {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            counter.fetch_add(1, Ordering::Relaxed);
+            let _ = read_request(&mut stream).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.shutdown().await.unwrap();
+        }
+    });
+
+    let config = test_config(&directory, &workspace, address);
+    let provider = Provider::new(&config).unwrap();
+    let mut messages = initial_messages(&workspace);
+    messages.push(json!({"role":"user","content":"where is the needle?"}));
+
+    let (events, mut receiver) = mpsc::unbounded_channel();
+    let agent = tokio::spawn(run_turn(
+        provider,
+        messages,
+        TurnOptions {
+            mode: AgentMode::Plan,
+            // Approval is a separate axis from mode; this isolates the mode
+            // gate, which is what regressed.
+            allow_mutations: Arc::new(AtomicBool::new(true)),
+            ..base_options(&workspace)
+        },
+        events,
+    ));
+
+    let mut blocked = false;
+    let mut output = String::new();
+    while let Some(event) = receiver.recv().await {
+        match event {
+            AgentEvent::ToolFinished { output: text, .. } => {
+                if text.contains("Blocked by PLAN MODE") {
+                    blocked = true;
+                }
+                output.push_str(&text);
+            }
+            AgentEvent::Done { .. } => break,
+            AgentEvent::Failed { error, .. } => panic!("agent failed: {error}"),
+            _ => {}
+        }
+    }
+    agent.await.unwrap();
+    server.await.unwrap();
+
+    assert!(!blocked, "grep only inspects: {output}");
+    assert!(
+        output.contains("needle"),
+        "the command actually ran: {output}"
+    );
+    assert_eq!(
+        connections.load(Ordering::Relaxed),
+        2,
+        "two turn requests and no classifier call in between"
+    );
+}
+
 /// Defaults for tests that only care about one or two options.
 fn base_options(workspace: &std::path::Path) -> TurnOptions {
     TurnOptions {
@@ -1297,6 +1400,8 @@ fn base_options(workspace: &std::path::Path) -> TurnOptions {
         aux_model: None,
         injections: abacus_agent::agent::InjectionQueue::default(),
         modes: abacus_agent::modes::ModeCoach::default(),
+        safety: abacus_agent::safety::SafetyCache::default(),
+        safety_uses_main: false,
         web_search: abacus_agent::web::WebConfig::default(),
     }
 }

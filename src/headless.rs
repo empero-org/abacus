@@ -472,6 +472,8 @@ fn turn_options(
     tether: &crate::tether::TetherState,
 ) -> TurnOptions {
     TurnOptions {
+        safety: crate::safety::SafetyCache::default(),
+        safety_uses_main: false,
         trace,
         cancel: Arc::new(AtomicBool::new(false)),
         workspace: config.workspace.clone(),

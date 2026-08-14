@@ -24,6 +24,7 @@ pub mod provider;
 pub mod ralph;
 pub mod recovery;
 pub mod rethink;
+pub mod safety;
 pub mod services;
 pub mod session;
 pub mod setup;

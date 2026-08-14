@@ -369,6 +369,30 @@ long ones. The stream is now mirrored where a crash can still reach it, and the
 same handlers that put the terminal back write it out. On the next start the
 text is handed straight back into the transcript, once, and the file is removed.
 
+### What PLAN mode allows
+
+PLAN is for investigating and writing a plan, so the boundary is *side
+effects*, not tools. Every shell command is judged in three tiers, and most
+never reach a model:
+
+- **Runs immediately** — recognisable inspection: `ls`, `cat`, `grep`, `rg`,
+  `find`, `git status`/`diff`/`log`, `cargo check`/`test`/`clippy`, `pytest`,
+  `npm test`, `sed -n`, pipelines of those, and `2>/dev/null` or `2>&1`.
+- **Blocked immediately** — recognisable destruction: `rm`, `mv`, `cp`, `chmod`,
+  `sudo`, `sed -i`, `find -delete`, `git push`/`reset`/`commit`, package
+  installs, and any redirect that writes a file. No appeal, no model call: a
+  classifier that is wrong about `rm -rf` is worse than one never asked.
+- **Judged** — everything else, including interpreters. `python -c 'print(1+1)'`
+  is judged on what the command does, not on what python can do.
+
+Verdicts are cached for the session, and `Safety classifier` in `/config`
+chooses whether the auxiliary or the main model does the judging.
+
+This replaces a rule that blocked every shell command unless a model call
+rescued it — and that call was told to refuse whenever it was unsure, so
+interpreters were refused on capability alone. Models noticed, recorded
+papercuts saying PLAN was unusable, and routed around it.
+
 ### Web search
 
 `[search] backend` defaults to `auto`, which takes the best option available:
