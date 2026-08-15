@@ -140,8 +140,11 @@ pub fn take(file: &Path) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// The mirror is global, so the tests share it; this keeps them honest
-    /// about resetting it rather than assuming a fresh one.
+    /// The mirror is one process-global, and cargo runs these tests on
+    /// parallel threads — so they take a lock and hold it for the duration
+    /// rather than racing each other through the same slot.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
     fn reset(file: Option<PathBuf>) {
         if let Ok(mut partial) = slot().lock() {
             *partial = Partial {
@@ -154,6 +157,7 @@ mod tests {
 
     #[test]
     fn a_stream_cut_short_is_written_out_with_both_halves() {
+        let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("recovered.md");
         reset(Some(file.clone()));
@@ -173,6 +177,7 @@ mod tests {
 
     #[test]
     fn a_turn_that_ended_normally_leaves_nothing_to_recover() {
+        let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("recovered.md");
         reset(Some(file.clone()));
@@ -186,6 +191,7 @@ mod tests {
 
     #[test]
     fn recording_before_arming_is_inert() {
+        let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
         reset(None);
         record_answer("this has nowhere to go");
         assert!(flush().is_none());

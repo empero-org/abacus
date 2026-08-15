@@ -1338,9 +1338,10 @@ async fn plan_mode_runs_inspection_without_a_classifier_call() {
         messages,
         TurnOptions {
             mode: AgentMode::Plan,
-            // Approval is a separate axis from mode; this isolates the mode
-            // gate, which is what regressed.
-            allow_mutations: Arc::new(AtomicBool::new(true)),
+            // Approval is deliberately NOT pre-granted: a command judged to
+            // change nothing should run in PLAN without a prompt, and there is
+            // nothing here that could answer one.
+            allow_mutations: Arc::new(AtomicBool::new(false)),
             ..base_options(&workspace)
         },
         events,
@@ -1365,6 +1366,10 @@ async fn plan_mode_runs_inspection_without_a_classifier_call() {
     server.await.unwrap();
 
     assert!(!blocked, "grep only inspects: {output}");
+    assert!(
+        !output.contains("User rejected"),
+        "inspection must not wait on an approval nobody can give: {output}"
+    );
     assert!(
         output.contains("needle"),
         "the command actually ran: {output}"
@@ -1468,6 +1473,82 @@ async fn an_outside_read_is_cleared_but_a_credential_is_not() {
         outputs[1].contains("private data"),
         "and it says why: {}",
         outputs[1]
+    );
+}
+
+/// The inspection skip is scoped to PLAN. BUILD can mutate, so its approval
+/// prompt is the user's control over what happens to their machine — a `grep`
+/// there must still ask, or the skip has quietly disarmed the whole gate.
+#[tokio::test]
+async fn build_mode_still_asks_before_running_a_command() {
+    let directory = tempdir().unwrap();
+    let workspace = directory.path().join("project");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::write(workspace.join("notes.txt"), "the needle is here\n").unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let first = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"run_command\",\"arguments\":\"{\\\"command\\\":\\\"grep -rn needle .\\\"}\"}}]}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let second = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        for body in [first, second] {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_request(&mut stream).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.shutdown().await.unwrap();
+        }
+    });
+
+    let config = test_config(&directory, &workspace, address);
+    let provider = Provider::new(&config).unwrap();
+    let mut messages = initial_messages(&workspace);
+    messages.push(json!({"role":"user","content":"find the needle"}));
+
+    let (events, mut receiver) = mpsc::unbounded_channel();
+    let agent = tokio::spawn(run_turn(
+        provider,
+        messages,
+        TurnOptions {
+            mode: AgentMode::Build,
+            allow_mutations: Arc::new(AtomicBool::new(false)),
+            ..base_options(&workspace)
+        },
+        events,
+    ));
+
+    let mut asked = false;
+    let mut output = String::new();
+    while let Some(event) = receiver.recv().await {
+        match event {
+            AgentEvent::Approval(_) => asked = true,
+            AgentEvent::ToolFinished { output: text, .. } => output.push_str(&text),
+            AgentEvent::Done { .. } => break,
+            AgentEvent::Failed { error, .. } => panic!("agent failed: {error}"),
+            _ => {}
+        }
+    }
+    agent.await.unwrap();
+    server.await.unwrap();
+
+    assert!(
+        asked,
+        "BUILD must still request approval for a shell command"
+    );
+    assert!(
+        !output.contains("the needle is here"),
+        "and must not run it unapproved: {output}"
     );
 }
 

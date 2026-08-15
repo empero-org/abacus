@@ -642,6 +642,12 @@ async fn run_turn_inner(
             // changes something. Inspecting — building, linting, running tests —
             // is exactly what a planning mode needs, so an unclear command costs
             // one small classification call rather than a flat refusal.
+            // Set when a command has been affirmatively judged to have no side
+            // effects. PLAN uses it to skip the approval prompt: the mode
+            // exists to investigate, and asking permission for each `ls` is the
+            // same obstacle in a politer form. It is deliberately not enough on
+            // its own — the mode still has to be PLAN.
+            let mut judged_inspection = false;
             if mode_blocked && call.name == "run_command" {
                 let command = serde_json::from_str::<Value>(&call.arguments)
                     .ok()
@@ -652,10 +658,16 @@ async fn run_turn_inner(
                         // Recognisably pure inspection, and recognisable
                         // destruction, are both settled here — no model call,
                         // no latency, and no chance of being talked round.
-                        crate::safety::Verdict::Allow => false,
+                        crate::safety::Verdict::Allow => {
+                            judged_inspection = true;
+                            false
+                        }
                         crate::safety::Verdict::Deny => true,
                         crate::safety::Verdict::Unclear => {
-                            !crate::safety::command_is_safe(&safety_model, &safety, &command).await
+                            judged_inspection =
+                                crate::safety::command_is_safe(&safety_model, &safety, &command)
+                                    .await;
+                            !judged_inspection
                         }
                     };
                 }
@@ -730,6 +742,10 @@ async fn run_turn_inner(
 
             let approved = if loop_blocked || mode_blocked || path_refusal.is_some() {
                 false
+            } else if active_mode == AgentMode::Plan && judged_inspection {
+                // Judged to change nothing, in the mode whose whole purpose is
+                // looking. Nothing to approve.
+                true
             } else if requires_approval && !options.allow_mutations.load(Ordering::Relaxed) {
                 let details = if call.name == "spawn_subagents" {
                     SubagentRuntime::approval_details(&call.arguments)

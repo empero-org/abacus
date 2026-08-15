@@ -386,7 +386,11 @@ never reach a model:
   is judged on what the command does, not on what python can do.
 
 Verdicts are cached for the session, and `Safety classifier` in `/config`
-chooses whether the auxiliary or the main model does the judging.
+chooses whether the auxiliary or the main model does the judging. In PLAN, a
+command judged to change nothing also skips the approval prompt — the mode
+exists to look around, and asking permission for each `ls` is the same
+obstacle in a politer form. BUILD is unaffected: it can mutate, so its prompt
+stays.
 
 Reading is judged the same way, and it is no longer confined to the workspace.
 Source and documentation are read wherever they live — a sibling checkout is
