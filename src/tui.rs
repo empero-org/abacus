@@ -120,6 +120,10 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/usage", "View local usage and activity"),
     ("/sessions", "Browse saved sessions"),
     ("/new", "Start a new session"),
+    (
+        "/fork",
+        "Fork the session — conversation continues in a new one",
+    ),
     ("/compact", "Compact conversation context"),
     ("/repair", "Fix corrupted session history"),
     ("/papercuts", "List or delete recorded lessons"),
@@ -570,8 +574,9 @@ struct App {
     /// Mode-discipline counts behind the escalating reminder.
     modes: crate::modes::ModeCoach,
     /// Whether Abacus is holding the mouse. Holding it enables wheel scrolling
-    /// and clickable rows but takes click-drag away from the terminal, which is
-    /// how you select and copy text — so it is releasable.
+    /// and clickable rows but takes click-drag away from the terminal on
+    /// terminals without a Shift-drag bypass, which is how you select and copy
+    /// text — so it is releasable with F2.
     mouse_captured: bool,
     /// Ctrl+P: the subagent detail overlay.
     hive_overlay: bool,
@@ -834,7 +839,7 @@ impl App {
             hive,
             injections: crate::agent::InjectionQueue::default(),
             modes,
-            mouse_captured: false,
+            mouse_captured: true,
             hive_overlay: false,
             hive_scroll: 0,
             tasks,
@@ -1641,6 +1646,10 @@ impl App {
             }
             "/clear" | "/new" => {
                 self.new_session();
+                true
+            }
+            "/fork" => {
+                self.fork_session();
                 true
             }
             "/quit" | "/q" | "/exit" => {
@@ -2505,6 +2514,75 @@ impl App {
         self.scroll = 0;
         self.follow = true;
         self.ctx_chars = message_chars(&self.messages);
+    }
+
+    /// Reopen the conversation as a new session — a fork. The original session
+    /// is left on disk untouched; the fork takes over the transcript with
+    /// "(fork)" in its title so `/sessions` shows where it came from. What is
+    /// in the composer stays put: fork first, then edit and send it in the new
+    /// branch.
+    fn fork_session(&mut self) {
+        if self.running.is_some() {
+            self.status = "finish or interrupt the turn before forking".to_owned();
+            return;
+        }
+        if self.session.is_none() {
+            self.status = "nothing to fork yet — send a message first".to_owned();
+            return;
+        }
+        self.persist_session(); // save the original before switching away from it
+        let fork = {
+            let Some(store) = &self.session_store else {
+                self.status = "sessions are disabled".to_owned();
+                return;
+            };
+            let Some(current) = &self.session else {
+                self.status = "nothing to fork yet — send a message first".to_owned();
+                return;
+            };
+            let mut fork = match store.create(
+                self.config.profile.clone(),
+                self.config.model.clone(),
+                self.messages.clone(),
+            ) {
+                Ok(fork) => fork,
+                Err(error) => {
+                    self.status = format!("fork failed: {error}");
+                    return;
+                }
+            };
+            fork.title = format!("(fork) {}", current.title)
+                .chars()
+                .take(100)
+                .collect();
+            // A fork is a branch of the work, so the session state that shapes
+            // it carries over; time and token accounting start fresh.
+            fork.goal = current.goal.clone();
+            fork.ralph_loop = current.ralph_loop.clone();
+            fork.tasks = current.tasks.clone();
+            fork.compaction = current.compaction.clone();
+            fork.intent = current.intent.clone();
+            if let Err(error) = store.save(&fork) {
+                self.status = format!("fork failed: {error}");
+                return;
+            }
+            fork
+        };
+        self.session = Some(fork);
+        // Traces are keyed by session id; drop the writer so the next persist
+        // reopens it for the fork instead of appending to the original's trace.
+        self.trace = None;
+        self.tokens.store(0, Ordering::Relaxed);
+        self.session_initial_active_secs = 0;
+        self.started = Instant::now();
+        self.push_entry(Entry::new(
+            EntryKind::System,
+            "Session forked — the conversation continues in a new session; the \
+             original is still saved."
+                .to_owned(),
+        ));
+        self.follow = true;
+        self.status = "session forked — the original is untouched".to_owned();
     }
 
     fn open_usage(&mut self) {
@@ -3946,10 +4024,12 @@ pub async fn run(
         stdout,
         EnterAlternateScreen,
         EnableBracketedPaste,
-        // Mouse capture is NOT enabled here. Holding the mouse gives wheel
-        // scrolling and clickable rows, but it also stops the terminal doing
-        // drag-select — and copying text out matters more than the wheel.
-        // F2 grabs it when the wheel is wanted; PgUp/PgDn scroll regardless.
+        // Capture the mouse from the first frame so the wheel scrolls the
+        // transcript and rows are clickable. Terminals that support Shift-drag
+        // bypass (iTerm2, kitty, WezTerm, Alacritty, Ghostty) still select text
+        // while captured; everywhere else F2 hands the mouse back for
+        // drag-select, and PgUp/PgDn scroll regardless.
+        EnableMouseCapture,
         SetTitle(format!("Abacus — {}", config.workspace_name()))
     )?;
     // Kitty keyboard protocol: lets the terminal distinguish Shift+Enter from
@@ -4257,8 +4337,10 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     }
     // F2: hand the mouse back to the terminal so click-drag selects text the
     // way it does anywhere else, and take it back when you want the wheel and
-    // clickable rows again. A TUI that holds the mouse cannot be copied out of,
-    // which makes it useless as a place to read from.
+    // clickable rows again. The mouse starts captured — the wheel is what most
+    // people expect to scroll the transcript — and F2 is the escape hatch on
+    // terminals without a Shift-drag bypass, so a captured TUI never becomes a
+    // place you cannot copy out of.
     if key.code == KeyCode::F(2) {
         app.mouse_captured = !app.mouse_captured;
         let mut out = io::stdout();
@@ -4727,6 +4809,14 @@ fn handle_insert_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Up if completing => app.move_completion(-1),
         KeyCode::Down if completing => app.move_completion(1),
+        // Ctrl+Shift+Enter forks the session at the current history, leaving
+        // the draft in the composer so it can be sent in the new branch.
+        KeyCode::Enter
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.modifiers.contains(KeyModifiers::SHIFT) =>
+        {
+            app.fork_session()
+        }
         // When the popup declines — because the command is already typed out in
         // full — Enter must still send. Consuming it here regardless is what
         // made a finished command unsendable.
@@ -6142,6 +6232,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
             &[
                 ("Enter", "send the prompt"),
                 ("Ctrl+J · Ctrl+O · Shift+Enter", "insert a newline"),
+                ("Ctrl+Shift+Enter", "fork the session"),
                 ("Tab", "accept the highlighted suggestion"),
                 ("↑ ↓", "browse prompt history, or the suggestion list"),
                 ("Ctrl+V", "paste text or an image from the clipboard"),
@@ -6162,7 +6253,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
             &[
                 (
                     "F2",
-                    "capture the mouse for wheel scrolling and clickable rows",
+                    "release the mouse for drag-select; F2 again for the wheel and clicks",
                 ),
                 ("j · k", "move between blocks"),
                 ("o · space · enter", "fold or unfold a tool result"),
@@ -8245,6 +8336,110 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
         );
         assert!(app.input.is_empty(), "Enter should have submitted");
+    }
+
+    #[test]
+    fn shift_enter_inserts_a_newline_instead_of_submitting() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.input.insert_str("line one");
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert_eq!(app.input.text(), "line one\n");
+        assert!(
+            app.running.is_none() && app.entries.is_empty(),
+            "shift+enter must not send the prompt"
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_enter_forks_the_session_keeping_the_draft() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.session_store = Some(SessionStore::new(
+            &app.config.paths,
+            app.config.workspace.clone(),
+        ));
+        app.messages
+            .push(json!({"role": "user", "content": "fix the parser"}));
+        app.persist_session();
+        let original_id = app.session.as_ref().unwrap().id;
+        assert_eq!(app.session.as_ref().unwrap().title, "fix the parser");
+        app.input.insert_str("then write the tests");
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        );
+
+        let fork = app.session.as_ref().expect("forked session");
+        assert_ne!(fork.id, original_id, "a fork is a new session");
+        assert!(
+            fork.title.starts_with("(fork)"),
+            "the fork is marked: {}",
+            fork.title
+        );
+        assert!(
+            fork.title.ends_with("fix the parser"),
+            "the fork keeps the title: {}",
+            fork.title
+        );
+        assert_eq!(
+            app.input.text(),
+            "then write the tests",
+            "the draft stays in the composer"
+        );
+        assert!(
+            app.messages
+                .iter()
+                .any(|message| message["content"] == "fix the parser"),
+            "the conversation carries into the fork"
+        );
+        let blob = app.entries.last().expect("fork blob");
+        assert_eq!(blob.kind, EntryKind::System);
+        assert!(blob.text.contains("forked"), "{}", blob.text);
+        // The original remains saved, untouched.
+        let store = app.session_store.as_ref().unwrap();
+        assert_eq!(store.list().unwrap().len(), 2);
+        let original = store.load(&original_id.to_string()).unwrap();
+        assert_eq!(original.id, original_id);
+        assert_eq!(original.title, "fix the parser");
+    }
+
+    #[test]
+    fn fork_command_does_the_same_as_ctrl_shift_enter() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.session_store = Some(SessionStore::new(
+            &app.config.paths,
+            app.config.workspace.clone(),
+        ));
+        app.messages
+            .push(json!({"role": "user", "content": "plan the refactor"}));
+        app.persist_session();
+        let original_id = app.session.as_ref().unwrap().id;
+        app.input.insert_str("/fork");
+        app.submit();
+
+        assert!(app.input.is_empty(), "/fork consumes the command");
+        let fork = app.session.as_ref().expect("forked session");
+        assert_ne!(fork.id, original_id);
+        assert!(
+            fork.title.starts_with("(fork) plan the refactor"),
+            "{}",
+            fork.title
+        );
+        let blob = app.entries.last().expect("fork blob");
+        assert_eq!(blob.kind, EntryKind::System);
+        assert!(blob.text.contains("forked"), "{}", blob.text);
+    }
+
+    #[test]
+    fn fork_without_a_conversation_reports_instead_of_creating() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.session_store = Some(SessionStore::new(
+            &app.config.paths,
+            app.config.workspace.clone(),
+        ));
+        app.fork_session();
+        assert!(app.session.is_none(), "forking must not invent a session");
+        assert!(app.status.contains("fork"), "{}", app.status);
     }
 
     #[test]

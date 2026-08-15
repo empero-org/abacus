@@ -311,6 +311,7 @@ every request.
 | Command | Action |
 | --- | --- |
 | `/new` | Start a fresh persistent session |
+| `/fork` | Fork the conversation into a new session (also `Ctrl+Shift+Enter`) |
 | `/sessions` / `/resume <id>` | Pick or resume a saved session |
 | `/rename <title>` | Rename the active session |
 | `/model [id]` | Inspect or switch model |
@@ -453,16 +454,15 @@ instance_url = "http://localhost:8888"
 
 ### Selecting and copying
 
-A TUI that holds the mouse cannot be copied out of: capture is what gives you
-wheel scrolling and clickable rows, and it is also what stops your terminal
-doing click-drag selection. Copying wins, so Abacus **does not take the mouse**
-— drag to select and copy exactly as you would anywhere else, from the first
-frame. **F2** captures it when you want the wheel and clickable rows, and F2
-again gives it back. Blocks are never tinted on click: the only selection on
-screen is your terminal's own.
-Scrolling never depends on the mouse: **PgUp/PgDn** move a page at a time and
-keep working in selection mode, **Alt+↑/↓** nudge a line, and **Ctrl+End** jumps
-back to live.
+The wheel works from the first frame: Abacus captures the mouse so a scroll
+moves the transcript and rows are clickable, with a click marking the block
+under the pointer just like `j`/`k` in normal mode. Capture is also what stops
+the terminal doing click-drag selection, so on terminals with a Shift-drag
+bypass (iTerm2, kitty, WezTerm, Alacritty, Ghostty) you can still select and
+copy text as anywhere else. Elsewhere **F2** hands the mouse back for
+drag-select, and F2 again takes it back — or skip the mouse entirely:
+**PgUp/PgDn** move a page at a time, **Alt+↑/↓** nudge a line, and **Ctrl+End**
+jumps back to live.
 
 You can also copy without the mouse at all. In normal mode `y` copies the
 selected block — the *full* tool output, not the truncated preview — and `Y`
@@ -471,7 +471,9 @@ copies the last assistant reply. In the composer, `Ctrl+A` selects the draft and
 interrupt.
 
 The prompt starts in insert mode. `Enter` sends (or queues while a turn runs);
-`Ctrl+J` (or `Shift+Enter`) inserts a newline; `Up`/`Down` recall earlier
+`Ctrl+J` (or `Shift+Enter`) inserts a newline; `Ctrl+Shift+Enter` forks the
+session — the conversation moves into a new session, marked `(fork)` in
+`/sessions`, with your draft still in the box; `Up`/`Down` recall earlier
 prompts. Scroll with the mouse wheel, a trackpad, `PageUp`/`PageDown`, or
 `Alt`/`Shift`+`↑`/`↓` from the composer — a dense burst is read as a trackpad and
 moves a line at a time, while a discrete wheel notch moves three; scrolling from
