@@ -315,6 +315,8 @@ every request.
 | `/sessions` / `/resume <id>` | Pick or resume a saved session |
 | `/rename <title>` | Rename the active session |
 | `/model [id]` | Inspect or switch model |
+| `/profile [id]` | List or switch provider profiles |
+| `/profile rename <id>` / `/profile delete [id]` / `/profile add` | Rename, delete, or add a profile |
 | `/providers [names\|clear\|strict\|fallback]` | Pin which upstream suppliers may serve the model |
 | `/usage` | Local activity heatmap, usage totals, model breakdown |
 | `/mode [auto\|plan\|build]` | Inspect or pin the workflow mode |
@@ -803,12 +805,14 @@ recent window — keeping the most recent results verbatim — and a one-call
 **rolling summary** condenses the dropped middle as you near the ceiling. Both
 thresholds scale with the model's real context window; `/compact` forces an
 immediate shrink. Thresholds resolve most-authoritative-first: an explicit
-`--context-window`/`--max-output-tokens`, then detection from the provider's
-`/models`, then a per-family heuristic, then a conservative 128k/8k default.
-Both limits are editable live in `/config`, and detection is defended twice: an
-upstream that echoes its context window as the completion cap is ignored, and if
-a provider still rejects a value, Abacus reads the real ceiling out of the
-rejection, clamps, retries, and remembers it for the session.
+`--context-window`/`--max-output-tokens`, then the active profile's limits,
+then leftover `[agent]` fields from older configs, then detection from the
+provider's `/models`, then a per-family heuristic, then a conservative 128k/8k
+default. Both limits are per-profile and editable live in `/config`; blank or
+`auto` clears that profile and returns to detection. Detection is defended
+twice: an upstream that echoes its context window as the completion cap is
+ignored, and if a provider still rejects a value, Abacus reads the real ceiling
+out of the rejection, clamps, retries, and remembers it for the session.
 
 ## Scheduled jobs
 
@@ -848,6 +852,8 @@ base_url = "http://localhost:11434/v1"
 model = "your-tool-capable-model"
 protocol = "chat-completions"   # chat-completions | responses | anthropic
 # aux_model = "a-smaller-model"   # secondary calls; blank = same as `model`
+# context_window = 128000         # this profile only; omit to auto-detect
+# max_output_tokens = 8000        # this profile only; omit to auto-detect
 
 [ui]
 permission_mode = "ask"
@@ -868,11 +874,13 @@ backend = "auto"              # keyless default: bing -> mojeek -> marginalia ->
 ```
 
 `/config` is a keyboard-driven settings panel — profile, model, provider URL,
-protocol, permission mode, Vim bindings, limits, and feedback settings apply
-immediately and save atomically. `/config raw` opens the complete TOML document
-inside Abacus for every other setting. Override per run with `--profile`,
-`--model`, `--base-url`, `--protocol`, and tune the context budget with
-`--context-window 1m --max-output-tokens 32k`.
+protocol, permission mode, Vim bindings, per-profile context/output limits, and
+feedback settings apply immediately and save atomically. On the **Active
+profile** row, Enter switches, `r` renames, `d` deletes, and `n` adds a
+provider. `/profile` does the same from the composer. `/config raw` opens the
+complete TOML document inside Abacus for every other setting. Override per run
+with `--profile`, `--model`, `--base-url`, `--protocol`, and tune this run's
+context budget with `--context-window 1m --max-output-tokens 32k`.
 
 ## Headless and CI usage
 

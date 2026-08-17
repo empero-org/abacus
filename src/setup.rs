@@ -354,6 +354,8 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
             endpoint: None,
             providers: Vec::new(),
             allow_fallbacks: true,
+            context_window: None,
+            max_output_tokens: None,
         },
     );
     settings.default_profile = profile_id.clone();

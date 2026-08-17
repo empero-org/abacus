@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- **Turns no longer loop the opening prompt.** A `max_output_tokens` at or
+  above the context window (a leftover `[agent]` 128k on a 128k local model,
+  or a server echoing its window as the completion cap) reserved the entire
+  window for output, so compaction kept only system + the first user message
+  and every later request replayed the original prompt. The reservation is
+  now clamped, and the opening turn is never summarised away while it is
+  still live.
+- Context window and max output tokens are now per provider profile. `/config`
+  writes them on the active profile; switching profiles applies that profile's
+  limits. CLI flags still override for the current run, and leftover
+  `[agent]` values from older configs remain a fallback until a profile sets
+  its own.
+- Profiles are easier to live with: the profile picker now renames (`r`),
+  deletes (`d`), and adds (`n` / `+`), and `/profile` lists, switches,
+  renames, and deletes from the composer.
+
 ## 0.6.1 — 2026-08-14
 
 - **Keyless search works again.** DuckDuckGo's `html.duckduckgo.com/html/`

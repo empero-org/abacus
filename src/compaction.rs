@@ -132,9 +132,18 @@ pub async fn compact(
     if messages.len() <= KEEP_FIRST + 1 {
         return;
     }
+    // Still on the opening user turn: only microcompact. Summarising this
+    // turn drops the tool results and the next request is just the original
+    // prompt again — the model then restarts the same work every step.
+    if opening_turn_still_live(messages) {
+        return;
+    }
 
     let head_end = first_legal_cut_at_or_after(messages, KEEP_FIRST);
-    let cut = find_tail_cut(messages, budget.recent_budget_chars, head_end);
+    // Never cut into the current user turn, even when the recent-window
+    // budget is tiny — that tail is what the next model call has to see.
+    let cut = find_tail_cut(messages, budget.recent_budget_chars, head_end)
+        .min(last_user_index(messages).unwrap_or(messages.len()));
     if cut <= head_end {
         return;
     }
@@ -210,7 +219,9 @@ fn bound_summary(summary: String, budget: usize) -> String {
 /// longer worth re-sending in full. Below this, everything stays verbatim so the
 /// model never loses its own findings.
 fn should_microcompact(messages: &[Value], budget: &CompactionBudget) -> bool {
-    message_chars(messages) > budget.recent_budget_chars
+    // A zero recent window is a broken budget, not a signal to blank every
+    // tool result. Leave the transcript alone until the numbers are real.
+    budget.recent_budget_chars > 0 && message_chars(messages) > budget.recent_budget_chars
 }
 
 /// Whether the conversation has grown near the real context ceiling, warranting
@@ -219,12 +230,28 @@ fn should_microcompact(messages: &[Value], budget: &CompactionBudget) -> bool {
 /// turn and grows over time — not accounting for it means compaction triggers
 /// too late and the actual request overflows the context window.
 fn under_pressure(messages: &[Value], state: &CompactionState, budget: &CompactionBudget) -> bool {
+    if budget.compact_at_chars == 0 {
+        return false;
+    }
     let mut total = message_chars(messages);
     if let Some(summary) = &state.running_summary {
         // The summary is wrapped in a template; add the wrapper overhead too.
         total += summary.len() + 200;
     }
     total > budget.compact_at_chars
+}
+
+/// Index of the most recent `user` message, if any.
+fn last_user_index(messages: &[Value]) -> Option<usize> {
+    messages
+        .iter()
+        .rposition(|message| message["role"] == "user")
+}
+
+/// True while the only real user prompt is the opening one (the pair
+/// `KEEP_FIRST` protects). Later user turns are fair game for the summariser.
+fn opening_turn_still_live(messages: &[Value]) -> bool {
+    last_user_index(messages).is_none_or(|index| index < KEEP_FIRST)
 }
 
 /// Smallest index `>= start` that is a legal cut (never splits a tool-call group).
@@ -819,6 +846,54 @@ mod tests {
 
         // A summary within budget is returned untouched.
         assert_eq!(bound_summary("short".to_owned(), 500), "short");
+    }
+
+    #[test]
+    fn the_opening_turn_is_not_summarised_away() {
+        // system + original user + assistant/tool pairs: last user is still
+        // the opening prompt. Rolling-summary must refuse, or the next
+        // request is just that prompt again.
+        let mut messages = vec![
+            json!({"role":"system","content":"rules"}),
+            json!({"role":"user","content":"fix the importer"}),
+        ];
+        for i in 0..8 {
+            messages.push(json!({"role":"assistant","content":null,"tool_calls":[
+                {"id":format!("c{i}"),"type":"function","function":{"name":"read_file","arguments":"{}"}}
+            ]}));
+            messages.push(json!({"role":"tool","tool_call_id":format!("c{i}"),"name":"read_file","content":format!("finding {i}")}));
+        }
+        assert!(opening_turn_still_live(&messages));
+        assert_eq!(last_user_index(&messages), Some(1));
+
+        messages.push(json!({"role":"user","content":"also run the tests"}));
+        assert!(!opening_turn_still_live(&messages));
+        assert_eq!(last_user_index(&messages), Some(messages.len() - 1));
+    }
+
+    #[test]
+    fn a_zero_recent_budget_still_keeps_the_current_user_turn() {
+        // Defense in depth if the budget arithmetic ever goes to zero again:
+        // the cut is clamped to the last user message so the current turn
+        // is not dropped.
+        let messages = vec![
+            json!({"role":"system","content":"rules"}),
+            json!({"role":"user","content":"first"}),
+            json!({"role":"assistant","content":"working"}),
+            json!({"role":"user","content":"second"}),
+            json!({"role":"assistant","content":null,"tool_calls":[
+                {"id":"c1","type":"function","function":{"name":"read_file","arguments":"{}"}}
+            ]}),
+            json!({"role":"tool","tool_call_id":"c1","name":"read_file","content":"body"}),
+        ];
+        let head_end = first_legal_cut_at_or_after(&messages, KEEP_FIRST);
+        let cut = find_tail_cut(&messages, 0, head_end)
+            .min(last_user_index(&messages).unwrap_or(messages.len()));
+        assert_eq!(
+            cut, 3,
+            "current user turn must survive a zero recent budget"
+        );
+        assert!(cut > head_end);
     }
 
     #[test]

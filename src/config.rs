@@ -383,8 +383,11 @@ impl Config {
             })
         });
 
-        let context_override = cli.context_window.or(settings.agent.context_window);
-        let output_override = cli.max_output_tokens.or(settings.agent.max_output_tokens);
+        // CLI wins for this run; then the active profile; leftover [agent]
+        // fields keep older config.toml working until a profile override is set.
+        let (profile_context, profile_output) = settings.profile_limits(&profile_name);
+        let context_override = cli.context_window.or(profile_context);
+        let output_override = cli.max_output_tokens.or(profile_output);
         let model_limits =
             ModelLimits::resolve_from_name(&model, context_override, output_override);
         let tool_format = cli
@@ -586,6 +589,30 @@ impl Settings {
     pub fn is_configured(&self) -> bool {
         self.profiles.contains_key(&self.default_profile)
     }
+
+    /// Effective token-limit overrides for `profile_name`: the profile's own
+    /// values when set, otherwise leftover `[agent]` fields from older configs.
+    pub fn profile_limits(&self, profile_name: &str) -> (Option<usize>, Option<usize>) {
+        let profile = self.profiles.get(profile_name);
+        (
+            profile
+                .and_then(|profile| profile.context_window)
+                .or(self.agent.context_window),
+            profile
+                .and_then(|profile| profile.max_output_tokens)
+                .or(self.agent.max_output_tokens),
+        )
+    }
+}
+
+/// Profile map keys must stay TOML-table-safe. Display names can be anything;
+/// this only gates rename / create of the id itself.
+pub fn validate_profile_id(id: &str) -> Result<&str> {
+    let id = id.trim();
+    if id.is_empty() || id.len() > 64 || !id.chars().all(is_profile_id_char) {
+        bail!("profile id must be 1–64 characters: letters, digits, `.`, `_`, or `-`");
+    }
+    Ok(id)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -631,6 +658,17 @@ pub struct ProviderProfile {
     /// request fails rather than quietly landing somewhere else.
     #[serde(default = "default_true")]
     pub allow_fallbacks: bool,
+    /// Context window override in tokens for this profile. Unset means detect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<usize>,
+    /// Max output tokens sent as `max_tokens` for this profile. Unset means
+    /// detect, or leave it to the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<usize>,
+}
+
+fn is_profile_id_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')
 }
 
 /// How hard the model should think before answering. Left unset, nothing is
@@ -1142,15 +1180,175 @@ mod tests {
                 endpoint: None,
                 providers: Vec::new(),
                 allow_fallbacks: true,
+                context_window: None,
+                max_output_tokens: None,
             },
         );
+        settings.profiles.get_mut("local").unwrap().context_window = Some(1_000_000);
+        settings
+            .profiles
+            .get_mut("local")
+            .unwrap()
+            .max_output_tokens = Some(64_000);
         settings.default_profile = "local".into();
         settings.save(&paths).unwrap();
         let loaded = Settings::load(&paths).unwrap();
         assert_eq!(loaded.profiles["local"].model, "codestral");
+        assert_eq!(loaded.profiles["local"].context_window, Some(1_000_000));
+        assert_eq!(loaded.profiles["local"].max_output_tokens, Some(64_000));
         assert_eq!(loaded.version, SETTINGS_VERSION);
         assert!(loaded.feedback.enabled);
         assert!(loaded.ui.animations);
+    }
+
+    #[test]
+    fn profile_limits_prefer_the_profile_then_leftover_agent_fields() {
+        let mut settings = Settings::default();
+        settings.agent.context_window = Some(128_000);
+        settings.agent.max_output_tokens = Some(8_000);
+        settings.profiles.insert(
+            "claude".into(),
+            ProviderProfile {
+                name: "Claude".into(),
+                base_url: "https://api.anthropic.com".into(),
+                model: "claude".into(),
+                protocol: ProviderProtocol::Anthropic,
+                api_key_env: None,
+                aux_model: None,
+                reasoning_effort: None,
+                endpoint: None,
+                providers: Vec::new(),
+                allow_fallbacks: true,
+                context_window: Some(1_000_000),
+                max_output_tokens: Some(64_000),
+            },
+        );
+        settings.profiles.insert(
+            "local".into(),
+            ProviderProfile {
+                name: "Local".into(),
+                base_url: "http://localhost:11434/v1".into(),
+                model: "codestral".into(),
+                protocol: ProviderProtocol::ChatCompletions,
+                api_key_env: None,
+                aux_model: None,
+                reasoning_effort: None,
+                endpoint: None,
+                providers: Vec::new(),
+                allow_fallbacks: true,
+                context_window: None,
+                max_output_tokens: None,
+            },
+        );
+        assert_eq!(
+            settings.profile_limits("claude"),
+            (Some(1_000_000), Some(64_000))
+        );
+        assert_eq!(
+            settings.profile_limits("local"),
+            (Some(128_000), Some(8_000))
+        );
+    }
+
+    #[test]
+    fn validate_profile_id_rejects_empty_and_unsafe_names() {
+        assert!(validate_profile_id("claude-4").is_ok());
+        assert!(validate_profile_id("local.v2").is_ok());
+        assert!(validate_profile_id("").is_err());
+        assert!(validate_profile_id("has space").is_err());
+        assert!(validate_profile_id("slash/name").is_err());
+    }
+
+    #[test]
+    fn resolve_prefers_cli_then_profile_then_leftover_agent_limits() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let paths = AbacusPaths::under(dir.path().join("home"));
+        let mut settings = Settings {
+            default_profile: "claude".into(),
+            ..Settings::default()
+        };
+        settings.agent.context_window = Some(128_000);
+        settings.agent.max_output_tokens = Some(8_000);
+        settings.profiles.insert(
+            "claude".into(),
+            ProviderProfile {
+                name: "Claude".into(),
+                base_url: "https://api.anthropic.com".into(),
+                model: "claude".into(),
+                protocol: ProviderProtocol::Anthropic,
+                api_key_env: None,
+                aux_model: None,
+                reasoning_effort: None,
+                endpoint: None,
+                providers: Vec::new(),
+                allow_fallbacks: true,
+                context_window: Some(1_000_000),
+                max_output_tokens: Some(64_000),
+            },
+        );
+        settings.profiles.insert(
+            "local".into(),
+            ProviderProfile {
+                name: "Local".into(),
+                base_url: "http://localhost:11434/v1".into(),
+                model: "codestral".into(),
+                protocol: ProviderProtocol::ChatCompletions,
+                api_key_env: None,
+                aux_model: None,
+                reasoning_effort: None,
+                endpoint: None,
+                providers: Vec::new(),
+                allow_fallbacks: true,
+                context_window: None,
+                max_output_tokens: None,
+            },
+        );
+        let credentials = Credentials::default();
+
+        let from_profile = Config::resolve(
+            &Cli::parse_from(["abacus", workspace.to_str().unwrap()]),
+            &settings,
+            &credentials,
+            paths.clone(),
+        )
+        .unwrap();
+        assert_eq!(from_profile.model_limits.context_window, 1_000_000);
+        assert_eq!(
+            from_profile.model_limits.configured_output_tokens,
+            Some(64_000)
+        );
+
+        let from_agent = Config::resolve(
+            &Cli::parse_from(["abacus", "--profile", "local", workspace.to_str().unwrap()]),
+            &settings,
+            &credentials,
+            paths.clone(),
+        )
+        .unwrap();
+        assert_eq!(from_agent.model_limits.context_window, 128_000);
+        assert_eq!(
+            from_agent.model_limits.configured_output_tokens,
+            Some(8_000)
+        );
+
+        let from_cli = Config::resolve(
+            &Cli::parse_from([
+                "abacus",
+                "--context-window",
+                "2000000",
+                "--max-output-tokens",
+                "32000",
+                workspace.to_str().unwrap(),
+            ]),
+            &settings,
+            &credentials,
+            paths,
+        )
+        .unwrap();
+        assert_eq!(from_cli.model_limits.context_window, 2_000_000);
+        assert_eq!(from_cli.model_limits.configured_output_tokens, Some(32_000));
     }
 
     #[test]

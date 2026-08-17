@@ -114,6 +114,10 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("/model", "Inspect or switch model"),
     (
+        "/profile",
+        "List, switch, rename, or delete a provider profile",
+    ),
+    (
         "/providers",
         "Pin which upstream providers may serve the model",
     ),
@@ -293,6 +297,13 @@ struct Picker {
     items: Vec<(String, String)>,
     selected: usize,
     action: PickerAction,
+    /// Inline prompt on top of the list (profile rename / delete confirm).
+    prompt: Option<PickerPrompt>,
+}
+
+enum PickerPrompt {
+    Rename { id: String, input: InputBuffer },
+    ConfirmDelete { id: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -396,11 +407,11 @@ const CONFIG_ROWS: &[ConfigRow] = &[
     ConfigRow::Key(ConfigKey::Providers),
     ConfigRow::Key(ConfigKey::Fallbacks),
     ConfigRow::Key(ConfigKey::ApiKey),
+    ConfigRow::Key(ConfigKey::ContextWindow),
+    ConfigRow::Key(ConfigKey::MaxOutput),
     ConfigRow::Heading("AGENT"),
     ConfigRow::Key(ConfigKey::Permission),
     ConfigRow::Key(ConfigKey::MaxSteps),
-    ConfigRow::Key(ConfigKey::ContextWindow),
-    ConfigRow::Key(ConfigKey::MaxOutput),
     ConfigRow::Key(ConfigKey::ToolOutputLimit),
     ConfigRow::Key(ConfigKey::ProjectTrust),
     ConfigRow::Heading("INTERFACE"),
@@ -426,7 +437,9 @@ const CONFIG_ROWS: &[ConfigRow] = &[
 /// guess; this is the cheapest possible fix for that.
 fn config_help(key: ConfigKey) -> &'static str {
     match key {
-        ConfigKey::Profile => "Which stored provider profile this session talks to.",
+        ConfigKey::Profile => {
+            "Which stored provider profile this session talks to. Enter to switch, r to rename, d to delete, n to add."
+        }
         ConfigKey::Model => "Model ID sent to the provider. /model lists what the endpoint offers.",
         ConfigKey::AuxModel => {
             "Cheaper model on this same endpoint for background calls (rethink, drafts, tether, command checks). Blank = same as the main model."
@@ -469,10 +482,10 @@ fn config_help(key: ConfigKey) -> &'static str {
         }
         ConfigKey::MaxSteps => "How many tool calls one turn may make before it stops.",
         ConfigKey::ContextWindow => {
-            "Context window override in tokens (accepts 128k / 1m). Blank returns to auto-detection."
+            "This profile's context window in tokens (accepts 128k / 1m). Blank returns to auto-detection."
         }
         ConfigKey::MaxOutput => {
-            "Max output tokens sent as max_tokens (accepts 8k / 64k). Blank returns to auto — set this when the provider rejects the detected value."
+            "This profile's max output tokens sent as max_tokens (accepts 8k / 64k). Blank returns to auto — set this when the provider rejects the detected value."
         }
         ConfigKey::ToolOutputLimit => "Characters of tool output kept before truncation.",
         ConfigKey::ProjectTrust => {
@@ -503,10 +516,10 @@ const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey::Providers,
     ConfigKey::Fallbacks,
     ConfigKey::ApiKey,
-    ConfigKey::Permission,
-    ConfigKey::MaxSteps,
     ConfigKey::ContextWindow,
     ConfigKey::MaxOutput,
+    ConfigKey::Permission,
+    ConfigKey::MaxSteps,
     ConfigKey::ToolOutputLimit,
     ConfigKey::ProjectTrust,
     ConfigKey::VimMode,
@@ -736,6 +749,8 @@ impl App {
                     endpoint: None,
                     providers: Vec::new(),
                     allow_fallbacks: true,
+                    context_window: None,
+                    max_output_tokens: None,
                 },
             );
         }
@@ -1745,6 +1760,10 @@ impl App {
                 self.follow = true;
                 true
             }
+            "/profile" => {
+                self.profile_command(argument);
+                true
+            }
             "/model" => {
                 if argument.trim().is_empty() {
                     self.push_entry(Entry::new(EntryKind::System, format!(
@@ -2631,6 +2650,7 @@ impl App {
                 self.picker = Some(Picker {
                     title: "sessions".to_owned(),
                     action: PickerAction::ResumeSession,
+                    prompt: None,
                     items: sessions
                         .into_iter()
                         .take(50)
@@ -2841,15 +2861,20 @@ impl App {
         // Re-resolve the model limits when an override is in play — either
         // newly set (it must reach the provider and the compaction budget
         // immediately) or newly cleared (the Override source must not stick).
-        // With no override involved, startup detection is left alone.
-        if self.settings.agent.context_window.is_some()
-            || self.settings.agent.max_output_tokens.is_some()
+        // Profile switch is the other trigger: a 1M Claude profile must not
+        // leak onto a 128k local one. With no override involved and the same
+        // profile, startup detection is left alone.
+        let (context_override, output_override) = self.settings.profile_limits(&profile_name);
+        let profile_changed = prior_profile != profile_name;
+        if context_override.is_some()
+            || output_override.is_some()
+            || profile_changed
             || self.config.model_limits.source == crate::model_info::LimitSource::Override
         {
             self.config.model_limits = crate::model_info::ModelLimits::resolve_from_name(
                 &self.config.model,
-                self.settings.agent.context_window,
-                self.settings.agent.max_output_tokens,
+                context_override,
+                output_override,
             );
         }
         let always = self.settings.ui.permission_mode == PermissionMode::AlwaysApprove;
@@ -3071,11 +3096,18 @@ impl App {
                 }),
             // Blank returns the limit to auto-resolution; a value (with `k`/`m`
             // suffixes accepted) becomes a hard override sent to the provider.
-            ConfigKey::ContextWindow => parse_optional_tokens(&value).map(|tokens| {
-                self.settings.agent.context_window = tokens;
+            ConfigKey::ContextWindow => parse_optional_tokens(&value).and_then(|tokens| {
+                self.active_profile_mut()?.context_window = tokens;
+                // A leftover [agent] override would otherwise leak back onto
+                // every profile that has not set its own value — including
+                // this one after a blank/auto clear.
+                self.settings.agent.context_window = None;
+                Ok(())
             }),
-            ConfigKey::MaxOutput => parse_optional_tokens(&value).map(|tokens| {
-                self.settings.agent.max_output_tokens = tokens;
+            ConfigKey::MaxOutput => parse_optional_tokens(&value).and_then(|tokens| {
+                self.active_profile_mut()?.max_output_tokens = tokens;
+                self.settings.agent.max_output_tokens = None;
+                Ok(())
             }),
             ConfigKey::ToolOutputLimit => value
                 .trim()
@@ -3197,25 +3229,31 @@ impl App {
             ConfigKey::MaxSteps => self.settings.agent.max_steps.to_string(),
             // The override when set; otherwise what auto-resolution landed on
             // and where it came from, so "auto" is never a mystery value.
-            ConfigKey::ContextWindow => match self.settings.agent.context_window {
-                Some(tokens) => ui::format_count(tokens as u64),
-                None => format!(
-                    "auto — {} ({})",
-                    ui::format_count(self.config.model_limits.context_window as u64),
-                    limit_source_label(self.config.model_limits.source),
-                ),
-            },
-            ConfigKey::MaxOutput => match self.settings.agent.max_output_tokens {
-                Some(tokens) => ui::format_count(tokens as u64),
-                None => match self.config.model_limits.configured_output_tokens {
-                    Some(tokens) => format!(
+            ConfigKey::ContextWindow => {
+                let (context, _) = self.settings.profile_limits(&self.settings.default_profile);
+                match context {
+                    Some(tokens) => ui::format_count(tokens as u64),
+                    None => format!(
                         "auto — {} ({})",
-                        ui::format_count(tokens as u64),
+                        ui::format_count(self.config.model_limits.context_window as u64),
                         limit_source_label(self.config.model_limits.source),
                     ),
-                    None => "auto — server default".to_owned(),
-                },
-            },
+                }
+            }
+            ConfigKey::MaxOutput => {
+                let (_, output) = self.settings.profile_limits(&self.settings.default_profile);
+                match output {
+                    Some(tokens) => ui::format_count(tokens as u64),
+                    None => match self.config.model_limits.configured_output_tokens {
+                        Some(tokens) => format!(
+                            "auto — {} ({})",
+                            ui::format_count(tokens as u64),
+                            limit_source_label(self.config.model_limits.source),
+                        ),
+                        None => "auto — server default".to_owned(),
+                    },
+                }
+            }
             ConfigKey::ToolOutputLimit => self.settings.agent.tool_output_limit.to_string(),
             ConfigKey::ProjectTrust => on_off(self.settings.trust.contains(&self.config.workspace)),
             ConfigKey::FeedbackEnabled => on_off(self.settings.feedback.enabled),
@@ -3280,6 +3318,7 @@ impl App {
             items,
             selected: 0,
             action: PickerAction::SwitchProfile,
+            prompt: None,
         });
     }
 
@@ -3318,6 +3357,7 @@ impl App {
             items,
             selected: 0,
             action: PickerAction::AddProvider,
+            prompt: None,
         });
     }
 
@@ -3376,6 +3416,8 @@ impl App {
                 endpoint: Some(name.to_owned()),
                 providers: Vec::new(),
                 allow_fallbacks: true,
+                context_window: None,
+                max_output_tokens: None,
             },
         );
         let previous = self.settings.default_profile.clone();
@@ -3443,6 +3485,204 @@ impl App {
         }
     }
 
+    fn selected_profile_id(&self) -> Option<String> {
+        let picker = self.picker.as_ref()?;
+        if picker.action != PickerAction::SwitchProfile {
+            return None;
+        }
+        let id = picker.items.get(picker.selected)?.1.clone();
+        if id == NEW_PROVIDER_SENTINEL {
+            None
+        } else {
+            Some(id)
+        }
+    }
+
+    fn begin_profile_rename(&mut self, id: &str) {
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        if picker.action != PickerAction::SwitchProfile {
+            return;
+        }
+        let mut input = InputBuffer::new();
+        input.insert_str(id);
+        picker.prompt = Some(PickerPrompt::Rename {
+            id: id.to_owned(),
+            input,
+        });
+    }
+
+    fn begin_profile_delete(&mut self, id: &str) {
+        if self.settings.profiles.len() <= 1 {
+            self.status = "cannot delete the last remaining profile".to_owned();
+            return;
+        }
+        if let Some(picker) = self.picker.as_mut() {
+            picker.prompt = Some(PickerPrompt::ConfirmDelete { id: id.to_owned() });
+        }
+    }
+
+    fn commit_profile_rename(&mut self, from: &str, to: &str) {
+        match self.rename_profile(from, to) {
+            Ok(id) => {
+                self.status = format!("profile renamed to {id}");
+                self.open_profile_picker();
+                if let Some(picker) = self.picker.as_mut()
+                    && let Some(index) = picker.items.iter().position(|(_, value)| value == &id)
+                {
+                    picker.selected = index;
+                }
+            }
+            Err(error) => self.status = format!("could not rename profile: {error:#}"),
+        }
+    }
+
+    fn rename_profile(&mut self, from: &str, to: &str) -> Result<String> {
+        let to = crate::config::validate_profile_id(to)?.to_owned();
+        if to == from {
+            return Ok(to);
+        }
+        if self.settings.profiles.contains_key(&to) {
+            bail!("a profile named `{to}` already exists");
+        }
+        let mut profile = self
+            .settings
+            .profiles
+            .remove(from)
+            .context("that profile no longer exists")?;
+        if profile.name == from {
+            profile.name = to.clone();
+        }
+        self.settings.profiles.insert(to.clone(), profile);
+        if self.settings.default_profile == from {
+            self.settings.default_profile = to.clone();
+        }
+        if let Some(key) = self.credentials.keys.remove(from) {
+            self.credentials.keys.insert(to.clone(), key);
+            self.credentials.save(&self.config.paths)?;
+        }
+        if let Some(pending) = &mut self.pending_provider
+            && pending.profile == from
+        {
+            pending.profile = to.clone();
+        }
+        if let Some(pending) = &mut self.pending_provider
+            && pending.previous == from
+        {
+            pending.previous = to.clone();
+        }
+        self.save_and_apply_settings()?;
+        Ok(to)
+    }
+
+    fn delete_profile(&mut self, id: &str) -> Result<()> {
+        if !self.settings.profiles.contains_key(id) {
+            bail!("no profile named `{id}`");
+        }
+        if self.settings.profiles.len() <= 1 {
+            bail!("cannot delete the last remaining profile");
+        }
+        self.settings.profiles.remove(id);
+        self.credentials.keys.remove(id);
+        self.credentials.save(&self.config.paths)?;
+        if self.settings.default_profile == id {
+            let next = self
+                .settings
+                .profiles
+                .keys()
+                .next()
+                .cloned()
+                .context("no remaining profile")?;
+            self.settings.default_profile = next;
+        }
+        if let Some(pending) = &self.pending_provider
+            && pending.profile == id
+        {
+            self.pending_provider = None;
+        }
+        self.save_and_apply_settings()?;
+        Ok(())
+    }
+
+    fn confirm_profile_delete(&mut self, id: &str) {
+        match self.delete_profile(id) {
+            Ok(()) => {
+                self.status = format!("profile {id} deleted");
+                self.open_profile_picker();
+            }
+            Err(error) => self.status = format!("could not delete profile: {error:#}"),
+        }
+    }
+
+    fn profile_command(&mut self, argument: &str) {
+        let argument = argument.trim();
+        if argument.is_empty() {
+            let mut lines = self
+                .settings
+                .profiles
+                .iter()
+                .map(|(id, profile)| {
+                    let marker = if *id == self.settings.default_profile {
+                        "●"
+                    } else {
+                        " "
+                    };
+                    format!("{marker} {id}  —  {}  ·  {}", profile.name, profile.model)
+                })
+                .collect::<Vec<_>>();
+            lines.push(String::new());
+            lines.push(
+                "Switch with /profile <id>; /profile rename <id>; /profile delete <id>; /profile add."
+                    .to_owned(),
+            );
+            self.push_entry(Entry::new(EntryKind::System, lines.join("\n")));
+            self.follow = true;
+            return;
+        }
+        let (verb, rest) = argument
+            .split_once(char::is_whitespace)
+            .map(|(verb, rest)| (verb, rest.trim()))
+            .unwrap_or((argument, ""));
+        match verb {
+            "rename" => {
+                if rest.is_empty() {
+                    self.status = "usage: /profile rename <new-id>".to_owned();
+                    return;
+                }
+                let from = self.settings.default_profile.clone();
+                match self.rename_profile(&from, rest) {
+                    Ok(id) => self.status = format!("profile renamed to {id}"),
+                    Err(error) => self.status = format!("could not rename profile: {error:#}"),
+                }
+            }
+            "delete" => {
+                if rest.is_empty() {
+                    self.status = "usage: /profile delete <id>".to_owned();
+                    return;
+                }
+                let id = rest.to_owned();
+                match self.delete_profile(&id) {
+                    Ok(()) => self.status = format!("profile {id} deleted"),
+                    Err(error) => self.status = format!("could not delete profile: {error:#}"),
+                }
+            }
+            "add" | "new" => self.open_provider_picker(),
+            "list" => self.profile_command(""),
+            id => {
+                if !self.settings.profiles.contains_key(id) {
+                    self.status = format!("no profile named `{id}`");
+                    return;
+                }
+                self.settings.default_profile = id.to_owned();
+                match self.save_and_apply_settings() {
+                    Ok(()) => self.status = format!("profile {id}"),
+                    Err(error) => self.status = format!("could not switch profile: {error:#}"),
+                }
+            }
+        }
+    }
+
     /// Create a profile from a preset (or a blank custom one), make it active,
     /// and open the field that most needs filling in next.
     fn add_provider(&mut self, id: &str) {
@@ -3488,6 +3728,8 @@ impl App {
                 endpoint: None,
                 providers: Vec::new(),
                 allow_fallbacks: true,
+                context_window: None,
+                max_output_tokens: None,
             },
         );
         // Deliberately persisted but *not* applied: a profile with no model
@@ -4260,6 +4502,14 @@ async fn event_loop(
                         if !form.sending {
                             form.input.insert_str(&text);
                         }
+                    } else if let Some(input) = app.picker.as_mut().and_then(|picker| match picker
+                        .prompt
+                        .as_mut()
+                    {
+                        Some(PickerPrompt::Rename { input, .. }) => Some(input),
+                        _ => None,
+                    }) {
+                        input.insert_str(&text);
                     } else if let Some((_, input)) = app
                         .config_panel
                         .as_mut()
@@ -4547,8 +4797,20 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     // Routed before the panels: a picker opened from /config sits on top of it
     // and must own the keys while it is up.
     if app.picker.is_some() {
+        // An inline rename / delete prompt owns the keys until it is dismissed.
+        if app
+            .picker
+            .as_ref()
+            .is_some_and(|picker| picker.prompt.is_some())
+        {
+            handle_picker_prompt(app, key);
+            return;
+        }
         let mut accept = false;
         let mut cancel = false;
+        let mut rename = false;
+        let mut delete = false;
+        let mut add = false;
         if let Some(picker) = &mut app.picker {
             match key.code {
                 KeyCode::Char('k') | KeyCode::Up => {
@@ -4560,6 +4822,13 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 }
                 KeyCode::Enter => accept = true,
                 KeyCode::Esc | KeyCode::Char('q') => cancel = true,
+                KeyCode::Char('r') if picker.action == PickerAction::SwitchProfile => rename = true,
+                KeyCode::Char('d') if picker.action == PickerAction::SwitchProfile => delete = true,
+                KeyCode::Char('n') | KeyCode::Char('+')
+                    if picker.action == PickerAction::SwitchProfile =>
+                {
+                    add = true
+                }
                 _ => {}
             }
         }
@@ -4567,6 +4836,12 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             app.accept_picker(None);
         } else if cancel {
             app.picker = None;
+        } else if add {
+            app.open_provider_picker();
+        } else if rename && let Some(id) = app.selected_profile_id() {
+            app.begin_profile_rename(&id);
+        } else if delete && let Some(id) = app.selected_profile_id() {
+            app.begin_profile_delete(&id);
         }
         return;
     }
@@ -4733,6 +5008,15 @@ fn handle_click(app: &mut App, column: u16, row: u16) {
     // Same precedence as drawing: a picker floats above the config panel, so a
     // click landing on both belongs to the picker.
     if let Some(index) = picker {
+        // A rename / delete prompt owns the overlay; list clicks must not
+        // switch profiles out from under it.
+        if app
+            .picker
+            .as_ref()
+            .is_some_and(|picker| picker.prompt.is_some())
+        {
+            return;
+        }
         let already = app
             .picker
             .as_ref()
@@ -7487,19 +7771,29 @@ fn draw_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let Some(picker) = &app.picker else {
         return;
     };
-    let height = (picker.items.len() as u16 + 2)
+    let hints: &[(&str, &str)] = if picker.prompt.is_some() {
+        &[("enter", "confirm"), ("esc", "cancel")]
+    } else if picker.action == PickerAction::SwitchProfile {
+        &[
+            ("↑↓", "select"),
+            ("enter", "switch"),
+            ("r", "rename"),
+            ("d", "delete"),
+            ("n", "add"),
+            ("esc", "close"),
+        ]
+    } else {
+        &[("↑↓", "select"), ("enter", "open"), ("esc", "close")]
+    };
+    let extra = if picker.prompt.is_some() { 3 } else { 0 };
+    let height = (picker.items.len() as u16 + 2 + extra)
         .min(area.height.saturating_sub(4))
-        .max(3);
+        .max(3 + extra);
     let popup = ui::centered(area.width.saturating_sub(12).min(100), height, area);
-    let inner = open_overlay(
-        frame,
-        popup,
-        &picker.title.to_uppercase(),
-        primary(),
-        &[("↑↓", "select"), ("enter", "open"), ("esc", "close")],
-    );
+    let inner = open_overlay(frame, popup, &picker.title.to_uppercase(), primary(), hints);
 
-    let rows = inner.height as usize;
+    let prompt_rows = if picker.prompt.is_some() { 3usize } else { 0 };
+    let rows = inner.height.saturating_sub(prompt_rows as u16) as usize;
     let width = inner.width as usize;
     let start = picker.selected.saturating_sub(rows.saturating_sub(1));
     let mut lines = Vec::new();
@@ -7535,7 +7829,109 @@ fn draw_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
             )],
         ));
     }
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    let list = Rect {
+        height: inner.height.saturating_sub(prompt_rows as u16),
+        ..inner
+    };
+    frame.render_widget(Paragraph::new(Text::from(lines)), list);
+    if let Some(prompt) = &picker.prompt {
+        let field = Rect {
+            y: list.bottom(),
+            height: prompt_rows as u16,
+            ..inner
+        };
+        match prompt {
+            PickerPrompt::Rename { id, input } => {
+                frame.render_widget(
+                    Paragraph::new(Text::from(vec![
+                        ui::rule(inner.width),
+                        Line::from(Span::styled(
+                            format!(" rename {id} →"),
+                            Style::default().fg(muted()),
+                        )),
+                        Line::from(Span::styled(
+                            format!(" {}", input.text()),
+                            Style::default().fg(text()),
+                        )),
+                    ])),
+                    field,
+                );
+                let (_, column) = input.cursor_position();
+                frame.set_cursor_position((
+                    (field.x + 1 + column as u16).min(field.right().saturating_sub(1)),
+                    field.y + 2,
+                ));
+            }
+            PickerPrompt::ConfirmDelete { id } => {
+                frame.render_widget(
+                    Paragraph::new(Text::from(vec![
+                        ui::rule(inner.width),
+                        Line::from(Span::styled(
+                            format!(" delete {id}?"),
+                            Style::default().fg(danger()).add_modifier(Modifier::BOLD),
+                        )),
+                        Line::from(Span::styled(
+                            " enter confirms · esc cancels",
+                            Style::default().fg(muted()),
+                        )),
+                    ])),
+                    field,
+                );
+            }
+        }
+    }
+}
+
+fn handle_picker_prompt(app: &mut App, key: KeyEvent) {
+    let renaming = app
+        .picker
+        .as_ref()
+        .is_some_and(|picker| matches!(picker.prompt, Some(PickerPrompt::Rename { .. })));
+    if renaming {
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(picker) = app.picker.as_mut() {
+                    picker.prompt = None;
+                }
+            }
+            KeyCode::Enter => {
+                let Some(picker) = app.picker.as_mut() else {
+                    return;
+                };
+                let Some(PickerPrompt::Rename { id, input }) = picker.prompt.take() else {
+                    return;
+                };
+                let to = input.text();
+                app.commit_profile_rename(&id, &to);
+            }
+            _ => {
+                if let Some(PickerPrompt::Rename { input, .. }) = app
+                    .picker
+                    .as_mut()
+                    .and_then(|picker| picker.prompt.as_mut())
+                {
+                    edit_buffer(input, key, false);
+                }
+            }
+        }
+        return;
+    }
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('n') => {
+            if let Some(picker) = app.picker.as_mut() {
+                picker.prompt = None;
+            }
+        }
+        KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('d') => {
+            let id = match app.picker.as_mut().and_then(|picker| picker.prompt.take()) {
+                Some(PickerPrompt::ConfirmDelete { id }) => id,
+                _ => return,
+            };
+            app.confirm_profile_delete(&id);
+        }
+        _ => {}
+    }
 }
 
 /// The slice of a tool result kept for expansion, bounded so one enormous
@@ -8220,6 +8616,8 @@ mod tests {
                 endpoint: Some("claude".into()),
                 providers: Vec::new(),
                 allow_fallbacks: true,
+                context_window: None,
+                max_output_tokens: None,
             },
         );
         app.settings.profiles.insert(
@@ -8235,6 +8633,8 @@ mod tests {
                 endpoint: None,
                 providers: Vec::new(),
                 allow_fallbacks: true,
+                context_window: None,
+                max_output_tokens: None,
             },
         );
 
@@ -8458,6 +8858,8 @@ mod tests {
                 endpoint: None,
                 providers: Vec::new(),
                 allow_fallbacks: true,
+                context_window: None,
+                max_output_tokens: None,
             },
         );
         app.open_profile_picker();
@@ -8474,6 +8876,193 @@ mod tests {
         app.accept_picker(Some(index));
         assert_eq!(app.settings.default_profile, "second");
         assert!(app.picker.is_none());
+    }
+
+    fn extra_profile(app: &mut App, id: &str, model: &str) {
+        extra_profile_with_limits(app, id, model, None, None);
+    }
+
+    fn extra_profile_with_limits(
+        app: &mut App,
+        id: &str,
+        model: &str,
+        context_window: Option<usize>,
+        max_output_tokens: Option<usize>,
+    ) {
+        app.settings.profiles.insert(
+            id.to_owned(),
+            crate::config::ProviderProfile {
+                name: id.to_owned(),
+                base_url: "http://127.0.0.1:9/v1".into(),
+                model: model.into(),
+                protocol: ProviderProtocol::ChatCompletions,
+                api_key_env: None,
+                aux_model: None,
+                reasoning_effort: None,
+                endpoint: None,
+                providers: Vec::new(),
+                allow_fallbacks: true,
+                context_window,
+                max_output_tokens,
+            },
+        );
+    }
+
+    #[test]
+    fn switching_profiles_applies_that_profiles_token_limits() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        extra_profile_with_limits(&mut app, "claude", "claude", Some(1_000_000), Some(64_000));
+        extra_profile_with_limits(&mut app, "local", "codestral", Some(128_000), Some(8_000));
+
+        app.settings.default_profile = "claude".into();
+        app.save_and_apply_settings().unwrap();
+        assert_eq!(app.config.model_limits.context_window, 1_000_000);
+        assert_eq!(
+            app.config.model_limits.configured_output_tokens,
+            Some(64_000)
+        );
+
+        app.settings.default_profile = "local".into();
+        app.save_and_apply_settings().unwrap();
+        assert_eq!(app.config.model, "codestral");
+        assert_eq!(app.config.model_limits.context_window, 128_000);
+        assert_eq!(
+            app.config.model_limits.configured_output_tokens,
+            Some(8_000)
+        );
+    }
+
+    #[test]
+    fn leftover_agent_limits_apply_until_a_profile_sets_its_own() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        extra_profile(&mut app, "other", "other-model");
+        app.settings.agent.context_window = Some(200_000);
+        app.settings.agent.max_output_tokens = Some(16_000);
+        app.save_and_apply_settings().unwrap();
+        assert_eq!(app.config.model_limits.context_window, 200_000);
+        assert_eq!(
+            app.config.model_limits.configured_output_tokens,
+            Some(16_000)
+        );
+
+        // Writing a profile override clears the leftover so a later blank
+        // does not resurrect the old global value.
+        let edit = |app: &mut App, key: ConfigKey, text: &str| {
+            let mut input = InputBuffer::new();
+            input.insert_str(text);
+            app.config_panel = Some(ConfigPanel {
+                selected: 0,
+                editing: Some((key, input)),
+            });
+            app.commit_config_edit();
+        };
+        edit(&mut app, ConfigKey::ContextWindow, "1m");
+        assert_eq!(app.settings.agent.context_window, None);
+        assert_eq!(
+            app.settings.profiles["test"].context_window,
+            Some(1_000_000)
+        );
+        assert_eq!(app.settings.profile_limits("other"), (None, Some(16_000)));
+    }
+
+    #[test]
+    fn profile_picker_renames_and_moves_the_stored_key() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        extra_profile(&mut app, "second", "other-model");
+        app.credentials
+            .keys
+            .insert("second".into(), "secret-key".into());
+        app.open_profile_picker();
+        let index = app
+            .picker
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .position(|(_, value)| value == "second")
+            .unwrap();
+        app.picker.as_mut().unwrap().selected = index;
+        app.begin_profile_rename("second");
+        handle_picker_prompt(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+        );
+        // Replace the seeded id with the new one.
+        if let Some(PickerPrompt::Rename { input, .. }) = app
+            .picker
+            .as_mut()
+            .and_then(|picker| picker.prompt.as_mut())
+        {
+            input.clear();
+            input.insert_str("renamed");
+        }
+        handle_picker_prompt(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert!(!app.settings.profiles.contains_key("second"));
+        assert!(app.settings.profiles.contains_key("renamed"));
+        assert_eq!(
+            app.credentials.keys.get("renamed").map(String::as_str),
+            Some("secret-key")
+        );
+        assert!(!app.credentials.keys.contains_key("second"));
+    }
+
+    #[test]
+    fn profile_picker_refuses_to_delete_the_last_profile() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.open_profile_picker();
+        app.begin_profile_delete("test");
+        assert!(app.picker.as_ref().unwrap().prompt.is_none());
+        assert!(app.status.contains("last remaining"), "{}", app.status);
+        assert!(app.settings.profiles.contains_key("test"));
+    }
+
+    #[test]
+    fn deleting_the_active_profile_switches_to_another() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        extra_profile(&mut app, "second", "other-model");
+        app.settings.default_profile = "test".into();
+        app.delete_profile("test").unwrap();
+        assert!(!app.settings.profiles.contains_key("test"));
+        assert_eq!(app.settings.default_profile, "second");
+        assert_eq!(app.config.profile, "second");
+    }
+
+    #[test]
+    fn profile_slash_command_lists_switches_renames_and_deletes() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        extra_profile(&mut app, "second", "other-model");
+        extra_profile(&mut app, "third", "third-model");
+
+        assert!(app.slash_command("/profile"));
+        let listed = &app.entries.last().unwrap().text;
+        assert!(listed.contains("test"), "{listed}");
+        assert!(listed.contains("second"), "{listed}");
+        assert!(listed.contains("/profile rename"), "{listed}");
+
+        assert!(app.slash_command("/profile second"));
+        assert_eq!(app.settings.default_profile, "second");
+        assert_eq!(app.config.model, "other-model");
+
+        assert!(app.slash_command("/profile rename claude"));
+        assert!(app.settings.profiles.contains_key("claude"));
+        assert!(!app.settings.profiles.contains_key("second"));
+        assert_eq!(app.settings.default_profile, "claude");
+
+        assert!(app.slash_command("/profile delete claude"));
+        assert!(!app.settings.profiles.contains_key("claude"));
+        assert_ne!(app.settings.default_profile, "claude");
+    }
+
+    #[test]
+    fn profile_is_offered_by_the_command_palette() {
+        assert!(
+            SLASH_COMMANDS
+                .iter()
+                .any(|(command, _)| *command == "/profile")
+        );
     }
 
     #[test]
@@ -8630,6 +9219,8 @@ mod tests {
                 endpoint: None,
                 providers: Vec::new(),
                 allow_fallbacks: true,
+                context_window: None,
+                max_output_tokens: None,
             },
         );
         app.config_panel = Some(ConfigPanel {
@@ -9046,7 +9637,13 @@ mod tests {
         // wire value in one step — this is the /config escape hatch for a
         // provider that rejects the detected max_tokens.
         edit(&mut app, ConfigKey::MaxOutput, "64k");
-        assert_eq!(app.settings.agent.max_output_tokens, Some(64_000));
+        let profile = app
+            .settings
+            .profiles
+            .get(&app.settings.default_profile)
+            .expect("active profile");
+        assert_eq!(profile.max_output_tokens, Some(64_000));
+        assert_eq!(app.settings.agent.max_output_tokens, None);
         assert_eq!(
             app.config.model_limits.configured_output_tokens,
             Some(64_000)
@@ -9055,13 +9652,29 @@ mod tests {
 
         // Context window accepts m-suffixed values.
         edit(&mut app, ConfigKey::ContextWindow, "1m");
+        let profile = app
+            .settings
+            .profiles
+            .get(&app.settings.default_profile)
+            .expect("active profile");
+        assert_eq!(profile.context_window, Some(1_000_000));
         assert_eq!(app.config.model_limits.context_window, 1_000_000);
 
         // Blank (or "auto") clears the override and re-resolves.
         edit(&mut app, ConfigKey::MaxOutput, "");
-        assert_eq!(app.settings.agent.max_output_tokens, None);
+        let profile = app
+            .settings
+            .profiles
+            .get(&app.settings.default_profile)
+            .expect("active profile");
+        assert_eq!(profile.max_output_tokens, None);
         edit(&mut app, ConfigKey::ContextWindow, "auto");
-        assert_eq!(app.settings.agent.context_window, None);
+        let profile = app
+            .settings
+            .profiles
+            .get(&app.settings.default_profile)
+            .expect("active profile");
+        assert_eq!(profile.context_window, None);
         assert_ne!(
             app.config.model_limits.source,
             crate::model_info::LimitSource::Override
@@ -9070,7 +9683,12 @@ mod tests {
         // Garbage is rejected without changing anything.
         edit(&mut app, ConfigKey::MaxOutput, "lots");
         assert!(app.status.contains("configuration error"), "{}", app.status);
-        assert_eq!(app.settings.agent.max_output_tokens, None);
+        let profile = app
+            .settings
+            .profiles
+            .get(&app.settings.default_profile)
+            .expect("active profile");
+        assert_eq!(profile.max_output_tokens, None);
     }
 
     #[test]
@@ -10182,6 +10800,8 @@ mod tests {
                 endpoint: None,
                 providers: Vec::new(),
                 allow_fallbacks: true,
+                context_window: None,
+                max_output_tokens: None,
             },
         );
         let config = Config {

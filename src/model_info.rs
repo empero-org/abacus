@@ -163,10 +163,7 @@ impl Default for CompactionBudget {
 
 impl CompactionBudget {
     pub fn from_limits(limits: ModelLimits) -> Self {
-        let usable_tokens = limits
-            .context_window
-            .saturating_sub(limits.max_output_tokens)
-            .saturating_sub(RESERVED_TOKENS);
+        let usable_tokens = usable_input_tokens(limits);
         let usable_chars = usable_tokens.saturating_mul(CHARS_PER_TOKEN);
         Self {
             compact_at_chars: usable_chars.saturating_mul(4) / 5,
@@ -177,6 +174,47 @@ impl CompactionBudget {
             summary_budget_chars: usable_chars.saturating_mul(3) / 20,
         }
     }
+}
+
+/// Tokens left for the conversation after reserving output and the standing
+/// prompt/tool overhead.
+///
+/// The reservation is clamped: a configured `max_output_tokens` that meets or
+/// exceeds the context window (a leftover `[agent]` 128k on a 128k local
+/// profile, or a server echoing its window as the completion cap) used to
+/// leave **zero** input budget. Compaction then kept only system + the first
+/// user prompt, so every later request replayed the opening turn.
+fn usable_input_tokens(limits: ModelLimits) -> usize {
+    let reserved_output = reserved_output_tokens(limits);
+    let usable = limits
+        .context_window
+        .saturating_sub(reserved_output)
+        .saturating_sub(RESERVED_TOKENS);
+    let floor = min_usable_input_tokens(limits.context_window);
+    usable.max(floor)
+}
+
+fn reserved_output_tokens(limits: ModelLimits) -> usize {
+    let output = limits.max_output_tokens;
+    if output == 0 {
+        return 0;
+    }
+    // Same echo rule as `apply_detected`: output ≥ context is not a real
+    // completion cap, so reserve the conservative default rather than the
+    // whole window.
+    if output >= limits.context_window {
+        return DEFAULT_MAX_OUTPUT_TOKENS.min(limits.context_window / 4);
+    }
+    // Never reserve more than half the window — long answers still get room,
+    // but a 64k output cap on a 128k model must not starve the transcript.
+    output.min(limits.context_window / 2)
+}
+
+fn min_usable_input_tokens(context_window: usize) -> usize {
+    if context_window == 0 {
+        return 0;
+    }
+    DEFAULT_MAX_OUTPUT_TOKENS.min(context_window / 4).max(1)
 }
 
 /// Heuristic table for *currently shipping* frontier model families, with
@@ -460,6 +498,48 @@ mod tests {
         // Roughly the old hardcoded values (~400k trigger, ~140k recent).
         assert!(budget.compact_at_chars > 300_000 && budget.compact_at_chars < 450_000);
         assert!(budget.recent_budget_chars > 100_000 && budget.recent_budget_chars < 160_000);
+    }
+
+    #[test]
+    fn an_output_cap_that_fills_the_window_still_leaves_input_budget() {
+        // Regression: `[agent] max_output_tokens = 128000` on a 128k model
+        // reserved the entire window, so every later request dropped down to
+        // system + the first user prompt and the model looped the opening turn.
+        let budget = ModelLimits {
+            context_window: 128_000,
+            max_output_tokens: 128_000,
+            configured_output_tokens: Some(128_000),
+            source: LimitSource::Override,
+        }
+        .compaction_budget();
+        let default = CompactionBudget::default();
+        assert!(
+            budget.compact_at_chars > 300_000,
+            "must still have a real trigger, got {}",
+            budget.compact_at_chars
+        );
+        assert!(
+            budget.recent_budget_chars > 100_000,
+            "must still keep a recent window, got {}",
+            budget.recent_budget_chars
+        );
+        // Same order of magnitude as the 128k/8k default — not a zero budget.
+        assert!(budget.compact_at_chars >= default.compact_at_chars * 3 / 4);
+        assert!(budget.recent_budget_chars >= default.recent_budget_chars * 3 / 4);
+    }
+
+    #[test]
+    fn a_large_but_real_output_cap_cannot_starve_the_transcript() {
+        let budget = ModelLimits {
+            context_window: 128_000,
+            max_output_tokens: 96_000,
+            configured_output_tokens: Some(96_000),
+            source: LimitSource::Override,
+        }
+        .compaction_budget();
+        assert!(budget.compact_at_chars > 100_000);
+        assert!(budget.recent_budget_chars > 40_000);
+        assert!(budget.recent_budget_chars < budget.compact_at_chars);
     }
 
     #[test]
