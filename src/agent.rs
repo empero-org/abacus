@@ -231,12 +231,25 @@ async fn run_turn_inner(
     mut options: TurnOptions,
     events: mpsc::UnboundedSender<AgentEvent>,
 ) {
+    // The auxiliary model: the same endpoint with a different model, used for
+    // secondary calls (rethink, tether drift, command classification) so a big
+    // main model does not pay for them. Compaction deliberately stays on the
+    // main model — the rolling summary is load-bearing for the whole session.
+    // Falls back to the main provider when no aux model is set.
+    let aux = match options.aux_model.as_deref() {
+        Some(model) if !model.trim().is_empty() && model != provider.model() => {
+            provider.with_model(model)
+        }
+        _ => provider.clone(),
+    };
+
     // Paths outside the workspace that the safety layer has cleared for
     // reading. The executor consults it; the loop below fills it in.
     let outside_reads = crate::tools::OutsideReads::default();
     let tools =
         ToolExecutor::with_output_limit(options.workspace.clone(), options.tool_output_limit)
-            .with_web(options.web_search.clone())
+            // The auxiliary model reads fetched pages for the tools.
+            .with_web(options.web_search.clone().with_extractor(aux.clone()))
             .with_outside_reads(outside_reads.clone());
     let mut specs = options.services.tool_specs();
     specs.extend(GoalState::tool_specs());
@@ -263,17 +276,6 @@ async fn run_turn_inner(
         options.hive.clone(),
         options.injections.clone(),
     );
-    // The auxiliary model: the same endpoint with a different model, used for
-    // secondary calls (rethink, tether drift, command classification) so a big
-    // main model does not pay for them. Compaction deliberately stays on the
-    // main model — the rolling summary is load-bearing for the whole session.
-    // Falls back to the main provider when no aux model is set.
-    let aux = match options.aux_model.as_deref() {
-        Some(model) if !model.trim().is_empty() && model != provider.model() => {
-            provider.with_model(model)
-        }
-        _ => provider.clone(),
-    };
     let mut repeated_calls: HashMap<String, usize> = HashMap::new();
     // Consecutive failed tool results this turn — two in a row triggers a
     // forced papercut recall on the theory the model is stuck on a known snag.

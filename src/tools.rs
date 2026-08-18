@@ -561,13 +561,21 @@ impl ToolExecutor {
             query: String,
             #[serde(default)]
             max_results: Option<usize>,
+            /// What the caller wants answered. With it, the top results are
+            /// opened and read rather than merely listed.
+            #[serde(default)]
+            extract: Option<String>,
         }
         if !self.web.enabled {
             bail!("web tools are disabled; set `[search] enabled = true`");
         }
         let args: Args = parse_args(arguments)?;
         self.web
-            .search(&args.query, args.max_results.unwrap_or(5))
+            .search_and_extract(
+                &args.query,
+                args.max_results.unwrap_or(5),
+                args.extract.as_deref(),
+            )
             .await
     }
 
@@ -577,13 +585,21 @@ impl ToolExecutor {
             url: String,
             #[serde(default)]
             max_chars: Option<usize>,
+            /// What the caller wants from the page. With it, the page is read
+            /// by the auxiliary model and only the answer comes back.
+            #[serde(default)]
+            extract: Option<String>,
         }
         if !self.web.enabled {
             bail!("web tools are disabled; set `[search] enabled = true`");
         }
         let args: Args = parse_args(arguments)?;
         self.web
-            .read_page(&args.url, args.max_chars.unwrap_or(0))
+            .read_page(
+                &args.url,
+                args.max_chars.unwrap_or(0),
+                args.extract.as_deref(),
+            )
             .await
     }
 

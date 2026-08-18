@@ -446,6 +446,16 @@ falls through to the next. A query no keyless engine covers still comes back
 empty; when that happens the tool says so plainly and tells the model not to
 keep rephrasing, which is what used to burn whole turns.
 
+Both web tools take an `extract` argument — "the exact signature of
+`Client::builder`", "which crate handles unix signals" — and the auxiliary
+model answers that from the fetched page, so a lookup costs one fact rather
+than a whole document. `web_search` with `extract` reads the results page
+itself rather than scraping links out of it, which is the part that kept
+breaking: the markup shifts between fetches and the links are redirect
+wrappers. Fetched pages are quoted to the reader as data, with the instruction
+not to obey them stated where the page cannot reach — anything on the open web
+can contain text aimed at whatever model reads it.
+
 Self-hosting SearXNG is the fix that costs nothing but a container:
 
 ```toml
@@ -536,8 +546,9 @@ dispatches through:
   (never pushes); `git_restore` reverts paths to HEAD; `git_checkout` creates or
   switches branches. The mutating Git tools are approval-gated, as is
   `run_command`, which executes a timed workspace command.
-- `web_search` queries the web and `read_page` fetches an `http(s)` URL as
-  readable text. Both are read-only; `read_page` refuses non-HTTP schemes and
+- `web_search` queries the web and `read_page` fetches an `http(s)` URL. Both
+  take an `extract` argument saying what you want from the page, and answer
+  that with the auxiliary model instead of returning the whole document. Both are read-only; `read_page` refuses non-HTTP schemes and
   private/loopback hosts. The backend defaults to `auto`, which picks the best
   one you have configured — see [Web search](#web-search).
 - `skill_search`, `skill_load`, and `skill_read` load Agent Skills progressively.
