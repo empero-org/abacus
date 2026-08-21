@@ -398,19 +398,10 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
                 "needs TAVILY_API_KEY — full web search, free tier",
             ),
             (
-                "DuckDuckGo",
-                "no key, Instant Answer only; falls back to Bing",
-            ),
-            ("Bing", "no key — the index DuckDuckGo used to proxy"),
-            ("Mojeek", "no key — independent index, tolerates scripts"),
-            (
                 "SearXNG",
                 "no key — your own instance, best if you self-host",
             ),
-            (
-                "Marginalia",
-                "no key, small independent index; slow but decent",
-            ),
+            ("Bing", "no key — public page, best effort"),
         ]
         .iter()
         .enumerate()
@@ -425,21 +416,15 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
         let default = match settings.search.backend {
             SearchBackend::Brave => "2",
             SearchBackend::Tavily => "3",
-            SearchBackend::Duckduckgo => "4",
-            SearchBackend::Searxng => "5",
-            SearchBackend::Marginalia => "6",
-            SearchBackend::Bing => "7",
-            SearchBackend::Mojeek => "8",
+            SearchBackend::Searxng => "4",
+            SearchBackend::Bing => "5",
             SearchBackend::Auto => "1",
         };
         let (backend, env_var) = match console::prompt("Search backend", Some(default))?.trim() {
             "2" => (SearchBackend::Brave, Some("BRAVE_API_KEY")),
             "3" => (SearchBackend::Tavily, Some("TAVILY_API_KEY")),
-            "4" => (SearchBackend::Duckduckgo, None),
-            "5" => (SearchBackend::Searxng, None),
-            "6" => (SearchBackend::Marginalia, None),
-            "7" => (SearchBackend::Bing, None),
-            "8" => (SearchBackend::Mojeek, None),
+            "4" => (SearchBackend::Searxng, None),
+            "5" => (SearchBackend::Bing, None),
             _ => (SearchBackend::Auto, None),
         };
         // A SearXNG instance is useless without its address, so ask here

@@ -433,18 +433,14 @@ it is worth being blunt about why:
 | `searxng` | none — your instance | Best keyless option. Unlimited, private, reliable. Needs `instance_url`, and the instance must allow JSON (`search: formats: [html, json]`). |
 | `tavily` | `TAVILY_API_KEY` | Full web search. Free tier, no card. |
 | `brave` | `BRAVE_API_KEY` | Full web search. The free tier ended in February 2026. |
-| `bing` | none | The engine behind DuckDuckGo, queried directly: DuckDuckGo's own html/lite pages now answer bots with an anti-bot challenge, so a keyless "DuckDuckGo search" is this. Public HTML, unofficial — may rate-limit an agent eventually. |
-| `mojeek` | none | Independent index, tolerant of automated queries, direct result links. The bot-friendly fallback. |
-| `marginalia` | none | Hobby-scale independent index; slow and rate-limits an agent quickly, so it is a bonus, not a foundation. |
-| `duckduckgo` | none | Its Instant Answer API (encyclopedic lookups only) first, then the keyless chain for real web results. |
+| `bing` | none | Public HTML, unofficial. The keyless default — best effort, and may rate-limit or bot-wall an agent. |
 
-With nothing configured, `auto` tries Bing first and falls through to Mojeek,
-Marginalia and DuckDuckGo's Instant Answer API, so ordinary queries now get
-real results keylessly. These are public HTML endpoints, not official APIs —
-the chain exists precisely so one engine blocking or rate-limiting an agent
-falls through to the next. A query no keyless engine covers still comes back
-empty; when that happens the tool says so plainly and tells the model not to
-keep rephrasing, which is what used to burn whole turns.
+With nothing configured, `auto` uses Bing's public page. That is a scraped
+HTML endpoint, not an official API: it can bot-wall or change layout without
+warning, and when it comes back empty the tool says so plainly and tells the
+model not to keep rephrasing, which is what used to burn whole turns. For
+search you can rely on, set `TAVILY_API_KEY` (free tier, no card) or point
+`instance_url` at your own SearXNG.
 
 Both web tools take an `extract` argument — "the exact signature of
 `Client::builder`", "which crate handles unix signals" — and the auxiliary
@@ -880,7 +876,7 @@ tool_output_limit = 30000
 
 [search]
 enabled = true
-backend = "auto"              # keyless default: bing -> mojeek -> marginalia -> duckduckgo
+backend = "auto"              # searxng -> brave/tavily key -> bing (keyless)
                               # or "searxng" with an instance_url, or brave | tavily with an API key
 ```
 

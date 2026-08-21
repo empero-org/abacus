@@ -1,11 +1,10 @@
 //! Web search and page-reading tools.
 //!
-//! `web_search` is keyless by default: a chain of public engines — Bing,
-//! Mojeek, Marginalia, and DuckDuckGo's Instant Answer API — tried in order
-//! with zero config. DuckDuckGo's html/lite pages now answer automated
-//! requests with an anti-bot challenge, so the chain queries the engines
-//! directly instead. API-key backends (Brave, Tavily) and a self-hosted
-//! SearXNG instance can be picked via `[search]` in the config. `read_page`
+//! `web_search` works with zero config: with no key set it falls back to
+//! Bing's public HTML page, which is best effort by nature — a bot wall or a
+//! layout change is a miss, and the tool says so rather than implying the web
+//! is empty. API-key backends (Brave, Tavily) and a self-hosted SearXNG
+//! instance can be picked via `[search]` in the config. `read_page`
 //! fetches a URL and converts it to readable text. Both are read-only and
 //! bounded; `read_page` refuses non-HTTP schemes and private / loopback hosts
 //! to avoid being steered into the local network (SSRF).
@@ -28,42 +27,26 @@ const EXTRACT_RESULT_PAGES: usize = 2;
 /// Ceiling on the results text handed to the reader model.
 const EXTRACT_CORPUS_CHARS: usize = 40_000;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-/// Marginalia runs on hobby hardware and rate-limits an agent's traffic
-/// quickly — measured here, it stopped answering after about ten queries and
-/// then hung rather than refusing. So the wait before falling through to
-/// DuckDuckGo is kept short: a fast miss beats a slow one.
-const MARGINALIA_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PAGE_CHARS: usize = 20_000;
 
 /// Which search backend `web_search` uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchBackend {
-    /// Use whichever backend the environment can support: Brave or Tavily
-    /// when their key is present, otherwise the keyless chain: Bing first,
-    /// then Mojeek, Marginalia and DuckDuckGo's Instant Answer API. The
-    /// default, because the old keyless default — DuckDuckGo's Instant Answer
-    /// API — cannot answer most queries and silently returned nothing for
-    /// them.
+    /// Use whichever backend the environment can support: a configured
+    /// SearXNG instance, then Brave or Tavily when their key is present,
+    /// otherwise Bing's keyless public search.
     #[default]
     Auto,
-    /// Marginalia: a small independent index, no key. Favours technical and
-    /// non-commercial pages, which suits an agent — but it runs on modest
-    /// hardware, so it is slow and sometimes times out. Part of the keyless
-    /// chain, not a default on its own.
-    Marginalia,
-    /// Bing's public HTML search: no key, and the same index DuckDuckGo's
-    /// blocked html/lite pages used to proxy. The keyless default.
+    /// Bing's public HTML search: no key needed. The keyless default, and
+    /// the only one — scraping a public results page is best-effort by
+    /// nature, so there is no chain of fallbacks pretending otherwise.
     Bing,
-    /// Mojeek: an independent index, no key, tolerant of automated queries.
-    /// Part of the keyless chain.
-    Mojeek,
     /// A SearXNG instance, named by `[search] instance_url`. Self-hosted ones
     /// are the best option here: no key, no quota, and the query never leaves
     /// infrastructure you control. Public instances mostly refuse automated
     /// JSON access, so this is only offered when a URL is configured.
     Searxng,
-    Duckduckgo,
     Brave,
     Tavily,
 }
@@ -72,11 +55,8 @@ impl SearchBackend {
     fn label(self) -> &'static str {
         match self {
             SearchBackend::Auto => "auto",
-            SearchBackend::Marginalia => "marginalia",
             SearchBackend::Bing => "bing",
-            SearchBackend::Mojeek => "mojeek",
             SearchBackend::Searxng => "searxng",
-            SearchBackend::Duckduckgo => "duckduckgo",
             SearchBackend::Brave => "brave",
             SearchBackend::Tavily => "tavily",
         }
@@ -129,11 +109,8 @@ impl SearchSettings {
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty())
         };
-        // `Auto` prefers a backend that can actually answer. DuckDuckGo's
-        // html/lite pages now block bots, its Instant Answer API only covers
-        // encyclopedic lookups, and Marginalia is a hobby-scale index, so the
-        // keyless default is Bing — with Mojeek, Marginalia and the Instant
-        // Answer API behind it inside `search`.
+        // `Auto` prefers a backend that can actually answer: a self-hosted
+        // SearXNG first, then a keyed API, and Bing's public page last.
         let instance = self
             .instance_url
             .as_deref()
@@ -160,10 +137,7 @@ impl SearchSettings {
                 } else if let Some(key) = read("TAVILY_API_KEY") {
                     (SearchBackend::Tavily, Some(key))
                 } else {
-                    // No key: the keyless engine with the broadest index —
-                    // Bing, the same index DuckDuckGo's blocked HTML pages
-                    // used to proxy. `search` falls back to Mojeek, Marginalia
-                    // and the Instant Answer API when it comes back empty.
+                    // No key: Bing's public page, the one keyless route left.
                     (SearchBackend::Bing, None)
                 }
             }
@@ -306,23 +280,19 @@ impl WebConfig {
         let client = self.client()?;
         let results = match self.backend {
             // `resolve` turns Auto into a concrete backend before a WebConfig
-            // ever exists; treating it as DuckDuckGo here would silently pick
-            // a single engine if that ever stopped being true.
+            // ever exists; treating it as a concrete engine here would
+            // silently pick one if that ever stopped being true.
             SearchBackend::Auto => bail!("search backend was not resolved"),
             // The keyless engines share one chain: the chosen engine goes
             // first, then the rest of the keyless order. A bot wall, rate
             // limit, or empty page on one engine is a miss, and the next
             // engine is tried — a blocked public endpoint does not sink the
             // whole search.
-            SearchBackend::Bing => {
-                keyless_search(&client, query, max_results, KeylessEngine::Bing).await
-            }
-            SearchBackend::Mojeek => {
-                keyless_search(&client, query, max_results, KeylessEngine::Mojeek).await
-            }
-            SearchBackend::Marginalia => {
-                keyless_search(&client, query, max_results, KeylessEngine::Marginalia).await
-            }
+            // Scraping a public results page is best effort: a bot wall or a
+            // layout change is a miss, not a failure of the whole search.
+            SearchBackend::Bing => bing_search(&client, query, max_results)
+                .await
+                .unwrap_or_default(),
             SearchBackend::Searxng => {
                 let base = self.instance_url.as_deref().ok_or_else(|| {
                     anyhow!(
@@ -331,9 +301,6 @@ impl WebConfig {
                     )
                 })?;
                 searxng_search(&client, base, query, max_results).await?
-            }
-            SearchBackend::Duckduckgo => {
-                keyless_search(&client, query, max_results, KeylessEngine::Duckduckgo).await
             }
             SearchBackend::Brave => {
                 brave_search(
@@ -355,22 +322,15 @@ impl WebConfig {
             }
         };
         if results.is_empty() {
-            if matches!(
-                self.backend,
-                SearchBackend::Duckduckgo
-                    | SearchBackend::Marginalia
-                    | SearchBackend::Bing
-                    | SearchBackend::Mojeek
-            ) {
+            if matches!(self.backend, SearchBackend::Bing) {
                 return Ok(format!(
-                    "No results for {query:?}. This is the keyless search path: \
-                     Bing, Mojeek, Marginalia and DuckDuckGo's Instant Answer API \
-                     were all tried, and none covered this query. Keyless search \
-                     misses on plenty of real queries — a limit of the public \
-                     engines, not the wording. Rephrasing rarely helps, so do not \
-                     retry more than once. Say so plainly, and mention that \
-                     setting TAVILY_API_KEY (free tier, no card) gives full web \
-                     search."
+                    "No results for {query:?}. This is the keyless search path — \
+                     Bing's public page, which blocks bots and changes layout \
+                     without warning. Keyless search misses on plenty of real \
+                     queries; that is a limit of the public endpoint, not of how \
+                     the question was worded, so do not retry more than once. Say \
+                     so plainly, and mention that setting TAVILY_API_KEY (free \
+                     tier, no card) gives full web search."
                 ));
             }
             return Ok(format!("No results for {query:?}."));
@@ -552,74 +512,6 @@ fn render_results(query: &str, results: &[SearchResult]) -> String {
     out
 }
 
-// ---- DuckDuckGo (keyless Instant Answer API) ----
-//
-// The legacy `html.duckduckgo.com/html/` and `lite.duckduckgo.com/lite/`
-// endpoints now answer automated requests with an anti-bot challenge page
-// instead of result markup, so scraping them yields nothing. DuckDuckGo's
-// official keyless Instant Answer API (`api.duckduckgo.com`, JSON) still
-// returns structured data without a key, so we query that instead. It
-// surfaces a single abstract plus `Results` and `RelatedTopics` lists; we
-// flatten the most relevant entries into the common `SearchResult` shape. It
-// is encyclopedic-only, which is why it sits at the end of the keyless chain
-// rather than anywhere a real web search is expected.
-
-/// Marginalia's public API. Keyless, JSON, and licensed CC-BY-NC-SA — it is a
-/// hobby-scale index, so it is queried with a short timeout and its failures
-/// are treated as "no results" rather than as errors worth surfacing.
-async fn marginalia_search(
-    client: &reqwest::Client,
-    query: &str,
-    max_results: usize,
-) -> Result<Vec<SearchResult>> {
-    #[derive(serde::Deserialize)]
-    struct Response {
-        #[serde(default)]
-        results: Vec<Entry>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Entry {
-        #[serde(default)]
-        title: String,
-        #[serde(default)]
-        url: String,
-        #[serde(default)]
-        description: String,
-    }
-    // `path_segments_mut` percent-encodes the query for us, so no extra
-    // dependency and no hand-rolled escaping.
-    let mut url = reqwest::Url::parse("https://api.marginalia.nu/public/search/")?;
-    url.path_segments_mut()
-        .map_err(|_| anyhow!("marginalia url cannot take a path"))?
-        .pop_if_empty()
-        .push(query);
-    let response = client
-        .get(url)
-        // Well under the shared timeout: this index is often slow, and an
-        // agent waiting 20s for a maybe-empty answer is worse than a miss.
-        .timeout(MARGINALIA_TIMEOUT)
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<Response>()
-        .await?;
-    Ok(response
-        .results
-        .into_iter()
-        .filter(|entry| !entry.url.trim().is_empty())
-        .take(max_results)
-        .map(|entry| SearchResult {
-            title: entry.title,
-            url: entry.url,
-            snippet: entry.description,
-        })
-        .collect())
-}
-
-/// A SearXNG instance's JSON API. The instance must allow the JSON format —
-/// SearXNG ships with it disabled, so a working URL that returns HTML is the
-/// common misconfiguration, and the error says so rather than just failing to
-/// parse.
 async fn searxng_search(
     client: &reqwest::Client,
     base: &str,
@@ -673,10 +565,9 @@ async fn searxng_search(
 
 // ---- Bing HTML (keyless) ----
 //
-// DuckDuckGo's html/lite endpoints now block bots, so the web index behind
-// them — Bing's — is queried directly instead, through its public HTML page.
-// Microsoft wraps most result links in a `bing.com/ck/a` redirect whose `u`
-// parameter holds the real URL; `bing_result_url` unwraps it. Like the other
+// The one keyless route: Bing's public HTML page. Microsoft wraps most result
+// links in a `bing.com/ck/a` redirect whose `u` parameter holds the real URL;
+// `bing_result_url` unwraps it. Like the other
 // keyless engines, a page that does not parse (a captcha or consent wall)
 // yields no results and the keyless chain falls through.
 
@@ -769,251 +660,6 @@ fn bing_result_url(href: &str) -> Option<String> {
         .ok()?;
     let decoded = String::from_utf8(decoded).ok()?;
     decoded.starts_with("http").then_some(decoded)
-}
-
-// ---- Mojeek HTML (keyless) ----
-//
-// Mojeek is an independent index that tolerates automated queries and serves
-// no-js HTML with direct result links. A second broad-but-scraper-friendly
-// keyless engine for the chain.
-
-async fn mojeek_search(
-    client: &reqwest::Client,
-    query: &str,
-    max_results: usize,
-) -> Result<Vec<SearchResult>> {
-    let response = client
-        .get("https://www.mojeek.com/search")
-        .query(&[("q", query)])
-        .header(reqwest::header::ACCEPT, "text/html")
-        .send()
-        .await
-        .map_err(|error| anyhow!("Mojeek request failed: {error}"))?
-        .error_for_status()
-        .map_err(|error| anyhow!("Mojeek returned an error status: {error}"))?;
-    let body = response
-        .text()
-        .await
-        .map_err(|error| anyhow!("could not read Mojeek response: {error}"))?;
-    Ok(parse_mojeek_html(&body, max_results))
-}
-
-/// Parse Mojeek's `<ul class="results-standard">` list: one `<li>` per result
-/// with an `<a class="title">` for the title and link and a `<p class="s">`
-/// snippet. Caps at `max_results`.
-fn parse_mojeek_html(html: &str, max_results: usize) -> Vec<SearchResult> {
-    use regex::Regex;
-    let list = Regex::new(r#"(?is)<ul class="results-standard".*?</ul>"#).expect("valid regex");
-    let item = Regex::new(r#"(?is)<li[^>]*>(.*?)</li>"#).expect("valid regex");
-    let anchor = Regex::new(r#"(?is)<a class="title"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#)
-        .expect("valid regex");
-    let snippet = Regex::new(r#"(?is)<p class="s"[^>]*>(.*?)</p>"#).expect("valid regex");
-    let mut results = Vec::new();
-    let Some(list) = list.captures(html) else {
-        return results;
-    };
-    for capture in item.captures_iter(&list[0]) {
-        if results.len() >= max_results {
-            break;
-        }
-        let Some(anchor) = anchor.captures(&capture[1]) else {
-            continue;
-        };
-        let url = decode_entities(&anchor[1]).trim().to_owned();
-        let title = html_to_text(&anchor[2]).trim().to_owned();
-        if url.is_empty() || title.is_empty() {
-            continue;
-        }
-        let snippet = snippet
-            .captures(&capture[1])
-            .map(|text| html_to_text(&text[1]).trim().to_owned())
-            .unwrap_or_default();
-        results.push(SearchResult {
-            title,
-            url,
-            snippet,
-        });
-    }
-    results
-}
-
-// ---- Keyless chain ----
-
-/// The engines the keyless path tries. `search` starts from the pinned
-/// backend and falls through the rest in `KEYLESS_ORDER`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum KeylessEngine {
-    Bing,
-    Mojeek,
-    Marginalia,
-    Duckduckgo,
-}
-
-const KEYLESS_ORDER: [KeylessEngine; 4] = [
-    KeylessEngine::Bing,
-    KeylessEngine::Mojeek,
-    KeylessEngine::Marginalia,
-    KeylessEngine::Duckduckgo,
-];
-
-async fn fetch_keyless(
-    client: &reqwest::Client,
-    engine: KeylessEngine,
-    query: &str,
-    max_results: usize,
-) -> Result<Vec<SearchResult>> {
-    match engine {
-        KeylessEngine::Bing => bing_search(client, query, max_results).await,
-        KeylessEngine::Mojeek => mojeek_search(client, query, max_results).await,
-        KeylessEngine::Marginalia => marginalia_search(client, query, max_results).await,
-        KeylessEngine::Duckduckgo => duckduckgo_search(client, query, max_results).await,
-    }
-}
-
-/// Run the keyless chain, the chosen engine first. Errors and empty pages are
-/// misses: `search` gets whatever the last engine had rather than failing the
-/// whole search on one blocked public endpoint.
-async fn keyless_search(
-    client: &reqwest::Client,
-    query: &str,
-    max_results: usize,
-    head: KeylessEngine,
-) -> Vec<SearchResult> {
-    let mut order: Vec<KeylessEngine> = KEYLESS_ORDER.to_vec();
-    let head_index = order.iter().position(|&engine| engine == head).unwrap_or(0);
-    order.rotate_left(head_index);
-    for engine in order {
-        if let Ok(results) = fetch_keyless(client, engine, query, max_results).await
-            && !results.is_empty()
-        {
-            return results;
-        }
-    }
-    Vec::new()
-}
-
-async fn duckduckgo_search(
-    client: &reqwest::Client,
-    query: &str,
-    max_results: usize,
-) -> Result<Vec<SearchResult>> {
-    let response = client
-        .get("https://api.duckduckgo.com/")
-        .query(&[
-            ("q", query),
-            ("format", "json"),
-            ("no_html", "1"),
-            ("skip_disambig", "1"),
-        ])
-        .send()
-        .await
-        .map_err(|error| anyhow!("DuckDuckGo request failed: {error}"))?;
-    if !response.status().is_success() {
-        bail!("DuckDuckGo returned HTTP {}", response.status().as_u16());
-    }
-    let value: Value = response
-        .json()
-        .await
-        .map_err(|error| anyhow!("invalid DuckDuckGo response: {error}"))?;
-    Ok(parse_duckduckgo_json(&value, max_results))
-}
-
-/// Parse the DuckDuckGo Instant Answer JSON. The API surfaces a single
-/// abstract (when it has a direct answer) plus `Results` and `RelatedTopics`
-/// lists, which may themselves contain nested `Topics` groups. We flatten the
-/// most relevant entries into the common `SearchResult` shape.
-fn parse_duckduckgo_json(value: &Value, max_results: usize) -> Vec<SearchResult> {
-    let mut results = Vec::new();
-
-    // The abstract is the canonical answer: lead with it when present.
-    let abstract_text = value["AbstractText"].as_str().unwrap_or("").trim();
-    let abstract_url = value["AbstractURL"].as_str().unwrap_or("").trim();
-    let heading = value["Heading"].as_str().unwrap_or("").trim();
-    if !abstract_text.is_empty() && !abstract_url.is_empty() {
-        results.push(SearchResult {
-            title: if heading.is_empty() {
-                truncate_for_title(abstract_text)
-            } else {
-                heading.to_owned()
-            },
-            url: abstract_url.to_owned(),
-            snippet: abstract_text.to_owned(),
-        });
-    }
-
-    // `Results` are the top "official" links (e.g. official site).
-    if let Some(items) = value["Results"].as_array() {
-        for item in items.iter() {
-            if results.len() >= max_results {
-                break;
-            }
-            if let Some(result) = ddg_topic_to_result(item) {
-                results.push(result);
-            }
-        }
-    }
-
-    // `RelatedTopics` is the broader list; entries may be flat topics or
-    // grouped under a `Topics` key with a `Name`.
-    if let Some(items) = value["RelatedTopics"].as_array() {
-        for item in items.iter() {
-            if results.len() >= max_results {
-                break;
-            }
-            if let Some(group) = item["Topics"].as_array() {
-                for sub in group.iter() {
-                    if results.len() >= max_results {
-                        break;
-                    }
-                    if let Some(result) = ddg_topic_to_result(sub) {
-                        results.push(result);
-                    }
-                }
-            } else if let Some(result) = ddg_topic_to_result(item) {
-                results.push(result);
-            }
-        }
-    }
-
-    results
-}
-
-/// Convert a DuckDuckGo topic object (flat or nested) into a `SearchResult`.
-/// Topic objects carry `Text` (already plain text via `no_html=1`),
-/// `FirstURL`, and optionally an HTML `Result` anchor whose inner text we
-/// fall back to when `Text` is empty.
-fn ddg_topic_to_result(item: &Value) -> Option<SearchResult> {
-    let text = item["Text"].as_str().unwrap_or("").trim();
-    let url = item["FirstURL"].as_str().unwrap_or("").trim();
-    let result_html = item["Result"].as_str().unwrap_or("").trim();
-    let title = if !text.is_empty() {
-        truncate_for_title(text)
-    } else if !result_html.is_empty() {
-        // `no_html=1` strips tags, but guard against stray markup anyway.
-        truncate_for_title(&html_to_text(result_html))
-    } else {
-        String::new()
-    };
-    if title.is_empty() || url.is_empty() {
-        return None;
-    }
-    Some(SearchResult {
-        title,
-        url: url.to_owned(),
-        snippet: text.to_owned(),
-    })
-}
-
-/// Collapse a long snippet into a compact title (first sentence, capped).
-fn truncate_for_title(text: &str) -> String {
-    let text = text.trim();
-    // Prefer the first sentence; otherwise cap at a reasonable length.
-    let end = text
-        .find(". ")
-        .filter(|&pos| pos < 78)
-        .map(|pos| pos + 1)
-        .unwrap_or_else(|| text.len().min(80));
-    text[..end].trim().to_owned()
 }
 
 // ---- Brave Search API ----
@@ -1270,81 +916,8 @@ mod tests {
         assert_eq!(decode_entities("a&amp;b&#39;c&#x2d;d"), "a&b'c-d");
     }
 
-    #[test]
-    fn parses_duckduckgo_abstract_and_related_topics() {
-        // Mirrors the shape of api.duckduckgo.com (no_html=1, JSON).
-        let value = serde_json::json!({
-            "Heading": "Rust (programming language)",
-            "AbstractText": "Rust is a general-purpose programming language.",
-            "AbstractURL": "https://en.wikipedia.org/wiki/Rust_(programming_language)",
-            "Results": [
-                {
-                    "Text": "Official site",
-                    "FirstURL": "https://www.rust-lang.org/",
-                    "Result": "Official site"
-                }
-            ],
-            "RelatedTopics": [
-                {
-                    "Text": "Outline of the Rust programming language - The following outline is provided as an overview of and topical guide to Rust.",
-                    "FirstURL": "https://duckduckgo.com/Outline_of_the_Rust_programming_language",
-                    "Result": "<a href=\"x\">Outline of the Rust programming language</a>"
-                },
-                {
-                    "Name": "Categories",
-                    "Topics": [
-                        {
-                            "Text": "Systems programming languages",
-                            "FirstURL": "https://duckduckgo.com/c/Systems_programming_languages",
-                            "Result": "Systems programming languages"
-                        },
-                        {
-                            "Text": "Multi-paradigm programming languages",
-                            "FirstURL": "https://duckduckgo.com/c/Multi-paradigm_programming_languages",
-                            "Result": "Multi-paradigm programming languages"
-                        }
-                    ]
-                }
-            ]
-        });
-        let results = parse_duckduckgo_json(&value, 10);
-        assert_eq!(results.len(), 5);
-        // Abstract leads.
-        assert_eq!(results[0].title, "Rust (programming language)");
-        assert_eq!(
-            results[0].url,
-            "https://en.wikipedia.org/wiki/Rust_(programming_language)"
-        );
-        assert!(results[0].snippet.contains("general-purpose"));
-        // Official site from Results.
-        assert_eq!(results[1].url, "https://www.rust-lang.org/");
-        assert_eq!(results[1].title, "Official site");
-        // RelatedTopics entry: title is collapsed to the first 80 chars.
-        assert_eq!(
-            results[2].url,
-            "https://duckduckgo.com/Outline_of_the_Rust_programming_language"
-        );
-        assert_eq!(
-            results[2].title,
-            "Outline of the Rust programming language - The following outline is provided as"
-        );
-        // Nested group topics, in order.
-        assert_eq!(
-            results[3].url,
-            "https://duckduckgo.com/c/Systems_programming_languages"
-        );
-        assert_eq!(results[3].title, "Systems programming languages");
-        assert_eq!(
-            results[4].url,
-            "https://duckduckgo.com/c/Multi-paradigm_programming_languages"
-        );
-        assert_eq!(results[4].title, "Multi-paradigm programming languages");
-    }
-
-    /// The default backend used to be DuckDuckGo unconditionally, and its
-    /// Instant Answer API answers roughly one real query in seven. `Auto`
-    /// takes a backend that works whenever the environment offers one —
-    /// Bing keylessly, Brave or Tavily on a key.
+    /// `Auto` takes a backend that works whenever the environment offers one:
+    /// a self-hosted SearXNG, then Brave or Tavily on a key, then Bing.
     /// The reader is handed hostile input by definition, so the framing is
     /// part of the contract: the page arrives as data, and the instruction not
     /// to obey it sits where the page cannot reach.
@@ -1447,8 +1020,7 @@ mod tests {
         let resolved = settings.resolve_with(|_| Some("either".into()));
         assert_eq!(resolved.backend, SearchBackend::Brave);
 
-        // No keys at all: Bing, with Mojeek, Marginalia and DuckDuckGo's
-        // Instant Answer API behind it inside `search`'s keyless chain.
+        // No keys at all: Bing's public page, the one keyless route.
         let resolved = settings.resolve_with(|_| None);
         assert_eq!(resolved.backend, SearchBackend::Bing);
         assert!(resolved.api_key.is_none());
@@ -1486,12 +1058,12 @@ mod tests {
     #[test]
     fn an_explicit_backend_is_honoured_even_when_a_key_exists() {
         let settings = SearchSettings {
-            backend: SearchBackend::Duckduckgo,
+            backend: SearchBackend::Bing,
             ..SearchSettings::default()
         };
         assert_eq!(
             settings.resolve_with(|_| Some("bk-1".into())).backend,
-            SearchBackend::Duckduckgo
+            SearchBackend::Bing
         );
 
         // A named variable under Auto is an explicit choice too.
@@ -1503,22 +1075,6 @@ mod tests {
         let resolved = named.resolve_with(|name| (name == "MY_TAVILY_KEY").then(|| "tv-9".into()));
         assert_eq!(resolved.backend, SearchBackend::Tavily);
         assert_eq!(resolved.api_key.as_deref(), Some("tv-9"));
-    }
-
-    #[test]
-    fn ddg_skips_empty_abstract_and_empty_topics() {
-        let value = serde_json::json!({
-            "Heading": "",
-            "AbstractText": "",
-            "AbstractURL": "",
-            "Results": [],
-            "RelatedTopics": [
-                { "Text": "", "FirstURL": "", "Result": "" },
-                { "Name": "Empty", "Topics": [] }
-            ]
-        });
-        let results = parse_duckduckgo_json(&value, 10);
-        assert!(results.is_empty());
     }
 
     #[test]
@@ -1586,26 +1142,7 @@ mod tests {
     /// than surfacing a garbage "result" or an error.
     #[test]
     fn bot_wall_pages_parse_to_empty_results() {
-        let page = r#"<html><body><div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div></body></html>"#;
+        let page = r#"<html><body><div class="anomaly-modal__title">Unfortunately, bots use this search engine too.</div></body></html>"#;
         assert!(parse_bing_html(page, 10).is_empty());
-        assert!(parse_mojeek_html(page, 10).is_empty());
-    }
-
-    #[test]
-    fn parses_mojeek_results_and_skips_missing_snippets() {
-        let html = r#"<html><body><ul class="results-standard">
-            <li><a class="title" title="https://rust-lang.org/" href="https://rust-lang.org/">Rust Programming Language</a>
-                <span class="url">rust-lang.org</span>
-                <p class="s">In 2018, the Rust community decided to improve the programming experience.</p></li>
-            <li><a class="title" title="https://www.rust-lang.org/learn" href="https://www.rust-lang.org/learn">Learn Rust &amp; More</a></li>
-        </ul></body></html>"#;
-        let results = parse_mojeek_html(html, 10);
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].title, "Rust Programming Language");
-        assert_eq!(results[0].url, "https://rust-lang.org/");
-        assert!(results[0].snippet.contains("2018"));
-        assert_eq!(results[1].title, "Learn Rust & More");
-        assert_eq!(results[1].url, "https://www.rust-lang.org/learn");
-        assert!(results[1].snippet.is_empty());
     }
 }
