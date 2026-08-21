@@ -28,10 +28,9 @@ const EXTRACT_RESULT_PAGES: usize = 2;
 const EXTRACT_CORPUS_CHARS: usize = 40_000;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_PAGE_CHARS: usize = 20_000;
-/// Shared SearXNG used when nothing else is configured, so `web_search` works
-/// on a fresh install. Point `[search] instance_url` at your own instance to
-/// stop leaning on someone else's host.
-pub const DEFAULT_SEARXNG: &str = "https://searxng.bluflare.de";
+/// A public SearXNG instance offered as a convenience, used only when
+/// `[search] use_shared_instance` is explicitly turned on.
+pub const SHARED_SEARXNG: &str = "https://searxng.bluflare.de";
 
 /// Which search backend `web_search` uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -39,7 +38,8 @@ pub const DEFAULT_SEARXNG: &str = "https://searxng.bluflare.de";
 pub enum SearchBackend {
     /// Use whichever backend the environment can support: a configured
     /// SearXNG instance, then Brave or Tavily when their key is present,
-    /// otherwise a shared SearXNG instance so search works with no setup.
+    /// otherwise Bing's keyless public page — or a shared SearXNG instance
+    /// when `use_shared_instance` opts into one.
     #[default]
     Auto,
     /// Bing's public HTML search: no key needed. The keyless default, and
@@ -87,6 +87,12 @@ pub struct SearchSettings {
     /// instance must have the JSON format enabled (`search.formats: [json]`
     /// in its settings.yml) — it is off by default in SearXNG.
     pub instance_url: Option<String>,
+    /// Fall back to [`SHARED_SEARXNG`] when nothing else is configured.
+    ///
+    /// Off by default. Turning it on sends every search to a host neither you
+    /// nor Abacus runs — fine for trying things out, worth replacing with your
+    /// own instance or an API key for anything you rely on.
+    pub use_shared_instance: bool,
 }
 
 impl Default for SearchSettings {
@@ -96,6 +102,7 @@ impl Default for SearchSettings {
             backend: SearchBackend::default(),
             api_key_env: None,
             instance_url: None,
+            use_shared_instance: false,
         }
     }
 }
@@ -115,7 +122,8 @@ impl SearchSettings {
                 .filter(|value| !value.is_empty())
         };
         // `Auto` prefers a backend that can actually answer: a self-hosted
-        // SearXNG first, then a keyed API, then the shared instance.
+        // SearXNG first, then a keyed API, then the shared instance if it was
+        // opted into, and Bing's public page as the zero-config floor.
         let instance = self
             .instance_url
             .as_deref()
@@ -141,20 +149,20 @@ impl SearchSettings {
                     (SearchBackend::Brave, Some(key))
                 } else if let Some(key) = read("TAVILY_API_KEY") {
                     (SearchBackend::Tavily, Some(key))
-                } else {
-                    // No key and no instance: the shared SearXNG, so search
-                    // works out of the box. Bing's public page stays available
-                    // as an explicit choice, but it is not the default — a
-                    // scraped results page bot-walls without warning, and a
-                    // real JSON API that answers is worth more than one that
-                    // sometimes does.
+                } else if self.use_shared_instance {
+                    // Explicitly asked for: a real JSON API beats scraping,
+                    // but it is someone else's host, so it is never assumed.
                     return WebConfig {
                         enabled: self.enabled,
                         backend: SearchBackend::Searxng,
                         api_key: None,
-                        instance_url: Some(DEFAULT_SEARXNG.to_owned()),
+                        instance_url: Some(SHARED_SEARXNG.to_owned()),
                         extractor: None,
                     };
+                } else {
+                    // No key, no instance, no permission to borrow one: Bing's
+                    // public page, best effort.
+                    (SearchBackend::Bing, None)
                 }
             }
             chosen => {
@@ -933,8 +941,7 @@ mod tests {
     }
 
     /// `Auto` takes a backend that works whenever the environment offers one:
-    /// a self-hosted SearXNG, then Brave or Tavily on a key, then the shared
-    /// instance.
+    /// a self-hosted SearXNG, then Brave or Tavily on a key, then Bing.
     /// The reader is handed hostile input by definition, so the framing is
     /// part of the contract: the page arrives as data, and the instruction not
     /// to obey it sits where the page cannot reach.
@@ -1037,15 +1044,25 @@ mod tests {
         let resolved = settings.resolve_with(|_| Some("either".into()));
         assert_eq!(resolved.backend, SearchBackend::Brave);
 
-        // No keys at all: the shared SearXNG instance.
+        // No keys at all: Bing's public page, the zero-config floor.
         let resolved = settings.resolve_with(|_| None);
-        assert_eq!(resolved.backend, SearchBackend::Searxng);
-        assert_eq!(resolved.instance_url.as_deref(), Some(DEFAULT_SEARXNG));
+        assert_eq!(resolved.backend, SearchBackend::Bing);
         assert!(resolved.api_key.is_none());
         // A blank variable counts as absent, not as a key.
         let blank = settings.resolve_with(|_| Some("   ".into()));
-        assert_eq!(blank.backend, SearchBackend::Searxng);
-        assert_eq!(blank.instance_url.as_deref(), Some(DEFAULT_SEARXNG));
+        assert_eq!(blank.backend, SearchBackend::Bing);
+
+        // The shared instance is used only when asked for.
+        let opted_in = SearchSettings {
+            use_shared_instance: true,
+            ..SearchSettings::default()
+        };
+        let resolved = opted_in.resolve_with(|_| None);
+        assert_eq!(resolved.backend, SearchBackend::Searxng);
+        assert_eq!(resolved.instance_url.as_deref(), Some(SHARED_SEARXNG));
+        // And never over a key the operator already has.
+        let resolved = opted_in.resolve_with(|name| (name == "BRAVE_API_KEY").then(|| "bk".into()));
+        assert_eq!(resolved.backend, SearchBackend::Brave);
     }
 
     /// A configured instance is an explicit decision — and the best option
@@ -1065,14 +1082,12 @@ mod tests {
             Some("http://localhost:8888")
         );
 
-        // A blank URL is not a configuration; the shared instance fills in.
+        // A blank URL is not a configuration.
         let blank = SearchSettings {
             instance_url: Some("   ".into()),
             ..SearchSettings::default()
         };
-        let resolved = blank.resolve_with(|_| None);
-        assert_eq!(resolved.backend, SearchBackend::Searxng);
-        assert_eq!(resolved.instance_url.as_deref(), Some(DEFAULT_SEARXNG));
+        assert_eq!(blank.resolve_with(|_| None).backend, SearchBackend::Bing);
     }
 
     /// An explicitly chosen backend is never second-guessed.

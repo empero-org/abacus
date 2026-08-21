@@ -402,6 +402,10 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
                 "no key — your own instance, best if you self-host",
             ),
             ("Bing", "no key — public page, best effort"),
+            (
+                "Shared SearXNG",
+                "no key — a public instance; queries leave to a host you do not control",
+            ),
         ]
         .iter()
         .enumerate()
@@ -418,9 +422,16 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
             SearchBackend::Tavily => "3",
             SearchBackend::Searxng => "4",
             SearchBackend::Bing => "5",
+            SearchBackend::Auto if settings.search.use_shared_instance => "6",
             SearchBackend::Auto => "1",
         };
-        let (backend, env_var) = match console::prompt("Search backend", Some(default))?.trim() {
+        // Option 6 is `auto` with the shared instance permitted, not a
+        // backend of its own — a key the operator adds later still wins.
+        let choice = console::prompt("Search backend", Some(default))?
+            .trim()
+            .to_owned();
+        settings.search.use_shared_instance = choice == "6";
+        let (backend, env_var) = match choice.as_str() {
             "2" => (SearchBackend::Brave, Some("BRAVE_API_KEY")),
             "3" => (SearchBackend::Tavily, Some("TAVILY_API_KEY")),
             "4" => (SearchBackend::Searxng, None),
