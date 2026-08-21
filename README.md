@@ -430,17 +430,18 @@ it is worth being blunt about why:
 
 | Backend | Key | Result |
 | --- | --- | --- |
-| `searxng` | none — your instance | Best keyless option. Unlimited, private, reliable. Needs `instance_url`, and the instance must allow JSON (`search: formats: [html, json]`). |
+| `searxng` | none — your instance | Best option. Unlimited, private, reliable. Set `instance_url` (the instance must allow JSON: `search: formats: [html, json]`); with none set, a shared instance is used. |
 | `tavily` | `TAVILY_API_KEY` | Full web search. Free tier, no card. |
 | `brave` | `BRAVE_API_KEY` | Full web search. The free tier ended in February 2026. |
 | `bing` | none | Public HTML, unofficial. The keyless default — best effort, and may rate-limit or bot-wall an agent. |
 
-With nothing configured, `auto` uses Bing's public page. That is a scraped
-HTML endpoint, not an official API: it can bot-wall or change layout without
-warning, and when it comes back empty the tool says so plainly and tells the
-model not to keep rephrasing, which is what used to burn whole turns. For
-search you can rely on, set `TAVILY_API_KEY` (free tier, no card) or point
-`instance_url` at your own SearXNG.
+With nothing configured, `auto` uses a shared SearXNG instance
+(`https://searxng.bluflare.de`) so search works on a fresh install. That is a
+courtesy, not infrastructure — one host that can go down or get busy — so
+anything that depends on search should set `instance_url` to its own instance,
+or `TAVILY_API_KEY` (free tier, no card). `bing` remains available as an
+explicit choice, but it scrapes a public page and bot-walls without warning,
+so it is no longer the default.
 
 Both web tools take an `extract` argument — "the exact signature of
 `Client::builder`", "which crate handles unix signals" — and the auxiliary
@@ -876,7 +877,7 @@ tool_output_limit = 30000
 
 [search]
 enabled = true
-backend = "auto"              # searxng -> brave/tavily key -> bing (keyless)
+backend = "auto"              # your searxng -> brave/tavily key -> shared searxng
                               # or "searxng" with an instance_url, or brave | tavily with an API key
 ```
 
