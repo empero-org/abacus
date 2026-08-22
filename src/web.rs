@@ -3,7 +3,7 @@
 //! `web_search` works with zero config: with no key set it falls back to
 //! Bing's public HTML page, which is best effort by nature — a bot wall or a
 //! layout change is a miss, and the tool says so rather than implying the web
-//! is empty. API-key backends (Brave, Tavily) and a self-hosted SearXNG
+//! is empty. The API-key backend (Brave) and a self-hosted SearXNG
 //! instance can be picked via `[search]` in the config. `read_page`
 //! fetches a URL and converts it to readable text. Both are read-only and
 //! bounded; `read_page` refuses non-HTTP schemes and private / loopback hosts
@@ -37,9 +37,9 @@ pub const SHARED_SEARXNG: &str = "https://searxng.bluflare.de";
 #[serde(rename_all = "lowercase")]
 pub enum SearchBackend {
     /// Use whichever backend the environment can support: a configured
-    /// SearXNG instance, then Brave or Tavily when their key is present,
-    /// otherwise Bing's keyless public page — or a shared SearXNG instance
-    /// when `use_shared_instance` opts into one.
+    /// SearXNG instance, then Brave when its key is present, otherwise Bing's
+    /// keyless public page — or a shared SearXNG instance when
+    /// `use_shared_instance` opts into one.
     #[default]
     Auto,
     /// Bing's public HTML search: no key needed. The keyless default, and
@@ -53,7 +53,6 @@ pub enum SearchBackend {
     /// infrastructure, so anything depending on search should set its own.
     Searxng,
     Brave,
-    Tavily,
 }
 
 impl SearchBackend {
@@ -63,14 +62,13 @@ impl SearchBackend {
             SearchBackend::Bing => "bing",
             SearchBackend::Searxng => "searxng",
             SearchBackend::Brave => "brave",
-            SearchBackend::Tavily => "tavily",
         }
     }
 
     /// Whether this backend needs an API key to function. `Auto` never does:
     /// it has already resolved to something concrete by the time it is asked.
     fn needs_key(self) -> bool {
-        matches!(self, SearchBackend::Brave | SearchBackend::Tavily)
+        matches!(self, SearchBackend::Brave)
     }
 }
 
@@ -136,19 +134,10 @@ impl SearchSettings {
             SearchBackend::Auto if instance.is_some() => (SearchBackend::Searxng, None),
             SearchBackend::Auto => {
                 if let Some(key) = self.api_key_env.as_deref().and_then(&read) {
-                    // A named variable is an explicit choice; honour it, and
-                    // guess the provider from whichever name was given.
-                    let named = self.api_key_env.as_deref().unwrap_or_default();
-                    let backend = if named.to_ascii_uppercase().contains("TAVILY") {
-                        SearchBackend::Tavily
-                    } else {
-                        SearchBackend::Brave
-                    };
-                    (backend, Some(key))
+                    // A named variable is an explicit choice; honour it.
+                    (SearchBackend::Brave, Some(key))
                 } else if let Some(key) = read("BRAVE_API_KEY") {
                     (SearchBackend::Brave, Some(key))
-                } else if let Some(key) = read("TAVILY_API_KEY") {
-                    (SearchBackend::Tavily, Some(key))
                 } else if self.use_shared_instance {
                     // Explicitly asked for: a real JSON API beats scraping,
                     // but it is someone else's host, so it is never assumed.
@@ -168,7 +157,6 @@ impl SearchSettings {
             chosen => {
                 let default_env = match chosen {
                     SearchBackend::Brave => Some("BRAVE_API_KEY"),
-                    SearchBackend::Tavily => Some("TAVILY_API_KEY"),
                     _ => None,
                 };
                 let key = self.api_key_env.as_deref().or(default_env).and_then(&read);
@@ -335,15 +323,6 @@ impl WebConfig {
                 )
                 .await?
             }
-            SearchBackend::Tavily => {
-                tavily_search(
-                    &client,
-                    self.api_key.as_deref().unwrap(),
-                    query,
-                    max_results,
-                )
-                .await?
-            }
         };
         if results.is_empty() {
             if matches!(self.backend, SearchBackend::Bing) {
@@ -353,8 +332,8 @@ impl WebConfig {
                      without warning. Keyless search misses on plenty of real \
                      queries; that is a limit of the public endpoint, not of how \
                      the question was worded, so do not retry more than once. Say \
-                     so plainly, and mention that setting TAVILY_API_KEY (free \
-                     tier, no card) gives full web search."
+                     so plainly, and mention that a self-hosted SearXNG \
+                     instance, or a BRAVE_API_KEY, gives full web search."
                 ));
             }
             return Ok(format!("No results for {query:?}."));
@@ -728,50 +707,6 @@ async fn brave_search(
     Ok(results)
 }
 
-// ---- Tavily API ----
-
-async fn tavily_search(
-    client: &reqwest::Client,
-    api_key: &str,
-    query: &str,
-    max_results: usize,
-) -> Result<Vec<SearchResult>> {
-    let response = client
-        .post("https://api.tavily.com/search")
-        .json(&serde_json::json!({
-            "api_key": api_key,
-            "query": query,
-            "max_results": max_results,
-        }))
-        .send()
-        .await
-        .map_err(|error| anyhow!("Tavily request failed: {error}"))?;
-    if !response.status().is_success() {
-        bail!("Tavily returned HTTP {}", response.status().as_u16());
-    }
-    let value: Value = response
-        .json()
-        .await
-        .map_err(|error| anyhow!("invalid Tavily response: {error}"))?;
-    let mut results = Vec::new();
-    if let Some(items) = value["results"].as_array() {
-        for item in items.iter().take(max_results) {
-            let url = item["url"].as_str().unwrap_or_default().to_owned();
-            let title = item["title"].as_str().unwrap_or_default().to_owned();
-            if url.is_empty() || title.is_empty() {
-                continue;
-            }
-            let snippet = item["content"].as_str().unwrap_or_default().to_owned();
-            results.push(SearchResult {
-                title,
-                url,
-                snippet,
-            });
-        }
-    }
-    Ok(results)
-}
-
 // ---- URL safety (SSRF guard) ----
 
 /// Accept only `http`/`https` URLs to public hosts. Rejects loopback, private,
@@ -941,7 +876,7 @@ mod tests {
     }
 
     /// `Auto` takes a backend that works whenever the environment offers one:
-    /// a self-hosted SearXNG, then Brave or Tavily on a key, then Bing.
+    /// a self-hosted SearXNG, then Brave on a key, then Bing.
     /// The reader is handed hostile input by definition, so the framing is
     /// part of the contract: the page arrives as data, and the instruction not
     /// to obey it sits where the page cannot reach.
@@ -1034,13 +969,7 @@ mod tests {
         assert_eq!(resolved.backend, SearchBackend::Brave);
         assert_eq!(resolved.api_key.as_deref(), Some("bk-1"));
 
-        let resolved = settings.resolve_with(|name| match name {
-            "TAVILY_API_KEY" => Some("tv-1".into()),
-            _ => None,
-        });
-        assert_eq!(resolved.backend, SearchBackend::Tavily);
-
-        // Brave wins when both exist: one answer every run, not lookup order.
+        // Any key present resolves to Brave, the one key-backed engine.
         let resolved = settings.resolve_with(|_| Some("either".into()));
         assert_eq!(resolved.backend, SearchBackend::Brave);
 
@@ -1105,12 +1034,12 @@ mod tests {
         // A named variable under Auto is an explicit choice too.
         let named = SearchSettings {
             backend: SearchBackend::Auto,
-            api_key_env: Some("MY_TAVILY_KEY".into()),
+            api_key_env: Some("MY_SEARCH_KEY".into()),
             ..SearchSettings::default()
         };
-        let resolved = named.resolve_with(|name| (name == "MY_TAVILY_KEY").then(|| "tv-9".into()));
-        assert_eq!(resolved.backend, SearchBackend::Tavily);
-        assert_eq!(resolved.api_key.as_deref(), Some("tv-9"));
+        let resolved = named.resolve_with(|name| (name == "MY_SEARCH_KEY").then(|| "bk-9".into()));
+        assert_eq!(resolved.backend, SearchBackend::Brave);
+        assert_eq!(resolved.api_key.as_deref(), Some("bk-9"));
     }
 
     #[test]
@@ -1126,7 +1055,7 @@ mod tests {
     }
 
     #[test]
-    fn brave_and_tavily_require_a_key() {
+    fn brave_requires_a_key() {
         let cfg = WebConfig {
             enabled: true,
             backend: SearchBackend::Brave,

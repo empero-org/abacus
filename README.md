@@ -424,14 +424,13 @@ papercuts saying PLAN was unusable, and routed around it.
 ### Web search
 
 `[search] backend` defaults to `auto`, which takes the best option available:
-your own SearXNG instance, then a Brave or Tavily key, then the keyless
+your own SearXNG instance, then a Brave key, then the keyless
 chain. Keyless search is genuinely limited compared with a keyed backend, and
 it is worth being blunt about why:
 
 | Backend | Key | Result |
 | --- | --- | --- |
 | `searxng` | none — your instance | Best option. Unlimited, private, reliable. Set `instance_url`; the instance must allow JSON (`search: formats: [html, json]`). |
-| `tavily` | `TAVILY_API_KEY` | Full web search. Free tier, no card. |
 | `brave` | `BRAVE_API_KEY` | Full web search. The free tier ended in February 2026. |
 | `bing` | none | Public HTML, unofficial. The keyless default — best effort, and may rate-limit or bot-wall an agent. |
 
@@ -440,7 +439,7 @@ HTML endpoint, not an official API: it can bot-wall or change layout without
 warning, and when it comes back empty the tool says so plainly and tells the
 model not to keep rephrasing, which is what used to burn whole turns.
 
-For search you can rely on, set `TAVILY_API_KEY` (free tier, no card) or point
+For search you can rely on, set `BRAVE_API_KEY` (free tier, no card) or point
 `instance_url` at your own SearXNG. There is also a shared public instance
 available as an explicit opt-in:
 
@@ -888,8 +887,8 @@ tool_output_limit = 30000
 
 [search]
 enabled = true
-backend = "auto"              # your searxng -> brave/tavily key -> bing
-                              # or "searxng" with an instance_url, or brave | tavily with an API key
+backend = "auto"              # your searxng -> brave key -> bing
+                              # or "searxng" with an instance_url, or "brave" with an API key
 ```
 
 `/config` is a keyboard-driven settings panel — profile, model, provider URL,

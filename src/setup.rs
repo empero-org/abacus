@@ -34,7 +34,7 @@ pub const PRESETS: &[Preset] = &[
         env_key: Some("OPENAI_API_KEY"),
         fallback_model: "",
         protocol: ProviderProtocol::Responses,
-        hint: "GPT and o-series",
+        hint: "GPT and reasoning models",
     },
     Preset {
         id: "xai",
@@ -70,7 +70,7 @@ pub const PRESETS: &[Preset] = &[
         env_key: Some("DEEPSEEK_API_KEY"),
         fallback_model: "",
         protocol: ProviderProtocol::ChatCompletions,
-        hint: "DeepSeek V3 and R1",
+        hint: "DeepSeek chat and reasoning",
     },
     Preset {
         id: "mistral",
@@ -79,7 +79,7 @@ pub const PRESETS: &[Preset] = &[
         env_key: Some("MISTRAL_API_KEY"),
         fallback_model: "",
         protocol: ProviderProtocol::ChatCompletions,
-        hint: "Mistral and Codestral",
+        hint: "Mistral and code models",
     },
     Preset {
         id: "together",
@@ -392,15 +392,11 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
                 "Automatic",
                 "picks the best of the below that is configured",
             ),
-            ("Brave", "needs BRAVE_API_KEY — full web search"),
-            (
-                "Tavily",
-                "needs TAVILY_API_KEY — full web search, free tier",
-            ),
             (
                 "SearXNG",
-                "no key — your own instance, best if you self-host",
+                "no key — your own instance, the best option here",
             ),
+            ("Brave", "needs BRAVE_API_KEY — full web search"),
             ("Bing", "no key — public page, best effort"),
             (
                 "Shared SearXNG",
@@ -418,24 +414,22 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
             );
         }
         let default = match settings.search.backend {
-            SearchBackend::Brave => "2",
-            SearchBackend::Tavily => "3",
-            SearchBackend::Searxng => "4",
-            SearchBackend::Bing => "5",
-            SearchBackend::Auto if settings.search.use_shared_instance => "6",
+            SearchBackend::Searxng => "2",
+            SearchBackend::Brave => "3",
+            SearchBackend::Bing => "4",
+            SearchBackend::Auto if settings.search.use_shared_instance => "5",
             SearchBackend::Auto => "1",
         };
-        // Option 6 is `auto` with the shared instance permitted, not a
+        // Option 5 is `auto` with the shared instance permitted, not a
         // backend of its own — a key the operator adds later still wins.
         let choice = console::prompt("Search backend", Some(default))?
             .trim()
             .to_owned();
-        settings.search.use_shared_instance = choice == "6";
+        settings.search.use_shared_instance = choice == "5";
         let (backend, env_var) = match choice.as_str() {
-            "2" => (SearchBackend::Brave, Some("BRAVE_API_KEY")),
-            "3" => (SearchBackend::Tavily, Some("TAVILY_API_KEY")),
-            "4" => (SearchBackend::Searxng, None),
-            "5" => (SearchBackend::Bing, None),
+            "2" => (SearchBackend::Searxng, None),
+            "3" => (SearchBackend::Brave, Some("BRAVE_API_KEY")),
+            "4" => (SearchBackend::Bing, None),
             _ => (SearchBackend::Auto, None),
         };
         // A SearXNG instance is useless without its address, so ask here
