@@ -4037,6 +4037,47 @@ impl App {
 
     /// Fold or unfold the selected tool row. Returns whether anything moved, so
     /// the caller can fall through to another binding when it did not.
+    /// Expand or collapse the newest tool block — the one running now, or the
+    /// last to finish. Folding was reachable only through the transcript
+    /// cursor, which meant hunting for a row while its output was still
+    /// arriving; the thing you want open is almost always the newest one.
+    fn toggle_latest_tool(&mut self) -> bool {
+        let Some(index) = self.entries.iter().rposition(|entry| entry.tool.is_some()) else {
+            self.status = "no tool output to open".to_owned();
+            return false;
+        };
+        let expanded = {
+            let Some(call) = self.entries[index].tool.as_mut() else {
+                return false;
+            };
+            if !call.has_more() {
+                // Nothing withheld: say so rather than appearing to ignore the
+                // key. A running command that has not printed yet lands here.
+                self.status = match call.status {
+                    ui::ToolStatus::Running => {
+                        "nothing buffered yet — output appears as it arrives"
+                    }
+                    _ => "that output is already shown in full",
+                }
+                .to_owned();
+                return false;
+            }
+            call.expanded = !call.expanded;
+            call.expanded
+        };
+        // Point the cursor at what was just opened, so j/k and `y` continue
+        // from there, and keep the newly revealed lines on screen.
+        self.cursor = Some(index);
+        self.entries_rev = self.entries_rev.wrapping_add(1);
+        self.follow = true;
+        self.status = if expanded {
+            "expanded — ^O closes it".to_owned()
+        } else {
+            "collapsed".to_owned()
+        };
+        true
+    }
+
     fn toggle_cursor_fold(&mut self, expand: Option<bool>) -> bool {
         let Some(index) = self.cursor else {
             return false;
@@ -4567,6 +4608,20 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     }
     // Ctrl+O steps an open approval or question aside so the output behind it
     // can be read (and scrolled); pressing it again brings the dialog back.
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.code == KeyCode::Char('o')
+        && app.approval.is_none()
+        && app.question.is_none()
+        && app.config_panel.is_none()
+        && app.raw_config.is_none()
+        && app.feedback_form.is_none()
+    {
+        // No dialog to step aside: open the newest tool block instead. This
+        // works mid-turn, which is the point — watching a long command's
+        // output should not require it to finish first.
+        app.toggle_latest_tool();
+        return;
+    }
     if key.modifiers.contains(KeyModifiers::CONTROL)
         && key.code == KeyCode::Char('o')
         && (app.approval.is_some() || app.question.is_some())
@@ -5139,12 +5194,6 @@ fn handle_insert_key(app: &mut App, key: KeyEvent) {
         // plain Enter (e.g. macOS Terminal.app). It may arrive as Char('j')+Ctrl
         // or, on some terminals, fold into Enter+Ctrl (covered by modified_enter).
         KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.input.insert('\n')
-        }
-        // Ctrl+O is the universal newline fallback: it sends 0x0f, a distinct
-        // byte that no terminal confuses with Enter. Use this when Shift+Enter
-        // doesn't work (macOS Terminal.app, many SSH muxers).
-        KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.input.insert('\n')
         }
         KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -6515,7 +6564,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
             "COMPOSE",
             &[
                 ("Enter", "send the prompt"),
-                ("Ctrl+J · Ctrl+O · Shift+Enter", "insert a newline"),
+                ("Ctrl+J · Shift+Enter", "insert a newline"),
                 ("Ctrl+Shift+Enter", "fork the session"),
                 ("Tab", "accept the highlighted suggestion"),
                 ("↑ ↓", "browse prompt history, or the suggestion list"),
@@ -7403,7 +7452,7 @@ fn draw_user_question(frame: &mut Frame<'_>, area: Rect, app: &App) {
             ("space", "toggle"),
             ("t", "type"),
             ("enter", "submit"),
-            ("^O", "peek output"),
+            ("^O", "open latest output"),
         ]
     } else {
         &[
@@ -7411,7 +7460,7 @@ fn draw_user_question(frame: &mut Frame<'_>, area: Rect, app: &App) {
             ("x", "choose"),
             ("t", "type"),
             ("esc", "skip"),
-            ("^O", "peek output"),
+            ("^O", "open latest output"),
         ]
     };
     let title = if question.header.is_empty() {
@@ -7552,7 +7601,7 @@ fn draw_approval(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ("a", "allow session"),
         ("n", "reject"),
         ("j/k", "scroll"),
-        ("^O", "peek output"),
+        ("^O", "open latest output"),
     ];
     if approval.diff.is_some() {
         hints.push(("v", "raw/unified"));
@@ -9447,6 +9496,76 @@ mod tests {
         let last = app.entries.last().unwrap();
         assert_eq!(last.kind, EntryKind::Thinking);
         assert_eq!(last.text, "still weighing them");
+    }
+
+    /// The newest tool block opens without hunting for it with the cursor,
+    /// and it opens while the tool is still running — watching a long command
+    /// should not require waiting for it to finish.
+    #[tokio::test]
+    async fn ctrl_o_opens_the_newest_tool_block_even_mid_run() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        let tool = |summary: &str, preview: &str, full: &str, status| {
+            Entry::tool(ui::ToolCall {
+                name: "run_command".to_owned(),
+                summary: summary.to_owned(),
+                status,
+                output: preview.to_owned(),
+                full: full.to_owned(),
+                duration_ms: None,
+                expanded: false,
+            })
+        };
+        app.push_entry(tool(
+            "first",
+            "short",
+            "short\nand more",
+            ui::ToolStatus::Ok,
+        ));
+        app.push_entry(tool(
+            "second",
+            "building…",
+            "building…\nline 2\nline 3",
+            ui::ToolStatus::Running,
+        ));
+
+        assert!(app.toggle_latest_tool(), "opens without a cursor");
+        let newest = app.entries.last().unwrap().tool.as_ref().unwrap();
+        assert!(newest.expanded, "the running one is the one opened");
+        assert_eq!(newest.summary, "second");
+        // The older block is left alone.
+        let older = app.entries[app.entries.len() - 2].tool.as_ref().unwrap();
+        assert!(!older.expanded);
+        // And the cursor follows, so j/k and y continue from there.
+        assert_eq!(app.cursor, Some(app.entries.len() - 1));
+
+        // Pressing again closes it.
+        assert!(app.toggle_latest_tool());
+        assert!(!app.entries.last().unwrap().tool.as_ref().unwrap().expanded);
+    }
+
+    /// Nothing withheld, or nothing at all: say so rather than looking broken.
+    #[tokio::test]
+    async fn ctrl_o_explains_itself_when_there_is_nothing_to_open() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        assert!(!app.toggle_latest_tool());
+        assert!(app.status.contains("no tool output"), "{}", app.status);
+
+        // A running tool that has printed nothing yet.
+        app.push_entry(Entry::tool(ui::ToolCall {
+            name: "run_command".to_owned(),
+            summary: "cargo build".to_owned(),
+            status: ui::ToolStatus::Running,
+            output: String::new(),
+            full: String::new(),
+            duration_ms: None,
+            expanded: false,
+        }));
+        assert!(!app.toggle_latest_tool());
+        assert!(
+            app.status.contains("nothing buffered yet"),
+            "{}",
+            app.status
+        );
     }
 
     /// Push a reasoning chunk through the real event path.

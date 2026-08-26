@@ -471,6 +471,12 @@ backend = "auto"                       # or "searxng" to pin it
 instance_url = "http://localhost:8888"
 ```
 
+**Ctrl+O** opens the newest tool block — the one running now, or the last to
+finish — and closes it again. It works mid-turn, which is the point: watching a
+long command's output should not mean waiting for it to end, or hunting for the
+row with the transcript cursor. When a dialog is open, Ctrl+O keeps its other
+meaning and steps the dialog aside instead.
+
 ### Selecting and copying
 
 The wheel works from the first frame: Abacus captures the mouse so a scroll
