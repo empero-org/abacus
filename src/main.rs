@@ -188,6 +188,10 @@ async fn main() -> Result<()> {
         print_session_list(&store)?;
         return Ok(());
     }
+    if let Some(Command::Sync { action }) = cli.command.clone() {
+        let workspace = workspace_from_cli(&cli)?;
+        return abacus_agent::sync::handle(action, &paths, workspace).await;
+    }
     if matches!(cli.command, Some(Command::Doctor))
         && !settings.is_configured()
         && !cli.has_inline_provider()
@@ -276,7 +280,7 @@ async fn main() -> Result<()> {
             console::blank();
             return Ok(());
         }
-        Some(Command::Sessions) => {
+        Some(Command::Sessions) | Some(Command::Sync { .. }) => {
             unreachable!()
         }
         Some(Command::Doctor) => {

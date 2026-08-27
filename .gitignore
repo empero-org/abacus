@@ -3,4 +3,5 @@
 .env
 .abacus/
 .claude/settings.local.json
+/src_server/
 

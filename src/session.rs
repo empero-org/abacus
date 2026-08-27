@@ -144,6 +144,10 @@ impl SessionStore {
         Ok(session)
     }
 
+    pub fn for_session(paths: &AbacusPaths, workspace: PathBuf) -> Self {
+        Self::new(paths, workspace)
+    }
+
     pub fn save(&self, session: &Session) -> Result<()> {
         fs::create_dir_all(&self.directory)?;
         let content = serde_json::to_vec_pretty(session).context("could not encode session")?;

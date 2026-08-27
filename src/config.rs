@@ -155,6 +155,11 @@ pub enum Command {
     Providers,
     /// List saved sessions for this workspace
     Sessions,
+    /// Sync accounts, sessions, and traces across devices
+    Sync {
+        #[command(subcommand)]
+        action: SyncCommand,
+    },
     /// Print configuration and environment diagnostics
     Doctor,
     /// Copy this machine's training traces into a directory for fine-tuning
@@ -195,6 +200,41 @@ pub enum Command {
     Cron {
         #[command(subcommand)]
         action: CronCommand,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum SyncCommand {
+    /// Sign in and save a device token
+    Login {
+        #[arg(long, default_value = "https://abacus.empero.org")]
+        server: String,
+        #[arg(long)]
+        email: Option<String>,
+        #[arg(long, hide = true)]
+        password: Option<String>,
+    },
+    /// Remove the saved sync token
+    Logout,
+    /// Show the current sync account
+    Status,
+    /// List sessions stored by the server
+    Sessions,
+    /// Upload local sessions and their traces
+    Push {
+        /// Upload one session ID or unique prefix (all local sessions by default)
+        session: Option<String>,
+        /// Replace a conflicting remote revision
+        #[arg(long)]
+        force: bool,
+    },
+    /// Download remote sessions and required traces into local storage
+    Pull {
+        /// Download one session ID (all remote sessions by default)
+        session: Option<String>,
+        /// Replace local sessions instead of preserving them as forks
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -962,6 +1002,15 @@ impl Default for AgentSettings {
 #[serde(default)]
 pub struct Credentials {
     pub keys: BTreeMap<String, String>,
+    #[serde(default)]
+    pub sync: Option<SyncCredentials>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncCredentials {
+    pub server: String,
+    pub token: String,
+    pub email: String,
 }
 
 impl Credentials {

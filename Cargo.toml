@@ -41,6 +41,8 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-
 toml = "0.8"
 unicode-width = "0.2"
 uuid = { version = "1", features = ["v4", "serde"] }
+sha2 = "0.10.9"
+tokio-tungstenite = { version = "0.26.2", features = ["rustls-tls-webpki-roots"] }
 
 [dev-dependencies]
 tempfile = "3"

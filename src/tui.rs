@@ -23,6 +23,7 @@ use crossterm::{
         EnterAlternateScreen, LeaveAlternateScreen, SetTitle, disable_raw_mode, enable_raw_mode,
     },
 };
+use futures_util::{SinkExt, StreamExt};
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -102,6 +103,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/config", "Change live settings"),
     ("/theme", "Switch dark, light, or auto theme"),
     ("/feedback", "Send product feedback"),
+    ("/remote", "Share this session through Abacus Sync"),
     ("/mode", "Set auto, plan, or build mode"),
     ("/plan", "Toggle plan pin"),
     ("/thinking", "Show or hide the model's reasoning"),
@@ -578,6 +580,10 @@ struct ServicesResult {
     result: std::result::Result<AgentServices, String>,
 }
 
+struct RemoteResult {
+    result: std::result::Result<String, String>,
+}
+
 struct App {
     config: Config,
     settings: Settings,
@@ -627,6 +633,10 @@ struct App {
     feedback_form: Option<FeedbackForm>,
     feedback_tx: mpsc::UnboundedSender<FeedbackResult>,
     feedback_rx: mpsc::UnboundedReceiver<FeedbackResult>,
+    remote_tx: mpsc::UnboundedSender<RemoteResult>,
+    remote_rx: mpsc::UnboundedReceiver<RemoteResult>,
+    remote_task: Option<JoinHandle<()>>,
+    remote_outbound: Option<mpsc::UnboundedSender<String>>,
     reload_services: bool,
     services_reloading: bool,
     services_tx: mpsc::UnboundedSender<ServicesResult>,
@@ -820,6 +830,7 @@ impl App {
         }
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (feedback_tx, feedback_rx) = mpsc::unbounded_channel();
+        let (remote_tx, remote_rx) = mpsc::unbounded_channel();
         let (services_tx, services_rx) = mpsc::unbounded_channel();
         let (draft_tx, draft_rx) = mpsc::unbounded_channel();
         // Detached, so a slow or unreachable GitHub never delays the first
@@ -890,6 +901,10 @@ impl App {
             feedback_form: None,
             feedback_tx,
             feedback_rx,
+            remote_tx,
+            remote_rx,
+            remote_task: None,
+            remote_outbound: None,
             reload_services: false,
             services_reloading: false,
             services_tx,
@@ -1129,9 +1144,14 @@ impl App {
                 AgentEvent::TraceFailed { error } => {
                     // Reported once; capture is already disabled for the run.
                     self.trace = None;
+                    let required = self.credentials.sync.is_some();
                     self.push_entry(Entry::new(
                         EntryKind::Error,
-                        format!("Training trace disabled — {error}"),
+                        if required {
+                            format!("Sync trace failed — session sync is paused: {error}")
+                        } else {
+                            format!("Training trace disabled — {error}")
+                        },
                     ));
                 }
                 AgentEvent::Notice(notice) => {
@@ -1253,6 +1273,9 @@ impl App {
                         }
                     }
                     self.persist_session();
+                    if let Some(remote) = &self.remote_outbound {
+                        let _ = remote.send(assistant_output.clone());
+                    }
                     self.running = None;
                     self.last_outcome = match reason {
                         DoneReason::Complete => None,
@@ -1331,6 +1354,9 @@ impl App {
                     // refuse on every retry. Point at the way out.
                     let provider_rejection = error.contains("provider stream error")
                         || error.contains("provider returned");
+                    if let Some(remote) = &self.remote_outbound {
+                        let _ = remote.send(format!("Error: {error}"));
+                    }
                     self.push_entry(Entry::new(EntryKind::Error, error));
                     if provider_rejection {
                         self.push_entry(Entry::new(
@@ -2075,6 +2101,10 @@ impl App {
                 self.open_feedback();
                 true
             }
+            "/remote" => {
+                self.toggle_remote();
+                true
+            }
             "/compact" => {
                 // Manual quick-compaction: a synchronous drop-only shrink for when
                 // the user wants to cut context immediately. The rolling LLM
@@ -2276,7 +2306,7 @@ impl App {
         // session exists — which is here, on the first persist. `start_turn`
         // persists before spawning, so the first model call is already covered.
         if self.trace.is_none()
-            && self.config.trace_enabled
+            && (self.config.trace_enabled || self.credentials.sync.is_some())
             && let Some(session) = &self.session
         {
             match crate::sft::TraceWriter::open(
@@ -2302,6 +2332,8 @@ impl App {
             .saturating_add(self.started.elapsed().as_secs());
         if let Err(error) = store.save(session) {
             self.status = format!("session save failed: {error}");
+        } else {
+            crate::sync::spawn_session_sync(&self.config.paths, session);
         }
     }
 
@@ -3866,6 +3898,103 @@ impl App {
         });
     }
 
+    fn toggle_remote(&mut self) {
+        self.persist_session();
+        let Some(session) = self.session.clone() else {
+            self.status = "send a message before enabling remote".to_owned();
+            return;
+        };
+        if let Some(task) = self.remote_task.take() {
+            task.abort();
+            self.remote_outbound = None;
+            if let Ok(client) = crate::sync::configured_client(&self.config.paths) {
+                let id = session.id.to_string();
+                tokio::spawn(async move {
+                    let _ = client.disable_remote(&id).await;
+                });
+            }
+            self.status = "remote disabled".to_owned();
+            return;
+        }
+        let Ok(client) = crate::sync::configured_client(&self.config.paths) else {
+            self.status = "run `abacus sync login` before /remote".to_owned();
+            return;
+        };
+        let paths = self.config.paths.clone();
+        let result_tx = self.remote_tx.clone();
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<String>();
+        self.remote_outbound = Some(outbound_tx);
+        self.config.trace_enabled = true;
+        self.persist_session();
+        self.status = "enabling remote".to_owned();
+        self.remote_task = Some(tokio::spawn(async move {
+            let trace = std::fs::read(paths.traces_dir.join(format!("{}.jsonl", session.id)))
+                .unwrap_or_default();
+            if let Err(error) = client.push(&session, &trace, true).await {
+                let _ = result_tx.send(RemoteResult {
+                    result: Err(format!("sync failed: {error:#}")),
+                });
+                return;
+            }
+            let result = async {
+                let socket_url = client.enable_remote(&session.id.to_string()).await?;
+                let (socket, _) = tokio_tungstenite::connect_async(&socket_url).await?;
+                let (mut sink, mut stream) = socket.split();
+                let hello = json!({"v":1,"type":"snapshot","id":uuid::Uuid::new_v4(),"seq":1,"payload":{"text":"Session connected. New browser prompts are relayed to the terminal."}});
+                sink.send(tokio_tungstenite::tungstenite::Message::Text(hello.to_string().into())).await?;
+                let _ = result_tx.send(RemoteResult { result: Ok("remote enabled — open the server /remote page".to_owned()) });
+                loop {
+                    tokio::select! {
+                        Some(text) = outbound_rx.recv() => {
+                            let frame = json!({"v":1,"type":"entry","id":uuid::Uuid::new_v4(),"seq":1,"payload":{"kind":"assistant","text":text}});
+                            sink.send(tokio_tungstenite::tungstenite::Message::Text(frame.to_string().into())).await?;
+                        }
+                        message = stream.next() => {
+                            let Some(message) = message else { break; };
+                            let message = message?;
+                            if let Ok(text) = message.to_text()
+                                && let Ok(frame) = serde_json::from_str::<Value>(text)
+                                && frame.get("type").and_then(Value::as_str) == Some("prompt")
+                                && let Some(prompt) = frame.pointer("/payload/text").and_then(Value::as_str)
+                            {
+                                let _ = result_tx.send(RemoteResult { result: Ok(format!("remote prompt: {prompt}")) });
+                            }
+                        }
+                    }
+                }
+                anyhow::Ok(())
+            }.await;
+            if let Err(error) = result {
+                let _ = result_tx.send(RemoteResult {
+                    result: Err(format!("remote disconnected: {error:#}")),
+                });
+            }
+        }));
+    }
+
+    fn drain_remote_events(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(event) = self.remote_rx.try_recv() {
+            changed = true;
+            match event.result {
+                Ok(message) if message.starts_with("remote prompt: ") => {
+                    let prompt = message.trim_start_matches("remote prompt: ").to_owned();
+                    if self.running.is_none() {
+                        self.start_turn(prompt.clone(), prompt, true);
+                    } else {
+                        self.status = "remote prompt waiting for the current turn".to_owned();
+                    }
+                }
+                Ok(message) => self.status = message,
+                Err(error) => {
+                    self.status = error;
+                    self.remote_task = None;
+                }
+            }
+        }
+        changed
+    }
+
     fn drain_feedback_events(&mut self) -> bool {
         let mut changed = false;
         while let Ok(event) = self.feedback_rx.try_recv() {
@@ -4528,6 +4657,7 @@ async fn event_loop(
     while !app.quit {
         dirty |= app.drain_agent_events();
         dirty |= app.drain_feedback_events();
+        dirty |= app.drain_remote_events();
         dirty |= app.drain_services_events();
         dirty |= app.drain_update_events();
         dirty |= app.drain_draft_events();
