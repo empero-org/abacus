@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     activity::ActivityReporter,
-    agent::{AgentEvent, AgentMode, ApprovalDecision, TurnOptions, run_turn},
+    agent::{AgentEvent, AgentMode, ApprovalDecision, TurnOptions, compression_budget, run_turn},
     compaction::CompactionState,
     config::{Config, OutputFormat},
     goal::GoalState,
@@ -488,7 +488,11 @@ fn turn_options(
         goal: goal.clone(),
         tasks: tasks.clone(),
         compaction: compaction.clone(),
-        compaction_budget: config.model_limits.compaction_budget(),
+        compaction_budget: compression_budget(
+            config.model_limits.compaction_budget(),
+            config.token_compression,
+        ),
+        token_compression: config.token_compression,
         allow_subagents: true,
         papercuts: crate::papercuts::PapercutStore::load(
             config.paths.papercuts_file.clone(),

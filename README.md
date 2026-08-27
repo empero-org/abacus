@@ -331,6 +331,8 @@ every request.
 | `/swarm <objective>` | Delegate an objective to parallel subagents |
 | `/config` / `/config raw` | Change settings live: profiles, providers, API keys, limits |
 | `Auxiliary model` (in `/config`) | A cheaper model on the same endpoint for background calls; blank = same as the main model |
+| `Token Compression` (in `/config`) | Balanced high-savings mode: tighter context, fewer drift checks, and no drafts or routine rethink calls |
+| `One Stream` (in `/config`) | Serialize main and auxiliary upstream requests; explicitly spawned subagents remain parallel |
 | `/theme [auto\|dark\|light]` | Switch the Empero-derived palette; `auto` detects the terminal |
 | `/feedback` | Send product feedback |
 | `/compact` | Compact old conversation context |
@@ -794,8 +796,9 @@ ignore the field.
 ### The auxiliary model
 
 Not every model call is the main event. Rethink, the next-message
-recommendation, the tether's intent snapshot and drift checks, and command-risk
-classification are all *secondary* — useful, frequent, and wasteful on a frontier
+recommendation, the tether's initial/pre-compaction intent snapshots and drift
+checks, and command-risk classification are all *secondary* — useful and
+potentially wasteful on a frontier
 model. Set **Auxiliary model** in `/config` (or `aux_model` on the profile) to a
 cheaper model on the same endpoint and those calls go there instead; leave it
 blank and they use the main model. Compaction deliberately stays on the main
@@ -898,8 +901,8 @@ backend = "auto"              # your searxng -> brave key -> bing
 ```
 
 `/config` is a keyboard-driven settings panel — profile, model, provider URL,
-protocol, permission mode, Vim bindings, per-profile context/output limits, and
-feedback settings apply immediately and save atomically. On the **Active
+protocol, permission mode, Vim bindings, per-profile context/output limits,
+Token Compression, One Stream, and feedback settings apply immediately and save atomically. On the **Active
 profile** row, Enter switches, `r` renames, `d` deletes, and `n` adds a
 provider. `/profile` does the same from the composer. `/config raw` opens the
 complete TOML document inside Abacus for every other setting. Override per run

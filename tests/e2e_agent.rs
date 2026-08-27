@@ -77,6 +77,8 @@ async fn streamed_agent_searches_workspace_and_finishes() {
         endpoint: None,
         aux_model: None,
         reasoning_effort: None,
+        token_compression: false,
+        one_stream: false,
         paths: AbacusPaths::under(directory.path().join("home")),
     };
     let provider = Provider::new(&config).unwrap();
@@ -100,6 +102,7 @@ async fn streamed_agent_searches_workspace_and_finishes() {
             tasks: TaskList::default(),
             compaction: CompactionState::default(),
             compaction_budget: CompactionBudget::default(),
+            token_compression: false,
             allow_subagents: true,
             papercuts: abacus_agent::papercuts::PapercutStore::default(),
             memories: abacus_agent::memories::MemoryStore::default(),
@@ -202,6 +205,8 @@ async fn a_cancelled_turn_keeps_the_work_it_already_did() {
         endpoint: None,
         aux_model: None,
         reasoning_effort: None,
+        token_compression: false,
+        one_stream: false,
         paths: AbacusPaths::under(directory.path().join("home")),
     };
     let provider = Provider::new(&config).unwrap();
@@ -226,6 +231,7 @@ async fn a_cancelled_turn_keeps_the_work_it_already_did() {
             tasks: TaskList::default(),
             compaction: CompactionState::default(),
             compaction_budget: CompactionBudget::default(),
+            token_compression: false,
             allow_subagents: true,
             papercuts: abacus_agent::papercuts::PapercutStore::default(),
             memories: abacus_agent::memories::MemoryStore::default(),
@@ -323,6 +329,8 @@ async fn responses_protocol_uses_responses_endpoint_and_stream_format() {
         endpoint: None,
         aux_model: None,
         reasoning_effort: None,
+        token_compression: false,
+        one_stream: false,
         paths: AbacusPaths::under(directory.path().join("home")),
     };
     let provider = Provider::new(&config).unwrap();
@@ -393,6 +401,8 @@ async fn edit_requires_reviewable_approval_before_atomic_write() {
         endpoint: None,
         aux_model: None,
         reasoning_effort: None,
+        token_compression: false,
+        one_stream: false,
         paths: AbacusPaths::under(directory.path().join("home")),
     };
     let provider = Provider::new(&config).unwrap();
@@ -416,6 +426,7 @@ async fn edit_requires_reviewable_approval_before_atomic_write() {
             tasks: TaskList::default(),
             compaction: CompactionState::default(),
             compaction_budget: CompactionBudget::default(),
+            token_compression: false,
             allow_subagents: true,
             papercuts: abacus_agent::papercuts::PapercutStore::default(),
             memories: abacus_agent::memories::MemoryStore::default(),
@@ -513,6 +524,7 @@ async fn text_emitted_tool_calls_are_parsed_when_native_calls_absent() {
             tasks: TaskList::default(),
             compaction: CompactionState::default(),
             compaction_budget: CompactionBudget::default(),
+            token_compression: false,
             allow_subagents: true,
             papercuts: abacus_agent::papercuts::PapercutStore::default(),
             memories: abacus_agent::memories::MemoryStore::default(),
@@ -609,6 +621,7 @@ async fn auto_mode_blocks_mutation_until_model_selects_build() {
             tasks: TaskList::default(),
             compaction: CompactionState::default(),
             compaction_budget: CompactionBudget::default(),
+            token_compression: false,
             allow_subagents: true,
             papercuts: abacus_agent::papercuts::PapercutStore::default(),
             memories: abacus_agent::memories::MemoryStore::default(),
@@ -695,6 +708,7 @@ async fn auto_mode_selection_enables_later_tool_in_same_completion() {
             tasks: TaskList::default(),
             compaction: CompactionState::default(),
             compaction_budget: CompactionBudget::default(),
+            token_compression: false,
             allow_subagents: true,
             papercuts: abacus_agent::papercuts::PapercutStore::default(),
             memories: abacus_agent::memories::MemoryStore::default(),
@@ -813,6 +827,7 @@ async fn rolling_summary_compaction_fires_on_large_context() {
             tasks: TaskList::default(),
             compaction: CompactionState::default(),
             compaction_budget: CompactionBudget::default(),
+            token_compression: false,
             allow_subagents: true,
             papercuts: abacus_agent::papercuts::PapercutStore::default(),
             memories: abacus_agent::memories::MemoryStore::default(),
@@ -1568,6 +1583,7 @@ fn base_options(workspace: &std::path::Path) -> TurnOptions {
         tasks: TaskList::default(),
         compaction: CompactionState::default(),
         compaction_budget: CompactionBudget::default(),
+        token_compression: false,
         allow_subagents: false,
         papercuts: abacus_agent::papercuts::PapercutStore::default(),
         memories: abacus_agent::memories::MemoryStore::default(),
@@ -1607,6 +1623,8 @@ fn test_config(
         endpoint: None,
         aux_model: None,
         reasoning_effort: None,
+        token_compression: false,
+        one_stream: false,
         paths: AbacusPaths::under(directory.path().join("home")),
     }
 }

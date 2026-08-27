@@ -314,6 +314,10 @@ pub struct Config {
     pub aux_model: Option<String>,
     /// Reasoning effort sent with every request, when set.
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Aggressively reduce upstream context and nonessential auxiliary calls.
+    pub token_compression: bool,
+    /// Serialize foreground and auxiliary requests on this provider session.
+    pub one_stream: bool,
     pub paths: AbacusPaths,
 }
 
@@ -435,6 +439,8 @@ impl Config {
                 .and_then(|profile| profile.aux_model.clone())
                 .filter(|model| !model.trim().is_empty()),
             reasoning_effort: profile.and_then(|profile| profile.reasoning_effort),
+            token_compression: settings.agent.token_compression,
+            one_stream: settings.agent.one_stream,
             paths,
         })
     }
@@ -895,6 +901,12 @@ pub struct AgentSettings {
     /// `kimi`, `deepseek`, `json`). Unset means `auto`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_format: Option<String>,
+    /// Balanced high-savings mode for upstream tokens.
+    #[serde(default)]
+    pub token_compression: bool,
+    /// Allow only one non-subagent upstream request at a time.
+    #[serde(default)]
+    pub one_stream: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -940,6 +952,8 @@ impl Default for AgentSettings {
             context_window: None,
             max_output_tokens: None,
             tool_format: None,
+            token_compression: false,
+            one_stream: false,
         }
     }
 }
@@ -1191,6 +1205,8 @@ mod tests {
             .unwrap()
             .max_output_tokens = Some(64_000);
         settings.default_profile = "local".into();
+        settings.agent.token_compression = true;
+        settings.agent.one_stream = true;
         settings.save(&paths).unwrap();
         let loaded = Settings::load(&paths).unwrap();
         assert_eq!(loaded.profiles["local"].model, "codestral");
@@ -1199,6 +1215,8 @@ mod tests {
         assert_eq!(loaded.version, SETTINGS_VERSION);
         assert!(loaded.feedback.enabled);
         assert!(loaded.ui.animations);
+        assert!(loaded.agent.token_compression);
+        assert!(loaded.agent.one_stream);
     }
 
     #[test]

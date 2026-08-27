@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Normal turns now avoid the redundant per-turn intent-refresh model call; intent
+  is captured initially and refreshed only before rolling compaction erases its
+  evidence.
+- `/config` adds **Token Compression**, a balanced high-savings mode with tighter
+  context retention, fewer drift checks, and no draft or routine rethink calls.
+  Pre-compaction reflection, summaries, and safety classification remain intact.
+- `/config` adds **One Stream**, which serializes foreground and auxiliary
+  upstream requests while explicitly spawned subagents retain independent streams.
+
 - **Turns no longer loop the opening prompt.** A `max_output_tokens` at or
   above the context window (a leftover `[agent]` 128k on a 128k local model,
   or a server echoing its window as the completion cap) reserved the entire

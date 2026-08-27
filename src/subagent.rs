@@ -619,6 +619,7 @@ impl SubagentRuntime {
                 tasks: TaskList::default(),
                 compaction: CompactionState::default(),
                 compaction_budget: CompactionBudget::default(),
+                token_compression: false,
                 allow_subagents: false,
                 web_search: self.web_search.clone(),
                 // Inert: a subagent's snags belong to its delegated task, and

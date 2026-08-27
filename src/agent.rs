@@ -170,6 +170,16 @@ impl InjectionQueue {
     }
 }
 
+/// Tighten context retention without changing the model's hard context limit.
+pub fn compression_budget(mut budget: CompactionBudget, enabled: bool) -> CompactionBudget {
+    if enabled {
+        budget.compact_at_chars = budget.compact_at_chars.saturating_mul(3) / 5;
+        budget.recent_budget_chars = budget.recent_budget_chars.saturating_mul(2) / 5;
+        budget.summary_budget_chars = budget.summary_budget_chars.saturating_mul(2) / 3;
+    }
+    budget
+}
+
 pub struct TurnOptions {
     pub workspace: std::path::PathBuf,
     pub max_steps: usize,
@@ -182,6 +192,8 @@ pub struct TurnOptions {
     pub tasks: TaskList,
     pub compaction: CompactionState,
     pub compaction_budget: CompactionBudget,
+    /// Balanced high-savings behavior for upstream requests.
+    pub token_compression: bool,
     pub allow_subagents: bool,
     pub web_search: crate::web::WebConfig,
     /// Lessons from past snags, scanned against every tool result and
@@ -297,19 +309,10 @@ async fn run_turn_inner(
         aux.clone()
     };
     let mut active_mode = options.mode;
-    // The intent snapshot runs *beside* the turn rather than after it. Intent
-    // is the user's, and the prompt already states it in full, so the call
-    // needs nothing the model is about to produce — starting it now and
-    // collecting it at the end costs the user no waiting at all.
-    //
-    // It refreshes on every turn, because every turn is a new user prompt and
-    // that is exactly when the intent can change. Refreshing only before
-    // rolling-summary compaction meant a big-context model never refreshed at
-    // all: no pressure, no compaction, so a snapshot taken from an opening
-    // "hi" stayed the yardstick for an entire session of agreed work.
-    let first_snapshot = options.tether.intent().is_none();
+    // Capture once per session. Later turns reuse the snapshot; only imminent
+    // rolling compaction refreshes it before verbatim evidence is erased.
     let mut intent_capture: Option<tokio::task::JoinHandle<Option<String>>> =
-        options.session_id.is_some().then(|| {
+        (options.session_id.is_some() && options.tether.intent().is_none()).then(|| {
             let (aux, snapshot, previous, cancel) = (
                 aux.clone(),
                 messages.clone(),
@@ -494,7 +497,12 @@ async fn run_turn_inner(
         // becomes a course-correction layer in the next requests. It runs
         // detached — a drift verdict is a nudge for the requests after this
         // one, so making the model wait on it buys nothing.
-        if options.tether.step_and_check_due()
+        let tether_interval = if options.token_compression {
+            crate::tether::CHECK_EVERY_STEPS_COMPRESSED
+        } else {
+            crate::tether::CHECK_EVERY_STEPS
+        };
+        if options.tether.step_and_check_due(tether_interval)
             && let Some(intent) = options.tether.intent()
         {
             let (aux, snapshot, plan, tether, cancel, notices) = (
@@ -535,7 +543,10 @@ async fn run_turn_inner(
             }
             // A turn with many actions earns a look back before it ends;
             // conversational turns end unexamined.
-            if !rethought && tool_calls_executed >= crate::rethink::LONG_TURN_TOOL_CALLS {
+            if !options.token_compression
+                && !rethought
+                && tool_calls_executed >= crate::rethink::LONG_TURN_TOOL_CALLS
+            {
                 run_rethink(&aux, &messages, &options, active_mode, &events).await;
             }
             // Collect the intent snapshot started when the turn began. It has
@@ -545,11 +556,7 @@ async fn run_turn_inner(
                 && let Ok(Some(intent)) = handle.await
             {
                 options.tether.set_intent(intent.clone());
-                // Only the first snapshot is announced; a refresh every turn
-                // would be noise.
-                if first_snapshot {
-                    let _ = events.send(AgentEvent::Notice(format!("tethered — {intent}")));
-                }
+                let _ = events.send(AgentEvent::Notice(format!("tethered — {intent}")));
             }
             let _ = events.send(AgentEvent::Done {
                 messages,
@@ -923,7 +930,7 @@ async fn run_turn_inner(
     //
     // A limit-length turn is by definition long, so it earns the reflection
     // pass on the way out.
-    if !rethought {
+    if !options.token_compression && !rethought {
         run_rethink(&aux, &messages, &options, active_mode, &events).await;
     }
     let _ = events.send(AgentEvent::Done {
@@ -1761,6 +1768,7 @@ mod tests {
             tasks: TaskList::default(),
             compaction: CompactionState::default(),
             compaction_budget: CompactionBudget::default(),
+            token_compression: false,
             allow_subagents: false,
             web_search: crate::web::WebConfig::default(),
             papercuts: crate::papercuts::PapercutStore::default(),
@@ -1775,6 +1783,24 @@ mod tests {
             trace: None,
             cancel: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[test]
+    fn token_compression_tightens_every_context_budget() {
+        let normal = CompactionBudget {
+            compact_at_chars: 100_000,
+            recent_budget_chars: 40_000,
+            summary_budget_chars: 12_000,
+        };
+        let unchanged = compression_budget(normal.clone(), false);
+        assert_eq!(unchanged.compact_at_chars, normal.compact_at_chars);
+        assert_eq!(unchanged.recent_budget_chars, normal.recent_budget_chars);
+        assert_eq!(unchanged.summary_budget_chars, normal.summary_budget_chars);
+
+        let compressed = compression_budget(normal, true);
+        assert_eq!(compressed.compact_at_chars, 60_000);
+        assert_eq!(compressed.recent_budget_chars, 16_000);
+        assert_eq!(compressed.summary_budget_chars, 8_000);
     }
 
     #[test]

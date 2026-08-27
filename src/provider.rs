@@ -7,7 +7,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use futures_util::StreamExt;
 use reqwest::{Client, header};
 use serde_json::{Value, json};
-use tokio::{sync::mpsc, time::sleep};
+use tokio::{
+    sync::{Semaphore, mpsc},
+    time::sleep,
+};
 
 use crate::{
     config::{Config, ProviderProtocol},
@@ -67,6 +70,8 @@ pub struct Provider {
     /// catches the known ones, and this catches everything it does not.
     /// Shared across clones for the same reason `learned_output_cap` is.
     prefers_adaptive_thinking: Arc<AtomicBool>,
+    /// Optional one-request gate shared by the main and auxiliary providers.
+    stream_gate: Option<Arc<Semaphore>>,
 }
 
 /// A piece of streamed output. Reasoning is kept separate from the answer all
@@ -167,6 +172,7 @@ impl Provider {
             session_id: uuid::Uuid::new_v4().simple().to_string(),
             reasoning_effort: config.reasoning_effort,
             prefers_adaptive_thinking: Arc::new(AtomicBool::new(false)),
+            stream_gate: config.one_stream.then(|| Arc::new(Semaphore::new(1))),
         })
     }
 
@@ -201,6 +207,8 @@ impl Provider {
         let counter = Arc::new(AtomicU64::new(0));
         let mut detached = self.clone();
         detached.tokens = counter.clone();
+        // Explicit subagents are the sole exception to One Stream.
+        detached.stream_gate = None;
         (detached, counter)
     }
 
@@ -266,6 +274,10 @@ impl Provider {
         deltas: mpsc::UnboundedSender<Chunk>,
         cancel: &AtomicBool,
     ) -> Result<Completion> {
+        let _permit = match &self.stream_gate {
+            Some(gate) => Some(gate.acquire().await.context("stream gate closed")?),
+            None => None,
+        };
         match self.protocol {
             ProviderProtocol::ChatCompletions => {
                 self.complete_chat(messages, tools, deltas, cancel).await
@@ -1665,6 +1677,42 @@ mod tests {
         assert_eq!(streamed, "Hi there");
     }
 
+    #[test]
+    fn detached_subagents_bypass_one_stream_gate() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = Config {
+            workspace: directory.path().to_path_buf(),
+            profile: "test".into(),
+            model: "test".into(),
+            base_url: "http://127.0.0.1:9".into(),
+            protocol: ProviderProtocol::ChatCompletions,
+            api_key: None,
+            max_steps: 8,
+            tool_output_limit: 30_000,
+            yes: false,
+            no_session: true,
+            model_limits: crate::model_info::ModelLimits::default(),
+            tool_format: ToolFormat::default(),
+            mode: None,
+            trace_enabled: false,
+            routing: Default::default(),
+            web_search: crate::web::WebConfig::default(),
+            endpoint: None,
+            aux_model: None,
+            reasoning_effort: None,
+            token_compression: false,
+            one_stream: true,
+            paths: crate::config::AbacusPaths::under(directory.path().join("home")),
+        };
+        let provider = Provider::new(&config).unwrap();
+        assert!(provider.stream_gate.is_some());
+        assert!(provider.with_model("aux").stream_gate.is_some());
+        assert!(provider.with_detached_counter().0.stream_gate.is_none());
+
+        config.one_stream = false;
+        assert!(Provider::new(&config).unwrap().stream_gate.is_none());
+    }
+
     /// The body is the whole contract: an adaptive model must get
     /// `output_config.effort`, and a legacy one must get `budget_tokens`.
     #[test]
@@ -1691,6 +1739,8 @@ mod tests {
                 endpoint: None,
                 aux_model: None,
                 reasoning_effort: None,
+                token_compression: false,
+                one_stream: false,
                 paths: crate::config::AbacusPaths::under(directory.path().join("home")),
             };
             Provider::new(&config).unwrap()

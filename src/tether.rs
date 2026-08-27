@@ -25,6 +25,8 @@ use crate::provider::Provider;
 
 /// How many model steps between drift checks.
 pub const CHECK_EVERY_STEPS: usize = 35;
+/// Token Compression keeps drift protection, but samples it less often.
+pub const CHECK_EVERY_STEPS_COMPRESSED: usize = 70;
 /// A correction stays in the system layer for this many requests, then
 /// clears — one nudge, visible long enough to land, not a permanent nag.
 const CORRECTION_REQUESTS: u8 = 3;
@@ -71,13 +73,13 @@ impl TetherState {
     }
 
     /// Count a model step; true when a drift check is due.
-    pub fn step_and_check_due(&self) -> bool {
+    pub fn step_and_check_due(&self, interval: usize) -> bool {
         let mut inner = self.inner.write().expect("tether lock");
         if inner.intent.is_none() {
             return false;
         }
         inner.steps_since_check += 1;
-        if inner.steps_since_check >= CHECK_EVERY_STEPS {
+        if inner.steps_since_check >= interval.max(1) {
             inner.steps_since_check = 0;
             return true;
         }
@@ -474,12 +476,15 @@ mod tests {
     fn steps_only_count_once_intent_exists() {
         let tether = TetherState::default();
         for _ in 0..100 {
-            assert!(!tether.step_and_check_due(), "no intent, no checks");
+            assert!(
+                !tether.step_and_check_due(CHECK_EVERY_STEPS),
+                "no intent, no checks"
+            );
         }
         tether.set_intent("do the thing".into());
         let mut due = 0;
         for _ in 0..(CHECK_EVERY_STEPS * 2) {
-            if tether.step_and_check_due() {
+            if tether.step_and_check_due(CHECK_EVERY_STEPS) {
                 due += 1;
             }
         }

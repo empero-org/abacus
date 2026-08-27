@@ -952,6 +952,8 @@ mod tests {
             endpoint: None,
             aux_model: None,
             reasoning_effort: None,
+            token_compression: false,
+            one_stream: false,
             paths: crate::config::AbacusPaths::under(std::env::temp_dir().join("abacus-web-test")),
         };
         crate::provider::Provider::new(&config).expect("provider")

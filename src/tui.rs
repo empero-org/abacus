@@ -39,7 +39,8 @@ use crate::{
     activity::ActivityReporter,
     agent::{
         AgentEvent, AgentMode, ApprovalDecision, ApprovalRequest, DoneReason, TurnOptions,
-        UserQuestionRequest, compact_messages, initial_messages, message_chars, run_turn,
+        UserQuestionRequest, compact_messages, compression_budget, initial_messages, message_chars,
+        run_turn,
     },
     compaction::CompactionState,
     config::{Config, Credentials, PermissionMode, ProviderProtocol, SETTINGS_VERSION, Settings},
@@ -376,6 +377,8 @@ enum ConfigKey {
     Animations,
     Tooltips,
     DraftReplies,
+    TokenCompression,
+    OneStream,
     CheckUpdates,
     SafetyModel,
     TraceLogging,
@@ -414,6 +417,8 @@ const CONFIG_ROWS: &[ConfigRow] = &[
     ConfigRow::Key(ConfigKey::MaxSteps),
     ConfigRow::Key(ConfigKey::ToolOutputLimit),
     ConfigRow::Key(ConfigKey::ProjectTrust),
+    ConfigRow::Key(ConfigKey::TokenCompression),
+    ConfigRow::Key(ConfigKey::OneStream),
     ConfigRow::Heading("INTERFACE"),
     ConfigRow::Key(ConfigKey::VimMode),
     ConfigRow::Key(ConfigKey::ShowThinking),
@@ -471,6 +476,12 @@ fn config_help(key: ConfigKey) -> &'static str {
         ConfigKey::DraftReplies => {
             "Predict a likely follow-up in the empty composer. One short model call per turn."
         }
+        ConfigKey::TokenCompression => {
+            "Balanced high-savings mode: tighter context, fewer background checks, and no draft or routine rethink calls."
+        }
+        ConfigKey::OneStream => {
+            "Serialize main and auxiliary upstream requests. Explicit subagents keep their own streams."
+        }
         ConfigKey::CheckUpdates => {
             "Check GitHub daily for a newer version tag and say so. Never downloads anything."
         }
@@ -522,6 +533,8 @@ const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey::MaxSteps,
     ConfigKey::ToolOutputLimit,
     ConfigKey::ProjectTrust,
+    ConfigKey::TokenCompression,
+    ConfigKey::OneStream,
     ConfigKey::VimMode,
     ConfigKey::ShowThinking,
     ConfigKey::TokenRate,
@@ -1047,7 +1060,11 @@ impl App {
     /// while the user is mid-thought, would be noise.
     fn start_draft(&mut self) {
         self.draft = None;
-        if !self.settings.ui.draft_replies || !self.input.is_empty() || self.running.is_some() {
+        if !self.settings.ui.draft_replies
+            || self.config.token_compression
+            || !self.input.is_empty()
+            || self.running.is_some()
+        {
             return;
         }
         if let Some(task) = self.draft_task.take() {
@@ -1643,7 +1660,11 @@ impl App {
             modes: self.modes.clone(),
             tasks: self.tasks.clone(),
             compaction: self.compaction.clone(),
-            compaction_budget: self.config.model_limits.compaction_budget(),
+            compaction_budget: compression_budget(
+                self.config.model_limits.compaction_budget(),
+                self.config.token_compression,
+            ),
+            token_compression: self.config.token_compression,
             allow_subagents: true,
             web_search: self.config.web_search.clone(),
         };
@@ -2858,6 +2879,8 @@ impl App {
             });
         self.config.max_steps = self.settings.agent.max_steps.clamp(1, 128);
         self.config.tool_output_limit = self.settings.agent.tool_output_limit.clamp(2_000, 200_000);
+        self.config.token_compression = self.settings.agent.token_compression;
+        self.config.one_stream = self.settings.agent.one_stream;
         // Re-resolve the model limits when an override is in play — either
         // newly set (it must reach the provider and the compaction budget
         // immediately) or newly cleared (the Override source must not stick).
@@ -2985,6 +3008,16 @@ impl App {
                 if !self.settings.ui.draft_replies {
                     self.clear_draft();
                 }
+            }
+            ConfigKey::TokenCompression => {
+                self.settings.agent.token_compression = !self.settings.agent.token_compression;
+                self.config.token_compression = self.settings.agent.token_compression;
+                if self.config.token_compression {
+                    self.clear_draft();
+                }
+            }
+            ConfigKey::OneStream => {
+                self.settings.agent.one_stream = !self.settings.agent.one_stream;
             }
             ConfigKey::TraceLogging => {
                 self.settings.trace.enabled = !self.settings.trace.enabled;
@@ -3214,6 +3247,8 @@ impl App {
             ConfigKey::Animations => on_off(self.settings.ui.animations),
             ConfigKey::Tooltips => on_off(self.settings.ui.show_tooltips),
             ConfigKey::DraftReplies => on_off(self.settings.ui.draft_replies),
+            ConfigKey::TokenCompression => on_off(self.settings.agent.token_compression),
+            ConfigKey::OneStream => on_off(self.settings.agent.one_stream),
             ConfigKey::CheckUpdates => on_off(self.settings.ui.check_updates),
             ConfigKey::SafetyModel => if self.settings.ui.safety_uses_main {
                 "Main model"
@@ -8156,6 +8191,8 @@ fn config_label(key: ConfigKey) -> &'static str {
         ConfigKey::Animations => "Animations",
         ConfigKey::Tooltips => "Welcome tips",
         ConfigKey::DraftReplies => "Draft next message",
+        ConfigKey::TokenCompression => "Token Compression",
+        ConfigKey::OneStream => "One Stream",
         ConfigKey::CheckUpdates => "Update reminder",
         ConfigKey::SafetyModel => "Safety classifier",
         ConfigKey::TraceLogging => "Training traces",
@@ -10943,6 +10980,8 @@ mod tests {
             endpoint: None,
             aux_model: None,
             reasoning_effort: None,
+            token_compression: false,
+            one_stream: false,
             paths,
         };
         let app = App::new(
