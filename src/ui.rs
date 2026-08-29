@@ -574,7 +574,8 @@ pub enum EntryKind {
     Rule,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ToolStatus {
     Running,
     Ok,
@@ -585,7 +586,7 @@ pub enum ToolStatus {
 /// ended, and how long it took. Keeping these as fields rather than a
 /// pre-formatted string is what lets the row show a live spinner, right-align
 /// the duration, and colour the outcome.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolCall {
     pub name: String,
     pub summary: String,

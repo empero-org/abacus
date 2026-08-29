@@ -28,6 +28,14 @@ const SWARM_AT: u32 = 3;
 const HIVE_AT: u32 = 12;
 /// …provided the worker failure rate stays under this.
 const HIVE_MAX_FAILURE_RATE: f64 = 0.3;
+/// Every promotion is gated on this, not just the top one. Counting clean runs
+/// alone let a workspace where most workers *fail* still read as "delegation
+/// works here" and ask for more of it: 3 clean runs out of 12, with 16 of 30
+/// workers failing, promoted to swarm and kept pushing.
+const SWARM_MAX_FAILURE_RATE: f64 = 0.4;
+/// Below this many workers the rate is too noisy to demote on — one early
+/// failure out of two should not pin a workspace to probing forever.
+const RATE_MEANINGFUL_AFTER: u32 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerState {
@@ -276,9 +284,14 @@ impl HiveStats {
         } else {
             f64::from(self.worker_failures) / f64::from(self.workers)
         };
+        // A rate computed from a handful of workers says little, so it only
+        // starts counting once there is enough of a record to mean something.
+        let rate_is_meaningful = self.workers >= RATE_MEANINGFUL_AFTER;
         if self.clean_runs >= HIVE_AT && failure_rate < HIVE_MAX_FAILURE_RATE {
             HiveTier::Hive
-        } else if self.clean_runs >= SWARM_AT {
+        } else if self.clean_runs >= SWARM_AT
+            && !(rate_is_meaningful && failure_rate >= SWARM_MAX_FAILURE_RATE)
+        {
             HiveTier::Swarm
         } else {
             HiveTier::Probing
@@ -344,6 +357,37 @@ impl HiveHandle {
     /// the wording changes only as recorded outcomes accumulate.
     pub fn guidance(&self) -> String {
         let stats = self.stats();
+        // Workers already in flight come first, and they come every time.
+        //
+        // Spawning does not block: the call returns "started in background" and
+        // results arrive after a later tool call. So a model that only sees the
+        // encouragement below, and nothing about what it already launched, will
+        // launch the same work again — three spawns of three became nine
+        // workers for one task. Naming them is what closes that loop.
+        let running: Vec<String> = self
+            .board
+            .snapshot()
+            .into_iter()
+            .filter(|worker| worker.state == WorkerState::Running)
+            .map(|worker| format!("{} ({}, {})", worker.name, worker.role, worker.activity))
+            .collect();
+        let in_flight = if running.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "ALREADY RUNNING — {} worker(s) you have already started, still \
+                 working: {}. Their results reach you after your next tool call. Do \
+                 NOT spawn more workers for this same work, and do not redo it \
+                 yourself; carry on with something else or wait for them.\n\n",
+                running.len(),
+                running.join("; ")
+            )
+        };
+        let guidance = self.tier_guidance(&stats);
+        format!("{in_flight}{guidance}")
+    }
+
+    fn tier_guidance(&self, stats: &HiveStats) -> String {
         match stats.tier() {
             HiveTier::Probing => format!(
                 "Delegation experience here: {} swarm run(s), {} clean. You are still \
@@ -383,6 +427,73 @@ mod tests {
     use super::*;
 
     #[test]
+    /// The record that caused this: 12 runs, 3 clean, 30 workers, 16 failed.
+    /// Counting clean runs alone promoted it to swarm, so the system prompt
+    /// told the model "delegation works in this workspace" while more than
+    /// half of every worker it started was failing — and asked for more.
+    #[test]
+    fn a_workspace_where_most_workers_fail_is_not_promoted() {
+        let losing = HiveStats {
+            runs: 12,
+            clean_runs: 3,
+            workers: 30,
+            worker_failures: 16,
+        };
+        assert_eq!(losing.tier(), HiveTier::Probing, "53% of workers failed");
+
+        // The same clean-run count with workers that mostly succeed does earn it.
+        let winning = HiveStats {
+            runs: 12,
+            clean_runs: 3,
+            workers: 30,
+            worker_failures: 4,
+        };
+        assert_eq!(winning.tier(), HiveTier::Swarm);
+    }
+
+    /// A rate from two or three workers is noise, and one early failure should
+    /// not pin a workspace to probing forever.
+    #[test]
+    fn a_thin_record_is_not_judged_on_its_failure_rate() {
+        let thin = HiveStats {
+            runs: 3,
+            clean_runs: 3,
+            workers: 4,
+            worker_failures: 2,
+        };
+        assert_eq!(thin.tier(), HiveTier::Swarm, "too few workers to demote on");
+    }
+
+    /// Spawning does not block, so without this the model cannot tell that it
+    /// already started the work it is about to start again.
+    #[test]
+    fn guidance_names_the_workers_already_in_flight() {
+        let hive = HiveHandle::default();
+        assert!(
+            !hive.guidance().contains("ALREADY RUNNING"),
+            "nothing running, nothing to say"
+        );
+
+        let tokens = Arc::new(AtomicU64::new(0));
+        let id = hive.board.begin("recon", "scout", tokens.clone());
+        hive.board.activity(id, "reading src/agent.rs");
+        hive.board.begin("builder", "drone", tokens);
+
+        let guidance = hive.guidance();
+        assert!(guidance.contains("ALREADY RUNNING"), "{guidance}");
+        assert!(guidance.contains("recon"), "names them: {guidance}");
+        assert!(guidance.contains("builder"), "{guidance}");
+        assert!(guidance.contains("scout"), "with their roles");
+        assert!(
+            guidance.contains("Do NOT spawn more workers"),
+            "and says what to do about it: {guidance}"
+        );
+        // The warning leads, ahead of the encouragement to delegate.
+        let warn = guidance.find("ALREADY RUNNING").unwrap();
+        let tier = guidance.find("Delegation experience").unwrap();
+        assert!(warn < tier, "the live state comes first");
+    }
+
     fn tiers_are_earned_from_clean_runs_and_failure_rate() {
         let mut stats = HiveStats::default();
         assert_eq!(stats.tier(), HiveTier::Probing);
