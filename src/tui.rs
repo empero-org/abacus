@@ -4,7 +4,7 @@ use std::{
     io::{self, Stdout},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -639,6 +639,7 @@ struct App {
     remote_outbound: Option<mpsc::UnboundedSender<String>>,
     sync_idle_since: Option<Instant>,
     last_auto_push: Option<Instant>,
+    last_board_version: u64,
     reload_services: bool,
     services_reloading: bool,
     services_tx: mpsc::UnboundedSender<ServicesResult>,
@@ -948,6 +949,7 @@ impl App {
             remote_outbound: None,
             sync_idle_since: None,
             last_auto_push: None,
+            last_board_version: 0,
             reload_services: false,
             services_reloading: false,
             services_tx,
@@ -1160,7 +1162,28 @@ impl App {
 
     fn drain_agent_events(&mut self) -> bool {
         let mut changed = false;
-        while let Ok(event) = self.event_rx.try_recv() {
+        loop {
+            let event = match self.event_rx.try_recv() {
+                Ok(event) => event,
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                // The turn task is gone without a final event — a panic in a
+                // background spawn is the usual way. Left alone, `running`
+                // would stay Some forever: the spinner would spin, every new
+                // prompt would be parked as "steering", and a finished
+                // subagent's report would never trigger its turn.
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    if self.running.take().is_some() {
+                        self.push_entry(Entry::new(
+                            EntryKind::Error,
+                            "The turn ended unexpectedly (the agent task exited). \
+                             Any partial output was saved to the recovery file."
+                                .to_owned(),
+                        ));
+                        changed = true;
+                    }
+                    break;
+                }
+            };
             changed = true;
             match event {
                 AgentEvent::Delta(delta) => {
@@ -1422,7 +1445,54 @@ impl App {
                 }
             }
         }
+        // Watchdog: a turn task that ended WITHOUT a Done/Failed event (a panic
+        // in a spawned tool task, most often) leaves `running` stuck. The
+        // channel never disconnects because the App holds a sender, so the
+        // finished handle with an empty event queue is the only signal.
+        if let Some(handle) = &self.running
+            && handle.is_finished()
+            && matches!(
+                self.event_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            )
+        {
+            self.running = None;
+            crate::recovery::clear();
+            self.turn_started = None;
+            self.tool_started = None;
+            self.receiving_delta = false;
+            self.receiving_thinking = false;
+            self.push_entry(Entry::new(
+                EntryKind::Error,
+                "The turn ended unexpectedly. Partial output was kept — \
+                 send a message to continue."
+                    .to_owned(),
+            ));
+            self.status = "turn ended unexpectedly".to_owned();
+            self.persist_session();
+            self.sync_idle_since = Some(Instant::now());
+            changed = true;
+        }
         changed
+    }
+
+    /// True when the worker board changed since the last draw. The strip must
+    /// update while no turn is running — during that window nothing else marks
+    /// the frame dirty, so background swarms looked frozen between keystrokes.
+    /// A termination signal arrived; the loop should wind down gracefully.
+    /// Called on the UI thread, which notices within one poll tick (~150ms).
+    fn pending_signal(&self) -> bool {
+        PENDING_SIGNAL.load(Ordering::SeqCst) != 0
+    }
+
+    fn board_changed(&mut self) -> bool {
+        let version = self.hive.board.version();
+        if version != self.last_board_version {
+            self.last_board_version = version;
+            true
+        } else {
+            false
+        }
     }
 
     fn set_approval(&mut self, request: ApprovalRequest) {
@@ -1701,6 +1771,11 @@ impl App {
             .saturating_add(crate::agent::message_chars_one(&message));
         self.messages.push(message);
         self.persist_session();
+        // The session now exists (first prompt creates it), so recovery can
+        // name it — the startup arm only knew the id for resumed sessions.
+        if let Some(session) = &self.session {
+            crate::recovery::set_session(Some(session.id.to_string()));
+        }
         self.sync_idle_since = None;
         self.receiving_delta = false;
         self.follow = true;
@@ -2371,9 +2446,7 @@ impl App {
         }
         // The trace is keyed by session id, so it can only be opened once the
         // session exists — which is here, on the first real persist.
-        if self.trace.is_none()
-            && (self.config.trace_enabled || self.credentials.sync.is_some())
-        {
+        if self.trace.is_none() && (self.config.trace_enabled || self.credentials.sync.is_some()) {
             match crate::sft::TraceWriter::open(
                 &self.config.paths.traces_dir,
                 &session.id.to_string(),
@@ -4210,6 +4283,11 @@ impl App {
             "A previous run stopped mid-reply. This is how far the model got:".to_owned(),
         ));
         self.push_entry(Entry::new(EntryKind::Assistant, content.trim().to_owned()));
+        // The transcript alone dies with the terminal; the answer belongs in
+        // the session too, so it survives a restart and stays in model context.
+        self.messages
+            .push(json!({"role": "assistant", "content": content.trim()}));
+        self.persist_session();
         self.follow = true;
     }
 
@@ -4589,6 +4667,17 @@ pub async fn run(
     // Resolve dark/light (auto-detecting the terminal/OS appearance) before the
     // first frame so the Empero palette matches the surrounding terminal.
     crate::theme::set_active(crate::theme::Theme::for_mode(settings.ui.theme.resolve()));
+    // A recovery file names the session that was interrupted. Resume THAT
+    // session so recovered output lands where the turn was running, instead of
+    // opening a fresh empty screen and pinning the text to a throwaway session.
+    let mut session = session;
+    if session.is_none()
+        && let Some(recovery_id) = crate::recovery::peek_session(&config.paths.recovery_file)
+        && let Some(store) = &session_store
+        && let Ok(recovered) = store.load(&recovery_id)
+    {
+        session = Some(recovered);
+    }
     let session_id = session.as_ref().map(|session| session.id.to_string());
     services
         .run_hooks(
@@ -4698,6 +4787,13 @@ pub async fn run(
     let duration_secs = app.started.elapsed().as_secs();
     drop(terminal);
     drop(restore);
+    // After the terminal is back: how to get back here. Without this the only
+    // ways in are `/sessions`-style archaeology or remembering the UUID.
+    if let Some(id) = &end_session_id {
+        eprintln!(
+            "\nSession saved — resume with: abacus --resume {id}  (or `abacus -c` for the latest in this workspace)"
+        );
+    }
     let status = if result.is_ok() {
         "completed"
     } else {
@@ -4717,6 +4813,12 @@ pub async fn run(
     }
     result?;
     hook_result?;
+    // A termination signal asked for a graceful exit; the session is now
+    // persisted and synced, so leave with the shell-conventional code.
+    if PENDING_SIGNAL.load(Ordering::SeqCst) != 0 {
+        GRACEFUL_EXIT.store(true, Ordering::SeqCst);
+        std::process::exit(PENDING_SIGNAL.swap(0, Ordering::SeqCst));
+    }
     Ok(())
 }
 
@@ -4725,6 +4827,13 @@ pub async fn run(
 static TERMINAL_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// Whether the kitty keyboard flags were pushed and still need popping.
 static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
+/// A termination signal's shell exit code (128+n), set by the guard task so
+/// the event loop can finish the session — persist, sync, hint — before
+/// exiting with that code.
+static PENDING_SIGNAL: AtomicI32 = AtomicI32::new(0);
+/// Set once the graceful exit path has taken over; the guard task's hard-exit
+/// backstop checks this so it never fires after a clean shutdown.
+static GRACEFUL_EXIT: AtomicBool = AtomicBool::new(false);
 
 /// Give the terminal back exactly as it was found.
 ///
@@ -4786,16 +4895,21 @@ fn install_terminal_guards() {
             };
             tokio::spawn(async move {
                 stream.recv().await;
-                restore_terminal();
-                if let Some(path) = crate::recovery::flush() {
-                    eprintln!(
-                        "Interrupted mid-reply; the partial text is in {}",
-                        path.display()
-                    );
+                // Hand control to the event loop, which persists the session
+                // and syncs before exiting. The delay below is only a backstop
+                // for a loop that is wedged and cannot notice.
+                PENDING_SIGNAL.store(code, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                if !GRACEFUL_EXIT.load(Ordering::SeqCst) {
+                    restore_terminal();
+                    if let Some(path) = crate::recovery::flush() {
+                        eprintln!(
+                            "Interrupted mid-reply; the partial text is in {}",
+                            path.display()
+                        );
+                    }
+                    std::process::exit(code);
                 }
-                // The terminal is back; leave now rather than limping on with
-                // a session the caller has already ended.
-                std::process::exit(code);
             });
         }
     }
@@ -4898,6 +5012,11 @@ async fn event_loop(
         }
         if app.running.is_some() {
             dirty = true;
+        }
+        dirty |= app.board_changed();
+        if app.pending_signal() {
+            app.interrupt();
+            return Ok(());
         }
     }
     app.interrupt();
@@ -11250,6 +11369,30 @@ mod tests {
                 .count();
             assert_eq!(repeats, index + 1);
         }
+    }
+
+    #[tokio::test]
+    async fn a_finished_turn_handle_without_a_done_event_releases_the_ui() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        // Simulate a turn task that died without sending Done/Failed — a panic
+        // in a spawned tool task, most often. The handle is finished and the
+        // queue is empty; the watchdog must clear `running` so later subagent
+        // reports can start a turn and prompts stop being parked as steering.
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        });
+        // Wait for the task to end without consuming the handle.
+        while !handle.is_finished() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        app.running = Some(handle);
+        assert!(app.drain_agent_events(), "the watchdog must mark changed");
+        assert!(app.running.is_none(), "running must be released");
+        assert!(
+            app.entries
+                .last()
+                .is_some_and(|entry| { entry.text.contains("ended unexpectedly") })
+        );
     }
 
     fn test_app(base_url: &str) -> (TempDir, App) {

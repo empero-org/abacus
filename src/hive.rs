@@ -69,6 +69,10 @@ impl WorkerStatus {
 struct BoardInner {
     workers: Vec<WorkerStatus>,
     next_id: u64,
+    /// Bumped on every visible mutation so the UI can redraw the strip when
+    /// workers move even though no turn is running (nothing else marks the
+    /// frame dirty while the transcript is idle).
+    version: u64,
 }
 
 /// Live worker state, written by the subagent runtime and read by the UI.
@@ -90,6 +94,7 @@ impl SubagentBoard {
             inner.workers.clear();
         }
         inner.next_id += 1;
+        inner.version = inner.version.wrapping_add(1);
         let id = inner.next_id;
         inner.workers.push(WorkerStatus {
             id,
@@ -117,6 +122,7 @@ impl SubagentBoard {
                 .to_owned();
             if !line.is_empty() {
                 worker.activity = line;
+                inner.version = inner.version.wrapping_add(1);
             }
         }
     }
@@ -129,7 +135,14 @@ impl SubagentBoard {
             } else {
                 WorkerState::Failed
             };
+            inner.version = inner.version.wrapping_add(1);
         }
+    }
+
+    /// Counter of visible board changes; a larger value than the last one the
+    /// UI saw means the worker strip should be redrawn.
+    pub fn version(&self) -> u64 {
+        self.inner.read().expect("board lock").version
     }
 
     pub fn snapshot(&self) -> Vec<WorkerStatus> {
@@ -152,7 +165,11 @@ impl SubagentBoard {
     }
 
     pub fn clear(&self) {
-        self.inner.write().expect("board lock").workers.clear();
+        let mut inner = self.inner.write().expect("board lock");
+        if !inner.workers.is_empty() {
+            inner.version = inner.version.wrapping_add(1);
+        }
+        inner.workers.clear();
     }
 }
 
@@ -426,7 +443,6 @@ impl HiveHandle {
 mod tests {
     use super::*;
 
-    #[test]
     /// The record that caused this: 12 runs, 3 clean, 30 workers, 16 failed.
     /// Counting clean runs alone promoted it to swarm, so the system prompt
     /// told the model "delegation works in this workspace" while more than

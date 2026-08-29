@@ -470,7 +470,12 @@ async fn push_all_updated_local_inner(paths: &AbacusPaths, force: bool) -> Resul
     Ok(pushed)
 }
 
-pub async fn pull_workspace(paths: &AbacusPaths, workspace: &std::path::Path) -> Result<usize> {
+pub async fn pull_workspace(
+    paths: &AbacusPaths,
+    // Kept for call-site symmetry with the per-workspace API; pulls are global
+    // so every device sees every session regardless of where it was started.
+    _workspace: &std::path::Path,
+) -> Result<usize> {
     let Some(client) = optional_client(paths)? else {
         return Ok(0);
     };

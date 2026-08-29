@@ -47,6 +47,29 @@ pub fn arm(file: PathBuf, session: Option<String>) {
     }
 }
 
+/// Bind the in-flight turn to its session once the session exists. A fresh
+/// screen starts without a session (one is created on the first prompt), so
+/// the startup arm cannot know the id yet; `start_turn` calls this instead.
+pub fn set_session(session: Option<String>) {
+    if let Ok(mut partial) = slot().lock() {
+        partial.session = session;
+    }
+}
+
+/// The session a recovery file belongs to, without consuming it. The startup
+/// path uses this to resume the interrupted session rather than opening a
+/// fresh empty one and dropping the recovered text into that.
+pub fn peek_session(file: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(file).ok()?;
+    let line = content.lines().find(|line| line.starts_with("Session: "))?;
+    let id = line
+        .strip_prefix("Session: `")?
+        .strip_suffix('`')?
+        .trim()
+        .to_owned();
+    (!id.is_empty()).then_some(id)
+}
+
 /// Mirror streamed answer text.
 pub fn record_answer(delta: &str) {
     append(delta, false);

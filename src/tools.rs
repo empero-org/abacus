@@ -1298,6 +1298,43 @@ impl ToolExecutor {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
+        // Tools must never own the user's terminal. ssh and friends write
+        // password prompts straight to /dev/tty and read keystrokes from it:
+        // in raw mode that both corrupts the transcript and steals typing.
+        // Detaching into a new session removes the controlling terminal, so
+        // those writes fail (visibly, in captured stderr) instead of landing
+        // in the UI. The env knobs make the usual prompters fail cleanly too.
+        command.envs([
+            ("GIT_TERMINAL_PROMPT", "0"),
+            ("SSH_ASKPASS_REQUIRE", "force"),
+            ("SSH_ASKPASS", "/bin/false"),
+            ("DISPLAY", "none"),
+            ("DEBIAN_FRONTEND", "noninteractive"),
+        ]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: pre_exec runs between fork and exec in the child only;
+            // setsid is async-signal-safe and the closure touches nothing else.
+            let std_command = command.as_std_mut();
+            unsafe {
+                std_command.pre_exec(|| {
+                    // setsid: leave the terminal's session so no controlling TTY is
+                    // inherited. Same extern pattern as cron.rs.
+                    unsafe extern "C" {
+                        fn setsid() -> i32;
+                    }
+                    // SAFETY: pre_exec runs after fork, before exec; async-signal-safe.
+                    // SAFETY: setsid is async-signal-safe; allowed inside
+                    // pre_exec without an extra unsafe block (unsafe extern).
+                    if setsid() < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+
         // A command that visibly sleeps needs at least that long: the model
         // writes `sleep 180 && retry` in good faith and the default 120s
         // timeout used to kill it mid-wait. The declared sleep total (plus
