@@ -4775,9 +4775,6 @@ pub async fn run(
     app.surface_recovered_reply();
     let result = event_loop(&mut terminal, &mut app).await;
     app.persist_session();
-    if crate::sync::is_configured(&app.credentials) {
-        let _ = crate::sync::push_all_updated_local(&app.config.paths).await;
-    }
     if let Some(handle) = heartbeat {
         handle.abort();
     }
@@ -4785,6 +4782,10 @@ pub async fn run(
     let end_session_id = app.session.as_ref().map(|session| session.id.to_string());
     let tokens_used = app.provider.tokens_used();
     let duration_secs = app.started.elapsed().as_secs();
+    // Restore the user's terminal BEFORE any network sync or lifecycle hook.
+    // Those are best-effort and can stall on DNS/TLS/server timeouts; keeping
+    // raw mode active while awaiting them makes `/exit` look like a total
+    // terminal freeze and prevents the user from recovering their shell.
     drop(terminal);
     drop(restore);
     // After the terminal is back: how to get back here. Without this the only
@@ -4794,22 +4795,37 @@ pub async fn run(
             "\nSession saved — resume with: abacus --resume {id}  (or `abacus -c` for the latest in this workspace)"
         );
     }
+    if crate::sync::is_configured(&app.credentials)
+        && tokio::time::timeout(
+            Duration::from_secs(3),
+            crate::sync::push_all_updated_local(&app.config.paths),
+        )
+        .await
+        .is_err()
+    {
+        eprintln!("Session sync is still pending; it will retry next time Abacus opens.");
+    }
     let status = if result.is_ok() {
         "completed"
     } else {
         "failed"
     };
-    let hook_result = end_services
-        .run_hooks(
+    let hook_result = tokio::time::timeout(
+        Duration::from_secs(3),
+        end_services.run_hooks(
             "session_end",
             end_session_id.as_deref(),
             &json!({"workspace":workspace,"mode":"tui","status":status}),
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| Ok(Vec::new()));
+    if let Some(reporter) = &reporter {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            reporter.report_end(&activity_session, tokens_used, duration_secs),
         )
         .await;
-    if let Some(reporter) = &reporter {
-        reporter
-            .report_end(&activity_session, tokens_used, duration_secs)
-            .await;
     }
     result?;
     hook_result?;

@@ -510,6 +510,7 @@ mod tests {
         assert!(warn < tier, "the live state comes first");
     }
 
+    #[test]
     fn tiers_are_earned_from_clean_runs_and_failure_rate() {
         let mut stats = HiveStats::default();
         assert_eq!(stats.tier(), HiveTier::Probing);
