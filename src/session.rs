@@ -285,6 +285,10 @@ impl SessionStore {
         Ok(session)
     }
 
+    pub fn path_for(&self, id: Uuid) -> PathBuf {
+        self.path(id)
+    }
+
     fn path(&self, id: Uuid) -> PathBuf {
         self.directory.join(format!("{id}.json"))
     }

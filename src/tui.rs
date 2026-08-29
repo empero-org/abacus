@@ -637,6 +637,8 @@ struct App {
     remote_rx: mpsc::UnboundedReceiver<RemoteResult>,
     remote_task: Option<JoinHandle<()>>,
     remote_outbound: Option<mpsc::UnboundedSender<String>>,
+    sync_idle_since: Option<Instant>,
+    last_auto_push: Option<Instant>,
     reload_services: bool,
     services_reloading: bool,
     services_tx: mpsc::UnboundedSender<ServicesResult>,
@@ -861,6 +863,45 @@ impl App {
             config.paths.memories_file.clone(),
             &config.workspace,
         );
+        if let Some(store) = &session_store
+            && let Ok(summaries) = store.list()
+        {
+            for summary in summaries {
+                // Still titled "New session" with at most the system prompt:
+                // a screen that was opened but never used.
+                if summary.title == "New session"
+                    && summary.message_count <= 1
+                    && let Ok(session) = store.load(&summary.id.to_string())
+                    && crate::sync::is_placeholder(&session)
+                {
+                    let _ = std::fs::remove_file(store.path_for(summary.id));
+                    let _ = std::fs::remove_file(
+                        config
+                            .paths
+                            .traces_dir
+                            .join(format!("{}.jsonl", summary.id)),
+                    );
+                }
+            }
+        }
+        let resume_from_id: Option<String> = if session.is_some() {
+            None
+        } else if let Some(store) = &session_store
+            && let Ok(summaries) = store.list()
+            && summaries
+                .iter()
+                .any(|summary| summary.message_count > 1 || summary.title != "New session")
+        {
+            store.latest().ok().map(|session| session.id.to_string())
+        } else {
+            None
+        };
+        if let Some(resume_id) = &resume_from_id {
+            entries.push(Entry::new(
+                EntryKind::System,
+                format!("Continue your last session? Press F12 or /resume {resume_id}."),
+            ));
+        }
         Ok(Self {
             config,
             settings,
@@ -869,7 +910,7 @@ impl App {
             aux_provider,
             messages,
             session,
-            session_store,
+            session_store: session_store.clone(),
             services,
             goal,
             papercuts,
@@ -905,6 +946,8 @@ impl App {
             remote_rx,
             remote_task: None,
             remote_outbound: None,
+            sync_idle_since: None,
+            last_auto_push: None,
             reload_services: false,
             services_reloading: false,
             services_tx,
@@ -1277,6 +1320,9 @@ impl App {
                         let _ = remote.send(assistant_output.clone());
                     }
                     self.running = None;
+                    if !continue_loop {
+                        self.sync_idle_since = Some(Instant::now());
+                    }
                     self.last_outcome = match reason {
                         DoneReason::Complete => None,
                         DoneReason::Interrupted => Some(TurnOutcome::Interrupted),
@@ -1371,6 +1417,7 @@ impl App {
                         let _ = state.pause();
                     }
                     self.persist_session();
+                    self.sync_idle_since = Some(Instant::now());
                     self.follow = true;
                 }
             }
@@ -1654,6 +1701,7 @@ impl App {
             .saturating_add(crate::agent::message_chars_one(&message));
         self.messages.push(message);
         self.persist_session();
+        self.sync_idle_since = None;
         self.receiving_delta = false;
         self.follow = true;
         self.status = "connecting".to_owned();
@@ -2302,21 +2350,6 @@ impl App {
                 .map_err(|error| self.status = format!("session create failed: {error}"))
                 .ok();
         }
-        // The trace is keyed by session id, so it can only be opened once the
-        // session exists — which is here, on the first persist. `start_turn`
-        // persists before spawning, so the first model call is already covered.
-        if self.trace.is_none()
-            && (self.config.trace_enabled || self.credentials.sync.is_some())
-            && let Some(session) = &self.session
-        {
-            match crate::sft::TraceWriter::open(
-                &self.config.paths.traces_dir,
-                &session.id.to_string(),
-            ) {
-                Ok(writer) => self.trace = Some(writer),
-                Err(error) => self.status = format!("training trace disabled: {error:#}"),
-            }
-        }
         let Some(session) = &mut self.session else {
             return;
         };
@@ -2330,9 +2363,49 @@ impl App {
         session.active_secs = self
             .session_initial_active_secs
             .saturating_add(self.started.elapsed().as_secs());
+        // A fresh screen that has never received a prompt is not a real session
+        // yet — keep it out of storage and out of the trace set. The first
+        // `start_turn` persists immediately, before calling the model.
+        if crate::sync::is_placeholder(session) {
+            return;
+        }
+        // The trace is keyed by session id, so it can only be opened once the
+        // session exists — which is here, on the first real persist.
+        if self.trace.is_none()
+            && (self.config.trace_enabled || self.credentials.sync.is_some())
+        {
+            match crate::sft::TraceWriter::open(
+                &self.config.paths.traces_dir,
+                &session.id.to_string(),
+            ) {
+                Ok(writer) => self.trace = Some(writer),
+                Err(error) => self.status = format!("training trace disabled: {error:#}"),
+            }
+        }
         if let Err(error) = store.save(session) {
             self.status = format!("session save failed: {error}");
-        } else {
+        }
+    }
+
+    fn maybe_idle_sync(&mut self) {
+        if self.running.is_some() || !crate::sync::is_configured(&self.credentials) {
+            return;
+        }
+        let Some(idle_since) = self.sync_idle_since else {
+            return;
+        };
+        if idle_since.elapsed() < crate::sync::AUTO_PUSH_IDLE {
+            return;
+        }
+        if self
+            .last_auto_push
+            .is_some_and(|pushed| pushed.elapsed() < crate::sync::AUTO_PUSH_IDLE)
+        {
+            return;
+        }
+        self.last_auto_push = Some(Instant::now());
+        self.sync_idle_since = None;
+        if let Some(session) = &self.session {
             crate::sync::spawn_session_sync(&self.config.paths, session);
         }
     }
@@ -3927,6 +4000,26 @@ impl App {
         self.config.trace_enabled = true;
         self.persist_session();
         self.status = "enabling remote".to_owned();
+        // Snapshot of current transcript so browser sees history immediately,
+        // mapped to role-distinguishable entries (user/assistant/tool/system).
+        let snapshot_entries: Vec<Value> = {
+            use crate::ui::EntryKind;
+            self.entries
+                .iter()
+                .map(|entry| {
+                    let kind = match entry.kind {
+                        EntryKind::User => "user",
+                        EntryKind::Assistant => "assistant",
+                        EntryKind::Tool => "tool",
+                        EntryKind::Thinking => "thinking",
+                        EntryKind::System => "system",
+                        EntryKind::Error => "error",
+                        EntryKind::Rule => "system",
+                    };
+                    json!({"kind": kind, "text": entry.text, "tool": entry.tool})
+                })
+                .collect()
+        };
         self.remote_task = Some(tokio::spawn(async move {
             let trace = std::fs::read(paths.traces_dir.join(format!("{}.jsonl", session.id)))
                 .unwrap_or_default();
@@ -3940,13 +4033,23 @@ impl App {
                 let socket_url = client.enable_remote(&session.id.to_string()).await?;
                 let (socket, _) = tokio_tungstenite::connect_async(&socket_url).await?;
                 let (mut sink, mut stream) = socket.split();
-                let hello = json!({"v":1,"type":"snapshot","id":uuid::Uuid::new_v4(),"seq":1,"payload":{"text":"Session connected. New browser prompts are relayed to the terminal."}});
-                sink.send(tokio_tungstenite::tungstenite::Message::Text(hello.to_string().into())).await?;
+                let mut seq: u64 = 1;
+                let snapshot = json!({"v":1,"type":"snapshot","id":uuid::Uuid::new_v4().to_string(),"seq":seq,"payload":{"entries": snapshot_entries}});
+                seq += 1;
+                sink.send(tokio_tungstenite::tungstenite::Message::Text(snapshot.to_string().into())).await?;
                 let _ = result_tx.send(RemoteResult { result: Ok("remote enabled — open the server /remote page".to_owned()) });
+                // Send deltas as they arrive from the running turn (via outbound channel)
+                // and forward browser prompts; track sequence for dedup.
                 loop {
                     tokio::select! {
                         Some(text) = outbound_rx.recv() => {
-                            let frame = json!({"v":1,"type":"entry","id":uuid::Uuid::new_v4(),"seq":1,"payload":{"kind":"assistant","text":text}});
+                            // Detect role prefix from outbound if present, else assistant.
+                            let (kind, body) = if text.starts_with("user:") { ("user", text.trim_start_matches("user:").to_string()) }
+                            else if text.starts_with("tool:") { ("tool", text.trim_start_matches("tool:").to_string()) }
+                            else if text.starts_with("system:") { ("system", text.trim_start_matches("system:").to_string()) }
+                            else { ("assistant", text) };
+                            let frame = json!({"v":1,"type":"entry","id":uuid::Uuid::new_v4().to_string(),"seq":seq,"payload":{"kind":kind,"text":body}});
+                            seq += 1;
                             sink.send(tokio_tungstenite::tungstenite::Message::Text(frame.to_string().into())).await?;
                         }
                         message = stream.next() => {
@@ -3954,10 +4057,24 @@ impl App {
                             let message = message?;
                             if let Ok(text) = message.to_text()
                                 && let Ok(frame) = serde_json::from_str::<Value>(text)
-                                && frame.get("type").and_then(Value::as_str) == Some("prompt")
-                                && let Some(prompt) = frame.pointer("/payload/text").and_then(Value::as_str)
                             {
-                                let _ = result_tx.send(RemoteResult { result: Ok(format!("remote prompt: {prompt}")) });
+                                let frame_type = frame.get("type").and_then(Value::as_str).unwrap_or("");
+                                match frame_type {
+                                    "prompt" => {
+                                        if let Some(prompt) = frame.pointer("/payload/text").and_then(Value::as_str) {
+                                            let _ = result_tx.send(RemoteResult { result: Ok(format!("remote prompt: {prompt}")) });
+                                        }
+                                    }
+                                    "interrupt" => {
+                                        let _ = result_tx.send(RemoteResult { result: Ok("remote interrupt".to_string()) });
+                                    }
+                                    "ping" => {
+                                        let pong = json!({"v":1,"type":"pong","id":uuid::Uuid::new_v4().to_string(),"seq":seq,"payload":{}});
+                                        seq += 1;
+                                        sink.send(tokio_tungstenite::tungstenite::Message::Text(pong.to_string().into())).await?;
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                     }
@@ -3974,23 +4091,55 @@ impl App {
 
     fn drain_remote_events(&mut self) -> bool {
         let mut changed = false;
+        let mut queued: Vec<String> = Vec::new();
         while let Ok(event) = self.remote_rx.try_recv() {
             changed = true;
             match event.result {
                 Ok(message) if message.starts_with("remote prompt: ") => {
                     let prompt = message.trim_start_matches("remote prompt: ").to_owned();
+                    // Guard against echo loops: ignore prompt that equals last assistant output
+                    let echo = self
+                        .entries
+                        .iter()
+                        .rev()
+                        .find(|e| e.kind == crate::ui::EntryKind::Assistant)
+                        .map(|e| e.text.trim().to_owned());
+                    if echo.as_deref() == Some(prompt.trim()) {
+                        continue;
+                    }
                     if self.running.is_none() {
                         self.start_turn(prompt.clone(), prompt, true);
                     } else {
-                        self.status = "remote prompt waiting for the current turn".to_owned();
+                        queued.push(prompt);
+                        self.status = "remote prompt queued".to_owned();
                     }
                 }
-                Ok(message) => self.status = message,
+                Ok(message) if message == "remote interrupt" => {
+                    if let Some(handle) = self.running.take() {
+                        handle.abort();
+                        self.status = "interrupted via remote".to_owned();
+                    }
+                }
+                Ok(message) => {
+                    if message.starts_with("remote interrupt")
+                        || message.starts_with("remote prompt")
+                    {
+                        // handled above
+                    } else {
+                        self.status = message;
+                    }
+                }
                 Err(error) => {
                     self.status = error;
                     self.remote_task = None;
+                    self.remote_outbound = None;
                 }
             }
+        }
+        // Flush queued remote prompts after turn finished
+        if self.running.is_none() && !queued.is_empty() {
+            let prompt = queued.remove(0);
+            self.start_turn(prompt.clone(), prompt, true);
         }
         changed
     }
@@ -4506,6 +4655,13 @@ pub async fn run(
         session_store,
         services.clone(),
     )?;
+    if crate::sync::is_configured(&app.credentials) {
+        let workspace = app.config.workspace.clone();
+        let paths_sync = app.config.paths.clone();
+        tokio::spawn(async move {
+            let _ = crate::sync::pull_workspace(&paths_sync, &workspace).await;
+        });
+    }
     // Heartbeat the open session so the dashboard shows live tokens and so a
     // session that is killed (terminal closed) drops off "active" instead of
     // lingering. The shared token counter survives model switches.
@@ -4529,6 +4685,10 @@ pub async fn run(
     // handed back at the top of the transcript.
     app.surface_recovered_reply();
     let result = event_loop(&mut terminal, &mut app).await;
+    app.persist_session();
+    if crate::sync::is_configured(&app.credentials) {
+        let _ = crate::sync::push_all_updated_local(&app.config.paths).await;
+    }
     if let Some(handle) = heartbeat {
         handle.abort();
     }
@@ -4661,6 +4821,7 @@ async fn event_loop(
         dirty |= app.drain_services_events();
         dirty |= app.drain_update_events();
         dirty |= app.drain_draft_events();
+        app.maybe_idle_sync();
         // A worker that finished after its turn ended delivers here.
         dirty |= app.deliver_pending_injections();
         // A running turn animates (spinner, shimmer, elapsed) even while the
@@ -4677,6 +4838,9 @@ async fn event_loop(
         if event::poll(Duration::from_millis(wait))? {
             match event::read()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    if app.sync_idle_since.is_some() {
+                        app.sync_idle_since = Some(Instant::now());
+                    }
                     let before = app.input.text();
                     handle_key(app, key);
                     // Editing the prompt invalidates the highlighted
@@ -5192,6 +5356,26 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     }
     if key.code == KeyCode::F(1) {
         app.show_help = true;
+        return;
+    }
+    if key.code == KeyCode::F(12) {
+        if let Some(store) = app.session_store.clone()
+            && let Ok(mut summaries) = store.list()
+        {
+            summaries.retain(|summary| summary.message_count > 1 || summary.title != "New session");
+            if !summaries.is_empty()
+                && let Some(latest) = store.latest().ok()
+                && summaries.iter().any(|summary| summary.id == latest.id)
+            {
+                let _ = app.resume_session(&latest.id.to_string());
+                return;
+            }
+            if let Some(summary) = summaries.into_iter().next_back() {
+                let _ = app.resume_session(&summary.id.to_string());
+                return;
+            }
+        }
+        let _ = app.list_sessions();
         return;
     }
     if key.code == KeyCode::BackTab {
@@ -9575,8 +9759,13 @@ mod tests {
         ));
         app.config.trace_enabled = true;
         assert!(app.trace.is_none(), "nothing to key on before a session");
+        // A fresh screen with no prompt is not a session yet, and leaves no file.
+        app.persist_session();
+        assert!(app.trace.is_none(), "an empty screen must not open a trace");
 
-        // The session is created on first persist, and the trace opens with it.
+        // The session is created on the first real turn: its user message is
+        // persisted, and the trace opens with it.
+        app.messages.push(json!({"role": "user", "content": "hi"}));
         app.persist_session();
         let trace = app
             .trace

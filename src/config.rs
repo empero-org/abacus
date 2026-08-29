@@ -211,8 +211,13 @@ pub enum SyncCommand {
         server: String,
         #[arg(long)]
         email: Option<String>,
+        /// Email password (password auth is the `--password-login` fallback;
+        /// magic-link browser login is the default)
         #[arg(long, hide = true)]
         password: Option<String>,
+        /// Use email and password instead of the browser sign-in flow
+        #[arg(long)]
+        password_login: bool,
     },
     /// Remove the saved sync token
     Logout,

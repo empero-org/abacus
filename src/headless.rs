@@ -27,7 +27,7 @@ pub async fn run(
     config: Config,
     format: OutputFormat,
     messages: Vec<Value>,
-    session: Option<Session>,
+    mut session: Option<Session>,
     store: Option<SessionStore>,
     services: Arc<AgentServices>,
     loop_config: Option<RalphLoop>,
@@ -50,6 +50,15 @@ pub async fn run(
     let activity_session = session_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    if crate::sync::is_configured(
+        &crate::config::Credentials::load(&config.paths).unwrap_or_default(),
+    ) && let Ok(count) = crate::sync::pull_workspace(&config.paths, &config.workspace).await
+        && count > 0
+        && let (Some(current), Some(store)) = (session.as_ref(), store.as_ref())
+        && let Ok(updated) = store.load(&current.id.to_string())
+    {
+        session = Some(updated);
+    }
     if let Some(reporter) = &reporter {
         reporter
             .report_start(&activity_session, &config.model)
@@ -456,6 +465,9 @@ fn persist_session(
     session_value.tokens_used = run.tokens_used;
     session_value.active_secs = session_value.active_secs.saturating_add(run.active_secs);
     store.save(&session_value)?;
+    if let Ok(paths) = crate::config::AbacusPaths::discover() {
+        crate::sync::spawn_session_sync(&paths, &session_value);
+    }
     Ok(Some(session_value.id.to_string()))
 }
 

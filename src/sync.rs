@@ -1,8 +1,9 @@
 use std::io::{self, Write};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use reqwest::{Client, header};
+use reqwest::{Client, StatusCode, header};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -13,6 +14,7 @@ use crate::{
 };
 
 const PROTOCOL: &str = "1";
+pub const AUTO_PUSH_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[derive(Debug, Deserialize)]
 struct LoginResponse {
@@ -23,6 +25,15 @@ struct LoginResponse {
 #[derive(Debug, Deserialize)]
 struct Account {
     email: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceStart {
+    device_code: String,
+    user_code: String,
+    verification_uri: String,
+    expires_in: u64,
+    interval: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,6 +159,81 @@ impl SyncClient {
     }
 }
 
+async fn password_login_flow(
+    server: &str,
+    email: Option<String>,
+    password: Option<String>,
+) -> Result<LoginResponse> {
+    let email = match email {
+        Some(value) => value,
+        None => prompt("Email: ")?,
+    };
+    let password = match password {
+        Some(value) => value,
+        None => prompt_password()?,
+    };
+    let response = anonymous_client()?
+        .post(format!("{server}/v1/auth/login"))
+        .header("Abacus-Protocol", PROTOCOL)
+        .json(&json!({"email": email, "password": password, "device_name": device_id()}))
+        .send()
+        .await?;
+    decode(response).await
+}
+
+async fn device_login_flow(server: &str) -> Result<LoginResponse> {
+    let start: DeviceStart = decode(
+        anonymous_client()?
+            .post(format!("{server}/v1/auth/device"))
+            .header("Abacus-Protocol", PROTOCOL)
+            .json(&json!({"device_name": device_id()}))
+            .send()
+            .await?,
+    )
+    .await?;
+    println!("Open this page in a browser and sign in with your magic link:");
+    println!("  {}", start.verification_uri);
+    println!();
+    println!("Then enter this code:");
+    println!("  {}", start.user_code);
+    println!();
+    println!("Waiting for approval…");
+    let deadline = std::time::Instant::now() + Duration::from_secs(start.expires_in.max(30));
+    let mut interval = Duration::from_secs(start.interval.max(1));
+    loop {
+        if std::time::Instant::now() >= deadline {
+            bail!("device login expired; run `abacus sync login` again");
+        }
+        tokio::time::sleep(interval).await;
+        let response = anonymous_client()?
+            .post(format!("{server}/v1/auth/device/token"))
+            .header("Abacus-Protocol", PROTOCOL)
+            .json(&json!({"device_code": start.device_code}))
+            .send()
+            .await?;
+        match response.status() {
+            StatusCode::OK => return decode(response).await,
+            StatusCode::PRECONDITION_REQUIRED => continue,
+            StatusCode::TOO_MANY_REQUESTS => {
+                interval += Duration::from_secs(1);
+            }
+            other => {
+                let detail = response.text().await.unwrap_or_default();
+                bail!(
+                    "sync server returned {other}: {}",
+                    detail.chars().take(1000).collect::<String>()
+                );
+            }
+        }
+    }
+}
+
+fn anonymous_client() -> Result<Client> {
+    Ok(Client::builder()
+        .user_agent(concat!("abacus-agent/", env!("CARGO_PKG_VERSION")))
+        .build()?)
+}
+
 async fn decode<T: for<'de> Deserialize<'de>>(response: reqwest::Response) -> Result<T> {
     let status = response.status();
     if response
@@ -177,25 +263,14 @@ pub async fn handle(
             server,
             email,
             password,
+            password_login,
         } => {
-            let email = match email {
-                Some(value) => value,
-                None => prompt("Email: ")?,
-            };
-            let password = match password {
-                Some(value) => value,
-                None => prompt_password()?,
-            };
             let server = server.trim_end_matches('/').to_owned();
-            let response = Client::builder()
-                .user_agent(concat!("abacus-agent/", env!("CARGO_PKG_VERSION")))
-                .build()?
-                .post(format!("{server}/v1/auth/login"))
-                .header("Abacus-Protocol", PROTOCOL)
-                .json(&json!({"email": email, "password": password, "device_name": device_id()}))
-                .send()
-                .await?;
-            let login: LoginResponse = decode(response).await?;
+            let login = if password_login || password.is_some() {
+                password_login_flow(&server, email, password).await?
+            } else {
+                device_login_flow(&server).await?
+            };
             credentials.sync = Some(SyncCredentials {
                 server,
                 token: login.access_token,
@@ -203,7 +278,7 @@ pub async fn handle(
             });
             credentials.save(paths)?;
             println!(
-                "Signed in as {}. Session sync is now configured.",
+                "Signed in as {}. Sessions now sync automatically across devices.",
                 login.user.email
             );
         }
@@ -314,26 +389,152 @@ fn device_id() -> String {
         .unwrap_or_else(|_| "Abacus CLI".to_owned())
 }
 
+pub fn is_configured(credentials: &Credentials) -> bool {
+    credentials.sync.is_some()
+}
+
 pub fn spawn_session_sync(paths: &AbacusPaths, session: &Session) {
     let paths = paths.clone();
     let session = session.clone();
     if let Ok(runtime) = tokio::runtime::Handle::try_current() {
         runtime.spawn(async move {
-            push_session_best_effort(&paths, &session).await;
+            let _ = push_session_best_effort(&paths, &session).await;
         });
     }
 }
 
-async fn push_session_best_effort(paths: &AbacusPaths, session: &Session) {
-    let Ok(credentials) = Credentials::load(paths) else {
-        return;
+pub async fn push_all_updated_local(paths: &AbacusPaths) -> Result<usize> {
+    push_all_updated_local_inner(paths, false).await
+}
+
+pub async fn push_all_local_force(paths: &AbacusPaths) -> Result<usize> {
+    push_all_updated_local_inner(paths, true).await
+}
+
+async fn push_all_updated_local_inner(paths: &AbacusPaths, force: bool) -> Result<usize> {
+    let Some(client) = optional_client(paths)? else {
+        return Ok(0);
     };
-    let Some(sync) = credentials.sync else {
-        return;
+    let base = &paths.sessions_dir;
+    if !base.exists() {
+        return Ok(0);
+    }
+    let mut pushed = 0;
+    for workspace_dir in std::fs::read_dir(base)? {
+        let workspace_dir = workspace_dir?;
+        let directory = workspace_dir.path();
+        if !directory.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(content) = std::fs::read(&path) else {
+                continue;
+            };
+            let Ok(session) = serde_json::from_slice::<Session>(&content) else {
+                continue;
+            };
+            if !force && is_placeholder(&session) {
+                continue;
+            }
+            let trace = std::fs::read(paths.traces_dir.join(format!("{}.jsonl", session.id)))
+                .unwrap_or_default();
+            let revision = client
+                .revision(&session.id.to_string())
+                .await
+                .ok()
+                .flatten();
+            let result = if force {
+                client.push(&session, &trace, true).await
+            } else {
+                client.push_at_revision(&session, &trace, revision).await
+            };
+            match result {
+                Ok(_) => pushed += 1,
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    if message.contains("409") || message.contains("conflict") {
+                        eprintln!(
+                            "sync push conflict for {}: use `abacus sync push --force`",
+                            session.id
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(pushed)
+}
+
+pub async fn pull_workspace(paths: &AbacusPaths, workspace: &std::path::Path) -> Result<usize> {
+    let Some(client) = optional_client(paths)? else {
+        return Ok(0);
     };
-    let Ok(client) = SyncClient::new(&sync) else {
-        return;
+    let mut pulled = 0;
+    for remote in client.sessions().await? {
+        let (session, trace) = client.pull(&remote.id).await?;
+        if is_placeholder(&session) {
+            // Screens that were opened but never used are noise on every
+            // device; retire them from the server instead of reinstalling.
+            let _ = client.delete_session(&remote.id, remote.revision).await;
+            continue;
+        }
+        install_pulled(paths, session, &trace, true)?;
+        pulled += 1;
+    }
+    Ok(pulled)
+}
+
+pub async fn push_session_now(paths: &AbacusPaths, session: &Session) -> Result<()> {
+    let Some(client) = optional_client(paths)? else {
+        return Ok(());
     };
+    push_one(&client, paths, session).await?;
+    Ok(())
+}
+
+fn optional_client(paths: &AbacusPaths) -> Result<Option<SyncClient>> {
+    let credentials = Credentials::load(paths)?;
+    credentials.sync.as_ref().map(SyncClient::new).transpose()
+}
+
+async fn push_session_best_effort(paths: &AbacusPaths, session: &Session) -> Result<()> {
+    let Some(client) = optional_client(paths)? else {
+        return Ok(());
+    };
+    let _ = push_one(&client, paths, session).await;
+    Ok(())
+}
+
+pub fn is_placeholder(session: &Session) -> bool {
+    // A session that has never received a prompt is not a session yet. The
+    // transcript always opens with the system prompt, so "empty" means no user
+    // message has ever been added.
+    session.title == "New session"
+        && !session
+            .messages
+            .iter()
+            .any(|message| message["role"] == "user")
+}
+
+async fn push_one(client: &SyncClient, paths: &AbacusPaths, session: &Session) -> Result<u64> {
+    if is_placeholder(session) {
+        return Ok(
+            match client
+                .revision(&session.id.to_string())
+                .await
+                .ok()
+                .flatten()
+            {
+                Some(revision) => revision,
+                None => 0,
+            },
+        );
+    }
     let trace =
         std::fs::read(paths.traces_dir.join(format!("{}.jsonl", session.id))).unwrap_or_default();
     // Read immediately before the conditional write. A concurrent writer still
@@ -343,7 +544,7 @@ async fn push_session_best_effort(paths: &AbacusPaths, session: &Session) {
         .await
         .ok()
         .flatten();
-    let _ = client.push_at_revision(session, &trace, revision).await;
+    client.push_at_revision(session, &trace, revision).await
 }
 
 #[cfg(test)]
@@ -358,6 +559,21 @@ mod tests {
             email: "test@example.com".into(),
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn configured_credentials_enable_auto_sync() {
+        assert!(!is_configured(&Credentials::default()));
+        let credentials = Credentials {
+            keys: Default::default(),
+            sync: Some(SyncCredentials {
+                server: "https://abacus.empero.org".into(),
+                token: "secret".into(),
+                email: "person@example.com".into(),
+            }),
+        };
+        assert!(is_configured(&credentials));
+        assert_eq!(AUTO_PUSH_IDLE, std::time::Duration::from_secs(60));
     }
 }
 
@@ -436,6 +652,19 @@ impl SyncClient {
             bail!("sync trace download returned {status}");
         }
         Ok((document.session, response.bytes().await?.to_vec()))
+    }
+
+    async fn delete_session(&self, session_id: &str, revision: u64) -> Result<()> {
+        let response = self
+            .request(
+                reqwest::Method::DELETE,
+                &format!("/v1/sync/sessions/{session_id}"),
+            )
+            .header(header::IF_MATCH, format!("\"{revision}\""))
+            .send()
+            .await?;
+        let _: serde_json::Value = decode(response).await?;
+        Ok(())
     }
 }
 
