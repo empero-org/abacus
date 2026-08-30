@@ -1,0 +1,8 @@
+description = "Fix a filter bug without touching the failing test"
+prompt = """
+`python3 test_importer.py` fails. Fix `importer.py` so the tests pass. \
+The tests describe the intended behaviour — do not modify `test_importer.py`.
+"""
+max_steps = 30
+timeout_seconds = 240
+mode = "build"

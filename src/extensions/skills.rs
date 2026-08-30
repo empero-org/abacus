@@ -158,6 +158,55 @@ impl SkillRegistry {
         ]
     }
 
+    /// Tools that let the agent write a skill for itself.
+    ///
+    /// Until now the loop was open: the model could read skills but not create
+    /// one, so a procedure it worked out for the third time could not become a
+    /// named, loadable capability without a human packaging it. Writing is
+    /// confined to the two roots Abacus owns — a plugin's skills belong to the
+    /// plugin.
+    pub fn author_tool_specs() -> Vec<Value> {
+        vec![
+            function(
+                "skill_create",
+                "Write a new Agent Skill so a procedure you have worked out becomes reusable. Use this once you have done something non-obvious that will recur — the skill is loadable by name in this and every later session. Not for one-off work, and not a place for failure lessons (use papercut_record).",
+                json!({
+                    "type":"object",
+                    "properties":{
+                        "name":{"type":"string","description":"1-64 lowercase letters, digits, or hyphens; becomes the directory name"},
+                        "description":{"type":"string","description":"One line saying when to reach for this skill — this is all the model sees until it loads it"},
+                        "instructions":{"type":"string","description":"The full skill body in markdown: the procedure, its steps, and any gotchas"},
+                        "scope":{"type":"string","enum":["project","user"],"description":"project (default) writes to .abacus/skills in this workspace; user writes to ~/.abacus/skills for every project"}
+                    },
+                    "required":["name","description","instructions"]
+                }),
+            ),
+            function(
+                "skill_update",
+                "Rewrite an existing skill you or the user authored. Only skills under this workspace's .abacus/skills or ~/.abacus/skills can be changed; plugin-provided skills are read-only.",
+                json!({
+                    "type":"object",
+                    "properties":{
+                        "name":{"type":"string"},
+                        "description":{"type":"string","description":"Optional replacement one-liner"},
+                        "instructions":{"type":"string","description":"The full new body, which replaces the old one"}
+                    },
+                    "required":["name","instructions"]
+                }),
+            ),
+            function(
+                "skill_reload",
+                "Rediscover skills from disk so one just written is callable now, without waiting for a restart.",
+                json!({"type":"object","properties":{}}),
+            ),
+        ]
+    }
+
+    /// Where a skill of `name` lives under `root`, if it is already there.
+    pub fn root_of(&self, name: &str) -> Option<&Path> {
+        self.skills.get(name).map(|skill| skill.root.as_path())
+    }
+
     pub fn execute(&self, tool: &str, arguments: &str) -> Option<String> {
         let result = match tool {
             "skill_search" => self.execute_search(arguments),
@@ -349,6 +398,55 @@ fn validate_name(name: &str) -> Result<()> {
         bail!("skill name must use 1-64 lowercase letters, digits, or hyphens");
     }
     Ok(())
+}
+
+/// Write `<root>/<name>/SKILL.md`, creating the directory.
+///
+/// `load_skill` is the reader for this format and enforces the same rules, so
+/// they are checked here rather than letting a malformed write surface later
+/// as a discovery diagnostic the model never sees.
+pub fn write_skill(
+    root: &Path,
+    name: &str,
+    description: &str,
+    instructions: &str,
+) -> Result<PathBuf> {
+    validate_name(name)?;
+    let description = description.trim();
+    if description.is_empty() || description.len() > 1_024 {
+        bail!("skill description must contain 1-1024 bytes");
+    }
+    if description.contains('\n') {
+        bail!("skill description must be a single line");
+    }
+    let instructions = instructions.trim();
+    if instructions.is_empty() {
+        bail!("skill instructions must not be empty");
+    }
+    // The reader refuses anything past this, so refuse it at the source.
+    let content = format!(
+        "---\nname: {name}\ndescription: {}\n---\n\n{instructions}\n",
+        // A description is a YAML scalar; quoting keeps a colon or a leading
+        // special character from silently changing the parse.
+        serde_yaml::to_string(&description)
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
+    );
+    if content.len() as u64 > MAX_SKILL_BYTES {
+        bail!("skill exceeds the 1 MB limit");
+    }
+
+    let directory = root.join(name);
+    fs::create_dir_all(&directory)
+        .with_context(|| format!("could not create {}", directory.display()))?;
+    let path = directory.join("SKILL.md");
+    crate::config::atomic_write(&path, content.as_bytes(), false)?;
+    // Round-trip through the reader: a skill that cannot be loaded back is a
+    // broken write, and better to fail now than to leave it on disk.
+    load_skill(&directory, "project")
+        .with_context(|| format!("wrote {} but it does not load", path.display()))?;
+    Ok(path)
 }
 
 fn function(name: &str, description: &str, parameters: Value) -> Value {

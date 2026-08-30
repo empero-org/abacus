@@ -48,8 +48,10 @@ pub enum WorkerState {
 pub struct WorkerStatus {
     pub id: u64,
     pub name: String,
-    /// drone / scout / worker — shown beside the name.
-    pub role: &'static str,
+    /// The worker's role: a built-in name, or the id of an authored delegation
+    /// spec. Owned rather than `&'static str` because an authored spec's id is
+    /// only known at runtime.
+    pub role: String,
     pub state: WorkerState,
     /// The worker's most recent visible activity — a tool call or the tail of
     /// its streamed answer — clipped to one line.
@@ -84,7 +86,7 @@ pub struct SubagentBoard {
 impl SubagentBoard {
     /// Register a worker; a new batch starting while only finished workers
     /// remain replaces them, so the strip always shows the current swarm.
-    pub fn begin(&self, name: &str, role: &'static str, tokens: Arc<AtomicU64>) -> u64 {
+    pub fn begin(&self, name: &str, role: &str, tokens: Arc<AtomicU64>) -> u64 {
         let mut inner = self.inner.write().expect("board lock");
         if inner
             .workers
@@ -99,7 +101,7 @@ impl SubagentBoard {
         inner.workers.push(WorkerStatus {
             id,
             name: name.to_owned(),
-            role,
+            role: role.to_owned(),
             state: WorkerState::Running,
             activity: "starting".to_owned(),
             started: Instant::now(),

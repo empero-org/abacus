@@ -1,0 +1,5 @@
+description = "Recover from a missing env var the repo documents"
+prompt = "Run this project's test suite and get it passing."
+max_steps = 25
+timeout_seconds = 240
+mode = "build"

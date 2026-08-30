@@ -199,9 +199,12 @@ pub struct TurnOptions {
     /// Lessons from past snags, scanned against every tool result and
     /// injected when a tripwire matches.
     pub papercuts: crate::papercuts::PapercutStore,
-    /// Durable knowledge from earlier sessions, injected as a context layer
-    /// and curated by the model.
-    pub memories: crate::memories::MemoryStore,
+    /// Large tool outputs bound as inspectable variables for this session.
+    pub handles: crate::handles::HandleStore,
+    /// Versioned, revertable state from earlier sessions: standing guidance,
+    /// memories, and delegation specs. Injected as a context layer, curated by
+    /// the model, and rewritten by the refine pass.
+    pub harness: crate::harness::HarnessStore,
     /// Session intent snapshot and drift-check bookkeeping.
     pub tether: crate::tether::TetherState,
     /// Delegation record and the live subagent board.
@@ -267,7 +270,8 @@ async fn run_turn_inner(
     specs.extend(GoalState::tool_specs());
     specs.extend(TaskList::tool_specs());
     specs.extend(crate::papercuts::PapercutStore::tool_specs());
-    specs.extend(crate::memories::MemoryStore::tool_specs());
+    specs.extend(crate::harness::HarnessStore::tool_specs());
+    specs.extend(crate::handles::HandleStore::tool_specs());
     if options.web_search.enabled {
         specs.extend(crate::web::tool_specs());
     }
@@ -286,6 +290,7 @@ async fn run_turn_inner(
         options.tool_output_limit,
         options.web_search.clone(),
         options.hive.clone(),
+        options.harness.clone(),
         options.injections.clone(),
     );
     let mut repeated_calls: HashMap<String, usize> = HashMap::new();
@@ -352,7 +357,7 @@ async fn run_turn_inner(
             )
         {
             rethought = true;
-            run_rethink(&aux, &messages, &options, active_mode, &events).await;
+            run_refine(&aux, &messages, &options, &events).await;
             // Refresh the tether snapshot while the evidence is still
             // verbatim — this is the one point mid-turn where history is about
             // to be replaced by a summary. The snapshot is owned, so it can
@@ -545,9 +550,9 @@ async fn run_turn_inner(
             // conversational turns end unexamined.
             if !options.token_compression
                 && !rethought
-                && tool_calls_executed >= crate::rethink::LONG_TURN_TOOL_CALLS
+                && tool_calls_executed >= crate::refine::LONG_TURN_TOOL_CALLS
             {
-                run_rethink(&aux, &messages, &options, active_mode, &events).await;
+                run_refine(&aux, &messages, &options, &events).await;
             }
             // Collect the intent snapshot started when the turn began. It has
             // had the whole turn to finish, so this is a formality — the
@@ -817,7 +822,23 @@ async fn run_turn_inner(
                             {
                                 output
                             } else if let Some(output) =
-                                options.memories.execute(&call.name, &call.arguments)
+                                options.harness.execute(&call.name, &call.arguments)
+                            {
+                                output
+                            } else if call.name == "handle_recurse" {
+                                // Dispatched apart from the other handle tools
+                                // because it makes model calls. The aux model
+                                // reads the chunks; the main model is the one
+                                // deciding what to ask.
+                                crate::handles::recurse(
+                                    &aux,
+                                    &options.handles,
+                                    &call.arguments,
+                                    &options.cancel,
+                                )
+                                .await
+                            } else if let Some(output) =
+                                options.handles.execute(&call.name, &call.arguments)
                             {
                                 output
                             } else if let Some(output) = options.services.execute(&call).await {
@@ -896,6 +917,28 @@ async fn run_turn_inner(
                     output.push_str(reminder);
                 }
             }
+            // Bind an oversized result instead of spending the window on it.
+            // The model gets a description and the tools to interrogate it,
+            // The bet: reasoning about the shape of the data and then reading
+            // only the part that turns out to matter beats spending the whole
+            // window on all of it.
+            //
+            // Deliberately after the papercut scan above — tripwires match on
+            // the failure text, and a large output replaced by a summary first
+            // would stop recalling the lesson it should have triggered.
+            //
+            // Handle tools are exempt: binding a slice of $h1 to $h2 would give
+            // the model a handle to a handle and no way back to the content.
+            if output.chars().count() >= crate::handles::BIND_THRESHOLD_CHARS
+                && !call.name.starts_with("handle_")
+            {
+                let source = format!(
+                    "{}: {}",
+                    call.name,
+                    call.arguments.chars().take(120).collect::<String>()
+                );
+                output = options.handles.bind(&source, output).summary();
+            }
             tool_calls_executed += 1;
             let _ = events.send(AgentEvent::ToolFinished {
                 name: call.name.clone(),
@@ -931,7 +974,7 @@ async fn run_turn_inner(
     // A limit-length turn is by definition long, so it earns the reflection
     // pass on the way out.
     if !options.token_compression && !rethought {
-        run_rethink(&aux, &messages, &options, active_mode, &events).await;
+        run_refine(&aux, &messages, &options, &events).await;
     }
     let _ = events.send(AgentEvent::Done {
         messages,
@@ -1225,6 +1268,15 @@ pub fn tool_reads_only(name: &str) -> bool {
             | "skill_search"
             | "skill_load"
             | "skill_read"
+            // A rescan of what is already on disk; it writes nothing.
+            | "skill_reload"
+            // Interrogating a payload already in memory. Nothing is written,
+            // so a read-only session keeps the whole inspection toolkit.
+            | "handle_list"
+            | "handle_info"
+            | "handle_slice"
+            | "handle_grep"
+            | "handle_recurse"
     )
 }
 
@@ -1408,7 +1460,7 @@ fn build_provider_messages(
     if !summary_context.is_empty() {
         provider_messages.push(json!({"role":"system","content":summary_context}));
     }
-    let memory_context = options.memories.prompt_context();
+    let memory_context = options.harness.prompt_context();
     if !memory_context.is_empty() {
         provider_messages.push(json!({"role":"system","content":memory_context}));
     }
@@ -1501,29 +1553,48 @@ fn abort_capture(handle: Option<tokio::task::JoinHandle<Option<String>>>) {
     }
 }
 
-async fn run_rethink(
+/// The reflection pass: decide whether this turn taught anything, and if so
+/// write it to the harness.
+///
+/// Gated on a cheap review call first. The old rethink pass paid the full
+/// planning cost on every long turn, and most long turns teach nothing.
+///
+/// Edits land session-scoped. Anything durable is either promoted by
+/// recurrence across sessions or adopted deliberately with `/refine --durable`,
+/// so one turn's mistaken conclusion cannot quietly follow the user forever.
+async fn run_refine(
     provider: &Provider,
     messages: &[Value],
     options: &TurnOptions,
-    active_mode: AgentMode,
     events: &mpsc::UnboundedSender<AgentEvent>,
 ) {
-    let allow_notes =
-        active_mode == AgentMode::Build || options.allow_mutations.load(Ordering::Relaxed);
-    if let Some(outcome) = crate::rethink::run(
+    let instructions =
+        match crate::refine::should_refine(provider, messages, &options.harness, &options.cancel)
+            .await
+        {
+            Some((true, instructions)) => instructions,
+            // A refusal and an unparseable gate reply both mean "do not spend
+            // the planning call".
+            _ => return,
+        };
+    if let Some(outcome) = crate::refine::run(
         provider,
         messages,
-        &options.memories,
+        &options.harness,
         &options.papercuts,
-        &options.workspace,
-        allow_notes,
+        crate::harness::Lifetime::Session,
+        instructions.as_deref(),
         &options.cancel,
     )
     .await
     {
+        let mut detail = format!("{} harness edit(s)", outcome.applied);
+        if outcome.papercuts > 0 {
+            detail.push_str(&format!(", {} papercut(s)", outcome.papercuts));
+        }
         let _ = events.send(AgentEvent::Notice(format!(
-            "rethink — {} ({} recorded)",
-            outcome.summary, outcome.recorded
+            "refine — {} ({detail}; /harness revert {} to undo)",
+            outcome.summary, outcome.result.id
         )));
     }
 }
@@ -1567,7 +1638,7 @@ fn deliver_injections(
 }
 
 /// Whether a tool result reads as a failure, for the papercut streak counter.
-fn tool_result_failed(output: &str) -> bool {
+pub fn tool_result_failed(output: &str) -> bool {
     let head = output.trim_start();
     head.starts_with("Error:")
         || head.starts_with("error:")
@@ -1772,7 +1843,8 @@ mod tests {
             allow_subagents: false,
             web_search: crate::web::WebConfig::default(),
             papercuts: crate::papercuts::PapercutStore::default(),
-            memories: crate::memories::MemoryStore::default(),
+            harness: crate::harness::HarnessStore::default(),
+            handles: crate::handles::HandleStore::default(),
             tether: crate::tether::TetherState::default(),
             hive: crate::hive::HiveHandle::default(),
             aux_model: None,
@@ -1949,6 +2021,11 @@ mod tests {
             "git_restore",
             "git_checkout",
             "spawn_subagents",
+            // Skill authoring writes files, so a read-only session must not
+            // reach it. Mode gating keys off the approval list, so omitting
+            // these here would let PLAN write a skill.
+            "skill_create",
+            "skill_update",
         ] {
             for mode in [AgentMode::Plan, AgentMode::Auto] {
                 assert!(
@@ -1961,6 +2038,42 @@ mod tests {
                 "{name} should run in BUILD"
             );
         }
+    }
+
+    /// A handle tool's own result must never be re-bound: binding a slice of
+    /// $h1 to $h2 hands the model a handle to a handle with no way back.
+    #[test]
+    fn handle_tool_results_are_exempt_from_binding() {
+        for name in [
+            "handle_slice",
+            "handle_grep",
+            "handle_recurse",
+            "handle_info",
+        ] {
+            assert!(name.starts_with("handle_"));
+        }
+        // The read-only classification has to agree: inspecting a bound
+        // payload changes nothing on disk.
+        assert!(tool_reads_only("handle_slice"));
+        assert!(tool_reads_only("handle_grep"));
+        assert!(tool_reads_only("handle_recurse"));
+    }
+
+    /// Reloading rescans what is already on disk, so it stays available in a
+    /// read-only session — unlike creating or updating a skill.
+    #[test]
+    fn skill_reload_is_read_only_but_authoring_is_not() {
+        assert!(tool_reads_only("skill_reload"));
+        assert!(!tool_reads_only("skill_create"));
+        assert!(!tool_reads_only("skill_update"));
+        assert!(
+            crate::tools::ToolCall {
+                id: "1".into(),
+                name: "skill_create".into(),
+                arguments: "{}".into()
+            }
+            .needs_approval()
+        );
     }
 
     /// A tool that needs no approval is not gated by mode either — the two

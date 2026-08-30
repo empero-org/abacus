@@ -129,6 +129,12 @@ impl ToolCall {
                 | "git_restore"
                 | "git_checkout"
                 | "append_file"
+                // Skill authoring writes a file into the workspace or the user
+                // home. Listing it here is what makes PLAN block it: mode gating
+                // is `requires_approval && !read_only`, so a mutating tool in
+                // neither list would run unchecked in a read-only session.
+                | "skill_create"
+                | "skill_update"
         )
     }
 }

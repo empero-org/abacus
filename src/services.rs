@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{Arc, RwLock},
     time::Duration,
 };
 
@@ -17,11 +17,25 @@ use crate::{
     tools::{ToolCall, tool_specs},
 };
 
+/// Everything `SkillRegistry::discover` needs, kept so the registry can be
+/// rebuilt without re-deriving trust and plugin state.
+#[derive(Clone, Default)]
+struct SkillDiscovery {
+    paths: Option<AbacusPaths>,
+    workspace: PathBuf,
+    plugin_roots: Vec<PathBuf>,
+    extra_paths: Vec<PathBuf>,
+}
+
 #[derive(Clone)]
 pub struct AgentServices {
-    pub skills: Arc<SkillRegistry>,
+    /// Behind a lock because the agent can now write a skill and register it
+    /// mid-turn. `TurnOptions.services` is a fixed `Arc` for the turn, so the
+    /// registry itself has to be the mutable part.
+    pub skills: Arc<RwLock<SkillRegistry>>,
     pub plugins: Arc<PluginRegistry>,
     pub mcp: Arc<McpManager>,
+    skill_discovery: SkillDiscovery,
     workspace: PathBuf,
     project_trusted: bool,
 }
@@ -69,7 +83,13 @@ impl AgentServices {
         let mcp = McpManager::connect(&mcp_configs, workspace).await;
 
         Ok(Self {
-            skills: Arc::new(skills),
+            skills: Arc::new(RwLock::new(skills)),
+            skill_discovery: SkillDiscovery {
+                paths: Some(paths.clone()),
+                workspace: workspace.to_owned(),
+                plugin_roots: plugins.skill_roots(),
+                extra_paths: skill_paths,
+            },
             plugins: Arc::new(plugins),
             mcp: Arc::new(mcp),
             workspace: workspace.to_owned(),
@@ -79,7 +99,8 @@ impl AgentServices {
 
     pub fn empty(workspace: PathBuf) -> Self {
         Self {
-            skills: Arc::new(SkillRegistry::default()),
+            skills: Arc::new(RwLock::new(SkillRegistry::default())),
+            skill_discovery: SkillDiscovery::default(),
             plugins: Arc::new(PluginRegistry::default()),
             mcp: Arc::new(McpManager::default()),
             workspace,
@@ -90,11 +111,40 @@ impl AgentServices {
     pub fn for_workspace(&self, workspace: PathBuf) -> Self {
         Self {
             skills: self.skills.clone(),
+            skill_discovery: self.skill_discovery.clone(),
             plugins: self.plugins.clone(),
             mcp: self.mcp.clone(),
             workspace,
             project_trusted: self.project_trusted,
         }
+    }
+
+    /// Rediscover skills in place, so a skill the agent just wrote is callable
+    /// without restarting the session. Returns how many are registered.
+    pub fn reload_skills(&self) -> usize {
+        let Some(paths) = &self.skill_discovery.paths else {
+            return 0;
+        };
+        let rebuilt = SkillRegistry::discover(
+            paths,
+            &self.skill_discovery.workspace,
+            &self.skill_discovery.plugin_roots,
+            &self.skill_discovery.extra_paths,
+        );
+        let count = rebuilt.list().count();
+        *self.skills.write().expect("skill registry lock") = rebuilt;
+        count
+    }
+
+    /// The roots the agent is allowed to write to: its own two workspace and
+    /// user directories. Plugin, `~/.agents`, and configured roots are somebody
+    /// else's to manage and stay read-only.
+    pub fn authorable_skill_roots(&self) -> Option<(PathBuf, PathBuf)> {
+        let paths = self.skill_discovery.paths.as_ref()?;
+        Some((
+            self.workspace.join(".abacus/skills"),
+            paths.root.join("skills"),
+        ))
     }
 
     pub fn project_trusted(&self) -> bool {
@@ -104,13 +154,21 @@ impl AgentServices {
     pub fn tool_specs(&self) -> Vec<Value> {
         let mut specs = tool_specs();
         specs.extend(SkillRegistry::tool_specs());
+        // Authoring is offered only where there is somewhere to write.
+        if self.authorable_skill_roots().is_some() {
+            specs.extend(SkillRegistry::author_tool_specs());
+        }
         specs.extend(self.mcp.tool_specs());
         specs
     }
 
     pub fn prompt_context(&self) -> String {
         let mut sections = Vec::new();
-        let skills = self.skills.prompt_index();
+        let skills = self
+            .skills
+            .read()
+            .expect("skill registry lock")
+            .prompt_index();
         if !skills.is_empty() {
             sections.push(skills);
         }
@@ -151,16 +209,147 @@ impl AgentServices {
     }
 
     pub async fn execute(&self, call: &ToolCall) -> Option<String> {
-        if let Some(result) = self.skills.execute(&call.name, &call.arguments) {
+        if let Some(result) = self.execute_authoring(&call.name, &call.arguments) {
+            return Some(result);
+        }
+        if let Some(result) = self
+            .skills
+            .read()
+            .expect("skill registry lock")
+            .execute(&call.name, &call.arguments)
+        {
             return Some(result);
         }
         self.mcp.execute(&call.name, &call.arguments).await
     }
 
+    /// `skill_create` / `skill_update` / `skill_reload`.
+    ///
+    /// These live here rather than on the registry because writing needs the
+    /// authorable roots and re-registering needs the discovery inputs, and the
+    /// registry knows neither.
+    fn execute_authoring(&self, tool: &str, arguments: &str) -> Option<String> {
+        let result = match tool {
+            "skill_create" => self.create_skill(arguments),
+            "skill_update" => self.update_skill(arguments),
+            "skill_reload" => Ok(format!(
+                "Reloaded skills — {} now registered.",
+                self.reload_skills()
+            )),
+            _ => return None,
+        };
+        Some(result.unwrap_or_else(|error| format!("Error: {error:#}")))
+    }
+
+    fn create_skill(&self, arguments: &str) -> Result<String> {
+        #[derive(serde::Deserialize)]
+        struct Args {
+            name: String,
+            description: String,
+            instructions: String,
+            #[serde(default)]
+            scope: Option<String>,
+        }
+        let args: Args =
+            serde_json::from_str(arguments).context("invalid skill_create arguments")?;
+        let (project_root, user_root) = self
+            .authorable_skill_roots()
+            .context("this session has no writable skill directory")?;
+        let root = match args.scope.as_deref() {
+            Some("user") => user_root,
+            None | Some("project") => project_root,
+            Some(other) => bail!("unknown scope `{other}` — use project or user"),
+        };
+        // Refuse to shadow a name that already resolves elsewhere: two skills
+        // with one name means whichever root wins discovery silently decides.
+        if let Some(existing) = self
+            .skills
+            .read()
+            .expect("skill registry lock")
+            .root_of(&args.name)
+            .map(Path::to_path_buf)
+            && !existing.starts_with(&root)
+        {
+            bail!(
+                "a skill named `{}` already exists at {} — pick another name, or use skill_update if it is yours",
+                args.name,
+                existing.display()
+            );
+        }
+        let path = crate::extensions::skills::write_skill(
+            &root,
+            &args.name,
+            &args.description,
+            &args.instructions,
+        )?;
+        let count = self.reload_skills();
+        Ok(format!(
+            "Created skill `{}` at {} and registered it ({count} skills active). It is loadable now with skill_load.",
+            args.name,
+            path.display()
+        ))
+    }
+
+    fn update_skill(&self, arguments: &str) -> Result<String> {
+        #[derive(serde::Deserialize)]
+        struct Args {
+            name: String,
+            #[serde(default)]
+            description: Option<String>,
+            instructions: String,
+        }
+        let args: Args =
+            serde_json::from_str(arguments).context("invalid skill_update arguments")?;
+        let (project_root, user_root) = self
+            .authorable_skill_roots()
+            .context("this session has no writable skill directory")?;
+
+        let (existing_root, existing_description) = {
+            let registry = self.skills.read().expect("skill registry lock");
+            let skill = registry
+                .get(&args.name)
+                .with_context(|| format!("skill `{}` is not installed", args.name))?;
+            (skill.root.clone(), skill.description.clone())
+        };
+        // A plugin's skill, a `~/.agents` skill, or a configured root belongs to
+        // whoever installed it. Editing it from here would be an edit the owner
+        // never sees and the next reinstall would silently undo.
+        let root = if existing_root.starts_with(&project_root) {
+            project_root
+        } else if existing_root.starts_with(&user_root) {
+            user_root
+        } else {
+            bail!(
+                "skill `{}` lives at {} and is not one Abacus manages — only skills under .abacus/skills or ~/.abacus/skills can be edited",
+                args.name,
+                existing_root.display()
+            );
+        };
+
+        let description = args.description.unwrap_or(existing_description);
+        let path = crate::extensions::skills::write_skill(
+            &root,
+            &args.name,
+            &description,
+            &args.instructions,
+        )?;
+        self.reload_skills();
+        Ok(format!(
+            "Updated skill `{}` at {}.",
+            args.name,
+            path.display()
+        ))
+    }
+
     pub fn search_catalog(&self, query: &str) -> String {
         let query = query.to_ascii_lowercase();
         let mut output = Vec::new();
-        for skill in self.skills.search(&query) {
+        for skill in self
+            .skills
+            .read()
+            .expect("skill registry lock")
+            .search(&query)
+        {
             output.push(format!("skill/{}: {}", skill.name, skill.description));
         }
         for tool in self.mcp.tools() {
@@ -239,7 +428,12 @@ impl AgentServices {
     }
 
     pub fn diagnostics(&self) -> Vec<String> {
-        let mut diagnostics = self.skills.diagnostics().to_vec();
+        let mut diagnostics = self
+            .skills
+            .read()
+            .expect("skill registry lock")
+            .diagnostics()
+            .to_vec();
         diagnostics.extend(self.plugins.diagnostics().iter().cloned());
         diagnostics.extend(self.mcp.diagnostics().iter().cloned());
         diagnostics
@@ -292,6 +486,243 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::tempdir;
+
+    async fn services(directory: &Path) -> (AgentServices, PathBuf) {
+        let workspace = directory.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let paths = AbacusPaths::under(directory.join("home"));
+        std::fs::create_dir_all(&paths.root).unwrap();
+        let services = AgentServices::discover(&workspace, &paths, &Settings::default())
+            .await
+            .unwrap();
+        (services, workspace)
+    }
+
+    fn call(name: &str, arguments: Value) -> ToolCall {
+        ToolCall {
+            id: "1".to_owned(),
+            name: name.to_owned(),
+            arguments: arguments.to_string(),
+        }
+    }
+
+    /// The loop Phase 2 exists to close: write a skill, register it, invoke it,
+    /// all inside one session.
+    #[tokio::test]
+    async fn a_created_skill_is_invocable_without_a_restart() {
+        let directory = tempdir().unwrap();
+        let (services, workspace) = services(directory.path()).await;
+
+        let created = services
+            .execute(&call(
+                "skill_create",
+                json!({
+                    "name": "release-audit",
+                    "description": "Audit a release branch before tagging",
+                    "instructions": "1. Check the changelog.\n2. Run the tests."
+                }),
+            ))
+            .await
+            .expect("skill_create is dispatched");
+        assert!(
+            created.contains("Created skill `release-audit`"),
+            "{created}"
+        );
+        assert!(
+            workspace
+                .join(".abacus/skills/release-audit/SKILL.md")
+                .is_file(),
+            "project scope writes into the workspace"
+        );
+
+        // Registered in the same session — no reload call, no restart.
+        let loaded = services
+            .execute(&call("skill_load", json!({"name": "release-audit"})))
+            .await
+            .unwrap();
+        assert!(loaded.contains("Check the changelog"), "{loaded}");
+        assert!(services.prompt_context().contains("release-audit"));
+        assert!(
+            services
+                .execute(&call("skill_search", json!({"query": "release"})))
+                .await
+                .unwrap()
+                .contains("release-audit")
+        );
+    }
+
+    #[tokio::test]
+    async fn user_scope_writes_outside_the_workspace() {
+        let directory = tempdir().unwrap();
+        let (services, workspace) = services(directory.path()).await;
+        services
+            .execute(&call(
+                "skill_create",
+                json!({
+                    "name": "commit-style",
+                    "description": "How this user likes commit messages",
+                    "instructions": "Imperative mood, no trailer.",
+                    "scope": "user"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            directory
+                .path()
+                .join("home/skills/commit-style/SKILL.md")
+                .is_file()
+        );
+        assert!(!workspace.join(".abacus/skills/commit-style").exists());
+    }
+
+    #[tokio::test]
+    async fn update_rewrites_an_owned_skill_and_refuses_a_foreign_one() {
+        let directory = tempdir().unwrap();
+        let (services, workspace) = services(directory.path()).await;
+        services
+            .execute(&call(
+                "skill_create",
+                json!({"name":"mine","description":"d","instructions":"v1 body"}),
+            ))
+            .await
+            .unwrap();
+        let updated = services
+            .execute(&call(
+                "skill_update",
+                json!({"name":"mine","instructions":"v2 body"}),
+            ))
+            .await
+            .unwrap();
+        assert!(updated.contains("Updated skill `mine`"), "{updated}");
+        let loaded = services
+            .execute(&call("skill_load", json!({"name":"mine"})))
+            .await
+            .unwrap();
+        assert!(
+            loaded.contains("v2 body") && !loaded.contains("v1 body"),
+            "{loaded}"
+        );
+        // The description survives an update that omits it.
+        assert!(services.prompt_context().contains("mine: d"));
+
+        // A skill from a root Abacus does not own is read-only: editing it
+        // would be invisible to its owner and undone by the next reinstall.
+        let foreign = workspace.join(".agents/skills/borrowed");
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(
+            foreign.join("SKILL.md"),
+            "---\nname: borrowed\ndescription: not ours\n---\n\nbody\n",
+        )
+        .unwrap();
+        services.reload_skills();
+        let refused = services
+            .execute(&call(
+                "skill_update",
+                json!({"name":"borrowed","instructions":"hijacked"}),
+            ))
+            .await
+            .unwrap();
+        assert!(refused.starts_with("Error:"), "{refused}");
+        assert!(refused.contains("not one Abacus manages"), "{refused}");
+        assert!(
+            std::fs::read_to_string(foreign.join("SKILL.md"))
+                .unwrap()
+                .contains("body"),
+            "the foreign skill is untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_refuses_to_shadow_a_name_owned_elsewhere() {
+        let directory = tempdir().unwrap();
+        let (services, workspace) = services(directory.path()).await;
+        let foreign = workspace.join(".agents/skills/taken");
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(
+            foreign.join("SKILL.md"),
+            "---\nname: taken\ndescription: theirs\n---\n\nbody\n",
+        )
+        .unwrap();
+        services.reload_skills();
+
+        // Two skills of one name means whichever root wins discovery silently
+        // decides which the model gets.
+        let refused = services
+            .execute(&call(
+                "skill_create",
+                json!({"name":"taken","description":"mine","instructions":"body"}),
+            ))
+            .await
+            .unwrap();
+        assert!(refused.starts_with("Error:"), "{refused}");
+        assert!(refused.contains("already exists"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_skill_is_rejected_before_it_reaches_disk() {
+        let directory = tempdir().unwrap();
+        let (services, _) = services(directory.path()).await;
+        for arguments in [
+            json!({"name":"Bad Name","description":"d","instructions":"b"}),
+            json!({"name":"ok","description":"","instructions":"b"}),
+            json!({"name":"ok","description":"d","instructions":"   "}),
+            json!({"name":"ok","description":"line\nbreak","instructions":"b"}),
+        ] {
+            let reply = services
+                .execute(&call("skill_create", arguments.clone()))
+                .await
+                .unwrap();
+            assert!(reply.starts_with("Error:"), "{arguments} accepted: {reply}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_description_with_yaml_punctuation_round_trips() {
+        let directory = tempdir().unwrap();
+        let (services, _) = services(directory.path()).await;
+        // An unquoted `key: value` description would reparse as a YAML map and
+        // the skill would fail to load back.
+        services
+            .execute(&call(
+                "skill_create",
+                json!({
+                    "name":"tricky",
+                    "description":"note: use this when tests fail",
+                    "instructions":"body"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            services
+                .prompt_context()
+                .contains("note: use this when tests fail")
+        );
+    }
+
+    #[tokio::test]
+    async fn authoring_tools_are_offered_only_with_somewhere_to_write() {
+        let directory = tempdir().unwrap();
+        let (services, _) = services(directory.path()).await;
+        let names: Vec<String> = services
+            .tool_specs()
+            .iter()
+            .filter_map(|spec| spec["function"]["name"].as_str().map(str::to_owned))
+            .collect();
+        assert!(names.iter().any(|name| name == "skill_create"));
+        assert!(names.iter().any(|name| name == "skill_reload"));
+
+        // A bare services object has no discovery inputs and so no root.
+        let empty = AgentServices::empty(directory.path().to_owned());
+        assert!(empty.authorable_skill_roots().is_none());
+        let names: Vec<String> = empty
+            .tool_specs()
+            .iter()
+            .filter_map(|spec| spec["function"]["name"].as_str().map(str::to_owned))
+            .collect();
+        assert!(!names.iter().any(|name| name == "skill_create"));
+    }
 
     #[tokio::test]
     async fn executes_declared_plugin_hooks_with_context() {

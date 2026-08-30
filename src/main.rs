@@ -107,12 +107,15 @@ async fn main() -> Result<()> {
                         Some(SkillsCommand::Inspect { name }) => {
                             let output = services
                                 .skills
+                                .read()
+                                .expect("skill registry lock")
                                 .execute("skill_load", &json!({"name":name}).to_string())
                                 .context("skill tool unavailable")?;
                             println!("{output}");
                         }
                         _ => {
-                            for skill in services.skills.list() {
+                            for skill in services.skills.read().expect("skill registry lock").list()
+                            {
                                 println!("{}\t{}\t{}", skill.name, skill.source, skill.description);
                             }
                         }
@@ -210,6 +213,26 @@ async fn main() -> Result<()> {
     let mut config = Config::resolve(&cli, &settings, &credentials, paths.clone())?;
 
     match cli.command {
+        Some(Command::Eval {
+            tasks,
+            repeat,
+            state,
+            model,
+            json,
+        }) => {
+            return abacus_agent::eval::run(
+                config,
+                settings,
+                abacus_agent::eval::EvalOptions {
+                    filter: tasks,
+                    repeat,
+                    state,
+                    model,
+                    json,
+                },
+            )
+            .await;
+        }
         Some(Command::Models) => {
             let models =
                 setup::discover_models(&config.base_url, config.api_key.as_deref()).await?;

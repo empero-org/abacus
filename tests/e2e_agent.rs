@@ -105,7 +105,8 @@ async fn streamed_agent_searches_workspace_and_finishes() {
             token_compression: false,
             allow_subagents: true,
             papercuts: abacus_agent::papercuts::PapercutStore::default(),
-            memories: abacus_agent::memories::MemoryStore::default(),
+            harness: abacus_agent::harness::HarnessStore::default(),
+            handles: abacus_agent::handles::HandleStore::default(),
             tether: abacus_agent::tether::TetherState::default(),
             hive: abacus_agent::hive::HiveHandle::default(),
             aux_model: None,
@@ -234,7 +235,8 @@ async fn a_cancelled_turn_keeps_the_work_it_already_did() {
             token_compression: false,
             allow_subagents: true,
             papercuts: abacus_agent::papercuts::PapercutStore::default(),
-            memories: abacus_agent::memories::MemoryStore::default(),
+            harness: abacus_agent::harness::HarnessStore::default(),
+            handles: abacus_agent::handles::HandleStore::default(),
             tether: abacus_agent::tether::TetherState::default(),
             hive: abacus_agent::hive::HiveHandle::default(),
             aux_model: None,
@@ -429,7 +431,8 @@ async fn edit_requires_reviewable_approval_before_atomic_write() {
             token_compression: false,
             allow_subagents: true,
             papercuts: abacus_agent::papercuts::PapercutStore::default(),
-            memories: abacus_agent::memories::MemoryStore::default(),
+            harness: abacus_agent::harness::HarnessStore::default(),
+            handles: abacus_agent::handles::HandleStore::default(),
             tether: abacus_agent::tether::TetherState::default(),
             hive: abacus_agent::hive::HiveHandle::default(),
             aux_model: None,
@@ -527,7 +530,8 @@ async fn text_emitted_tool_calls_are_parsed_when_native_calls_absent() {
             token_compression: false,
             allow_subagents: true,
             papercuts: abacus_agent::papercuts::PapercutStore::default(),
-            memories: abacus_agent::memories::MemoryStore::default(),
+            harness: abacus_agent::harness::HarnessStore::default(),
+            handles: abacus_agent::handles::HandleStore::default(),
             tether: abacus_agent::tether::TetherState::default(),
             hive: abacus_agent::hive::HiveHandle::default(),
             aux_model: None,
@@ -624,7 +628,8 @@ async fn auto_mode_blocks_mutation_until_model_selects_build() {
             token_compression: false,
             allow_subagents: true,
             papercuts: abacus_agent::papercuts::PapercutStore::default(),
-            memories: abacus_agent::memories::MemoryStore::default(),
+            harness: abacus_agent::harness::HarnessStore::default(),
+            handles: abacus_agent::handles::HandleStore::default(),
             tether: abacus_agent::tether::TetherState::default(),
             hive: abacus_agent::hive::HiveHandle::default(),
             aux_model: None,
@@ -711,7 +716,8 @@ async fn auto_mode_selection_enables_later_tool_in_same_completion() {
             token_compression: false,
             allow_subagents: true,
             papercuts: abacus_agent::papercuts::PapercutStore::default(),
-            memories: abacus_agent::memories::MemoryStore::default(),
+            harness: abacus_agent::harness::HarnessStore::default(),
+            handles: abacus_agent::handles::HandleStore::default(),
             tether: abacus_agent::tether::TetherState::default(),
             hive: abacus_agent::hive::HiveHandle::default(),
             aux_model: None,
@@ -760,9 +766,9 @@ async fn rolling_summary_compaction_fires_on_large_context() {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request = String::from_utf8(read_request(&mut stream).await).unwrap();
             let is_summary = request.contains("context-aware state summary");
-            // The reflection pass runs before summary compaction; answer it
-            // with NOTHING so no side effects fire and the flow continues.
-            let is_rethink = request.contains("REFLECTION PASS");
+            // The refinement review gate runs before summary compaction;
+            // refuse it so no planning call fires and the flow continues.
+            let is_gate = request.contains("refinement review gate");
             let payload = if is_summary {
                 saw_summary_server.store(true, Ordering::Relaxed);
                 let summary_text = "1. Primary Request and Intent: do the thing. \
@@ -771,12 +777,11 @@ async fn rolling_summary_compaction_fires_on_large_context() {
                     serde_json::to_string(&json!({"choices":[{"delta":{"content":summary_text}}]}))
                         .unwrap();
                 format!("data: {chunk}\n\ndata: [DONE]\n\n")
-            } else if is_rethink {
-                concat!(
-                    "data: {\"choices\":[{\"delta\":{\"content\":\"NOTHING\"}}]}\n\n",
-                    "data: [DONE]\n\n"
-                )
-                .to_owned()
+            } else if is_gate {
+                let chunk = serde_json::to_string(&json!({"choices":[{"delta":{"content":
+                    "{\"should_refine\": false, \"rationale\": \"nothing to keep\"}"}}]}))
+                .unwrap();
+                format!("data: {chunk}\n\ndata: [DONE]\n\n")
             } else {
                 concat!(
                     "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n",
@@ -791,7 +796,7 @@ async fn rolling_summary_compaction_fires_on_large_context() {
             );
             stream.write_all(response.as_bytes()).await.unwrap();
             stream.shutdown().await.unwrap();
-            if !is_summary && !is_rethink {
+            if !is_summary && !is_gate {
                 break;
             }
         }
@@ -830,7 +835,8 @@ async fn rolling_summary_compaction_fires_on_large_context() {
             token_compression: false,
             allow_subagents: true,
             papercuts: abacus_agent::papercuts::PapercutStore::default(),
-            memories: abacus_agent::memories::MemoryStore::default(),
+            harness: abacus_agent::harness::HarnessStore::default(),
+            handles: abacus_agent::handles::HandleStore::default(),
             tether: abacus_agent::tether::TetherState::default(),
             hive: abacus_agent::hive::HiveHandle::default(),
             aux_model: None,
@@ -991,11 +997,12 @@ async fn intent_snapshot_runs_beside_the_turn_not_after_it() {
     );
 }
 
-/// The reflection pass used to spend a second full-conversation call just to
-/// restate a summary it had already given. When every record in the batch is
-/// accepted and the model already said what it recorded, one call is enough.
+/// Refinement is two calls, not one: a cheap gate decides whether the turn
+/// taught anything before the planning call runs. A "no" must cost exactly one
+/// call — the old rethink pass planned unconditionally, and most long turns
+/// have nothing worth keeping.
 #[tokio::test]
-async fn reflection_stops_after_one_call_when_every_record_lands() {
+async fn a_refusing_review_gate_skips_the_planning_call() {
     let directory = tempdir().unwrap();
     let workspace = directory.path().join("project");
     std::fs::create_dir(&workspace).unwrap();
@@ -1003,23 +1010,27 @@ async fn reflection_stops_after_one_call_when_every_record_lands() {
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let reflections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let counter = reflections.clone();
+    let gates = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let plans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (gate_counter, plan_counter) = (gates.clone(), plans.clone());
     let server = tokio::spawn(async move {
         for _ in 0..5 {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request = String::from_utf8(read_request(&mut stream).await).unwrap();
-            let is_reflection = request.contains("REFLECTION PASS");
+            let is_gate = request.contains("refinement review gate");
+            let is_plan = request.contains("continual-harness refiner");
             let is_summary = request.contains("context-aware state summary");
-            let payload = if is_reflection {
-                counter.fetch_add(1, Ordering::Relaxed);
-                // A record *and* a summary in the same completion: nothing is
-                // left for a second pass to discover.
-                concat!(
-                    "data: {\"choices\":[{\"delta\":{\"content\":\"Recorded the importer quirk.\"}}]}\n\n",
-                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"m1\",\"function\":{\"name\":\"memory_record\",\"arguments\":\"{\\\"title\\\":\\\"importer quirk\\\",\\\"body\\\":\\\"null keys are dropped\\\"}\"}}]}}]}\n\n",
-                    "data: [DONE]\n\n"
-                ).to_owned()
+            let payload = if is_gate {
+                gate_counter.fetch_add(1, Ordering::Relaxed);
+                let chunk = serde_json::to_string(&json!({"choices":[{"delta":{"content":
+                    "{\"should_refine\": false, \"rationale\": \"routine work\"}"}}]}))
+                .unwrap();
+                format!("data: {chunk}\n\ndata: [DONE]\n\n")
+            } else if is_plan {
+                plan_counter.fetch_add(1, Ordering::Relaxed);
+                let chunk = serde_json::to_string(&json!({"choices":[{"delta":{"content":
+                    "{\"summary\":\"s\",\"rationale\":\"r\",\"expected_outcome\":\"e\",\"edits\":[]}"}}]})).unwrap();
+                format!("data: {chunk}\n\ndata: [DONE]\n\n")
             } else if is_summary {
                 let chunk = serde_json::to_string(
                     &json!({"choices":[{"delta":{"content":"1. Primary Request and Intent: do the thing. 10. Next Step: continue."}}]}),
@@ -1040,7 +1051,7 @@ async fn reflection_stops_after_one_call_when_every_record_lands() {
             );
             stream.write_all(response.as_bytes()).await.unwrap();
             stream.shutdown().await.unwrap();
-            if !is_reflection && !is_summary {
+            if !is_gate && !is_plan && !is_summary {
                 break;
             }
         }
@@ -1054,13 +1065,13 @@ async fn reflection_stops_after_one_call_when_every_record_lands() {
     messages.push(json!({"role":"assistant","content":format!("BIGBLOB{}", "x".repeat(420_000))}));
     messages.push(json!({"role":"user","content":"continue"}));
 
-    let memories = abacus_agent::memories::MemoryStore::default();
+    let harness = abacus_agent::harness::HarnessStore::default();
     let (events, mut receiver) = mpsc::unbounded_channel();
     let agent = tokio::spawn(run_turn(
         provider,
         messages,
         TurnOptions {
-            memories: memories.clone(),
+            harness: harness.clone(),
             ..base_options(&workspace)
         },
         events,
@@ -1076,17 +1087,18 @@ async fn reflection_stops_after_one_call_when_every_record_lands() {
     server.await.unwrap();
 
     assert_eq!(
-        reflections.load(Ordering::Relaxed),
+        gates.load(Ordering::Relaxed),
         1,
-        "one reflection call, not a second one to repeat the summary"
+        "the gate is consulted once"
     );
-    // The saving must not cost the recording itself.
-    let recorded = memories.snapshot();
+    assert_eq!(
+        plans.load(Ordering::Relaxed),
+        0,
+        "a refused gate must not pay for the planning call"
+    );
     assert!(
-        recorded
-            .iter()
-            .any(|memory| memory.title == "importer quirk"),
-        "the memory was still recorded: {recorded:?}"
+        harness.snapshot().is_empty(),
+        "nothing is written when the gate refuses"
     );
 }
 
@@ -1568,6 +1580,102 @@ async fn build_mode_still_asks_before_running_a_command() {
 }
 
 /// Defaults for tests that only care about one or two options.
+/// A tool result too large to be worth reading whole is replaced by a handle
+/// the model can interrogate — checked through the real loop rather than
+/// against the store in isolation.
+#[tokio::test]
+async fn an_oversized_tool_result_is_bound_instead_of_flooding_the_context() {
+    let directory = tempdir().unwrap();
+    let workspace = directory.path().join("project");
+    std::fs::create_dir(&workspace).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+    // read_file returns at most 400 lines by default, so the lines have to be
+    // long enough that a bounded read still clears the bind threshold.
+    let huge: String = (0..4_000)
+        .map(|index| format!("line {index}: {}\n", "filler ".repeat(40)))
+        .collect();
+    std::fs::write(workspace.join("big.log"), &huge).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for turn in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_request(&mut stream).await;
+            let payload = if turn == 0 {
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"t1\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"big.log\\\"}\"}}]}}]}\n\n",
+                    "data: [DONE]\n\n"
+                )
+                .to_owned()
+            } else {
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n",
+                    "data: [DONE]\n\n"
+                )
+                .to_owned()
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                payload.len(),
+                payload
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.shutdown().await.unwrap();
+        }
+    });
+
+    let config = test_config(&directory, &workspace, address);
+    let provider = Provider::new(&config).unwrap();
+    let handles = abacus_agent::handles::HandleStore::default();
+    let mut messages = initial_messages(&workspace);
+    messages.push(json!({"role":"user","content":"read big.log"}));
+
+    let (events, mut receiver) = mpsc::unbounded_channel();
+    let agent = tokio::spawn(run_turn(
+        provider,
+        messages,
+        TurnOptions {
+            handles: handles.clone(),
+            ..base_options(&workspace)
+        },
+        events,
+    ));
+    let mut final_messages = Vec::new();
+    while let Some(event) = receiver.recv().await {
+        match event {
+            AgentEvent::Done { messages, .. } => {
+                final_messages = messages;
+                break;
+            }
+            AgentEvent::Failed { error, .. } => panic!("agent failed: {error}"),
+            _ => {}
+        }
+    }
+    agent.await.unwrap();
+    server.await.unwrap();
+
+    let tool_result = final_messages
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .and_then(|message| message["content"].as_str())
+        .expect("a tool result was recorded")
+        .to_owned();
+    assert!(tool_result.contains("[bound to $h1"), "{tool_result}");
+    assert!(tool_result.contains("read_file"), "the source is named");
+    // The payload itself never entered the conversation.
+    assert!(!tool_result.contains("filler filler"), "{tool_result}");
+    assert!(
+        tool_result.len() < 1_000,
+        "the stand-in is small: {}",
+        tool_result.len()
+    );
+    // And it is still reachable in full.
+    let bound = handles.get("h1").expect("content is retained");
+    assert!(bound.content.contains("filler filler"));
+    assert!(bound.chars() > 20_000, "the full payload is kept");
+}
+
 fn base_options(workspace: &std::path::Path) -> TurnOptions {
     TurnOptions {
         trace: None,
@@ -1586,7 +1694,8 @@ fn base_options(workspace: &std::path::Path) -> TurnOptions {
         token_compression: false,
         allow_subagents: false,
         papercuts: abacus_agent::papercuts::PapercutStore::default(),
-        memories: abacus_agent::memories::MemoryStore::default(),
+        harness: abacus_agent::harness::HarnessStore::default(),
+        handles: abacus_agent::handles::HandleStore::default(),
         tether: abacus_agent::tether::TetherState::default(),
         hive: abacus_agent::hive::HiveHandle::default(),
         aux_model: None,

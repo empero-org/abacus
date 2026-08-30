@@ -37,6 +37,11 @@ pub struct Session {
     /// the first answered prompt, refreshed before compaction.
     #[serde(default)]
     pub intent: Option<String>,
+    /// Session-lifetime harness entries. Durable ones live in `~/.abacus`;
+    /// these are the ones that have not yet earned a place there, so they ride
+    /// the session and are gone when it is.
+    #[serde(default)]
+    pub harness: Option<crate::harness::HarnessState>,
     /// Approximate provider-reported token total accumulated across resumes.
     #[serde(default)]
     pub tokens_used: u64,
@@ -63,6 +68,7 @@ impl Session {
             tasks: Vec::new(),
             compaction: None,
             intent: None,
+            harness: None,
             tokens_used: 0,
             active_secs: 0,
         }

@@ -50,6 +50,19 @@ pub async fn run(
     let activity_session = session_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    // Migration from the pre-harness stores runs once, here. Keyed by the
+    // session id so promotion counts distinct sessions rather than distinct
+    // processes.
+    let harness = crate::harness::HarnessStore::load_migrated(
+        config.paths.harness_dir.clone(),
+        &config.workspace,
+        &config.paths.memories_file,
+    )
+    .with_session(activity_session.clone());
+    if let Some(state) = session.as_ref().and_then(|session| session.harness.clone()) {
+        harness.restore_session(state);
+    }
+    let handles = crate::handles::HandleStore::default();
     if crate::sync::is_configured(
         &crate::config::Credentials::load(&config.paths).unwrap_or_default(),
     ) && let Ok(count) = crate::sync::pull_workspace(&config.paths, &config.workspace).await
@@ -160,6 +173,8 @@ pub async fn run(
                 session_id.clone(),
                 trace.clone(),
                 &tether,
+                &harness,
+                &handles,
             ),
             events.clone(),
         )))
@@ -328,6 +343,8 @@ pub async fn run(
                         session_id.clone(),
                         trace.clone(),
                         &tether,
+                        &harness,
+                        &handles,
                     ),
                     events.clone(),
                 )));
@@ -347,6 +364,7 @@ pub async fn run(
         PersistedRun {
             messages: final_messages,
             intent: tether.intent(),
+            harness: Some(harness.session_snapshot()),
             goal: &goal,
             tasks: &tasks,
             compaction: &compaction,
@@ -429,6 +447,7 @@ pub async fn run(
 struct PersistedRun<'a> {
     messages: Vec<Value>,
     intent: Option<String>,
+    harness: Option<crate::harness::HarnessState>,
     goal: &'a GoalState,
     tasks: &'a TaskList,
     compaction: &'a CompactionState,
@@ -458,6 +477,7 @@ fn persist_session(
     };
     session_value.update_messages(run.messages);
     session_value.intent = run.intent;
+    session_value.harness = run.harness;
     session_value.goal = run.goal.snapshot();
     session_value.tasks = run.tasks.snapshot();
     session_value.compaction = Some(run.compaction.clone());
@@ -482,6 +502,8 @@ fn turn_options(
     session_id: Option<String>,
     trace: Option<crate::sft::TraceWriter>,
     tether: &crate::tether::TetherState,
+    harness: &crate::harness::HarnessStore,
+    handles: &crate::handles::HandleStore,
 ) -> TurnOptions {
     TurnOptions {
         safety: crate::safety::SafetyCache::default(),
@@ -510,10 +532,8 @@ fn turn_options(
             config.paths.papercuts_file.clone(),
             &config.workspace,
         ),
-        memories: crate::memories::MemoryStore::load(
-            config.paths.memories_file.clone(),
-            &config.workspace,
-        ),
+        harness: harness.clone(),
+        handles: handles.clone(),
         tether: tether.clone(),
         hive: crate::hive::HiveHandle::load(config.paths.hive_file.clone()),
         aux_model: config.aux_model.clone(),
@@ -567,6 +587,7 @@ mod tests {
             PersistedRun {
                 messages,
                 intent: None,
+                harness: None,
                 goal: &GoalState::default(),
                 tasks: &TaskList::default(),
                 compaction: &CompactionState::default(),
@@ -615,6 +636,7 @@ mod tests {
                     json!({"role":"user","content":"continue"}),
                 ],
                 intent: None,
+                harness: None,
                 goal: &GoalState::default(),
                 tasks: &TaskList::default(),
                 compaction: &CompactionState::default(),

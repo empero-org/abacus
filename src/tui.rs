@@ -135,6 +135,11 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/repair", "Fix corrupted session history"),
     ("/papercuts", "List or delete recorded lessons"),
     ("/memories", "List or delete stored memories"),
+    (
+        "/harness",
+        "Inspect the continual harness, its log, and revert",
+    ),
+    ("/refine", "Update the harness from this conversation now"),
     ("/skills", "Browse Agent Skills"),
     ("/plugins", "Inspect plugins"),
     ("/mcps", "Inspect MCP tools"),
@@ -576,6 +581,12 @@ struct FeedbackResult {
     result: std::result::Result<crate::feedback::FeedbackReceipt, String>,
 }
 
+/// The outcome of a manual `/refine`, delivered back to the UI thread.
+struct RefineResult {
+    message: String,
+    failed: bool,
+}
+
 struct ServicesResult {
     result: std::result::Result<AgentServices, String>,
 }
@@ -598,7 +609,8 @@ struct App {
     services: Arc<AgentServices>,
     goal: GoalState,
     papercuts: crate::papercuts::PapercutStore,
-    memories: crate::memories::MemoryStore,
+    harness: crate::harness::HarnessStore,
+    handles: crate::handles::HandleStore,
     tether: crate::tether::TetherState,
     hive: crate::hive::HiveHandle,
     /// Mid-turn arrivals: user steering and finished background subagents.
@@ -644,6 +656,10 @@ struct App {
     services_reloading: bool,
     services_tx: mpsc::UnboundedSender<ServicesResult>,
     services_rx: mpsc::UnboundedReceiver<ServicesResult>,
+    refine_tx: mpsc::UnboundedSender<RefineResult>,
+    refine_rx: mpsc::UnboundedReceiver<RefineResult>,
+    /// A manual refinement is in flight; a second would race it for the store.
+    refining: bool,
     /// Delivers a newer-release notice from the startup check, if there is one.
     update_rx: mpsc::UnboundedReceiver<crate::update::Available>,
     /// Safety verdicts, kept for the session rather than the turn.
@@ -835,6 +851,7 @@ impl App {
         let (feedback_tx, feedback_rx) = mpsc::unbounded_channel();
         let (remote_tx, remote_rx) = mpsc::unbounded_channel();
         let (services_tx, services_rx) = mpsc::unbounded_channel();
+        let (refine_tx, refine_rx) = mpsc::unbounded_channel();
         let (draft_tx, draft_rx) = mpsc::unbounded_channel();
         // Detached, so a slow or unreachable GitHub never delays the first
         // frame, and silent on failure — being offline is not a problem worth
@@ -860,10 +877,22 @@ impl App {
             config.paths.papercuts_file.clone(),
             &config.workspace,
         );
-        let memories = crate::memories::MemoryStore::load(
-            config.paths.memories_file.clone(),
+        // Promotion counts distinct sessions, so a run with no session file
+        // yet still needs a stable key — otherwise a fresh session contributes
+        // no evidence and a lesson could never earn its way to durable.
+        let session_key = session
+            .as_ref()
+            .map(|session| session.id.to_string())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let harness = crate::harness::HarnessStore::load_migrated(
+            config.paths.harness_dir.clone(),
             &config.workspace,
-        );
+            &config.paths.memories_file,
+        )
+        .with_session(session_key);
+        if let Some(state) = session.as_ref().and_then(|session| session.harness.clone()) {
+            harness.restore_session(state);
+        }
         if let Some(store) = &session_store
             && let Ok(summaries) = store.list()
         {
@@ -915,7 +944,8 @@ impl App {
             services,
             goal,
             papercuts,
-            memories,
+            harness,
+            handles: crate::handles::HandleStore::default(),
             tether,
             hive,
             injections: crate::agent::InjectionQueue::default(),
@@ -954,6 +984,9 @@ impl App {
             services_reloading: false,
             services_tx,
             services_rx,
+            refine_tx,
+            refine_rx,
+            refining: false,
             update_rx,
             safety: crate::safety::SafetyCache::default(),
             allow_mutations: Arc::new(AtomicBool::new(yes)),
@@ -1588,10 +1621,10 @@ impl App {
         let (command, argument) = prompt.split_once(' ').unwrap_or((&prompt, ""));
         let command_name = command.strip_prefix('/');
         let extension_prompt = command_name.and_then(|name| {
-            self.services
-                .skills
+            let skills = self.services.skills.read().expect("skill registry lock");
+            skills
                 .get(name)
-                .map(|_| self.services.skills.invocation(name, argument))
+                .map(|_| skills.invocation(name, argument))
                 .or_else(|| {
                     self.services.plugins.command(name).map(|plugin_command| {
                         Ok(plugin_command.prompt.replace("{{args}}", argument))
@@ -1801,7 +1834,8 @@ impl App {
             session_id: self.session.as_ref().map(|session| session.id.to_string()),
             goal: self.goal.clone(),
             papercuts: self.papercuts.clone(),
-            memories: self.memories.clone(),
+            harness: self.harness.clone(),
+            handles: self.handles.clone(),
             tether: self.tether.clone(),
             hive: self.hive.clone(),
             aux_model: self.config.aux_model.clone(),
@@ -2058,6 +2092,8 @@ impl App {
                 let text = self
                     .services
                     .skills
+                    .read()
+                    .expect("skill registry lock")
                     .list()
                     .map(|skill| format!("/{}  {}", skill.name, skill.description))
                     .collect::<Vec<_>>()
@@ -2341,17 +2377,18 @@ impl App {
                 let argument = argument.trim();
                 // One ordering for display and delete alike, or the numbers
                 // the user sees would target different entries.
-                let mut snapshot = self.memories.snapshot();
-                snapshot.sort_by_key(|memory| std::cmp::Reverse(memory.updated_at));
+                let snapshot = self.harness.snapshot_of(crate::harness::EntryKind::Memory);
                 if let Some(target) = argument.strip_prefix("delete") {
                     let target = target.trim();
                     let removed = target
                         .parse::<usize>()
                         .ok()
                         .and_then(|number| snapshot.get(number.saturating_sub(1)))
-                        .map(|memory| (memory.title.clone(), memory.id));
+                        .map(|memory| (memory.title.clone(), memory.id.clone()));
                     match removed {
-                        Some((title, id)) if self.memories.remove(id) => {
+                        Some((title, id))
+                            if self.harness.remove(crate::harness::EntryKind::Memory, &id) =>
+                        {
                             self.push_entry(Entry::new(
                                 EntryKind::System,
                                 format!("Memory \"{title}\" deleted."),
@@ -2369,7 +2406,7 @@ impl App {
                     self.push_entry(Entry::new(
                         EntryKind::System,
                         "No memories yet. Abacus records durable knowledge here — on its \
-                         own after long turns (rethink), or whenever the model calls \
+                         own after long turns (refine), or whenever the model calls \
                          memory_record — and injects it into future sessions."
                             .to_owned(),
                     ));
@@ -2379,16 +2416,30 @@ impl App {
                         snapshot.len()
                     )];
                     for (index, memory) in snapshot.iter().enumerate() {
+                        // The lifetime is the part a user needs to see: a
+                        // session memory disappears when the session ends.
                         lines.push(format!(
-                            "{}. {} — {}",
+                            "{}. [{}] {} — {}",
                             index + 1,
+                            memory.lifetime_label(),
                             memory.title,
-                            crate::ui::truncate(&memory.body, 120),
+                            crate::ui::truncate(&memory.content, 120),
                         ));
                     }
                     lines.push("Delete one with /memories delete <number>.".to_owned());
                     self.push_entry(Entry::new(EntryKind::System, lines.join("\n")));
                 }
+                self.follow = true;
+                true
+            }
+            "/refine" => {
+                self.start_refine(argument);
+                self.follow = true;
+                true
+            }
+            "/harness" => {
+                let entry = self.harness_command(argument.trim());
+                self.push_entry(entry);
                 self.follow = true;
                 true
             }
@@ -2402,6 +2453,109 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    /// `/harness`, `/harness log`, `/harness revert <id>`.
+    ///
+    /// The point of the harness is that its changes are inspectable and
+    /// undoable, which only helps if there is a way to look and to undo.
+    fn harness_command(&mut self, argument: &str) -> Entry {
+        use crate::harness::EntryKind as Kind;
+
+        if let Some(id) = argument.strip_prefix("revert") {
+            let id = id.trim();
+            if id.is_empty() {
+                return Entry::new(
+                    EntryKind::Error,
+                    "Usage: /harness revert <refinement-id> — ids come from /harness log"
+                        .to_owned(),
+                );
+            }
+            return match self.harness.rollback(id) {
+                Ok(result) => {
+                    let changes = result.changes();
+                    Entry::new(
+                        EntryKind::System,
+                        format!(
+                            "Reverted {id} ({} edit(s) undone): {}\nThis rollback is itself \
+                             {} — revert it to redo.",
+                            result.applied_count(),
+                            if changes.is_empty() {
+                                "nothing applied".to_owned()
+                            } else {
+                                changes.join(", ")
+                            },
+                            result.id
+                        ),
+                    )
+                }
+                Err(error) => Entry::new(EntryKind::Error, format!("{error:#}")),
+            };
+        }
+
+        if argument == "log" {
+            let history = self.harness.history();
+            if history.is_empty() {
+                return Entry::new(
+                    EntryKind::System,
+                    "No refinements recorded yet. Abacus refines after a long turn, or \
+                     when you run /refine."
+                        .to_owned(),
+                );
+            }
+            let mut lines = vec![format!("{} refinement(s), newest first:", history.len())];
+            for result in history.iter().rev().take(15) {
+                let changes = result.changes();
+                lines.push(format!(
+                    "- {} — {} [{}]",
+                    result.id,
+                    result.summary,
+                    if changes.is_empty() {
+                        "no applied edits".to_owned()
+                    } else {
+                        changes.join(", ")
+                    }
+                ));
+            }
+            lines.push("Undo one with /harness revert <id>.".to_owned());
+            return Entry::new(EntryKind::System, lines.join("\n"));
+        }
+
+        if !argument.is_empty() {
+            return Entry::new(
+                EntryKind::Error,
+                "Usage: /harness | /harness log | /harness revert <id>".to_owned(),
+            );
+        }
+
+        let mut lines: Vec<String> = Vec::new();
+        for kind in Kind::ALL {
+            let entries = self.harness.snapshot_of(kind);
+            if entries.is_empty() {
+                continue;
+            }
+            lines.push(format!("{} ({}):", kind.label(), entries.len()));
+            for entry in entries {
+                lines.push(format!(
+                    "  [{}] {} — {} (v{}, {})",
+                    entry.id,
+                    entry.title,
+                    crate::ui::truncate(&entry.content, 100),
+                    entry.version,
+                    entry.lifetime_label(),
+                ));
+            }
+        }
+        if lines.is_empty() {
+            return Entry::new(
+                EntryKind::System,
+                "The harness is empty. Abacus fills it as it works — new entries start \
+                 session-scoped and become durable once they recur across sessions."
+                    .to_owned(),
+            );
+        }
+        lines.push("/harness log for history, /harness revert <id> to undo.".to_owned());
+        Entry::new(EntryKind::System, lines.join("\n"))
     }
 
     fn persist_session(&mut self) {
@@ -2430,6 +2584,7 @@ impl App {
         };
         session.update_messages(self.messages.clone());
         session.intent = self.tether.intent();
+        session.harness = Some(self.harness.session_snapshot());
         session.goal = self.goal.snapshot();
         session.tasks = self.tasks.snapshot();
         session.compaction = Some(self.compaction.clone());
@@ -4302,6 +4457,102 @@ impl App {
         changed
     }
 
+    fn drain_refine_events(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(event) = self.refine_rx.try_recv() {
+            changed = true;
+            self.refining = false;
+            self.push_entry(Entry::new(
+                if event.failed {
+                    EntryKind::Error
+                } else {
+                    EntryKind::System
+                },
+                event.message,
+            ));
+            self.follow = true;
+        }
+        changed
+    }
+
+    /// Run the refinement pass on demand. `--durable` writes straight to the
+    /// cross-session store instead of waiting for a lesson to recur, which is
+    /// how a user adopts something deliberately.
+    fn start_refine(&mut self, argument: &str) {
+        if self.refining {
+            self.push_entry(Entry::new(
+                EntryKind::Error,
+                "A refinement is already running.".to_owned(),
+            ));
+            return;
+        }
+        let argument = argument.trim();
+        let (durable, instructions) = match argument.strip_prefix("--durable") {
+            Some(rest) => (true, rest.trim()),
+            None => (false, argument),
+        };
+        let lifetime = if durable {
+            crate::harness::Lifetime::Durable
+        } else {
+            crate::harness::Lifetime::Session
+        };
+
+        self.refining = true;
+        self.status = "refining the harness".to_owned();
+        let provider = self.aux_provider.clone();
+        let messages = self.messages.clone();
+        let harness = self.harness.clone();
+        let papercuts = self.papercuts.clone();
+        let workspace = self.config.workspace.clone();
+        let instructions = (!instructions.is_empty()).then(|| instructions.to_owned());
+        let sender = self.refine_tx.clone();
+        tokio::spawn(async move {
+            // A user asking for this has already made the judgement the review
+            // gate exists to make, so the gate is skipped and the planning call
+            // runs directly.
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            let outcome = crate::refine::run(
+                &provider,
+                &messages,
+                &harness,
+                &papercuts,
+                lifetime,
+                instructions.as_deref(),
+                &cancel,
+            )
+            .await;
+            let result = match outcome {
+                Some(outcome) => {
+                    if durable {
+                        // Durable prompt entries are what AGENTS.md renders.
+                        let _ = harness.render_notes(&workspace);
+                    }
+                    let mut message = format!(
+                        "refine — {} ({} harness edit(s)",
+                        outcome.summary, outcome.applied
+                    );
+                    if outcome.papercuts > 0 {
+                        message.push_str(&format!(", {} papercut(s)", outcome.papercuts));
+                    }
+                    message.push_str(&format!(
+                        ", {}). Undo with /harness revert {}.",
+                        if durable { "durable" } else { "this session" },
+                        outcome.result.id
+                    ));
+                    RefineResult {
+                        message,
+                        failed: false,
+                    }
+                }
+                None => RefineResult {
+                    message: "refine — nothing worth recording from this conversation.".to_owned(),
+                    failed: false,
+                },
+            };
+            let _ = sender.send(result);
+        });
+    }
+
     fn drain_services_events(&mut self) -> bool {
         let mut changed = false;
         while let Ok(event) = self.services_rx.try_recv() {
@@ -4949,6 +5200,7 @@ async fn event_loop(
         dirty |= app.drain_feedback_events();
         dirty |= app.drain_remote_events();
         dirty |= app.drain_services_events();
+        dirty |= app.drain_refine_events();
         dirty |= app.drain_update_events();
         dirty |= app.drain_draft_events();
         app.maybe_idle_sync();

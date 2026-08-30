@@ -1,0 +1,9 @@
+description = "Rename a shell function across code and docs"
+prompt = """
+Rename the shell function `say_hello` to `greet_user` everywhere in this \
+repository — the definition, every call site, and the documentation. \
+`bash src/main.sh` must still print `Hello, world!` afterwards.
+"""
+max_steps = 30
+timeout_seconds = 240
+mode = "build"
