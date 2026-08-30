@@ -132,7 +132,15 @@ pub struct EvalOptions {
 pub fn discover(workspace: &Path, filter: Option<&str>) -> Result<Vec<EvalTask>> {
     let root = workspace.join(TASKS_DIR);
     if !root.is_dir() {
-        bail!("no eval tasks found: {} does not exist", root.display());
+        // Tasks are workspace-relative, so running this from the wrong
+        // directory is the likely mistake — say so rather than just naming a
+        // path that does not exist.
+        bail!(
+            "no eval tasks in {}\n\
+             Tasks live in {TASKS_DIR} relative to the project directory. Run this from a \
+             project that has them, or name the project: `abacus <path> eval`.",
+            root.display()
+        );
     }
     let mut tasks = Vec::new();
     let mut entries: Vec<PathBuf> = std::fs::read_dir(&root)
