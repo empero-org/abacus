@@ -56,7 +56,7 @@ pub enum SearchBackend {
 }
 
 impl SearchBackend {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             SearchBackend::Auto => "auto",
             SearchBackend::Bing => "bing",

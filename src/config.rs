@@ -709,7 +709,7 @@ pub struct ProviderProfile {
     pub protocol: ProviderProtocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
-    /// A cheaper/secondary model used for background calls (rethink, draft
+    /// A cheaper/secondary model used for background calls (refine, draft
     /// recommendations, tether, compaction summary, command classification)
     /// on this same endpoint. None means "use the main model".
     #[serde(default, skip_serializing_if = "Option::is_none")]

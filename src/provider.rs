@@ -249,7 +249,7 @@ impl Provider {
 
     /// A sibling provider that differs only in the model — same endpoint,
     /// auth, protocol, and scripted config. For the auxiliary model used by
-    /// secondary calls (rethink, drafts, tether, compaction). The billing
+    /// secondary calls (refine, drafts, tether, compaction). The billing
     /// counter is shared so aux calls count toward the session total; the
     /// context-size gauge is fresh so an aux call over the whole history does
     /// not overwrite the main conversation's "window full" figure.

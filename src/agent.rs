@@ -209,7 +209,7 @@ pub struct TurnOptions {
     pub tether: crate::tether::TetherState,
     /// Delegation record and the live subagent board.
     pub hive: crate::hive::HiveHandle,
-    /// Model for secondary calls (rethink, tether, command classification,
+    /// Model for secondary calls (refine, tether, command classification,
     /// draft recommendations) on the same endpoint. Compaction stays on the
     /// main model. None reuses the main model.
     pub aux_model: Option<String>,
@@ -247,7 +247,7 @@ async fn run_turn_inner(
     events: mpsc::UnboundedSender<AgentEvent>,
 ) {
     // The auxiliary model: the same endpoint with a different model, used for
-    // secondary calls (rethink, tether drift, command classification) so a big
+    // secondary calls (refine, tether drift, command classification) so a big
     // main model does not pay for them. Compaction deliberately stays on the
     // main model — the rolling summary is load-bearing for the whole session.
     // Falls back to the main provider when no aux model is set.
@@ -1333,7 +1333,7 @@ pub async fn draft_reply(provider: &Provider, messages: &[Value]) -> Option<Stri
     Some(draft)
 }
 
-/// An assistant message built from a completion, for the rethink pass's own
+/// An assistant message built from a completion, for the refine pass's own
 /// private conversation.
 pub fn assistant_reflection_message(completion: &crate::provider::Completion) -> Value {
     assistant_message(

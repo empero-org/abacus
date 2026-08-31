@@ -392,6 +392,11 @@ enum ConfigKey {
     MaxSteps,
     ToolOutputLimit,
     ProjectTrust,
+    SearchEnabled,
+    SearchBackend,
+    SearchInstanceUrl,
+    SearchApiKeyEnv,
+    SearchSharedInstance,
     FeedbackEnabled,
     FeedbackDiagnostics,
     FeedbackEndpoint,
@@ -426,6 +431,12 @@ const CONFIG_ROWS: &[ConfigRow] = &[
     ConfigRow::Key(ConfigKey::ProjectTrust),
     ConfigRow::Key(ConfigKey::TokenCompression),
     ConfigRow::Key(ConfigKey::OneStream),
+    ConfigRow::Heading("SEARCH"),
+    ConfigRow::Key(ConfigKey::SearchEnabled),
+    ConfigRow::Key(ConfigKey::SearchBackend),
+    ConfigRow::Key(ConfigKey::SearchInstanceUrl),
+    ConfigRow::Key(ConfigKey::SearchApiKeyEnv),
+    ConfigRow::Key(ConfigKey::SearchSharedInstance),
     ConfigRow::Heading("INTERFACE"),
     ConfigRow::Key(ConfigKey::VimMode),
     ConfigRow::Key(ConfigKey::ShowThinking),
@@ -454,7 +465,7 @@ fn config_help(key: ConfigKey) -> &'static str {
         }
         ConfigKey::Model => "Model ID sent to the provider. /model lists what the endpoint offers.",
         ConfigKey::AuxModel => {
-            "Cheaper model on this same endpoint for background calls (rethink, drafts, tether, command checks). Blank = same as the main model."
+            "Cheaper model on this same endpoint for background calls (refine, drafts, tether, command checks). Blank = same as the main model."
         }
         ConfigKey::Effort => {
             "How hard the model thinks: minimal, low, medium, high — or blank to leave it to the provider. Models without reasoning ignore it."
@@ -483,8 +494,23 @@ fn config_help(key: ConfigKey) -> &'static str {
         ConfigKey::DraftReplies => {
             "Predict a likely follow-up in the empty composer. One short model call per turn."
         }
+        ConfigKey::SearchEnabled => {
+            "Whether the web_search and read_page tools are offered to the model at all."
+        }
+        ConfigKey::SearchBackend => {
+            "Enter cycles auto → searxng → brave → bing. Auto picks whatever is configured: your SearXNG instance, then Brave if its key is set, else Bing."
+        }
+        ConfigKey::SearchInstanceUrl => {
+            "Base URL of your SearXNG instance, e.g. http://localhost:8888. It must have the JSON format enabled in settings.yml. Blank to unset."
+        }
+        ConfigKey::SearchApiKeyEnv => {
+            "Environment variable holding the search API key. Blank uses the backend default (BRAVE_API_KEY for Brave)."
+        }
+        ConfigKey::SearchSharedInstance => {
+            "Allow falling back to a public SearXNG instance when nothing else is configured. Off by default: queries would leave to a host neither you nor Abacus runs."
+        }
         ConfigKey::TokenCompression => {
-            "Balanced high-savings mode: tighter context, fewer background checks, and no draft or routine rethink calls."
+            "Balanced high-savings mode: tighter context, fewer background checks, and no draft or routine refine calls."
         }
         ConfigKey::OneStream => {
             "Serialize main and auxiliary upstream requests. Explicit subagents keep their own streams."
@@ -542,6 +568,11 @@ const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey::ProjectTrust,
     ConfigKey::TokenCompression,
     ConfigKey::OneStream,
+    ConfigKey::SearchEnabled,
+    ConfigKey::SearchBackend,
+    ConfigKey::SearchInstanceUrl,
+    ConfigKey::SearchApiKeyEnv,
+    ConfigKey::SearchSharedInstance,
     ConfigKey::VimMode,
     ConfigKey::ShowThinking,
     ConfigKey::TokenRate,
@@ -601,7 +632,7 @@ struct App {
     credentials: Credentials,
     provider: Provider,
     /// The auxiliary-model provider for secondary calls (drafts here; the
-    /// agent loop builds its own for rethink/tether/classification).
+    /// agent loop builds its own for refine/tether/classification).
     aux_provider: Provider,
     messages: Vec<Value>,
     session: Option<Session>,
@@ -3321,6 +3352,25 @@ impl App {
                         PermissionMode::Ask
                     };
             }
+            ConfigKey::SearchEnabled => {
+                self.settings.search.enabled = !self.settings.search.enabled;
+                self.apply_search_settings();
+            }
+            ConfigKey::SearchBackend => {
+                use crate::web::SearchBackend;
+                self.settings.search.backend = match self.settings.search.backend {
+                    SearchBackend::Auto => SearchBackend::Searxng,
+                    SearchBackend::Searxng => SearchBackend::Brave,
+                    SearchBackend::Brave => SearchBackend::Bing,
+                    SearchBackend::Bing => SearchBackend::Auto,
+                };
+                self.apply_search_settings();
+            }
+            ConfigKey::SearchSharedInstance => {
+                self.settings.search.use_shared_instance =
+                    !self.settings.search.use_shared_instance;
+                self.apply_search_settings();
+            }
             ConfigKey::VimMode => self.settings.ui.vim_mode = !self.settings.ui.vim_mode,
             ConfigKey::ShowThinking => {
                 self.settings.ui.show_thinking = !self.settings.ui.show_thinking
@@ -3392,6 +3442,16 @@ impl App {
             .context("default profile does not exist")
     }
 
+    /// Re-resolve the search backend after a settings change.
+    ///
+    /// `config.web_search` is the resolved form the turn actually uses, built
+    /// once at startup. Without this, a change here would be written to disk
+    /// and take effect only on the next launch — the thing that made these
+    /// settings setup-only in the first place.
+    fn apply_search_settings(&mut self) {
+        self.config.web_search = self.settings.search.resolve();
+    }
+
     fn begin_config_edit(&mut self, key: ConfigKey) {
         // A secret is never seeded into the editor: `config_value` reports only
         // where the key came from, so pre-filling would put that description
@@ -3442,6 +3502,26 @@ impl App {
                         profile.reasoning_effort = parsed;
                     })
                 }
+            }
+            ConfigKey::SearchInstanceUrl => {
+                let trimmed = value.trim().trim_end_matches('/');
+                if !trimmed.is_empty() && !trimmed.starts_with("http") {
+                    Err(anyhow::anyhow!(
+                        "a SearXNG URL needs its scheme, e.g. http://localhost:8888"
+                    ))
+                } else {
+                    self.settings.search.instance_url =
+                        (!trimmed.is_empty()).then(|| trimmed.to_owned());
+                    self.apply_search_settings();
+                    Ok(())
+                }
+            }
+            ConfigKey::SearchApiKeyEnv => {
+                let trimmed = value.trim();
+                self.settings.search.api_key_env =
+                    (!trimmed.is_empty()).then(|| trimmed.to_owned());
+                self.apply_search_settings();
+                Ok(())
             }
             ConfigKey::BaseUrl => self.active_profile_mut().map(|profile| {
                 profile.base_url = value.trim().trim_end_matches('/').to_owned();
@@ -3580,6 +3660,38 @@ impl App {
             ConfigKey::Animations => on_off(self.settings.ui.animations),
             ConfigKey::Tooltips => on_off(self.settings.ui.show_tooltips),
             ConfigKey::DraftReplies => on_off(self.settings.ui.draft_replies),
+            ConfigKey::SearchEnabled => on_off(self.settings.search.enabled),
+            ConfigKey::SearchBackend => {
+                let label = self.settings.search.backend.label().to_owned();
+                // Auto is a decision deferred, so show what it currently
+                // resolves to — otherwise the row says "auto" and the user has
+                // no way to tell which engine is actually answering.
+                if self.settings.search.backend == crate::web::SearchBackend::Auto {
+                    format!("auto · {}", self.settings.search.resolve().backend.label())
+                } else {
+                    label
+                }
+            }
+            ConfigKey::SearchInstanceUrl => self
+                .settings
+                .search
+                .instance_url
+                .clone()
+                .filter(|url| !url.trim().is_empty())
+                .unwrap_or_else(|| "(none)".to_owned()),
+            ConfigKey::SearchApiKeyEnv => {
+                let name = self
+                    .settings
+                    .search
+                    .api_key_env
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| "BRAVE_API_KEY".to_owned());
+                // Report whether the variable is populated, never its contents.
+                let present = std::env::var(&name).is_ok_and(|value| !value.trim().is_empty());
+                format!("{name} · {}", if present { "set" } else { "unset" })
+            }
+            ConfigKey::SearchSharedInstance => on_off(self.settings.search.use_shared_instance),
             ConfigKey::TokenCompression => on_off(self.settings.agent.token_compression),
             ConfigKey::OneStream => on_off(self.settings.agent.one_stream),
             ConfigKey::CheckUpdates => on_off(self.settings.ui.check_updates),
@@ -8892,6 +9004,11 @@ fn config_label(key: ConfigKey) -> &'static str {
         ConfigKey::Animations => "Animations",
         ConfigKey::Tooltips => "Welcome tips",
         ConfigKey::DraftReplies => "Draft next message",
+        ConfigKey::SearchEnabled => "Web search",
+        ConfigKey::SearchBackend => "Search backend",
+        ConfigKey::SearchInstanceUrl => "SearXNG URL",
+        ConfigKey::SearchApiKeyEnv => "Search key variable",
+        ConfigKey::SearchSharedInstance => "Shared SearXNG",
         ConfigKey::TokenCompression => "Token Compression",
         ConfigKey::OneStream => "One Stream",
         ConfigKey::CheckUpdates => "Update reminder",
@@ -8952,6 +9069,8 @@ fn config_key_is_editable(key: ConfigKey) -> bool {
             | ConfigKey::ContextWindow
             | ConfigKey::MaxOutput
             | ConfigKey::ToolOutputLimit
+            | ConfigKey::SearchInstanceUrl
+            | ConfigKey::SearchApiKeyEnv
             | ConfigKey::FeedbackEndpoint
     )
 }
@@ -11080,6 +11199,88 @@ mod tests {
         let saved = Settings::load(&AbacusPaths::under(directory.path().join("home"))).unwrap();
         assert_eq!(saved.profiles["test"].model, "new-model");
         assert_eq!(saved.agent.max_steps, 64);
+    }
+
+    /// Search settings used to be reachable only from first-run setup, so
+    /// changing an engine meant re-running setup or hand-editing TOML.
+    #[test]
+    fn search_settings_are_editable_and_take_effect_without_a_restart() {
+        use crate::web::SearchBackend;
+        let (directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.open_config("");
+
+        // Enter cycles the backend rather than opening an editor.
+        app.settings.search.backend = SearchBackend::Auto;
+        app.cycle_config_value(ConfigKey::SearchBackend).unwrap();
+        assert_eq!(app.settings.search.backend, SearchBackend::Searxng);
+        for _ in 0..3 {
+            app.cycle_config_value(ConfigKey::SearchBackend).unwrap();
+        }
+        assert_eq!(
+            app.settings.search.backend,
+            SearchBackend::Auto,
+            "the cycle wraps"
+        );
+
+        // A URL is text, and reaches the resolved config the turn actually uses.
+        app.begin_config_edit(ConfigKey::SearchInstanceUrl);
+        if let Some(panel) = &mut app.config_panel {
+            panel.editing = Some((ConfigKey::SearchInstanceUrl, {
+                let mut input = InputBuffer::new();
+                input.insert_str("http://localhost:8888/");
+                input
+            }));
+        }
+        app.commit_config_edit();
+        assert_eq!(
+            app.settings.search.instance_url.as_deref(),
+            Some("http://localhost:8888"),
+            "a trailing slash is trimmed"
+        );
+        assert_eq!(
+            app.config.web_search.instance_url.as_deref(),
+            Some("http://localhost:8888"),
+            "the live config is re-resolved, not just the stored settings"
+        );
+
+        // Toggles flip and stay live.
+        let before = app.settings.search.enabled;
+        app.cycle_config_value(ConfigKey::SearchEnabled).unwrap();
+        assert_eq!(app.settings.search.enabled, !before);
+        assert_eq!(app.config.web_search.enabled, !before);
+
+        // And it all survives a save/load round trip.
+        app.save_and_apply_settings().unwrap();
+        let saved = Settings::load(&AbacusPaths::under(directory.path().join("home"))).unwrap();
+        assert_eq!(
+            saved.search.instance_url.as_deref(),
+            Some("http://localhost:8888")
+        );
+        assert_eq!(saved.search.enabled, !before);
+    }
+
+    #[test]
+    fn a_searxng_url_without_a_scheme_is_rejected() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.open_config("");
+        app.begin_config_edit(ConfigKey::SearchInstanceUrl);
+        if let Some(panel) = &mut app.config_panel {
+            panel.editing = Some((ConfigKey::SearchInstanceUrl, {
+                let mut input = InputBuffer::new();
+                input.insert_str("localhost:8888");
+                input
+            }));
+        }
+        app.commit_config_edit();
+        // A bare host silently fails at search time; catching it here is the
+        // difference between a message and a mystery.
+        assert!(app.settings.search.instance_url.is_none());
+        // Clearing it is still allowed.
+        if let Some(panel) = &mut app.config_panel {
+            panel.editing = Some((ConfigKey::SearchInstanceUrl, InputBuffer::new()));
+        }
+        app.commit_config_edit();
+        assert!(app.settings.search.instance_url.is_none());
     }
 
     #[test]

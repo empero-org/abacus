@@ -2,7 +2,7 @@
 //! objectively.
 //!
 //! Abacus carries five self-improvement loops — papercuts, memories, the
-//! rethink pass, the hive tier, mode discipline — and until now no way to tell
+//! refine pass, the hive tier, mode discipline — and until now no way to tell
 //! whether any of them helps. This module is the measurement side: a task
 //! suite, an isolated workspace per run, and a verdict from a script rather
 //! than from a model.
