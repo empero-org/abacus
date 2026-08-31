@@ -27,6 +27,11 @@ const EXTRACT_RESULT_PAGES: usize = 2;
 /// Ceiling on the results text handed to the reader model.
 const EXTRACT_CORPUS_CHARS: usize = 40_000;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// Total attempts for one HTTP request, including the first.
+const RETRY_ATTEMPTS: usize = 3;
+/// Backoff before each retry. Short: a search the model is waiting on is worth
+/// one quick second chance, not a patient exponential climb.
+const RETRY_BACKOFF: [Duration; 2] = [Duration::from_millis(250), Duration::from_millis(750)];
 const MAX_PAGE_CHARS: usize = 20_000;
 /// A public SearXNG instance offered as a convenience, used only when
 /// `[search] use_shared_instance` is explicitly turned on.
@@ -249,17 +254,16 @@ impl WebConfig {
         let pages = (0..EXTRACT_RESULT_PAGES).map(|page| {
             let client = client.clone();
             async move {
-                let response = client
-                    .get("https://www.bing.com/search")
-                    .query(&[("q", query), ("first", &(page * 10 + 1).to_string())])
-                    .header(reqwest::header::ACCEPT, "text/html")
-                    .header(reqwest::header::USER_AGENT, BROWSER_USER_AGENT)
-                    .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
-                    .send()
-                    .await
-                    .ok()?
-                    .error_for_status()
-                    .ok()?;
+                let response = send_with_retry(
+                    client
+                        .get("https://www.bing.com/search")
+                        .query(&[("q", query), ("first", &(page * 10 + 1).to_string())])
+                        .header(reqwest::header::ACCEPT, "text/html")
+                        .header(reqwest::header::USER_AGENT, BROWSER_USER_AGENT)
+                        .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9"),
+                )
+                .await
+                .ok()?;
                 let body = response.text().await.ok()?;
                 let text = html_to_text(&body);
                 (text.len() > 200).then_some(text)
@@ -290,55 +294,115 @@ impl WebConfig {
             );
         }
         let client = self.client()?;
-        let results = match self.backend {
-            // `resolve` turns Auto into a concrete backend before a WebConfig
-            // ever exists; treating it as a concrete engine here would
-            // silently pick one if that ever stopped being true.
-            SearchBackend::Auto => bail!("search backend was not resolved"),
-            // The keyless engines share one chain: the chosen engine goes
-            // first, then the rest of the keyless order. A bot wall, rate
-            // limit, or empty page on one engine is a miss, and the next
-            // engine is tried — a blocked public endpoint does not sink the
-            // whole search.
-            // Scraping a public results page is best effort: a bot wall or a
-            // layout change is a miss, not a failure of the whole search.
-            SearchBackend::Bing => bing_search(&client, query, max_results)
-                .await
-                .unwrap_or_default(),
-            SearchBackend::Searxng => {
-                let base = self.instance_url.as_deref().ok_or_else(|| {
-                    anyhow!(
-                        "the searxng backend needs an instance URL; set `[search] instance_url` \
-                         to e.g. http://localhost:8888"
-                    )
-                })?;
-                searxng_search(&client, base, query, max_results).await?
+
+        // Try the configured engine, then whatever else this machine can
+        // already reach. A bot wall, a rate limit, or an empty page on one
+        // engine is a miss rather than the end of the search — which is what
+        // this comment claimed long before the code did it: the match below
+        // used to call exactly one engine and discard its error, so every
+        // transient failure surfaced as "no results" and looked like the query
+        // was at fault.
+        let mut attempted: Vec<String> = Vec::new();
+        let mut failures: Vec<String> = Vec::new();
+        let mut results = Vec::new();
+        let mut answered_by = None;
+        for backend in self.chain() {
+            let label = backend.label();
+            attempted.push(label.to_owned());
+            let outcome = match backend {
+                // `resolve` turns Auto into something concrete before a
+                // WebConfig exists, so it never reaches a chain.
+                SearchBackend::Auto => continue,
+                SearchBackend::Bing => bing_search(&client, query, max_results).await,
+                SearchBackend::Searxng => match self.instance_url.as_deref() {
+                    Some(base) => searxng_search(&client, base, query, max_results).await,
+                    None => continue,
+                },
+                SearchBackend::Brave => match self.api_key.as_deref() {
+                    Some(key) => brave_search(&client, key, query, max_results).await,
+                    None => continue,
+                },
+            };
+            match outcome {
+                Ok(found) if !found.is_empty() => {
+                    results = found;
+                    answered_by = Some(backend);
+                    break;
+                }
+                // An engine that answered with nothing is a miss, not a fault;
+                // say so only if every engine agrees.
+                Ok(_) => failures.push(format!("{label}: no results")),
+                Err(error) => failures.push(format!("{label}: {error:#}")),
             }
-            SearchBackend::Brave => {
-                brave_search(
-                    &client,
-                    self.api_key.as_deref().unwrap(),
-                    query,
-                    max_results,
-                )
-                .await?
+        }
+
+        if results.is_empty() {
+            return Ok(self.empty_report(query, &attempted, &failures));
+        }
+
+        let mut rendered = render_results(query, &results);
+        // Falling back quietly would hide a broken configuration behind
+        // working results: someone who stood up a SearXNG instance and got
+        // scraped Bing answers for a month would have no way to notice. The
+        // search still succeeds; the fault is reported alongside it.
+        if answered_by != Some(self.backend) && !failures.is_empty() {
+            rendered.push_str(&format!(
+                "\n[the configured {} backend did not answer, so these came from {}: {}]\n",
+                self.backend.label(),
+                answered_by
+                    .map(SearchBackend::label)
+                    .unwrap_or("a fallback"),
+                failures.join("; ")
+            ));
+        }
+        Ok(rendered)
+    }
+
+    /// The engines to try, in order: the configured one first, then any other
+    /// that already has what it needs. Nothing here asks for new configuration
+    /// — a fallback that cannot run is not a fallback.
+    fn chain(&self) -> Vec<SearchBackend> {
+        let mut chain = vec![self.backend];
+        let mut consider = |backend: SearchBackend, usable: bool| {
+            if usable && !chain.contains(&backend) {
+                chain.push(backend);
             }
         };
-        if results.is_empty() {
-            if matches!(self.backend, SearchBackend::Bing) {
-                return Ok(format!(
-                    "No results for {query:?}. This is the keyless search path — \
-                     Bing's public page, which blocks bots and changes layout \
-                     without warning. Keyless search misses on plenty of real \
-                     queries; that is a limit of the public endpoint, not of how \
-                     the question was worded, so do not retry more than once. Say \
-                     so plainly, and mention that a self-hosted SearXNG \
-                     instance, or a BRAVE_API_KEY, gives full web search."
-                ));
-            }
-            return Ok(format!("No results for {query:?}."));
+        consider(SearchBackend::Searxng, self.instance_url.is_some());
+        consider(SearchBackend::Brave, self.api_key.is_some());
+        // Keyless and always available, so it anchors the chain.
+        consider(SearchBackend::Bing, true);
+        chain
+    }
+
+    /// What to say when the whole chain came back empty.
+    ///
+    /// The distinction that matters to a model deciding whether to rephrase:
+    /// engines that answered "nothing" mean the query found nothing, while
+    /// engines that errored mean the search never really happened.
+    fn empty_report(&self, query: &str, attempted: &[String], failures: &[String]) -> String {
+        let errored = failures.iter().any(|line| !line.ends_with("no results"));
+        let mut report = format!("No results for {query:?}.");
+        if !attempted.is_empty() {
+            report.push_str(&format!(" Tried: {}.", attempted.join(", ")));
         }
-        Ok(render_results(query, &results))
+        if errored {
+            report.push_str(&format!(
+                " Every backend failed rather than returning nothing:\n{}\nThis is an endpoint \
+                 problem, not a wording problem — retrying the same query is unlikely to help.",
+                failures.join("\n")
+            ));
+            return report;
+        }
+        if attempted.iter().any(|name| name == "bing") {
+            report.push_str(
+                " The keyless path scrapes a public results page, which blocks bots and changes \
+                 layout without warning, so it misses on plenty of real queries. Do not retry \
+                 more than once. Say so plainly, and mention that a self-hosted SearXNG instance \
+                 or a search API key gives full web search.",
+            );
+        }
+        report
     }
 
     /// Fetch a URL and return its readable text content.
@@ -378,17 +442,14 @@ impl WebConfig {
             max_chars.clamp(1_000, 200_000)
         };
         let client = self.client()?;
-        let response = client
-            .get(url.clone())
-            .header(reqwest::header::ACCEPT, "text/html,text/plain,*/*")
-            .header(reqwest::header::USER_AGENT, BROWSER_USER_AGENT)
-            .send()
-            .await
-            .map_err(|error| anyhow!("request failed: {error}"))?;
-        let status = response.status();
-        if !status.is_success() {
-            bail!("fetch returned HTTP {}", status.as_u16());
-        }
+        let response = send_with_retry(
+            client
+                .get(url.clone())
+                .header(reqwest::header::ACCEPT, "text/html,text/plain,*/*")
+                .header(reqwest::header::USER_AGENT, BROWSER_USER_AGENT),
+        )
+        .await
+        .map_err(|error| anyhow!("fetch failed: {error}"))?;
         let final_url = response.url().clone();
         // A redirect could land on a private host even when the original URL was
         // public; re-check before reading the body.
@@ -492,6 +553,51 @@ pub fn tool_specs() -> Vec<Value> {
     ]
 }
 
+/// Whether a status is worth trying again. A 429 or a 5xx is the endpoint
+/// having a moment; a 401 or a 404 will say the same thing however many times
+/// it is asked, and retrying only makes the model wait for the same answer.
+fn is_transient(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+/// Send a request, retrying transient failures.
+///
+/// Public search endpoints rate-limit, time out, and briefly 503 far more often
+/// than they are actually down, and every one of those used to surface as "no
+/// results" — indistinguishable from a query that genuinely found nothing.
+async fn send_with_retry(builder: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+    let mut last: Option<anyhow::Error> = None;
+    for attempt in 0..RETRY_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(RETRY_BACKOFF[(attempt - 1).min(RETRY_BACKOFF.len() - 1)]).await;
+        }
+        // `try_clone` fails only for streaming bodies, which none of these
+        // requests use; without a clone there is nothing to retry with.
+        let Some(attempt_builder) = builder.try_clone() else {
+            return builder.send().await.map_err(|error| anyhow!("{error}"));
+        };
+        match attempt_builder.send().await {
+            Ok(response) => {
+                let status = response.status();
+                if status.is_success() {
+                    return Ok(response);
+                }
+                last = Some(anyhow!("HTTP {}", status.as_u16()));
+                if !is_transient(status) {
+                    break;
+                }
+            }
+            Err(error) => {
+                last = Some(anyhow!("{error}"));
+                if !error.is_timeout() && !error.is_connect() && !error.is_request() {
+                    break;
+                }
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow!("request failed")))
+}
+
 #[derive(Debug)]
 struct SearchResult {
     title: String,
@@ -535,13 +641,14 @@ async fn searxng_search(
         #[serde(default)]
         content: String,
     }
-    let response = client
-        .get(format!("{base}/search"))
-        .query(&[("q", query), ("format", "json")])
-        .header("Accept", "application/json")
-        .send()
-        .await?
-        .error_for_status()?;
+    let response = send_with_retry(
+        client
+            .get(format!("{base}/search"))
+            .query(&[("q", query), ("format", "json")])
+            .header("Accept", "application/json"),
+    )
+    .await
+    .map_err(|error| anyhow!("SearXNG request failed: {error}"))?;
     let body = response.text().await?;
     let parsed: Response = serde_json::from_str(&body).map_err(|error| {
         if body.trim_start().starts_with('<') {
@@ -579,21 +686,20 @@ async fn bing_search(
     query: &str,
     max_results: usize,
 ) -> Result<Vec<SearchResult>> {
-    let response = client
-        .get("https://www.bing.com/search")
-        .query(&[("q", query), ("count", &max_results.to_string())])
-        .header(reqwest::header::ACCEPT, "text/html")
-        // Without a browser identity Bing serves a stripped page whose markup
-        // the parser barely matches, and without a language header it answers
-        // from the exit node's locale — a SIGHUP query came back with the
-        // German Wikipedia article about the city of Tokyo.
-        .header(reqwest::header::USER_AGENT, BROWSER_USER_AGENT)
-        .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
-        .send()
-        .await
-        .map_err(|error| anyhow!("Bing request failed: {error}"))?
-        .error_for_status()
-        .map_err(|error| anyhow!("Bing returned an error status: {error}"))?;
+    let response = send_with_retry(
+        client
+            .get("https://www.bing.com/search")
+            .query(&[("q", query), ("count", &max_results.to_string())])
+            .header(reqwest::header::ACCEPT, "text/html")
+            // Without a browser identity Bing serves a stripped page whose
+            // markup the parser barely matches, and without a language header
+            // it answers from the exit node's locale — a SIGHUP query came back
+            // with the German Wikipedia article about the city of Tokyo.
+            .header(reqwest::header::USER_AGENT, BROWSER_USER_AGENT)
+            .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9"),
+    )
+    .await
+    .map_err(|error| anyhow!("Bing request failed: {error}"))?;
     let body = response
         .text()
         .await
@@ -673,17 +779,15 @@ async fn brave_search(
     query: &str,
     max_results: usize,
 ) -> Result<Vec<SearchResult>> {
-    let response = client
-        .get("https://api.search.brave.com/res/v1/web/search")
-        .header("X-Subscription-Token", api_key)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .query(&[("q", query), ("count", &max_results.to_string())])
-        .send()
-        .await
-        .map_err(|error| anyhow!("Brave request failed: {error}"))?;
-    if !response.status().is_success() {
-        bail!("Brave returned HTTP {}", response.status().as_u16());
-    }
+    let response = send_with_retry(
+        client
+            .get("https://api.search.brave.com/res/v1/web/search")
+            .header("X-Subscription-Token", api_key)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .query(&[("q", query), ("count", &max_results.to_string())]),
+    )
+    .await
+    .map_err(|error| anyhow!("Brave request failed: {error}"))?;
     let value: Value = response
         .json()
         .await
@@ -856,6 +960,98 @@ fn truncate_chars(value: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn config(backend: SearchBackend, instance: Option<&str>, key: Option<&str>) -> WebConfig {
+        WebConfig {
+            enabled: true,
+            backend,
+            api_key: key.map(str::to_owned),
+            instance_url: instance.map(str::to_owned),
+            extractor: None,
+        }
+    }
+
+    #[test]
+    fn the_chain_tries_the_configured_engine_first_then_what_else_is_reachable() {
+        // A single scrape with no fallback was the flakiness: one bot wall and
+        // the search was over.
+        let searxng = config(SearchBackend::Searxng, Some("http://localhost:8888"), None);
+        assert_eq!(
+            searxng.chain(),
+            vec![SearchBackend::Searxng, SearchBackend::Bing]
+        );
+
+        let both = config(
+            SearchBackend::Brave,
+            Some("http://localhost:8888"),
+            Some("k"),
+        );
+        assert_eq!(
+            both.chain(),
+            vec![
+                SearchBackend::Brave,
+                SearchBackend::Searxng,
+                SearchBackend::Bing
+            ]
+        );
+    }
+
+    #[test]
+    fn the_chain_never_includes_an_engine_that_lacks_its_configuration() {
+        // A fallback that cannot run is not a fallback; offering it would only
+        // produce a confusing "tried: brave" in the failure report.
+        let bare = config(SearchBackend::Bing, None, None);
+        assert_eq!(bare.chain(), vec![SearchBackend::Bing]);
+        assert!(!bare.chain().contains(&SearchBackend::Brave));
+        assert!(!bare.chain().contains(&SearchBackend::Searxng));
+    }
+
+    #[test]
+    fn the_configured_engine_is_never_duplicated_in_the_chain() {
+        let brave = config(SearchBackend::Brave, None, Some("k"));
+        assert_eq!(
+            brave.chain(),
+            vec![SearchBackend::Brave, SearchBackend::Bing]
+        );
+    }
+
+    #[test]
+    fn an_empty_report_separates_a_miss_from_a_broken_endpoint() {
+        let bare = config(SearchBackend::Bing, None, None);
+
+        // Everything answered, nothing matched: a wording problem.
+        let miss = bare.empty_report("x", &["bing".into()], &["bing: no results".into()]);
+        assert!(miss.contains("Tried: bing"), "{miss}");
+        assert!(!miss.contains("endpoint problem"), "{miss}");
+        assert!(miss.contains("keyless path"), "{miss}");
+
+        // Nothing answered at all: retrying the wording is pointless, and the
+        // model needs to be told which it is.
+        let broken = bare.empty_report(
+            "x",
+            &["searxng".into(), "bing".into()],
+            &["searxng: HTTP 503".into(), "bing: HTTP 429".into()],
+        );
+        assert!(broken.contains("endpoint problem"), "{broken}");
+        assert!(broken.contains("HTTP 503"), "the cause is named: {broken}");
+        assert!(broken.contains("HTTP 429"), "{broken}");
+    }
+
+    #[test]
+    fn only_transient_statuses_are_retried() {
+        use reqwest::StatusCode;
+        // Worth a second chance.
+        assert!(is_transient(StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_transient(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(is_transient(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(is_transient(StatusCode::BAD_GATEWAY));
+        // A bad key or a missing page says the same thing every time, and
+        // retrying only makes the model wait for it.
+        assert!(!is_transient(StatusCode::UNAUTHORIZED));
+        assert!(!is_transient(StatusCode::FORBIDDEN));
+        assert!(!is_transient(StatusCode::NOT_FOUND));
+        assert!(!is_transient(StatusCode::BAD_REQUEST));
+    }
 
     #[test]
     fn html_becomes_readable_text() {

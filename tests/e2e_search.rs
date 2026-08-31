@@ -68,7 +68,9 @@ async fn a_searxng_instance_answers_and_is_asked_for_json() {
 }
 
 /// SearXNG ships with the JSON format disabled, so this is the mistake users
-/// will actually hit. The error has to name the fix, not just fail to parse.
+/// will actually hit. The search now falls back to a keyless engine rather than
+/// failing outright, but the misconfiguration must still be named: silently
+/// serving scraped results would leave a broken instance broken indefinitely.
 #[tokio::test]
 async fn an_instance_without_json_enabled_says_exactly_that() {
     let (url, _seen) = instance(
@@ -80,12 +82,16 @@ async fn an_instance_without_json_enabled_says_exactly_that() {
         instance_url: Some(url),
         ..SearchSettings::default()
     };
-    let error = settings
-        .resolve_with(|_| None)
-        .search("anything", 3)
-        .await
-        .expect_err("HTML is not a usable answer");
-    let message = format!("{error:#}");
-    assert!(message.contains("settings.yml"), "names the fix: {message}");
-    assert!(message.contains("json"), "{message}");
+    let config = settings.resolve_with(|_| None);
+    // The chain is searxng then bing; with no network in CI both may miss, so
+    // assert on the diagnostic rather than on results arriving.
+    let rendered = match config.search("anything", 3).await {
+        Ok(rendered) => rendered,
+        Err(error) => format!("{error:#}"),
+    };
+    assert!(
+        rendered.contains("settings.yml"),
+        "names the fix: {rendered}"
+    );
+    assert!(rendered.contains("json"), "{rendered}");
 }
