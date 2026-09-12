@@ -11,6 +11,7 @@ use abacus_agent::{
         AbacusPaths, Cli, Command, Config, Credentials, PluginsCommand, Settings, SkillsCommand,
         workspace_from_cli,
     },
+    app_server,
     context::expand_file_references,
     cron,
     extensions::PluginRegistry,
@@ -318,7 +319,9 @@ async fn main() -> Result<()> {
         | Some(Command::Trust)
         | Some(Command::Untrust)
         | Some(Command::Cron { .. }) => unreachable!(),
-        None => {}
+        // Falls through: the app server wants the same resolved config,
+        // session store, and services the TUI gets.
+        Some(Command::AppServer) | None => {}
     }
 
     // Best-effort: ask the provider for the model's real context window and
@@ -393,6 +396,18 @@ async fn main() -> Result<()> {
             services,
             loop_config,
             reporter,
+        )
+        .await;
+    }
+
+    if matches!(cli.command, Some(Command::AppServer)) {
+        return app_server::run(
+            config,
+            settings,
+            credentials,
+            session,
+            (!cli.no_session).then_some(store),
+            services,
         )
         .await;
     }

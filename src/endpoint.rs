@@ -159,6 +159,16 @@ impl ScriptedEndpoint {
             .collect()
     }
 
+    /// Whether this endpoint defines `name` itself (headers are
+    /// case-insensitive, so the comparison is too). Callers that would add a
+    /// default header of their own skip it when this is true, leaving the
+    /// file authoritative.
+    pub fn sets_header(&self, name: &str) -> bool {
+        self.headers
+            .keys()
+            .any(|header| header.eq_ignore_ascii_case(name))
+    }
+
     /// The request URL — always the verbatim `url`, the `protocol` argument is
     /// only used to decide which body Abacus builds.
     pub fn request_url(&self) -> &str {

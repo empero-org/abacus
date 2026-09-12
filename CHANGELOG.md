@@ -2,6 +2,57 @@
 
 ## Unreleased
 
+- **`abacus app-server`**, a persistent machine-facing mode for desktop and
+  editor front ends: JSON-RPC 2.0 over stdin/stdout, one process per workspace
+  and thread. A turn streams as a sequence of *items* — user message, agent
+  message, reasoning, tool call — each announced with `item/started`, streamed
+  through `item/*/delta`, and closed by an authoritative `item/completed`, so a
+  resumed thread and a live one render through one path. Crucially it carries
+  the two points where the agent blocks on a person: approvals and questions
+  arrive as server-initiated requests the client answers, which headless mode
+  cannot do (it is one-shot and auto-rejects every approval). Threads, models,
+  settings, extensions, cron and the working-tree diff are all readable over
+  the same socket, and `config/value/write` sets the model, mode, approval
+  policy and reasoning effort one key at a time — the last two ride the active
+  profile, so a level set in a front end is the one the terminal uses.
+  `turn/diff/updated` reports what the turn did to the working tree, per file,
+  with git's own added/removed counts. `abacus-gui` is the first client.
+
+- **`/models`**, a fullscreen browser over everything a configured endpoint
+  serves: a sidebar of profiles beside a live-filtered model list with the
+  context window and per-million price of each model in right-aligned columns,
+  and a fact line for the one under the cursor. Typing filters (by
+  subsequence, so `clsonnet` finds `claude-sonnet`); Enter switches the
+  profile's model. The columns collapse individually, so an endpoint that
+  reports nothing but ids renders as a plain list rather than a grid of
+  blanks.
+- **Model roles.** A profile can now put a different model on each job it
+  does: `default` runs the conversation, `aux` the background calls,
+  `subagent` delegated agents that name no model of their own, and
+  `compaction` the rolling summary. Unassigned roles inherit from `default`,
+  so a profile that sets none behaves exactly as before. Assign them from the
+  roles view in `/models`. `default` and `aux` keep writing `model` and
+  `aux_model`, so existing settings files are unchanged.
+- Lists throughout the interface now separate the keyboard cursor from the
+  pointer: the cursor is a glyph and accent text, and the filled band is
+  reserved for whatever the mouse is over — so a list with a pointer resting
+  on it no longer shows two highlights that mean different things.
+- `/config` shows on/off settings as `[x]` / `[/]` marks, so a column of
+  switches reads down its left edge.
+- **Theme files.** `/theme <name>` loads a JSON palette from
+  `~/.abacus/themes/`: `vars` names the colours, `colors` says where they go,
+  and every role falls back to the built-in palette so a file that sets one
+  colour is a complete theme. `/theme export <name>` writes the active palette
+  out as a starting point. A broken theme reports why and falls back rather
+  than leaving an unreadable screen.
+- **A Nerd Font glyph preset**, alongside unicode and ascii, selectable in
+  `/config` or with `ABACUS_GLYPHS`. It is never chosen automatically — no
+  terminal reports whether its font has the glyphs. The ascii preset now also
+  covers the panel outlines and the arrows in hint strips, which had stayed
+  Unicode.
+- A model role assigned mid-session now reaches the running configuration
+  immediately instead of waiting for the next launch.
+
 - Normal turns now avoid the redundant per-turn intent-refresh model call; intent
   is captured initially and refreshed only before rolling compaction erases its
   evidence.
@@ -26,6 +77,41 @@
 - Profiles are easier to live with: the profile picker now renames (`r`),
   deletes (`d`), and adds (`n` / `+`), and `/profile` lists, switches,
   renames, and deletes from the composer.
+
+- **OpenCode gateways work without hand-written headers.** Console Go and Zen
+  (`opencode.ai/zen/...`) route by conversation and answer
+  `400 MissingSessionID` when a request does not name one, so every request to
+  an `opencode.ai` endpoint now carries `x-opencode-session`. The id is the
+  session's own and survives a mid-run model or settings change, so a switch
+  is not billed as a second conversation; a scripted endpoint that sets the
+  header itself still wins.
+
+- **Prompt caching actually hits.** Abacus used to fold its volatile context —
+  rolling summary, harness memory, goal, tasks, mode — into the *leading*
+  system message, so the first tokens of every request changed and a
+  provider's prefix cache missed on every turn: a long session re-paid full
+  price for its entire history each step. That context now travels as one
+  block after the conversation, leaving the system prompt and the append-only
+  history as a stable, cacheable prefix. On the Anthropic protocol the request
+  also carries two `cache_control` breakpoints (end of the system prompt, end
+  of the stable history), so each turn reads the previous prefix and writes
+  only the delta. Strict chat templates that demand a leading system message
+  are learned from their first rejection and merged from then on, and a
+  gateway that rejects `cache_control` has it dropped; `agent.prompt_cache`
+  turns the markers off outright.
+- **Compaction and refine run inside the conversation.** When the summariser
+  or reflector is the conversation's own model (the default), the instruction
+  is appended to the live context — same tools, same prefix — instead of
+  rebuilding a fresh prompt from a re-serialised copy of the history, so the
+  most expensive calls of a long session become cache reads. Compaction falls
+  back to the old detached ladder if the in-context call fails.
+- **The footer shows `↑ input  ↓ output`** in place of one "used" total. Rest
+  the pointer on the arrows for the breakdown: cached and uncached input, the
+  cache hit rate, tokens written to the cache, and the session total. Cached
+  tokens are now parsed in Anthropic, OpenAI (`prompt_tokens_details`) and
+  DeepSeek dialects, and Anthropic's context gauge counts cached input rather
+  than only the uncached remainder. `app-server` reports the same breakdown as
+  `usage` on `thread/tokenUsage/updated`.
 
 ## 0.6.1 — 2026-08-14
 

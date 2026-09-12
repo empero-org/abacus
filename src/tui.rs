@@ -4,7 +4,7 @@ use std::{
     io::{self, Stdout},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI32, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -54,7 +54,7 @@ use crate::{
     services::AgentServices,
     session::{Session, SessionStore, SessionUsage},
     task::TaskList,
-    theme::{Theme, ThemeChoice, ThemeMode},
+    theme::ThemeMode,
     ui::{self, Entry, EntryKind, ToolCall, ToolStatus},
 };
 
@@ -117,6 +117,10 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("/model", "Inspect or switch model"),
     (
+        "/models",
+        "Browse every model and assign the roles they serve",
+    ),
+    (
         "/profile",
         "List, switch, rename, or delete a provider profile",
     ),
@@ -158,6 +162,8 @@ struct Hits {
     config: Vec<(Rect, usize)>,
     picker: Vec<(Rect, usize)>,
     transcript: Vec<(Rect, usize)>,
+    hub_scope: Vec<(Rect, usize)>,
+    hub_body: Vec<(Rect, usize)>,
 }
 
 impl Hits {
@@ -166,6 +172,8 @@ impl Hits {
         self.config.clear();
         self.picker.clear();
         self.transcript.clear();
+        self.hub_scope.clear();
+        self.hub_body.clear();
     }
 }
 
@@ -378,6 +386,8 @@ enum ConfigKey {
     Permission,
     ContextWindow,
     MaxOutput,
+    Theme,
+    Glyphs,
     VimMode,
     ShowThinking,
     TokenRate,
@@ -438,6 +448,8 @@ const CONFIG_ROWS: &[ConfigRow] = &[
     ConfigRow::Key(ConfigKey::SearchApiKeyEnv),
     ConfigRow::Key(ConfigKey::SearchSharedInstance),
     ConfigRow::Heading("INTERFACE"),
+    ConfigRow::Key(ConfigKey::Theme),
+    ConfigRow::Key(ConfigKey::Glyphs),
     ConfigRow::Key(ConfigKey::VimMode),
     ConfigRow::Key(ConfigKey::ShowThinking),
     ConfigRow::Key(ConfigKey::TokenRate),
@@ -484,6 +496,12 @@ fn config_help(key: ConfigKey) -> &'static str {
             "Stored in credentials.toml with owner-only permissions. Never shown back."
         }
         ConfigKey::Permission => "Ask before every mutation, or allow them for the session.",
+        ConfigKey::Theme => {
+            "Dark, light, auto, or a theme file from ~/.abacus/themes. `/theme export <name>` writes one to edit."
+        }
+        ConfigKey::Glyphs => {
+            "Which glyph set to draw with. `nerd` needs a patched font installed, so it is never chosen for you."
+        }
         ConfigKey::VimMode => "Esc enters normal mode in the composer instead of clearing it.",
         ConfigKey::ShowThinking => {
             "Show the model's reasoning, where the provider streams it apart from the answer."
@@ -573,6 +591,8 @@ const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey::SearchInstanceUrl,
     ConfigKey::SearchApiKeyEnv,
     ConfigKey::SearchSharedInstance,
+    ConfigKey::Theme,
+    ConfigKey::Glyphs,
     ConfigKey::VimMode,
     ConfigKey::ShowThinking,
     ConfigKey::TokenRate,
@@ -607,6 +627,12 @@ struct FeedbackForm {
 }
 
 const FEEDBACK_CATEGORIES: &[&str] = &["General", "Bug", "Feature", "Performance"];
+
+/// A finished `/models` fetch, posted back from the request task.
+struct CatalogFetched {
+    profile: String,
+    result: Result<Vec<crate::model_info::ModelCard>, String>,
+}
 
 struct FeedbackResult {
     result: std::result::Result<crate::feedback::FeedbackReceipt, String>,
@@ -676,6 +702,19 @@ struct App {
     feedback_form: Option<FeedbackForm>,
     feedback_tx: mpsc::UnboundedSender<FeedbackResult>,
     feedback_rx: mpsc::UnboundedReceiver<FeedbackResult>,
+    model_hub: Option<crate::model_hub::ModelHub>,
+    /// Body rows the last frame had room for. Keyboard paging needs the
+    /// measure the renderer arrived at, and only the renderer knows it.
+    hub_rows: std::cell::Cell<usize>,
+    /// Model catalogs by profile id, fetched on first visit and kept for the
+    /// session so reopening the hub is instant.
+    catalogs: HashMap<String, crate::model_hub::Catalog>,
+    catalog_tx: mpsc::UnboundedSender<CatalogFetched>,
+    catalog_rx: mpsc::UnboundedReceiver<CatalogFetched>,
+    /// Where the pointer last was, so a row under it can paint a hover band.
+    /// Cleared on any keystroke: once you are back on the keyboard, a stale
+    /// band beside the cursor is two highlights saying different things.
+    pointer: Option<(u16, u16)>,
     remote_tx: mpsc::UnboundedSender<RemoteResult>,
     remote_rx: mpsc::UnboundedReceiver<RemoteResult>,
     remote_task: Option<JoinHandle<()>>,
@@ -786,9 +825,9 @@ struct App {
     normal_prefix: Option<char>,
     agent_mode: AgentMode,
     resolved_agent_mode: Option<AgentMode>,
-    /// Shared session token counter; reused when the provider is rebuilt on a
-    /// model switch so the running total survives.
-    tokens: Arc<AtomicU64>,
+    /// Shared session token ledger; reused when the provider is rebuilt on a
+    /// model switch so the running totals survive.
+    tokens: Arc<crate::provider::TokenLedger>,
     session_initial_active_secs: u64,
     started: Instant,
     last_ctrl_c: Option<Instant>,
@@ -824,6 +863,7 @@ impl App {
                     allow_fallbacks: true,
                     context_window: None,
                     max_output_tokens: None,
+                    roles: Default::default(),
                 },
             );
         }
@@ -841,7 +881,7 @@ impl App {
             .as_ref()
             .map(|session| session.active_secs)
             .unwrap_or(0);
-        let tokens = Arc::new(AtomicU64::new(initial_tokens));
+        let tokens = Arc::new(crate::provider::TokenLedger::new(initial_tokens));
         let provider = Provider::with_tokens(&config, tokens.clone())?;
         let aux_provider = aux_provider_for(&config, &provider);
         let goal = GoalState::new(session.as_ref().and_then(|session| session.goal.clone()));
@@ -880,6 +920,7 @@ impl App {
         }
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (feedback_tx, feedback_rx) = mpsc::unbounded_channel();
+        let (catalog_tx, catalog_rx) = mpsc::unbounded_channel();
         let (remote_tx, remote_rx) = mpsc::unbounded_channel();
         let (services_tx, services_rx) = mpsc::unbounded_channel();
         let (refine_tx, refine_rx) = mpsc::unbounded_channel();
@@ -1004,6 +1045,12 @@ impl App {
             feedback_form: None,
             feedback_tx,
             feedback_rx,
+            model_hub: None,
+            hub_rows: std::cell::Cell::new(1),
+            catalogs: HashMap::new(),
+            catalog_tx,
+            catalog_rx,
+            pointer: None,
             remote_tx,
             remote_rx,
             remote_task: None,
@@ -1870,6 +1917,8 @@ impl App {
             tether: self.tether.clone(),
             hive: self.hive.clone(),
             aux_model: self.config.aux_model.clone(),
+            subagent_model: self.config.subagent_model.clone(),
+            compaction_model: self.config.compaction_model.clone(),
             injections: self.injections.clone(),
             modes: self.modes.clone(),
             tasks: self.tasks.clone(),
@@ -1997,6 +2046,10 @@ impl App {
             }
             "/profile" => {
                 self.profile_command(argument);
+                true
+            }
+            "/models" => {
+                self.open_model_hub();
                 true
             }
             "/model" => {
@@ -2911,7 +2964,7 @@ impl App {
         self.tasks = TaskList::default();
         self.compaction = CompactionState::default();
         self.ralph_loop = None;
-        self.tokens.store(0, Ordering::Relaxed);
+        self.tokens.store_total(0);
         self.session_initial_active_secs = 0;
         self.started = Instant::now();
         self.push_entry(Entry::new(EntryKind::System, "New session.".to_owned()));
@@ -2976,7 +3029,7 @@ impl App {
         // Traces are keyed by session id; drop the writer so the next persist
         // reopens it for the fork instead of appending to the original's trace.
         self.trace = None;
-        self.tokens.store(0, Ordering::Relaxed);
+        self.tokens.store_total(0);
         self.session_initial_active_secs = 0;
         self.started = Instant::now();
         self.push_entry(Entry::new(
@@ -3091,7 +3144,7 @@ impl App {
                 self.tasks = TaskList::new(session.tasks.clone());
                 self.compaction = session.compaction.clone().unwrap_or_default();
                 self.ralph_loop = session.ralph_loop.clone();
-                self.tokens.store(session.tokens_used, Ordering::Relaxed);
+                self.tokens.store_total(session.tokens_used);
                 self.session_initial_active_secs = session.active_secs;
                 self.started = Instant::now();
                 self.session = Some(session);
@@ -3194,6 +3247,12 @@ impl App {
         let prior_profile = self.config.profile.clone();
         let prior_key = self.config.api_key.clone();
         self.config.profile = profile_name.clone();
+        // Roles are read before `model` moves out of the clone below. Only
+        // explicit assignments travel: an unassigned role stays `None` so the
+        // turn falls back to whatever the main model is now, rather than
+        // pinning the model this profile happened to have at load time.
+        self.config.subagent_model = profile.role_model("subagent").map(str::to_owned);
+        self.config.compaction_model = profile.role_model("compaction").map(str::to_owned);
         self.config.model = profile.model;
         self.config.aux_model = profile
             .aux_model
@@ -3271,11 +3330,25 @@ impl App {
         if !self.settings.ui.vim_mode {
             self.mode = InputMode::Insert;
         }
-        self.provider = Provider::with_tokens(&self.config, self.tokens.clone())?;
+        let mut provider = Provider::with_tokens(&self.config, self.tokens.clone())?;
+        // Same conversation, new configuration: keep the session id so a host
+        // that routes by it does not see a switch as a second conversation.
+        provider.adopt_session(&self.provider);
+        self.provider = provider;
         self.aux_provider = aux_provider_for(&self.config, &self.provider);
         if let Some(session) = &mut self.session {
             session.profile = self.config.profile.clone();
             session.model = self.config.model.clone();
+        }
+        // The interface's own appearance travels with the settings too, so a
+        // theme edited through the raw config file takes effect on save
+        // rather than on next launch.
+        let (theme, theme_error) =
+            crate::theme::resolve(&self.settings.ui.theme, &self.config.paths.themes_dir);
+        crate::theme::set_active(theme);
+        crate::ui::set_glyphs(self.settings.ui.glyphs);
+        if let Some(error) = theme_error {
+            self.status = error;
         }
         self.persist_session();
         self.reload_services = true;
@@ -3291,35 +3364,95 @@ impl App {
 
     /// `/theme [auto|dark|light]` — switch the palette live and persist it.
     fn theme_command(&mut self, argument: &str) {
-        let choice = match argument.trim().to_ascii_lowercase().as_str() {
-            "" => {
-                let resolved = self.settings.ui.theme.resolve();
-                self.push_entry(Entry::new(EntryKind::System, format!(
-                        "Theme: {} (showing {}). Switch with /theme dark, /theme light, or /theme auto.",
-                        self.settings.ui.theme.label(),
-                        if resolved == ThemeMode::Dark { "dark" } else { "light" },
-                    )
-                ));
-                self.follow = true;
-                return;
+        let argument = argument.trim();
+        if argument.is_empty() {
+            let resolved = self.settings.ui.theme.resolve();
+            let custom = crate::theme::available(&self.config.paths.themes_dir);
+            let mut body = format!(
+                "Theme: {} (showing {}).\nSwitch with /theme dark, /theme light, /theme auto, or /theme <name>.",
+                self.settings.ui.theme.label(),
+                if resolved == ThemeMode::Dark {
+                    "dark"
+                } else {
+                    "light"
+                },
+            );
+            body.push_str(&format!(
+                "\n\nTheme files live in {}.",
+                self.config.paths.themes_dir.display()
+            ));
+            if custom.is_empty() {
+                body.push_str(
+                    "\nNothing there yet — `/theme export <name>` writes the current palette out as a starting point.",
+                );
+            } else {
+                body.push_str(&format!("\nAvailable: {}", custom.join(", ")));
             }
-            "auto" => ThemeChoice::Auto,
-            "dark" => ThemeChoice::Dark,
-            "light" => ThemeChoice::Light,
-            _ => {
-                self.push_entry(Entry::new(
-                    EntryKind::Error,
-                    "Usage: /theme auto|dark|light".to_owned(),
-                ));
-                self.follow = true;
-                return;
-            }
-        };
+            self.push_entry(Entry::new(EntryKind::System, body));
+            self.follow = true;
+            return;
+        }
+        if let Some(name) = argument.strip_prefix("export") {
+            self.export_theme(name.trim());
+            return;
+        }
+        let choice = crate::theme::ThemeChoice::parse(argument);
+        // Load before saving: a name that does not resolve should leave the
+        // setting alone rather than persist a theme that will fail on every
+        // later launch too.
+        let (theme, error) = crate::theme::resolve(&choice, &self.config.paths.themes_dir);
+        if let Some(error) = error {
+            self.push_entry(Entry::new(EntryKind::Error, error));
+            self.follow = true;
+            return;
+        }
+        crate::theme::set_active(theme);
         self.settings.ui.theme = choice;
-        crate::theme::set_active(Theme::for_mode(choice.resolve()));
+        let label = self.settings.ui.theme.label().to_owned();
         match self.settings.save(&self.config.paths) {
-            Ok(()) => self.status = format!("theme: {} · saved", choice.label()),
+            Ok(()) => self.status = format!("theme: {label} · saved"),
             Err(error) => self.status = format!("theme save failed: {error:#}"),
+        }
+        self.follow = true;
+    }
+
+    /// Write the active palette out as a theme file to edit.
+    fn export_theme(&mut self, name: &str) {
+        let name = if name.is_empty() { "custom" } else { name };
+        if !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+        {
+            self.push_entry(Entry::new(
+                EntryKind::Error,
+                "Theme names may use letters, digits, `.`, `_`, and `-`.".to_owned(),
+            ));
+            self.follow = true;
+            return;
+        }
+        let mode = self.settings.ui.theme.resolve();
+        let file = crate::theme::ThemeFile::from_theme(name, mode, &crate::theme::active());
+        let directory = self.config.paths.themes_dir.clone();
+        let path = directory.join(format!("{name}.json"));
+        let written = std::fs::create_dir_all(&directory).and_then(|()| {
+            let json = serde_json::to_string_pretty(&file)?;
+            std::fs::write(&path, format!("{json}\n"))
+        });
+        match written {
+            Ok(()) => {
+                self.push_entry(Entry::new(
+                    EntryKind::System,
+                    format!(
+                        "Wrote {}.\nEdit the colours, then `/theme {name}` to use it.",
+                        path.display()
+                    ),
+                ));
+                self.status = format!("theme exported: {name}");
+            }
+            Err(error) => self.push_entry(Entry::new(
+                EntryKind::Error,
+                format!("could not write {}: {error}", path.display()),
+            )),
         }
         self.follow = true;
     }
@@ -3370,6 +3503,34 @@ impl App {
                 self.settings.search.use_shared_instance =
                     !self.settings.search.use_shared_instance;
                 self.apply_search_settings();
+            }
+            // Both cycle through the built-ins and whatever the user has
+            // written, so a theme file is reachable without knowing its name.
+            ConfigKey::Theme => {
+                let mut names = vec!["auto".to_owned(), "dark".to_owned(), "light".to_owned()];
+                names.extend(crate::theme::available(&self.config.paths.themes_dir));
+                let current = self.settings.ui.theme.label().to_owned();
+                let next = names
+                    .iter()
+                    .position(|name| *name == current)
+                    .map_or(0, |index| (index + 1) % names.len());
+                let choice = crate::theme::ThemeChoice::parse(&names[next]);
+                let (theme, error) = crate::theme::resolve(&choice, &self.config.paths.themes_dir);
+                crate::theme::set_active(theme);
+                if let Some(error) = error {
+                    self.status = error;
+                }
+                self.settings.ui.theme = choice;
+            }
+            ConfigKey::Glyphs => {
+                use crate::ui::GlyphChoice;
+                self.settings.ui.glyphs = match self.settings.ui.glyphs {
+                    GlyphChoice::Auto => GlyphChoice::Unicode,
+                    GlyphChoice::Unicode => GlyphChoice::Nerd,
+                    GlyphChoice::Nerd => GlyphChoice::Ascii,
+                    GlyphChoice::Ascii => GlyphChoice::Auto,
+                };
+                crate::ui::set_glyphs(self.settings.ui.glyphs);
             }
             ConfigKey::VimMode => self.settings.ui.vim_mode = !self.settings.ui.vim_mode,
             ConfigKey::ShowThinking => {
@@ -3433,6 +3594,117 @@ impl App {
         self.save_and_apply_settings()?;
         self.status = format!("{} updated", config_label(key));
         Ok(())
+    }
+
+    // -- /models -----------------------------------------------------------
+
+    /// Open the model hub, scoped to the active profile's catalog.
+    fn open_model_hub(&mut self) {
+        let mut hub = crate::model_hub::ModelHub::new(&self.settings);
+        // Land on the active profile rather than on the roles list: the
+        // common reason to open this is to change the model, and the roles
+        // view is one keypress up from there.
+        let active = self.settings.default_profile.clone();
+        if let Some(index) = hub.scopes.iter().position(
+            |scope| matches!(scope, crate::model_hub::Scope::Profile { id, .. } if *id == active),
+        ) {
+            hub.scope = index;
+            hub.pane = crate::model_hub::Pane::Body;
+        }
+        self.model_hub = Some(hub);
+        self.fetch_catalog(&active);
+    }
+
+    /// Fetch a profile's model list, unless it is already loaded or in flight.
+    fn fetch_catalog(&mut self, profile_id: &str) {
+        use crate::model_hub::Catalog;
+        if matches!(
+            self.catalogs.get(profile_id),
+            Some(Catalog::Loading | Catalog::Ready(_))
+        ) {
+            return;
+        }
+        let Some(profile) = self.settings.profiles.get(profile_id) else {
+            return;
+        };
+        let base_url = profile.base_url.clone();
+        if base_url.trim().is_empty() {
+            self.catalogs.insert(
+                profile_id.to_owned(),
+                Catalog::Failed("this profile has no base URL".to_owned()),
+            );
+            return;
+        }
+        // The key for the *active* profile is already resolved on `config`;
+        // any other profile's key comes from its own environment variable.
+        let api_key = if profile_id == self.settings.default_profile {
+            self.config.api_key.clone()
+        } else {
+            profile
+                .api_key_env
+                .as_deref()
+                .and_then(|name| std::env::var(name).ok())
+        };
+        self.catalogs
+            .insert(profile_id.to_owned(), Catalog::Loading);
+        let sender = self.catalog_tx.clone();
+        let profile = profile_id.to_owned();
+        tokio::spawn(async move {
+            let result = crate::setup::discover_model_cards(&base_url, api_key.as_deref())
+                .await
+                .map_err(|error| format!("{error:#}"));
+            let _ = sender.send(CatalogFetched { profile, result });
+        });
+    }
+
+    fn drain_catalog_events(&mut self) -> bool {
+        use crate::model_hub::Catalog;
+        let mut changed = false;
+        while let Ok(event) = self.catalog_rx.try_recv() {
+            changed = true;
+            let state = match event.result {
+                Ok(cards) => Catalog::Ready(cards),
+                Err(error) => Catalog::Failed(error),
+            };
+            self.catalogs.insert(event.profile, state);
+        }
+        changed
+    }
+
+    /// The catalog for whichever profile the hub is scoped to.
+    fn hub_catalog(&self) -> &crate::model_hub::Catalog {
+        const IDLE: crate::model_hub::Catalog = crate::model_hub::Catalog::Idle;
+        self.model_hub
+            .as_ref()
+            .and_then(|hub| hub.scoped_profile())
+            .and_then(|id| self.catalogs.get(id))
+            .unwrap_or(&IDLE)
+    }
+
+    /// Assign `model` to `role` on the hub's scoped profile (or the active one
+    /// when the hub is on the roles view) and persist.
+    fn assign_role(&mut self, role: &str, model: Option<String>) {
+        let profile_id = self
+            .model_hub
+            .as_ref()
+            .and_then(|hub| hub.scoped_profile())
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.settings.default_profile.clone());
+        let Some(profile) = self.settings.profiles.get_mut(&profile_id) else {
+            self.status = format!("profile {profile_id} no longer exists");
+            return;
+        };
+        profile.set_role_model(role, model.clone());
+        match self.save_and_apply_settings() {
+            Ok(()) => {
+                let label = crate::roles::role(role).map_or(role, |role| role.label);
+                self.status = match model {
+                    Some(model) => format!("{label}: {model} · saved"),
+                    None => format!("{label}: cleared, inherits again"),
+                };
+            }
+            Err(error) => self.status = format!("could not save: {error:#}"),
+        }
     }
 
     fn active_profile_mut(&mut self) -> Result<&mut crate::config::ProviderProfile> {
@@ -3654,6 +3926,33 @@ impl App {
                 }
             }
             ConfigKey::Permission => format!("{:?}", self.settings.ui.permission_mode),
+            ConfigKey::Theme => {
+                let resolved = self.settings.ui.theme.resolve();
+                let polarity = if resolved == ThemeMode::Dark {
+                    "dark"
+                } else {
+                    "light"
+                };
+                match &self.settings.ui.theme {
+                    crate::theme::ThemeChoice::Auto => format!("auto · {polarity}"),
+                    other => other.label().to_owned(),
+                }
+            }
+            ConfigKey::Glyphs => {
+                let choice = self.settings.ui.glyphs;
+                if choice == crate::ui::GlyphChoice::Auto {
+                    // `auto` alone does not say what you are looking at, and
+                    // the difference is the whole reason to open this row.
+                    let resolved = if std::ptr::eq(choice.resolve(), &crate::ui::Glyphs::ASCII) {
+                        "ascii"
+                    } else {
+                        "unicode"
+                    };
+                    format!("auto · {resolved}")
+                } else {
+                    choice.label().to_owned()
+                }
+            }
             ConfigKey::VimMode => on_off(self.settings.ui.vim_mode),
             ConfigKey::ShowThinking => on_off(self.settings.ui.show_thinking),
             ConfigKey::TokenRate => on_off(self.settings.ui.show_token_rate),
@@ -3898,6 +4197,7 @@ impl App {
                 allow_fallbacks: true,
                 context_window: None,
                 max_output_tokens: None,
+                roles: Default::default(),
             },
         );
         let previous = self.settings.default_profile.clone();
@@ -4210,6 +4510,7 @@ impl App {
                 allow_fallbacks: true,
                 context_window: None,
                 max_output_tokens: None,
+                roles: Default::default(),
             },
         );
         // Deliberately persisted but *not* applied: a profile with no model
@@ -4624,7 +4925,7 @@ impl App {
             // runs directly.
             let cancel = std::sync::atomic::AtomicBool::new(false);
             let outcome = crate::refine::run(
-                &provider,
+                &crate::refine::Reflector::detached(&provider),
                 &messages,
                 &harness,
                 &papercuts,
@@ -4886,6 +5187,17 @@ impl App {
         Some((self.turn_output_chars as f64 / 4.0) / elapsed)
     }
 
+    /// The row state for a list row occupying `rect`: whether the keyboard
+    /// cursor is on it, and whether the pointer is over it.
+    fn row_state(&self, rect: Rect, selected: bool) -> ui::RowState {
+        ui::RowState {
+            selected,
+            hovered: self.pointer.is_some_and(|(column, row)| {
+                column >= rect.x && column < rect.right() && row >= rect.y && row < rect.bottom()
+            }),
+        }
+    }
+
     fn scroll_step(&mut self) -> u16 {
         const TRACKPAD_GAP: Duration = Duration::from_millis(80);
         let now = Instant::now();
@@ -5028,8 +5340,12 @@ pub async fn run(
     services: Arc<AgentServices>,
 ) -> Result<()> {
     // Resolve dark/light (auto-detecting the terminal/OS appearance) before the
-    // first frame so the Empero palette matches the surrounding terminal.
-    crate::theme::set_active(crate::theme::Theme::for_mode(settings.ui.theme.resolve()));
+    // first frame so the palette matches the surrounding terminal. A named
+    // theme that fails to load falls back and reports itself once the screen
+    // exists to report it on.
+    let (theme, theme_error) = crate::theme::resolve(&settings.ui.theme, &config.paths.themes_dir);
+    crate::theme::set_active(theme);
+    crate::ui::set_glyphs(settings.ui.glyphs);
     // A recovery file names the session that was interrupted. Resume THAT
     // session so recovered output lands where the turn was running, instead of
     // opening a fresh empty screen and pinning the text to a throwaway session.
@@ -5107,6 +5423,12 @@ pub async fn run(
         session_store,
         services.clone(),
     )?;
+    if let Some(error) = theme_error {
+        app.push_entry(Entry::new(
+            EntryKind::Error,
+            format!("{error}\nFalling back to the built-in theme."),
+        ));
+    }
     if crate::sync::is_configured(&app.credentials) {
         let workspace = app.config.workspace.clone();
         let paths_sync = app.config.paths.clone();
@@ -5127,9 +5449,7 @@ pub async fn run(
             ticker.tick().await; // the first tick fires immediately; skip it
             loop {
                 ticker.tick().await;
-                reporter
-                    .report_heartbeat(&session, tokens.load(std::sync::atomic::Ordering::Relaxed))
-                    .await;
+                reporter.report_heartbeat(&session, tokens.total()).await;
             }
         })
     });
@@ -5310,6 +5630,7 @@ async fn event_loop(
     while !app.quit {
         dirty |= app.drain_agent_events();
         dirty |= app.drain_feedback_events();
+        dirty |= app.drain_catalog_events();
         dirty |= app.drain_remote_events();
         dirty |= app.drain_services_events();
         dirty |= app.drain_refine_events();
@@ -5336,6 +5657,7 @@ async fn event_loop(
                         app.sync_idle_since = Some(Instant::now());
                     }
                     let before = app.input.text();
+                    app.pointer = None;
                     handle_key(app, key);
                     // Editing the prompt invalidates the highlighted
                     // suggestion, so reconcile the popup after every key.
@@ -5353,7 +5675,11 @@ async fn event_loop(
                             app.scroll_down(step)
                         }
                         MouseEventKind::Down(MouseButton::Left) => {
+                            app.pointer = Some((mouse.column, mouse.row));
                             handle_click(app, mouse.column, mouse.row)
+                        }
+                        MouseEventKind::Moved | MouseEventKind::Drag(_) => {
+                            app.pointer = Some((mouse.column, mouse.row));
                         }
                         _ => {}
                     }
@@ -5764,6 +6090,11 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    if app.model_hub.is_some() {
+        handle_model_hub_key(app, key);
+        return;
+    }
+
     if app.config_panel.is_some() {
         let editing = app
             .config_panel
@@ -5901,7 +6232,38 @@ fn handle_click(app: &mut App, column: u16, row: u16) {
     let config = hit(&hits.config, column, row);
     let picker = hit(&hits.picker, column, row);
     let transcript = hit(&hits.transcript, column, row);
+    let hub_scope = hit(&hits.hub_scope, column, row);
+    let hub_body = hit(&hits.hub_body, column, row);
     drop(hits);
+
+    // The hub is modal: while it is up, a click belongs to it or to nothing.
+    if app.model_hub.is_some() {
+        if let Some(index) = hub_scope {
+            if let Some(hub) = app.model_hub.as_mut() {
+                hub.pane = crate::model_hub::Pane::Sidebar;
+                if hub.scope != index {
+                    hub.scope = index;
+                    hub.reset_body();
+                }
+            }
+            app.enter_hub_scope();
+        } else if let Some(index) = hub_body {
+            // First click moves the cursor, second commits — the same
+            // two-step every other list in the interface uses, so a click
+            // never switches a model you were only pointing at.
+            let already = app.model_hub.as_ref().is_some_and(|hub| {
+                hub.selected == index && hub.pane == crate::model_hub::Pane::Body
+            });
+            if let Some(hub) = app.model_hub.as_mut() {
+                hub.pane = crate::model_hub::Pane::Body;
+                hub.selected = index;
+            }
+            if already {
+                app.accept_model_hub();
+            }
+        }
+        return;
+    }
 
     if let Some(index) = completion {
         app.completion_index = index;
@@ -6296,6 +6658,8 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         draw_raw_config(frame, area, app);
     } else if app.feedback_form.is_some() {
         draw_feedback(frame, area, app);
+    } else if app.model_hub.is_some() {
+        draw_model_hub(frame, area, app);
     } else if app.config_panel.is_some() {
         draw_config(frame, area, app);
     } else if app.usage_panel.is_some() {
@@ -6900,7 +7264,8 @@ fn draw_hive(frame: &mut Frame<'_>, area: Rect, app: &App) {
 /// highlighted row filled. Selection is real here: the popup is navigable, and
 /// what is highlighted is what Tab or Enter will insert.
 fn draw_completion_popup(frame: &mut Frame<'_>, input_area: Rect, app: &App) {
-    if app.config_panel.is_some()
+    if app.model_hub.is_some()
+        || app.config_panel.is_some()
         || app.raw_config.is_some()
         || app.feedback_form.is_some()
         || app.usage_panel.is_some()
@@ -7222,9 +7587,22 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     // Two different quantities, so they are labelled as such. Side by side and
     // both called "tokens", the running session total reads as the size of the
     // context, and the two never agree.
+    //
+    // The session figure is a pair of arrows rather than one "used" total,
+    // because the two directions are priced differently and move for different
+    // reasons: input climbs with the context on every turn, output only with
+    // what the model actually writes. A single sum hid both, and hid the thing
+    // that matters most on a long session — how much of that input was served
+    // from the provider's prompt cache. That breakdown is on hover.
+    let usage = app.provider.usage();
+    let cached = usage.cache_rate().is_some();
     let mut right = vec![
         Span::styled(
-            format!("{} used", ui::format_count(app.provider.tokens_used())),
+            format!("↑ {}", ui::format_count(usage.input)),
+            Style::default().fg(if cached { rail() } else { muted() }),
+        ),
+        Span::styled(
+            format!("  ↓ {}", ui::format_count(usage.output)),
             Style::default().fg(muted()),
         ),
         ui::dot(),
@@ -7239,6 +7617,13 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     ];
     right.extend(ui::meter(percent, 8, ctx_color));
     let right_width = ui::spans_width(&right) as u16;
+    // The arrows' own cells, so the pointer resting on them can open the
+    // breakdown. Measured from the right edge because the row is right-aligned.
+    let arrows_width = ui::spans_width(&right[..2]) as u16;
+    let arrows_x = area.x + area.width.saturating_sub(right_width);
+    let hovering_tokens = app.pointer.is_some_and(|(column, row)| {
+        row == area.y && column >= arrows_x && column < arrows_x + arrows_width
+    });
 
     let running = app.running.is_some();
     let mut left = if running {
@@ -7342,50 +7727,529 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Paragraph::new(Line::from(right)).alignment(Alignment::Right),
         area,
     );
+    if hovering_tokens {
+        draw_usage_tooltip(frame, area, arrows_x, &usage);
+    }
 }
 
-/// One row of a selectable list. The cursor row is filled edge to edge and
-/// marked with a rail, so the highlight reads as a band rather than as text
-/// that happens to be a different colour.
-fn list_row(selected: bool, width: usize, content: Vec<Span<'static>>) -> Line<'static> {
-    let palette = crate::theme::active();
-    // Without colour a background fill says nothing, so a selected row leans on
-    // its rail and bold text instead of a band.
-    let fill = if selected {
-        palette.selection
-    } else {
-        palette.overlay
-    };
-    let mark = if selected {
-        Style::default()
-            .fg(primary())
-            .bg(fill)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().bg(fill)
-    };
-    let mut spans = vec![Span::styled(
-        if selected {
-            format!("{} ", ui::glyphs().bar)
-        } else {
-            "  ".to_owned()
-        },
-        mark,
-    )];
-    for span in content {
-        let mut style = span.style.bg(fill);
-        if selected && palette.plain {
-            style = style.add_modifier(Modifier::BOLD);
+/// The token breakdown behind the footer's two arrows, opened by resting the
+/// pointer on them.
+///
+/// Cached and uncached input are shown as the two halves of one quantity, with
+/// the hit rate beside them, because that ratio is the whole reason to look:
+/// cached input is billed at a fraction of uncached, so a long session with a
+/// low rate is re-paying for its own history. An endpoint that reports no cache
+/// figures says so rather than showing a confident 0%.
+fn draw_usage_tooltip(
+    frame: &mut Frame<'_>,
+    footer: Rect,
+    anchor: u16,
+    usage: &crate::provider::TokenUsage,
+) {
+    let mut rows: Vec<(&str, String, Color)> = vec![
+        ("input", ui::format_count(usage.input), text()),
+        ("output", ui::format_count(usage.output), text()),
+    ];
+    match usage.cache_rate() {
+        Some(rate) => {
+            rows.push((
+                "cached",
+                format!("{} · {rate}%", ui::format_count(usage.cache_read)),
+                success(),
+            ));
+            rows.push((
+                "uncached",
+                ui::format_count(usage.uncached_input()),
+                muted(),
+            ));
+            if usage.cache_write > 0 {
+                rows.push(("written", ui::format_count(usage.cache_write), muted()));
+            }
         }
-        spans.push(Span::styled(span.content, style));
+        None => rows.push(("cache", "not reported".to_owned(), muted())),
     }
-    let used = ui::spans_width(&spans);
-    if used < width {
-        spans.push(Span::styled(
-            " ".repeat(width - used),
-            Style::default().bg(fill),
+    rows.push(("total", ui::format_count(usage.total), muted()));
+
+    let label_width = rows
+        .iter()
+        .map(|(label, ..)| label.len())
+        .max()
+        .unwrap_or(0);
+    let value_width = rows
+        .iter()
+        .map(|(_, value, _)| value.chars().count())
+        .max()
+        .unwrap_or(0);
+    let lines: Vec<Line<'static>> = rows
+        .iter()
+        .map(|(label, value, color)| {
+            Line::from(vec![
+                Span::styled(
+                    format!("{label:<label_width$}  "),
+                    Style::default().fg(muted()),
+                ),
+                Span::styled(
+                    format!("{value:>value_width$}"),
+                    Style::default().fg(*color),
+                ),
+            ])
+        })
+        .collect();
+
+    let width = (label_width + value_width + 6) as u16;
+    let height = lines.len() as u16 + 2;
+    // Anchored under the arrows, then pulled left if that would overflow the
+    // frame — a tooltip clipped at the edge is worse than one slightly off its
+    // anchor.
+    let x = anchor
+        .min(footer.x + footer.width.saturating_sub(width))
+        .max(footer.x);
+    let area = Rect {
+        x,
+        y: footer.y.saturating_sub(height),
+        width,
+        height,
+    };
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).block(ui::overlay_block("TOKENS", rail(), None)),
+        area,
+    );
+}
+
+/// The `/models` hub: a sidebar of scopes beside a searchable model list.
+///
+/// Both columns live inside one bordered surface, joined by `┬`/`┴` junctions
+/// punched into the border after the block is drawn — ratatui has no notion of
+/// an interior rule, and drawing two blocks side by side would fence the
+/// columns apart instead of tying them together.
+fn draw_model_hub(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    use crate::model_hub::{Catalog, Pane, Scope};
+    let Some(hub) = &app.model_hub else {
+        return;
+    };
+    let assigning = hub.assigning.as_deref();
+    let hints: &[(&str, &str)] = match (hub.pane, hub.current_scope(), assigning) {
+        (Pane::Sidebar, _, _) => &[("↑↓", "scope"), ("→ enter", "browse"), ("esc", "close")],
+        (Pane::Body, Scope::Roles, _) => &[
+            ("↑↓", "role"),
+            ("enter", "assign"),
+            ("del", "inherit"),
+            ("←", "scopes"),
+            ("esc", "close"),
+        ],
+        (Pane::Body, _, Some(_)) => &[
+            ("↑↓", "select"),
+            ("enter", "assign"),
+            ("type", "filter"),
+            ("esc", "back"),
+        ],
+        (Pane::Body, _, None) => &[
+            ("↑↓", "select"),
+            ("enter", "switch"),
+            ("type", "filter"),
+            ("←", "scopes"),
+            ("esc", "close"),
+        ],
+    };
+    // Full-bleed rather than a centred card: this is a surface you go *to*,
+    // and a floating panel with the composer showing around its edges reads as
+    // a dialog you are meant to dismiss.
+    let popup = area;
+    let title = match assigning {
+        Some(role) => format!("MODELS · assign {role}"),
+        None => "MODELS".to_owned(),
+    };
+    // The hint strip is a row of the body, not a caption on the bottom border:
+    // the column rule has to land somewhere, and it lands on the rule above
+    // the hints rather than in the middle of their text.
+    let inner = open_overlay(frame, popup, &title, primary(), &[]);
+    let columns = Rect {
+        height: inner.height.saturating_sub(2),
+        ..inner
+    };
+    let footer = Rect {
+        y: inner.bottom().saturating_sub(2),
+        height: 2,
+        ..inner
+    };
+
+    // Sidebar width is content-driven within bounds: wide enough for the
+    // longest profile name and its count, never wide enough to starve the
+    // list of the columns that carry the metadata.
+    let widest = hub
+        .scopes
+        .iter()
+        .map(|scope| match scope {
+            Scope::Roles => "roles".len(),
+            Scope::Separator => 0,
+            Scope::Profile { name, .. } => name.chars().count() + 4,
+        })
+        .max()
+        .unwrap_or(0);
+    let sidebar_width = (widest as u16 + 8).clamp(16, 30);
+    let split = ui::split(columns, sidebar_width);
+    let narrow = split.body.width < ui::MIN_SPLIT_BODY;
+
+    frame.render_widget(
+        Paragraph::new(Text::from(vec![
+            ui::rule(inner.width),
+            Line::from(ui::hints(hints)),
+        ])),
+        footer,
+    );
+    if !narrow {
+        draw_hub_divider(frame, popup, footer.y, split.divider_x);
+        draw_hub_sidebar(frame, split.sidebar, app, hub);
+    }
+    let body = if narrow { columns } else { split.body };
+    match hub.current_scope() {
+        Scope::Roles => draw_hub_roles(frame, body, app, hub),
+        Scope::Separator => {}
+        Scope::Profile { id, .. } => {
+            let catalog = app.catalogs.get(id).unwrap_or(&Catalog::Idle);
+            draw_hub_models(frame, body, app, hub, catalog);
+        }
+    }
+}
+
+/// The interior column rule, plus the junctions where it meets the border.
+fn draw_hub_divider(frame: &mut Frame<'_>, popup: Rect, footer_y: u16, column: u16) {
+    let palette = crate::theme::active();
+    let set = ui::glyphs();
+    let buffer = frame.buffer_mut();
+    for row in popup.y..=footer_y {
+        let glyph = if row == popup.y {
+            set.tee_down
+        } else if row == footer_y {
+            set.tee_up
+        } else {
+            set.track
+        };
+        if let Some(cell) = buffer.cell_mut((column, row)) {
+            cell.set_symbol(glyph)
+                .set_style(Style::default().fg(palette.border).bg(palette.overlay));
+        }
+    }
+}
+
+fn draw_hub_sidebar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    hub: &crate::model_hub::ModelHub,
+) {
+    use crate::model_hub::{Catalog, Pane, Scope};
+    let width = area.width as usize;
+    let focused = hub.pane == Pane::Sidebar;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (index, scope) in hub.scopes.iter().enumerate() {
+        if lines.len() >= area.height as usize {
+            break;
+        }
+        let rect = Rect {
+            y: area.y + lines.len() as u16,
+            height: 1,
+            ..area
+        };
+        if matches!(scope, Scope::Separator) {
+            lines.push(ui::rule(area.width));
+            continue;
+        }
+        let selected = index == hub.scope;
+        app.hits.borrow_mut().hub_scope.push((rect, index));
+        // The cursor only shows in the column that has the keyboard, so it is
+        // always unambiguous which list the arrow keys are driving.
+        let state = app.row_state(rect, selected && focused);
+        let (label, annotation, mark) = match scope {
+            Scope::Roles => {
+                let (assigned, total) = app
+                    .settings
+                    .profiles
+                    .get(&app.settings.default_profile)
+                    .map(|profile| profile.assigned_roles())
+                    .unwrap_or((0, 0));
+                ("roles".to_owned(), format!("{assigned}/{total}"), None)
+            }
+            Scope::Profile { id, name } => {
+                let catalog = app.catalogs.get(id).unwrap_or(&Catalog::Idle);
+                (
+                    name.clone(),
+                    catalog.annotation(),
+                    Some(*id == app.settings.default_profile),
+                )
+            }
+            Scope::Separator => unreachable!("handled above"),
+        };
+        let mut content: Vec<Span<'static>> = Vec::new();
+        if let Some(active) = mark {
+            content.push(ui::state_mark(active));
+            content.push(Span::raw(" "));
+        }
+        let label_width =
+            width.saturating_sub(2 + ui::spans_width(&content) + annotation.chars().count() + 1);
+        content.push(Span::styled(
+            ui::truncate(&label, label_width),
+            Style::default()
+                .fg(if selected { text() } else { muted() })
+                .add_modifier(if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ));
+        let used = ui::spans_width(&content) + 2;
+        let gap = width
+            .saturating_sub(used + annotation.chars().count())
+            .max(1);
+        content.push(Span::raw(" ".repeat(gap)));
+        content.push(Span::styled(annotation, Style::default().fg(rail())));
+        lines.push(ui::list_row(state, width, content));
+    }
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
+}
+
+/// Rows reserved below a hub list for the rule and the detail block.
+const HUB_DETAIL_ROWS: u16 = 3;
+
+fn draw_hub_roles(frame: &mut Frame<'_>, area: Rect, app: &App, hub: &crate::model_hub::ModelHub) {
+    use crate::model_hub::Pane;
+    let rows = crate::model_hub::role_rows(&app.settings, &app.settings.default_profile);
+    let width = area.width as usize;
+    let focused = hub.pane == Pane::Body;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let label_width = rows
+        .iter()
+        .map(|row| row.label.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(8);
+    for (index, row) in rows.iter().enumerate() {
+        let rect = Rect {
+            y: area.y + lines.len() as u16,
+            height: 1,
+            ..area
+        };
+        app.hits.borrow_mut().hub_body.push((rect, index));
+        let selected = index == hub.selected;
+        let state = app.row_state(rect, selected && focused);
+        // An inherited model is shown, not hidden — you need to know what the
+        // role will actually use — but dimmed, so "chosen" and "came along for
+        // the ride" never look the same.
+        let model_style = if row.inherited {
+            Style::default().fg(rail())
+        } else if selected {
+            Style::default().fg(primary())
+        } else {
+            Style::default().fg(text())
+        };
+        let model = if row.inherited {
+            format!("{} (inherited)", row.model)
+        } else {
+            row.model.clone()
+        };
+        lines.push(ui::list_row(
+            state,
+            width,
+            vec![
+                Span::styled(
+                    format!("{:<label_width$}  ", row.label),
+                    Style::default()
+                        .fg(if selected { text() } else { muted() })
+                        .add_modifier(if selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+                Span::styled(
+                    ui::truncate(&model, width.saturating_sub(label_width + 5)),
+                    model_style,
+                ),
+            ],
         ));
     }
+    app.hub_rows
+        .set(area.height.saturating_sub(HUB_DETAIL_ROWS).max(1) as usize);
+    let detail = rows
+        .get(hub.selected)
+        .map(|row| row.help.to_owned())
+        .unwrap_or_default();
+    while lines.len() + HUB_DETAIL_ROWS as usize <= area.height as usize {
+        lines.push(Line::default());
+    }
+    lines.truncate(area.height.saturating_sub(2) as usize);
+    lines.push(ui::rule(area.width));
+    lines.push(Line::from(Span::styled(
+        format!("  {}", ui::truncate(&detail, width.saturating_sub(2))),
+        Style::default().fg(muted()),
+    )));
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
+}
+
+fn draw_hub_models(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    hub: &crate::model_hub::ModelHub,
+    catalog: &crate::model_hub::Catalog,
+) {
+    use crate::model_hub::{Catalog, Pane};
+    let width = area.width as usize;
+    let focused = hub.pane == Pane::Body;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // The search row is always live — there is no mode to enter, so there is
+    // none to forget to leave.
+    let query = if hub.search.is_empty() {
+        Span::styled("type to filter", Style::default().fg(rail()))
+    } else {
+        Span::styled(hub.search.clone(), Style::default().fg(text()))
+    };
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{} ", ui::glyphs().prompt),
+            Style::default().fg(primary()).add_modifier(Modifier::BOLD),
+        ),
+        query,
+    ]));
+    lines.push(Line::default());
+
+    let list_height = area
+        .height
+        .saturating_sub(lines.len() as u16 + HUB_DETAIL_ROWS) as usize;
+    app.hub_rows.set(list_height.max(1));
+    let matched = crate::model_hub::filter(catalog.cards(), &hub.search);
+    let current = app
+        .settings
+        .profiles
+        .get(hub.scoped_profile().unwrap_or_default())
+        .map(|profile| profile.model.clone())
+        .unwrap_or_default();
+
+    // Column widths are measured over the visible window alone, so scrolling
+    // through a stretch of unpriced models closes the price column instead of
+    // holding a gutter open for rows that are not on screen.
+    let visible: Vec<&crate::model_info::ModelCard> = matched
+        .iter()
+        .skip(hub.window)
+        .take(list_height)
+        .copied()
+        .collect();
+    let cells: Vec<Vec<String>> = visible
+        .iter()
+        .map(|card| vec![card.context_label(), card.cost_label()])
+        .collect();
+    let widths = ui::metric_widths(cells.iter().map(Vec::as_slice), 2);
+    let metrics = ui::metrics_width(&widths);
+
+    if visible.is_empty() {
+        lines.push(Line::from(Span::styled(
+            match catalog {
+                Catalog::Loading => "  Asking the endpoint what it serves…".to_owned(),
+                Catalog::Failed(error) => format!("  {error}"),
+                Catalog::Idle => "  Nothing loaded yet.".to_owned(),
+                Catalog::Ready(_) if !hub.search.is_empty() => {
+                    "  Nothing matches that filter.".to_owned()
+                }
+                Catalog::Ready(_) => "  The endpoint listed no models.".to_owned(),
+            },
+            Style::default().fg(if matches!(catalog, Catalog::Failed(_)) {
+                danger()
+            } else {
+                muted()
+            }),
+        )));
+    }
+    for (offset, card) in visible.iter().enumerate() {
+        let index = hub.window + offset;
+        let rect = Rect {
+            y: area.y + lines.len() as u16,
+            height: 1,
+            ..area
+        };
+        app.hits.borrow_mut().hub_body.push((rect, index));
+        let selected = index == hub.selected;
+        let state = app.row_state(rect, selected && focused);
+        let mut content: Vec<Span<'static>> = Vec::new();
+        // The supplier is a dim prefix rather than an indent level: it groups
+        // a long list visually while every id still starts at the same column.
+        if let Some(provider) = &card.provider {
+            content.push(Span::styled(
+                format!("{provider}/"),
+                Style::default().fg(rail()),
+            ));
+        }
+        content.push(Span::styled(
+            card.short_id().to_owned(),
+            Style::default()
+                .fg(if selected { primary() } else { text() })
+                .add_modifier(if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ));
+        if card.id == current {
+            content.push(Span::styled(
+                format!(" {}", ui::glyphs().ok),
+                Style::default().fg(success()),
+            ));
+        }
+        let label_width = width.saturating_sub(metrics + 4);
+        let mut row = ui::fit(content, label_width);
+        row.push(Span::raw("  "));
+        row.extend(ui::metric_cells(&cells[offset], &widths));
+        lines.push(ui::list_row(state, width, row));
+    }
+
+    while lines.len() + HUB_DETAIL_ROWS as usize <= area.height as usize {
+        lines.push(Line::default());
+    }
+    lines.truncate(area.height.saturating_sub(2) as usize);
+    lines.push(ui::rule(area.width));
+    lines.push(hub_detail(
+        matched.get(hub.selected).copied(),
+        width.saturating_sub(2),
+    ));
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
+}
+
+/// The one-line fact block under the model list.
+///
+/// A row of comparable, `·`-joined facts about the selected model — the shape
+/// of it, then the prose. Truncation eats the description first, which is the
+/// part you can afford to lose.
+fn hub_detail(card: Option<&crate::model_info::ModelCard>, width: usize) -> Line<'static> {
+    let Some(card) = card else {
+        return Line::default();
+    };
+    let mut facts = vec![card.name.clone().unwrap_or_else(|| card.id.clone())];
+    facts.push(card.context_label());
+    if let Some(output) = card.max_output_tokens {
+        facts.push(format!("{} out", ui::format_count(output as u64)));
+    }
+    let cost = card.cost_label();
+    if !cost.is_empty() {
+        facts.push(if cost == "free" {
+            cost
+        } else {
+            format!("{cost} per M")
+        });
+    }
+    if card.reasoning {
+        facts.push("reasoning".to_owned());
+    }
+    if card.vision {
+        facts.push("vision".to_owned());
+    }
+    if let Some(description) = &card.description {
+        facts.push(description.clone());
+    }
+    // Indented to the content column, so the facts sit under the model names
+    // rather than under the cursor gutter.
+    let mut spans = vec![Span::raw("  ")];
+    spans.extend(ui::fit(ui::facts(&facts).spans, width));
     Line::from(spans)
 }
 
@@ -7398,7 +8262,10 @@ fn open_overlay(
     hints: &[(&str, &str)],
 ) -> Rect {
     frame.render_widget(Clear, area);
-    let block = ui::overlay_block(title, accent, Some(ui::overlay_hints(hints)));
+    // No hints means no caption on the bottom border — an empty strip leaves a
+    // two-column notch in the rule that reads as a rendering bug.
+    let footer = (!hints.is_empty()).then(|| ui::overlay_hints(hints));
+    let block = ui::overlay_block(title, accent, footer);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     inner
@@ -8013,15 +8880,18 @@ fn draw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let mut selected_row = 0usize;
     // Build every row first, then window around the cursor: with headings
     // interleaved, a row's position is no longer its index in CONFIG_KEYS.
-    let mut rows: Vec<(Option<usize>, Line<'static>)> = Vec::new();
+    // Rows are kept as spans rather than finished lines because a row cannot
+    // know whether the pointer is over it until the window fixes where it
+    // lands on screen.
+    let mut rows: Vec<(Option<usize>, Vec<Span<'static>>)> = Vec::new();
     for row in CONFIG_ROWS {
         match row {
             ConfigRow::Heading(title) => rows.push((
                 None,
-                Line::from(Span::styled(
+                vec![Span::styled(
                     format!("  {title}"),
                     Style::default().fg(rail()).add_modifier(Modifier::BOLD),
-                )),
+                )],
             )),
             ConfigRow::Key(key) => {
                 let index = key_index;
@@ -8030,29 +8900,22 @@ fn draw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 if selected {
                     selected_row = rows.len();
                 }
-                rows.push((
-                    Some(index),
-                    list_row(
-                        selected,
-                        width,
-                        vec![
-                            Span::styled(
-                                format!("{:<26}", config_label(*key)),
-                                Style::default()
-                                    .fg(if selected { text() } else { muted() })
-                                    .add_modifier(if selected {
-                                        Modifier::BOLD
-                                    } else {
-                                        Modifier::empty()
-                                    }),
-                            ),
-                            Span::styled(
-                                ui::truncate(&app.config_value(*key), width.saturating_sub(30)),
-                                Style::default().fg(if selected { primary() } else { text() }),
-                            ),
-                        ],
-                    ),
+                let mut content = vec![Span::styled(
+                    format!("{:<26}", config_label(*key)),
+                    Style::default()
+                        .fg(if selected { text() } else { muted() })
+                        .add_modifier(if selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                )];
+                content.extend(config_value_spans(
+                    &app.config_value(*key),
+                    width.saturating_sub(30),
+                    selected,
                 ));
+                rows.push((Some(index), content));
             }
         }
     }
@@ -8060,19 +8923,21 @@ fn draw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let first = selected_row
         .saturating_sub(visible.saturating_sub(1))
         .min(rows.len().saturating_sub(visible.min(rows.len())));
-    for (offset, (index, line)) in rows.into_iter().skip(first).take(visible).enumerate() {
-        if let Some(index) = index {
-            app.hits.borrow_mut().config.push((
-                Rect {
-                    x: list.x,
-                    y: list.y + offset as u16,
-                    width: list.width,
-                    height: 1,
-                },
-                index,
-            ));
+    for (offset, (index, content)) in rows.into_iter().skip(first).take(visible).enumerate() {
+        let rect = Rect {
+            x: list.x,
+            y: list.y + offset as u16,
+            width: list.width,
+            height: 1,
+        };
+        match index {
+            Some(index) => {
+                app.hits.borrow_mut().config.push((rect, index));
+                let state = app.row_state(rect, index == panel.selected);
+                lines.push(ui::list_row(state, width, content));
+            }
+            None => lines.push(Line::from(content)),
         }
-        lines.push(line);
     }
     frame.render_widget(Paragraph::new(Text::from(lines)), list);
 
@@ -8361,8 +9226,8 @@ fn draw_user_question(frame: &mut Frame<'_>, area: Rect, app: &App) {
             (false, true) => "(•)",
             (false, false) => "( )",
         };
-        lines.push(list_row(
-            on_cursor,
+        lines.push(ui::list_row(
+            ui::RowState::selected(on_cursor),
             width,
             vec![
                 Span::styled(
@@ -8702,17 +9567,15 @@ fn draw_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
     for (index, (label, _)) in picker.items.iter().enumerate().skip(start).take(rows) {
         let selected = index == picker.selected;
-        app.hits.borrow_mut().picker.push((
-            Rect {
-                x: inner.x,
-                y: inner.y + lines.len() as u16,
-                width: inner.width,
-                height: 1,
-            },
-            index,
-        ));
-        lines.push(list_row(
-            selected,
+        let rect = Rect {
+            x: inner.x,
+            y: inner.y + lines.len() as u16,
+            width: inner.width,
+            height: 1,
+        };
+        app.hits.borrow_mut().picker.push((rect, index));
+        lines.push(ui::list_row(
+            app.row_state(rect, selected),
             width,
             vec![Span::styled(
                 ui::truncate(label, width.saturating_sub(3)),
@@ -8774,6 +9637,197 @@ fn draw_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     ])),
                     field,
                 );
+            }
+        }
+    }
+}
+
+/// Keys for the `/models` hub.
+///
+/// The body list is searchable, so plain letters type rather than navigate —
+/// there is no vim-style `j`/`k` there, because a model list is something you
+/// filter your way through, not something you walk. The sidebar has no search
+/// and keeps them.
+fn handle_model_hub_key(app: &mut App, key: KeyEvent) {
+    use crate::model_hub::{Pane, Scope};
+    let Some(hub) = &app.model_hub else {
+        return;
+    };
+    let visible = app.hub_rows.get().max(1);
+    let in_roles = matches!(hub.current_scope(), Scope::Roles);
+    let in_body = hub.pane == Pane::Body;
+    let len = if in_roles {
+        crate::roles::ROLES.len()
+    } else {
+        let cards = app.hub_catalog().cards();
+        crate::model_hub::filter(cards, &hub.search).len()
+    };
+
+    match key.code {
+        KeyCode::Esc => {
+            let hub = app.model_hub.as_mut().expect("checked above");
+            if in_body && !hub.search.is_empty() {
+                hub.search.clear();
+                hub.reset_body();
+            } else if hub.assigning.is_some() {
+                // Back out of an assignment to the roles list it came from,
+                // rather than closing the surface out from under a half-made
+                // decision.
+                hub.assigning = None;
+                hub.scope = 0;
+                hub.reset_body();
+            } else {
+                app.model_hub = None;
+            }
+        }
+        KeyCode::Tab | KeyCode::Right => {
+            if let Some(hub) = app.model_hub.as_mut() {
+                hub.pane = Pane::Body;
+            }
+            app.enter_hub_scope();
+        }
+        KeyCode::Left => {
+            if let Some(hub) = app.model_hub.as_mut() {
+                hub.pane = Pane::Sidebar;
+            }
+        }
+        KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
+            let page = visible.max(1) as isize;
+            let delta = match key.code {
+                KeyCode::Up => -1,
+                KeyCode::Down => 1,
+                KeyCode::PageUp => -page,
+                _ => page,
+            };
+            let hub = app.model_hub.as_mut().expect("checked above");
+            if in_body {
+                hub.move_selection(delta, len, visible);
+            } else {
+                hub.move_scope(delta.signum());
+                app.enter_hub_scope();
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Char('j') if !in_body => {
+            let delta = if key.code == KeyCode::Char('k') {
+                -1
+            } else {
+                1
+            };
+            app.model_hub
+                .as_mut()
+                .expect("checked above")
+                .move_scope(delta);
+            app.enter_hub_scope();
+        }
+        KeyCode::Enter => app.accept_model_hub(),
+        KeyCode::Backspace if in_body && !in_roles => {
+            let hub = app.model_hub.as_mut().expect("checked above");
+            hub.search.pop();
+            hub.reset_body();
+        }
+        KeyCode::Delete if in_body && in_roles => {
+            let role = crate::roles::ROLES
+                .get(app.model_hub.as_ref().expect("checked above").selected)
+                .map(|role| role.id);
+            if let Some(role) = role {
+                app.assign_role(role, None);
+            }
+        }
+        KeyCode::Char(ch)
+            if in_body && !in_roles && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            let hub = app.model_hub.as_mut().expect("checked above");
+            hub.search.push(ch);
+            hub.reset_body();
+        }
+        _ => {}
+    }
+}
+
+impl App {
+    /// Make sure the scope under the sidebar cursor has a catalog on the way.
+    fn enter_hub_scope(&mut self) {
+        let profile = self
+            .model_hub
+            .as_ref()
+            .and_then(|hub| hub.scoped_profile())
+            .map(str::to_owned);
+        if let Some(profile) = profile {
+            self.fetch_catalog(&profile);
+        }
+    }
+
+    /// Enter on the hub: step into a scope, open a role for assignment, or
+    /// commit the model under the cursor.
+    fn accept_model_hub(&mut self) {
+        use crate::model_hub::{Pane, Scope};
+        let Some(hub) = &self.model_hub else {
+            return;
+        };
+        if hub.pane == Pane::Sidebar {
+            if let Some(hub) = self.model_hub.as_mut() {
+                hub.pane = Pane::Body;
+                hub.reset_body();
+            }
+            self.enter_hub_scope();
+            return;
+        }
+        match hub.current_scope() {
+            Scope::Separator => {}
+            Scope::Roles => {
+                // Picking a role opens the active profile's catalog with the
+                // role held in `assigning`, so the next Enter lands on it.
+                let Some(role) = crate::roles::ROLES.get(hub.selected) else {
+                    return;
+                };
+                let active = self.settings.default_profile.clone();
+                let target = self.model_hub.as_ref().and_then(|hub| {
+                    hub.scopes.iter().position(
+                        |scope| matches!(scope, Scope::Profile { id, .. } if *id == active),
+                    )
+                });
+                let Some(target) = target else {
+                    self.status = "no profile to pick a model from".to_owned();
+                    return;
+                };
+                if let Some(hub) = self.model_hub.as_mut() {
+                    hub.assigning = Some(role.id.to_owned());
+                    hub.scope = target;
+                    hub.pane = Pane::Body;
+                    hub.search.clear();
+                    hub.reset_body();
+                }
+                self.enter_hub_scope();
+            }
+            Scope::Profile { .. } => {
+                let cards = self.hub_catalog().cards();
+                let Some(model) = crate::model_hub::filter(cards, &hub.search)
+                    .get(hub.selected)
+                    .map(|card| card.id.clone())
+                else {
+                    return;
+                };
+                // Without a role in hand, Enter means "switch this profile's
+                // model" — which is the `default` role by another name.
+                let role = hub
+                    .assigning
+                    .clone()
+                    .unwrap_or_else(|| "default".to_owned());
+                self.assign_role(&role, Some(model));
+                if let Some(hub) = self.model_hub.as_mut()
+                    && let Some(assigned) = hub.assigning.take()
+                {
+                    hub.scope = 0;
+                    hub.search.clear();
+                    hub.reset_body();
+                    // Land back on the role that was just set rather than at
+                    // the top: assigning two roles in a row is the common
+                    // case, and the eye is already there.
+                    hub.selected = crate::roles::ROLES
+                        .iter()
+                        .position(|role| role.id == assigned)
+                        .unwrap_or(0);
+                }
             }
         }
     }
@@ -8998,6 +10052,8 @@ fn config_label(key: ConfigKey) -> &'static str {
         ConfigKey::Fallbacks => "Allow other providers",
         ConfigKey::ApiKey => "API key",
         ConfigKey::Permission => "Permission mode",
+        ConfigKey::Theme => "Theme",
+        ConfigKey::Glyphs => "Glyphs",
         ConfigKey::VimMode => "Vim keybindings",
         ConfigKey::ShowThinking => "Show thinking",
         ConfigKey::TokenRate => "Show tokens/second",
@@ -9073,6 +10129,22 @@ fn config_key_is_editable(key: ConfigKey) -> bool {
             | ConfigKey::SearchApiKeyEnv
             | ConfigKey::FeedbackEndpoint
     )
+}
+
+/// The value column of a config row.
+///
+/// A setting that is simply on or off gets the same `[x]` / `[/]` mark the
+/// model hub uses for the same idea, so a column of switches can be read down
+/// its left edge instead of word by word. Everything else is plain text.
+fn config_value_spans(value: &str, width: usize, selected: bool) -> Vec<Span<'static>> {
+    let style = Style::default().fg(if selected { primary() } else { text() });
+    match value {
+        "On" | "Off" => vec![
+            ui::state_mark(value == "On"),
+            Span::styled(format!(" {}", value.to_ascii_lowercase()), style),
+        ],
+        _ => vec![Span::styled(ui::truncate(value, width), style)],
+    }
 }
 
 fn on_off(value: bool) -> String {
@@ -9524,6 +10596,7 @@ mod tests {
                 allow_fallbacks: true,
                 context_window: None,
                 max_output_tokens: None,
+                roles: Default::default(),
             },
         );
         app.settings.profiles.insert(
@@ -9541,6 +10614,7 @@ mod tests {
                 allow_fallbacks: true,
                 context_window: None,
                 max_output_tokens: None,
+                roles: Default::default(),
             },
         );
 
@@ -9766,6 +10840,7 @@ mod tests {
                 allow_fallbacks: true,
                 context_window: None,
                 max_output_tokens: None,
+                roles: Default::default(),
             },
         );
         app.open_profile_picker();
@@ -9810,6 +10885,7 @@ mod tests {
                 allow_fallbacks: true,
                 context_window,
                 max_output_tokens,
+                roles: Default::default(),
             },
         );
     }
@@ -10127,6 +11203,7 @@ mod tests {
                 allow_fallbacks: true,
                 context_window: None,
                 max_output_tokens: None,
+                roles: Default::default(),
             },
         );
         app.config_panel = Some(ConfigPanel {
@@ -10243,16 +11320,46 @@ mod tests {
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let rendered = buffer_text(terminal.backend().buffer(), 100, 20);
         // "449.1k tokens · ctx 24%" read as one measurement of the same thing.
-        // They are the running session total and the current window, so they
-        // are named differently and the window shows its own denominator.
+        // They are what the session has spent and how full the window is, so
+        // the first is a direction pair and the second carries a denominator.
+        assert!(rendered.contains("↑ "), "session input should be marked up");
         assert!(
-            rendered.contains("used"),
-            "session total should be labelled"
+            rendered.contains("↓ "),
+            "session output should be marked down"
         );
         assert!(rendered.contains("ctx "), "context should be labelled");
         assert!(
             !rendered.contains("tokens  ·  ctx"),
             "the two figures must not both read as token counts"
+        );
+    }
+
+    #[test]
+    fn resting_the_pointer_on_the_arrows_opens_the_token_breakdown() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.entries = vec![Entry::new(EntryKind::Assistant, "hi")];
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Nothing is open until the pointer is actually on the readout.
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(!buffer_text(terminal.backend().buffer(), 100, 20).contains("TOKENS"));
+
+        // The footer's last row, inside the arrows: they sit at the left of the
+        // right-aligned group, whose width the context meter dominates.
+        let row = 19;
+        let mut opened = false;
+        for column in 0..100 {
+            app.pointer = Some((column, row));
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            if buffer_text(terminal.backend().buffer(), 100, 20).contains("TOKENS") {
+                opened = true;
+                break;
+            }
+        }
+        assert!(
+            opened,
+            "the arrows should have a hover target on the footer row"
         );
     }
 
@@ -11391,6 +12498,224 @@ mod tests {
         assert!(rendered.contains("abacus-pro"));
     }
 
+    fn hub_card(id: &str, context: usize, input: f64, output: f64) -> crate::model_info::ModelCard {
+        crate::model_info::ModelCard {
+            id: id.to_owned(),
+            provider: id.split_once('/').map(|(provider, _)| provider.to_owned()),
+            context_length: Some(context),
+            input_cost: Some(input),
+            output_cost: Some(output),
+            ..crate::model_info::ModelCard::default()
+        }
+    }
+
+    #[test]
+    fn the_model_hub_renders_both_columns_in_one_box() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.catalogs.insert(
+            "test".to_owned(),
+            crate::model_hub::Catalog::Ready(vec![
+                hub_card("anthropic/claude-sonnet-4.5", 200_000, 3.0, 15.0),
+                hub_card("openai/gpt-5", 400_000, 1.25, 10.0),
+            ]),
+        );
+        app.model_hub = Some(crate::model_hub::ModelHub::new(&app.settings));
+        if let Some(hub) = app.model_hub.as_mut() {
+            hub.scope = 2;
+            hub.pane = crate::model_hub::Pane::Body;
+        }
+        let backend = TestBackend::new(110, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let rendered = buffer_text(terminal.backend().buffer(), 110, 24);
+
+        assert!(rendered.contains("MODELS"), "{rendered}");
+        // Sidebar and body are both live, and the sidebar carries the profile
+        // marker and its model count.
+        assert!(rendered.contains("roles"), "{rendered}");
+        assert!(rendered.contains("[x] Test"), "{rendered}");
+        assert!(rendered.contains("anthropic/"), "{rendered}");
+        assert!(rendered.contains("claude-sonnet-4.5"), "{rendered}");
+        // The metric columns carry what the catalog reported.
+        assert!(rendered.contains("200k ctx"), "{rendered}");
+        assert!(rendered.contains("$3/15"), "{rendered}");
+        assert!(rendered.contains("400k ctx"), "{rendered}");
+        // One box: the column rule is joined into the border, not floating.
+        assert!(rendered.contains('┬'), "top junction missing:\n{rendered}");
+        assert!(
+            rendered.contains('┴'),
+            "bottom junction missing:\n{rendered}"
+        );
+
+        // On a terminal too narrow to carry two columns the sidebar drops and
+        // the list keeps the whole width, rather than squeezing to nothing.
+        let narrow = TestBackend::new(46, 18);
+        let mut narrow_terminal = Terminal::new(narrow).unwrap();
+        narrow_terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let rendered = buffer_text(narrow_terminal.backend().buffer(), 46, 18);
+        assert!(rendered.contains("claude-sonnet"), "{rendered}");
+        assert!(
+            !rendered.contains('┬'),
+            "no split at this width:\n{rendered}"
+        );
+
+        // Typing filters rather than navigating — the list is searched, not walked.
+        for ch in "gpt".chars() {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()),
+            );
+        }
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let rendered = buffer_text(terminal.backend().buffer(), 110, 24);
+        assert!(rendered.contains("gpt-5"), "{rendered}");
+        assert!(!rendered.contains("claude-sonnet"), "{rendered}");
+    }
+
+    #[test]
+    fn picking_a_model_for_a_role_assigns_it_and_returns_to_the_roles_list() {
+        use crate::model_hub::{Pane, Scope};
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.catalogs.insert(
+            "test".to_owned(),
+            crate::model_hub::Catalog::Ready(vec![hub_card("openai/gpt-5", 400_000, 1.25, 10.0)]),
+        );
+        app.model_hub = Some(crate::model_hub::ModelHub::new(&app.settings));
+        if let Some(hub) = app.model_hub.as_mut() {
+            hub.pane = Pane::Body;
+            // The `aux` role.
+            hub.selected = 1;
+        }
+        // Enter on the role opens the catalog with the role in hand…
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        let hub = app.model_hub.as_ref().expect("hub is still open");
+        assert_eq!(hub.assigning.as_deref(), Some("aux"));
+        assert!(matches!(hub.current_scope(), Scope::Profile { .. }));
+
+        // …and Enter on a model assigns it and comes back.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        let hub = app.model_hub.as_ref().expect("hub is still open");
+        assert_eq!(hub.assigning, None);
+        assert_eq!(*hub.current_scope(), Scope::Roles);
+        assert_eq!(hub.selected, 1, "the cursor lands back on the role it set");
+        let profile = &app.settings.profiles["test"];
+        assert_eq!(profile.role_model("aux"), Some("openai/gpt-5"));
+        // The main model is untouched: assigning a role is not switching.
+        assert_eq!(profile.model, "test-model");
+        assert_eq!(app.config.aux_model.as_deref(), Some("openai/gpt-5"));
+
+        // Delete clears it back to inheriting.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::empty()),
+        );
+        assert_eq!(app.settings.profiles["test"].role_model("aux"), None);
+    }
+
+    #[test]
+    fn enter_on_a_model_with_no_role_in_hand_switches_the_profile_model() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.catalogs.insert(
+            "test".to_owned(),
+            crate::model_hub::Catalog::Ready(vec![hub_card("openai/gpt-5", 400_000, 1.25, 10.0)]),
+        );
+        app.model_hub = Some(crate::model_hub::ModelHub::new(&app.settings));
+        if let Some(hub) = app.model_hub.as_mut() {
+            hub.scope = 2;
+            hub.pane = crate::model_hub::Pane::Body;
+        }
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert_eq!(app.settings.profiles["test"].model, "openai/gpt-5");
+        assert_eq!(app.config.model, "openai/gpt-5", "and it is applied live");
+    }
+
+    #[test]
+    fn exporting_a_theme_writes_a_file_that_loads_back() {
+        // The round trip is the feature: export is how you find out what the
+        // roles are called, so what it writes has to be what /theme accepts.
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.export_theme("mine");
+        let path = app.config.paths.themes_dir.join("mine.json");
+        assert!(path.exists(), "export wrote {}", path.display());
+        assert_eq!(
+            crate::theme::available(&app.config.paths.themes_dir),
+            vec!["mine"]
+        );
+
+        app.theme_command("mine");
+        assert_eq!(
+            app.settings.ui.theme,
+            crate::theme::ThemeChoice::Named("mine".to_owned())
+        );
+        // And the setting survives a save/load round trip as a bare string.
+        let reloaded = Settings::load(&app.config.paths).expect("settings reload");
+        assert_eq!(reloaded.ui.theme, app.settings.ui.theme);
+
+        // A name that does not resolve leaves the working theme alone rather
+        // than persisting a setting that fails on every later launch.
+        app.theme_command("absent");
+        assert_eq!(
+            app.settings.ui.theme,
+            crate::theme::ThemeChoice::Named("mine".to_owned())
+        );
+
+        // A path separator in a name must not escape the themes directory.
+        app.export_theme("../escaped");
+        assert!(
+            !app.config.paths.themes_dir.join("../escaped.json").exists(),
+            "a traversing name is refused"
+        );
+    }
+
+    #[test]
+    fn a_role_assigned_mid_session_reaches_the_running_config() {
+        // Saving settings has to push the role through to `Config`, or the
+        // assignment sits in the file doing nothing until the next launch.
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        assert_eq!(app.config.subagent_model, None);
+        app.model_hub = Some(crate::model_hub::ModelHub::new(&app.settings));
+        app.assign_role("subagent", Some("openai/gpt-5".to_owned()));
+        assert_eq!(app.config.subagent_model.as_deref(), Some("openai/gpt-5"));
+        app.assign_role("subagent", None);
+        assert_eq!(
+            app.config.subagent_model, None,
+            "clearing it lets the turn fall back to the main model again"
+        );
+    }
+
+    #[test]
+    fn escape_backs_out_one_layer_at_a_time() {
+        let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+        app.catalogs.insert(
+            "test".to_owned(),
+            crate::model_hub::Catalog::Ready(vec![hub_card("openai/gpt-5", 400_000, 1.25, 10.0)]),
+        );
+        app.model_hub = Some(crate::model_hub::ModelHub::new(&app.settings));
+        if let Some(hub) = app.model_hub.as_mut() {
+            hub.scope = 2;
+            hub.pane = crate::model_hub::Pane::Body;
+            hub.search = "gpt".to_owned();
+        }
+        let escape = || KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+        handle_key(&mut app, escape());
+        assert_eq!(
+            app.model_hub.as_ref().map(|hub| hub.search.clone()),
+            Some(String::new()),
+            "the filter clears before the surface does"
+        );
+        handle_key(&mut app, escape());
+        assert!(app.model_hub.is_none(), "and then it closes");
+    }
+
     #[tokio::test]
     async fn at_mention_completion_finds_and_inserts_workspace_files() {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
@@ -11889,6 +13214,7 @@ mod tests {
                 allow_fallbacks: true,
                 context_window: None,
                 max_output_tokens: None,
+                roles: Default::default(),
             },
         );
         let config = Config {
@@ -11910,9 +13236,12 @@ mod tests {
             web_search: crate::web::WebConfig::default(),
             endpoint: None,
             aux_model: None,
+            subagent_model: None,
+            compaction_model: None,
             reasoning_effort: None,
             token_compression: false,
             one_stream: false,
+            prompt_cache: true,
             paths,
         };
         let app = App::new(

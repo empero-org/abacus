@@ -27,11 +27,11 @@ pub struct Provider {
     protocol: ProviderProtocol,
     max_output_tokens: Option<usize>,
     tool_format: ToolFormat,
-    /// Best-effort running count of tokens processed, shared across provider
-    /// clones (subagents) and rebuilds (model switches) so a session totals one
-    /// number. Uses provider-reported usage when available, else a char-based
+    /// Best-effort running token counts, shared across provider clones
+    /// (subagents) and rebuilds (model switches) so a session totals one set of
+    /// numbers. Uses provider-reported usage when available, else a char-based
     /// estimate, so it is approximate.
-    tokens: Arc<AtomicU64>,
+    ledger: Arc<TokenLedger>,
     /// Set once the endpoint rejects `max_tokens`, so later requests in the
     /// same session go straight to `max_completion_tokens`. Shared across
     /// clones for the same reason `tokens` is.
@@ -72,6 +72,20 @@ pub struct Provider {
     prefers_adaptive_thinking: Arc<AtomicBool>,
     /// Optional one-request gate shared by the main and auxiliary providers.
     stream_gate: Option<Arc<Semaphore>>,
+    /// Set once the endpoint rejects a system message that is not first.
+    ///
+    /// Abacus appends its volatile context (rolling summary, goal, tasks, mode)
+    /// as a trailing system block, because folding it into the leading one
+    /// rewrites the request prefix and misses the prompt cache on every turn.
+    /// Permissive APIs (OpenAI, Anthropic) accept that; strict chat templates —
+    /// the Qwen3.5 family among them — raise "System message must be at the
+    /// beginning" and 500 the request. One such rejection teaches us here, and
+    /// the rest of the session pays the cache cost instead of failing.
+    /// Shared across clones for the same reason `strips_reasoning` is.
+    prefers_leading_system: Arc<AtomicBool>,
+    /// Whether to mark prompt-cache breakpoints on Anthropic requests, cleared
+    /// if the endpoint turns out not to understand `cache_control`.
+    caches_prompt: Arc<AtomicBool>,
 }
 
 /// A piece of streamed output. Reasoning is kept separate from the answer all
@@ -125,13 +139,13 @@ struct PartialToolCall {
 
 impl Provider {
     pub fn new(config: &Config) -> Result<Self> {
-        Self::with_tokens(config, Arc::new(AtomicU64::new(0)))
+        Self::with_tokens(config, Arc::new(TokenLedger::default()))
     }
 
-    /// Build a provider that accumulates token usage into a shared counter.
-    /// Pass the same counter when rebuilding on a model switch so the running
-    /// total survives; subagents inherit it automatically through `clone`.
-    pub fn with_tokens(config: &Config, tokens: Arc<AtomicU64>) -> Result<Self> {
+    /// Build a provider that accumulates token usage into a shared ledger.
+    /// Pass the same ledger when rebuilding on a model switch so the running
+    /// totals survive; subagents inherit it automatically through `clone`.
+    pub fn with_tokens(config: &Config, ledger: Arc<TokenLedger>) -> Result<Self> {
         let client = Client::builder()
             .user_agent(concat!("abacus-agent/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(10))
@@ -155,7 +169,7 @@ impl Provider {
             protocol: config.protocol,
             max_output_tokens: config.model_limits.configured_output_tokens,
             tool_format: config.tool_format,
-            tokens,
+            ledger,
             routing: config.routing.clone(),
             prefers_max_completion_tokens: Arc::new(AtomicBool::new(false)),
             learned_output_cap: Arc::new(AtomicU64::new(0)),
@@ -173,16 +187,23 @@ impl Provider {
             reasoning_effort: config.reasoning_effort,
             prefers_adaptive_thinking: Arc::new(AtomicBool::new(false)),
             stream_gate: config.one_stream.then(|| Arc::new(Semaphore::new(1))),
+            prefers_leading_system: Arc::new(AtomicBool::new(false)),
+            caches_prompt: Arc::new(AtomicBool::new(config.prompt_cache)),
         })
     }
 
-    /// The message list as this endpoint accepts it: verbatim, unless it has
-    /// rejected `reasoning_content` before, in which case the field is removed.
+    /// The message list as this endpoint accepts it: tool results lose the
+    /// non-standard `name` field, and `reasoning_content` is removed once the
+    /// endpoint has rejected it.
     fn sanitized_messages(&self, messages: &[Value]) -> Vec<Value> {
-        if !self.strips_reasoning.load(Ordering::Relaxed) {
-            return messages.to_vec();
+        let mut messages = strip_tool_names(messages);
+        if self.strips_reasoning.load(Ordering::Relaxed) {
+            messages = strip_reasoning_content(&messages);
         }
-        strip_reasoning_content(messages)
+        if self.prefers_leading_system.load(Ordering::Relaxed) {
+            messages = crate::agent::merge_system_messages(messages);
+        }
+        messages
     }
 
     /// The output ceiling to actually send: the configured/detected value,
@@ -197,26 +218,30 @@ impl Provider {
 
     /// Approximate tokens processed so far this session.
     pub fn tokens_used(&self) -> u64 {
-        self.tokens.load(Ordering::Relaxed)
+        self.ledger.total()
     }
 
-    /// A clone that counts into its own fresh counter — for a subagent whose
-    /// usage should be visible per worker. The caller folds the counter back
+    /// The running counts behind that total: input, output, and how much of the
+    /// input the provider served from its prompt cache.
+    pub fn usage(&self) -> TokenUsage {
+        self.ledger.snapshot()
+    }
+
+    /// A clone that counts into its own fresh ledger — for a subagent whose
+    /// usage should be visible per worker. The caller folds the ledger back
     /// into the session total when the worker finishes.
-    pub fn with_detached_counter(&self) -> (Self, Arc<AtomicU64>) {
-        let counter = Arc::new(AtomicU64::new(0));
+    pub fn with_detached_counter(&self) -> (Self, Arc<TokenLedger>) {
+        let ledger = Arc::new(TokenLedger::default());
         let mut detached = self.clone();
-        detached.tokens = counter.clone();
+        detached.ledger = ledger.clone();
         // Explicit subagents are the sole exception to One Stream.
         detached.stream_gate = None;
-        (detached, counter)
+        (detached, ledger)
     }
 
-    /// Fold a finished worker's usage into this provider's running total.
-    pub fn add_tokens(&self, tokens: u64) {
-        if tokens > 0 {
-            self.tokens.fetch_add(tokens, Ordering::Relaxed);
-        }
+    /// Fold a finished worker's usage into this provider's running totals.
+    pub fn add_tokens(&self, ledger: &TokenLedger) {
+        self.ledger.absorb(ledger);
     }
 
     fn record_tokens(
@@ -226,19 +251,13 @@ impl Provider {
         content: &str,
         calls: &BTreeMap<usize, PartialToolCall>,
     ) {
-        let tokens = reported
-            .map(|usage| usage.total)
-            .unwrap_or_else(|| estimate_tokens(messages, content, calls));
-        if tokens > 0 {
-            self.tokens.fetch_add(tokens, Ordering::Relaxed);
-        }
+        let usage = reported.unwrap_or_else(|| estimate_usage(messages, content, calls));
+        self.ledger.record(&usage);
         // The prompt count is the exact size of the context that was just sent,
-        // so the window gauge can stop guessing from character counts.
-        if let Some(prompt) = reported
-            .map(|usage| usage.prompt)
-            .filter(|count| *count > 0)
-        {
-            self.context_tokens.store(prompt, Ordering::Relaxed);
+        // so the window gauge can stop guessing from character counts. Cached
+        // input counts: the window was that full whether or not it was billed.
+        if reported.is_some() && usage.prompt > 0 {
+            self.context_tokens.store(usage.prompt, Ordering::Relaxed);
         }
     }
 
@@ -259,6 +278,16 @@ impl Provider {
             context_tokens: Arc::new(AtomicU64::new(0)),
             ..self.clone()
         }
+    }
+
+    /// Carry `previous`'s session id onto this freshly built provider.
+    ///
+    /// The id is what hosts that route by conversation are told (see
+    /// `opencode_session`, and `{uuid}` in a scripted endpoint's headers), so
+    /// a mid-session model or settings change — which rebuilds the provider —
+    /// must not make the same conversation look like a new one.
+    pub fn adopt_session(&mut self, previous: &Provider) {
+        self.session_id.clone_from(&previous.session_id);
     }
 
     /// Tokens in the last request's prompt, or 0 before the first reply or when
@@ -369,7 +398,7 @@ impl Provider {
                     && !self.strips_reasoning.load(Ordering::Relaxed) =>
             {
                 self.strips_reasoning.store(true, Ordering::Relaxed);
-                body["messages"] = json!(strip_reasoning_content(messages));
+                body["messages"] = json!(self.sanitized_messages(messages));
                 tokio::select! {
                     biased;
                     sent = self.post_stream(&body) => sent?,
@@ -386,6 +415,21 @@ impl Provider {
                     .expect("guard checked");
                 self.learned_output_cap.store(cap as u64, Ordering::Relaxed);
                 body[self.output_tokens_field()] = json!(cap);
+                tokio::select! {
+                    biased;
+                    sent = self.post_stream(&body) => sent?,
+                    () = wait_for_cancel(cancel) => return Ok(Completion::cancelled()),
+                }
+            }
+            // A strict chat template wants every system block at the front.
+            // Merge and retry once; the preference sticks for the session, and
+            // this session gives up the stable prefix that the cache needs.
+            Err(error)
+                if is_leading_system_rejection(&error)
+                    && !self.prefers_leading_system.load(Ordering::Relaxed) =>
+            {
+                self.prefers_leading_system.store(true, Ordering::Relaxed);
+                body["messages"] = json!(self.sanitized_messages(messages));
                 tokio::select! {
                     biased;
                     sent = self.post_stream(&body) => sent?,
@@ -556,7 +600,9 @@ impl Provider {
             .scripted
             .as_ref()
             .and_then(|scripted| scripted.system_prefix.as_deref());
-        let (system, converted) = anthropic_messages(messages, system_prefix);
+        let cache = self.caches_prompt.load(Ordering::Relaxed);
+        let (system, converted) =
+            anthropic_messages(&self.sanitized_messages(messages), system_prefix, cache);
         let mut body = json!({
             "model": self.model,
             // Required, no default; scripted body may override it.
@@ -611,6 +657,36 @@ impl Provider {
                     .expect("guard checked");
                 self.learned_output_cap.store(cap as u64, Ordering::Relaxed);
                 body["max_tokens"] = json!(cap);
+                tokio::select! {
+                    biased;
+                    sent = self.post_stream(&body) => sent?,
+                    () = wait_for_cancel(cancel) => return Ok(Completion::cancelled()),
+                }
+            }
+            // An Anthropic-compatible gateway that does not know
+            // `cache_control`. Caching is an optimisation — drop the markers,
+            // remember, and retry rather than failing the turn over it.
+            Err(error) if is_cache_control_rejection(&error) && cache => {
+                self.caches_prompt.store(false, Ordering::Relaxed);
+                let (system, converted) =
+                    anthropic_messages(&self.sanitized_messages(messages), system_prefix, false);
+                body["system"] = json!(system);
+                body["messages"] = json!(converted);
+                tokio::select! {
+                    biased;
+                    sent = self.post_stream(&body) => sent?,
+                    () = wait_for_cancel(cancel) => return Ok(Completion::cancelled()),
+                }
+            }
+            Err(error)
+                if is_leading_system_rejection(&error)
+                    && !self.prefers_leading_system.load(Ordering::Relaxed) =>
+            {
+                self.prefers_leading_system.store(true, Ordering::Relaxed);
+                let (system, converted) =
+                    anthropic_messages(&self.sanitized_messages(messages), system_prefix, cache);
+                body["system"] = json!(system);
+                body["messages"] = json!(converted);
                 tokio::select! {
                     biased;
                     sent = self.post_stream(&body) => sent?,
@@ -678,6 +754,28 @@ impl Provider {
     /// and a pin silently does nothing rather than breaking a plain endpoint.
     fn routes_upstream(&self) -> bool {
         self.endpoint.contains("openrouter.ai")
+    }
+
+    /// The session id to send as `x-opencode-session`, when this endpoint is
+    /// one that needs it.
+    ///
+    /// OpenCode's gateways (Console Go and Zen) route by conversation and
+    /// reject a request that carries no session id with
+    /// `400 MissingSessionID`. Matched on the host, like `routes_upstream`, so
+    /// a profile simply pointed at the gateway works without extra setup.
+    /// A scripted endpoint that sets the header itself stays authoritative —
+    /// reqwest appends repeated headers, so sending ours too would put two
+    /// values on the wire.
+    fn opencode_session(&self) -> Option<&str> {
+        if !self.endpoint.contains("opencode.ai") {
+            return None;
+        }
+        if let Some(scripted) = &self.scripted
+            && scripted.sets_header(OPENCODE_SESSION_HEADER)
+        {
+            return None;
+        }
+        Some(&self.session_id)
     }
 
     /// Which output-cap parameter this endpoint accepts. Starts optimistic and
@@ -752,6 +850,10 @@ impl Provider {
             // The Messages API requires a version header on every request.
             if self.protocol == ProviderProtocol::Anthropic {
                 request = request.header("anthropic-version", "2023-06-01");
+            }
+            // OpenCode's gateways want the conversation named on every request.
+            if let Some(session) = self.opencode_session() {
+                request = request.header(OPENCODE_SESSION_HEADER, session);
             }
             let mut scripted_auth = false;
             if let Some(scripted) = &self.scripted {
@@ -919,6 +1021,25 @@ fn chunk_hit_length_limit(data: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Remove `name` from tool-result messages. History keeps it (compaction reads
+/// it), but Chat Completions doesn't define it and strict upstreams — e.g.
+/// Anthropic behind an OpenAI-compatible gateway — reject the request with
+/// `messages[N]: "name" is not supported`.
+fn strip_tool_names(messages: &[Value]) -> Vec<Value> {
+    messages
+        .iter()
+        .map(|message| {
+            let mut message = message.clone();
+            if message["role"] == "tool" {
+                if let Some(object) = message.as_object_mut() {
+                    object.remove("name");
+                }
+            }
+            message
+        })
+        .collect()
+}
+
 /// Remove `reasoning_content` from every message, for endpoints that reject
 /// it in the input.
 fn strip_reasoning_content(messages: &[Value]) -> Vec<Value> {
@@ -976,6 +1097,26 @@ fn is_legacy_thinking_model(model: &str) -> bool {
 fn is_max_tokens_rejection(error: &anyhow::Error) -> bool {
     let text = format!("{error:#}");
     text.contains("max_completion_tokens") && text.contains("max_tokens")
+}
+
+/// Whether the endpoint refused a system message that was not first.
+///
+/// Strict chat templates raise it from inside the template rather than
+/// validating the request, so it arrives as a 500 with the template's own words
+/// ("System message must be at the beginning", Qwen3.5 and relatives). Matched
+/// on the two parts that phrasing keeps: the role, and the position.
+fn is_leading_system_rejection(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    text.contains("system message")
+        && (text.contains("beginning") || text.contains("first") || text.contains("start"))
+}
+
+/// Whether the endpoint refused the prompt-cache markers. Anthropic-compatible
+/// gateways mostly ignore fields they do not know, but a strict one 400s on
+/// `cache_control`; caching is an optimisation, so it is dropped rather than
+/// allowed to fail the turn.
+fn is_cache_control_rejection(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains("cache_control")
 }
 
 /// Extract the real output ceiling from a "max_tokens is too large" rejection.
@@ -1105,13 +1246,135 @@ fn apply_responses_event(
 /// Only the final usage chunk carries `usage`; the `contains` guard keeps the
 /// common delta path from re-parsing JSON it has already consumed.
 /// What a provider reported for one request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Usage {
     /// Prompt plus completion, added to the running session total.
     pub total: u64,
     /// Prompt alone — the exact size of the context that was sent, which is a
     /// far better "how full is the window" figure than counting characters.
+    /// Cached input is included: a cache hit is still context the model read.
     pub prompt: u64,
+    /// Generated tokens.
+    pub completion: u64,
+    /// Prompt tokens served from a prompt cache, billed at a fraction of the
+    /// uncached rate. Anthropic reports it directly; OpenAI-compatible hosts
+    /// report it under `prompt_tokens_details`; DeepSeek names it
+    /// `prompt_cache_hit_tokens`.
+    pub cache_read: u64,
+    /// Prompt tokens written *into* the cache by this request (Anthropic's
+    /// `cache_creation_input_tokens`). Billed above the uncached rate, so it
+    /// is tracked separately rather than folded into the hit rate.
+    pub cache_write: u64,
+}
+
+impl Usage {
+    /// Prompt tokens the model had to read in full — everything not served
+    /// from the cache.
+    pub fn uncached(&self) -> u64 {
+        self.prompt.saturating_sub(self.cache_read)
+    }
+}
+
+/// Running token counters for one session, shared by every provider clone
+/// (subagents, aux/compaction siblings) and across provider rebuilds on a model
+/// switch, so a session totals one set of numbers.
+///
+/// The split matters for cost: input and output are priced differently, and
+/// cached input an order of magnitude below uncached. One "tokens used" figure
+/// cannot show whether a long session is re-reading a cached prefix cheaply or
+/// paying full price for it every turn.
+#[derive(Debug, Default)]
+pub struct TokenLedger {
+    total: AtomicU64,
+    input: AtomicU64,
+    output: AtomicU64,
+    cache_read: AtomicU64,
+    cache_write: AtomicU64,
+}
+
+/// A consistent-enough read of a [`TokenLedger`] for display.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub total: u64,
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+}
+
+impl TokenUsage {
+    /// Input tokens the provider billed at the full uncached rate.
+    pub fn uncached_input(&self) -> u64 {
+        self.input.saturating_sub(self.cache_read)
+    }
+
+    /// Share of input tokens served from the cache, 0-100. `None` when no
+    /// input has been counted yet, or when the endpoint reports no cache
+    /// figures at all — an honest blank beats a confident 0%.
+    pub fn cache_rate(&self) -> Option<u8> {
+        if self.input == 0 || (self.cache_read == 0 && self.cache_write == 0) {
+            return None;
+        }
+        Some(((self.cache_read * 100) / self.input).min(100) as u8)
+    }
+}
+
+impl TokenLedger {
+    /// A ledger resuming a session that already spent `total` tokens. The
+    /// breakdown starts empty: older sessions recorded only the total, and
+    /// inventing a split for it would be worse than showing this run's.
+    pub fn new(total: u64) -> Self {
+        Self {
+            total: AtomicU64::new(total),
+            ..Self::default()
+        }
+    }
+
+    pub fn total(&self) -> u64 {
+        self.total.load(Ordering::Relaxed)
+    }
+
+    pub fn store_total(&self, total: u64) {
+        self.total.store(total, Ordering::Relaxed);
+    }
+
+    pub fn add_total(&self, tokens: u64) {
+        if tokens > 0 {
+            self.total.fetch_add(tokens, Ordering::Relaxed);
+        }
+    }
+
+    pub fn snapshot(&self) -> TokenUsage {
+        TokenUsage {
+            total: self.total(),
+            input: self.input.load(Ordering::Relaxed),
+            output: self.output.load(Ordering::Relaxed),
+            cache_read: self.cache_read.load(Ordering::Relaxed),
+            cache_write: self.cache_write.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Fold a finished worker's ledger into this one.
+    pub fn absorb(&self, other: &TokenLedger) {
+        let usage = other.snapshot();
+        self.add_total(usage.total);
+        self.input.fetch_add(usage.input, Ordering::Relaxed);
+        self.output.fetch_add(usage.output, Ordering::Relaxed);
+        self.cache_read
+            .fetch_add(usage.cache_read, Ordering::Relaxed);
+        self.cache_write
+            .fetch_add(usage.cache_write, Ordering::Relaxed);
+    }
+
+    fn record(&self, usage: &Usage) {
+        self.add_total(usage.total);
+        self.input.fetch_add(usage.prompt, Ordering::Relaxed);
+        self.output.fetch_add(usage.completion, Ordering::Relaxed);
+        self.cache_read
+            .fetch_add(usage.cache_read, Ordering::Relaxed);
+        self.cache_write
+            .fetch_add(usage.cache_write, Ordering::Relaxed);
+    }
 }
 
 fn capture_usage(data: &str, usage: &mut Option<Usage>, parse: fn(&Value) -> Option<Usage>) {
@@ -1137,7 +1400,8 @@ fn parse_responses_usage(value: &Value) -> Option<Usage> {
 }
 
 fn usage_total(usage: &Value) -> Option<Usage> {
-    let prompt = usage
+    let field = |name: &str| usage.get(name).and_then(Value::as_u64).unwrap_or(0);
+    let reported_prompt = usage
         .get("prompt_tokens")
         .or_else(|| usage.get("input_tokens"))
         .and_then(Value::as_u64)
@@ -1147,27 +1411,61 @@ fn usage_total(usage: &Value) -> Option<Usage> {
         .or_else(|| usage.get("output_tokens"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    // Three spellings of "served from cache", in decreasing specificity:
+    // Anthropic's own field, OpenAI's nested detail, DeepSeek's flat pair.
+    let cache_read = usage
+        .get("cache_read_input_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            usage
+                .pointer("/prompt_tokens_details/cached_tokens")
+                .and_then(Value::as_u64)
+        })
+        .or_else(|| usage.get("prompt_cache_hit_tokens").and_then(Value::as_u64))
+        .unwrap_or(0);
+    let cache_write = field("cache_creation_input_tokens");
+    // Anthropic's `input_tokens` counts only what it read uncached — cached and
+    // cache-written input are reported beside it. Everywhere else the prompt
+    // figure is already the whole prompt and the cache count is a subset of it.
+    let prompt = if usage.get("cache_read_input_tokens").is_some()
+        || usage.get("cache_creation_input_tokens").is_some()
+    {
+        reported_prompt + cache_read + cache_write
+    } else {
+        reported_prompt.max(cache_read)
+    };
     let total = usage
         .get("total_tokens")
         .and_then(Value::as_u64)
+        .filter(|reported| *reported >= prompt)
         .unwrap_or(prompt + completion);
     if total == 0 && prompt == 0 {
         return None;
     }
-    Some(Usage { total, prompt })
+    Some(Usage {
+        total,
+        prompt,
+        completion,
+        cache_read,
+        cache_write,
+    })
 }
 
-/// Rough fallback (~4 chars/token over prompt + completion) for providers that
-/// never report usage, so the running total is never stuck at zero.
-fn estimate_tokens(
+/// Rough fallback (~4 chars/token) for providers that never report usage, so
+/// the running totals are never stuck at zero. Prompt and completion are
+/// counted separately — one lumped figure cannot say which direction the
+/// tokens went, which is the first thing the status row shows.
+fn estimate_usage(
     messages: &[Value],
     content: &str,
     calls: &BTreeMap<usize, PartialToolCall>,
-) -> u64 {
+) -> Usage {
     let mut chars = content.chars().count();
     for call in calls.values() {
         chars += call.name.chars().count() + call.arguments.chars().count();
     }
+    let completion = (chars / 4) as u64;
+    let mut chars = 0usize;
     for message in messages {
         if let Some(text) = message["content"].as_str() {
             chars += text.chars().count();
@@ -1180,7 +1478,13 @@ fn estimate_tokens(
             }
         }
     }
-    (chars / 4) as u64
+    let prompt = (chars / 4) as u64;
+    Usage {
+        total: prompt + completion,
+        prompt,
+        completion,
+        ..Usage::default()
+    }
 }
 
 fn responses_input(messages: &[Value]) -> Vec<Value> {
@@ -1232,6 +1536,10 @@ fn responses_tools(tools: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// The header naming the conversation to OpenCode's gateways. They route by
+/// it and answer `400 MissingSessionID` without it.
+const OPENCODE_SESSION_HEADER: &str = "x-opencode-session";
+
 /// Tokens left for the answer itself above an Anthropic thinking budget.
 const ANTHROPIC_ANSWER_HEADROOM: usize = 8_192;
 
@@ -1245,13 +1553,38 @@ const DEFAULT_ANTHROPIC_MAX_TOKENS: usize = 32_000;
 /// of content blocks. Tool calls become `tool_use` blocks and tool results
 /// become `tool_result` blocks in a following user turn; consecutive same-role
 /// turns are coalesced so the result alternates as the API requires.
-fn anthropic_messages(messages: &[Value], system_prefix: Option<&str>) -> (Vec<Value>, Vec<Value>) {
+/// Split Abacus's message list into the Anthropic `system` blocks and `messages`
+/// turns.
+///
+/// Only *leading* system messages become `system` blocks. A system message that
+/// appears after the conversation has started is Abacus's volatile context block
+/// (see `build_provider_messages`), and hoisting it to the front would put
+/// turn-by-turn churn at the head of the request — the one place a prefix cache
+/// cannot tolerate it. It is rendered as a tagged text block in the final user
+/// turn instead, which is where it already belongs semantically: context handed
+/// to the model just before it answers, not part of its standing instructions.
+///
+/// With `cache` set, two `cache_control` breakpoints are marked: the end of the
+/// system blocks, and the end of the last turn that is *not* volatile context.
+/// The second is what rolls forward — each turn reads the previous breakpoint's
+/// prefix and writes only the delta — while the volatile tail after it stays
+/// uncached, because caching something that changes every turn only pays for a
+/// write nothing will read.
+fn anthropic_messages(
+    messages: &[Value],
+    system_prefix: Option<&str>,
+    cache: bool,
+) -> (Vec<Value>, Vec<Value>) {
     let mut system: Vec<Value> = Vec::new();
     if let Some(prefix) = system_prefix.filter(|prefix| !prefix.trim().is_empty()) {
         system.push(json!({"type": "text", "text": prefix}));
     }
     // (role, content-blocks) pairs, coalescing consecutive same-role turns.
     let mut turns: Vec<(String, Vec<Value>)> = Vec::new();
+    // Whether any conversation turn has been emitted yet, which is what makes a
+    // system message leading (standing instructions) or trailing (volatile
+    // context). Tracked separately because `push` holds the borrow on `turns`.
+    let mut started = false;
     let mut push = |role: &str, blocks: Vec<Value>| {
         if blocks.is_empty() {
             return;
@@ -1265,12 +1598,27 @@ fn anthropic_messages(messages: &[Value], system_prefix: Option<&str>) -> (Vec<V
     for message in messages {
         match message["role"].as_str().unwrap_or_default() {
             "system" => {
-                if let Some(text) = message["content"].as_str().filter(|text| !text.is_empty()) {
+                let Some(text) = message["content"].as_str().filter(|text| !text.is_empty()) else {
+                    continue;
+                };
+                if !started {
                     system.push(json!({"type": "text", "text": text}));
+                } else {
+                    push(
+                        "user",
+                        vec![json!({
+                            "type": "text",
+                            "text": format!("<session_context>\n{text}\n</session_context>"),
+                        })],
+                    );
                 }
             }
-            "user" => push("user", anthropic_content_blocks(&message["content"])),
+            "user" => {
+                started = true;
+                push("user", anthropic_content_blocks(&message["content"]));
+            }
             "assistant" => {
+                started = true;
                 let mut blocks = anthropic_content_blocks(&message["content"]);
                 if let Some(tool_calls) = message["tool_calls"].as_array() {
                     for call in tool_calls {
@@ -1290,22 +1638,49 @@ fn anthropic_messages(messages: &[Value], system_prefix: Option<&str>) -> (Vec<V
                 push("assistant", blocks);
             }
             // A tool result belongs in a user turn as a `tool_result` block.
-            "tool" => push(
-                "user",
-                vec![json!({
-                    "type": "tool_result",
-                    "tool_use_id": message["tool_call_id"],
-                    "content": message["content"].as_str().unwrap_or_default(),
-                })],
-            ),
+            "tool" => {
+                started = true;
+                push(
+                    "user",
+                    vec![json!({
+                        "type": "tool_result",
+                        "tool_use_id": message["tool_call_id"],
+                        "content": message["content"].as_str().unwrap_or_default(),
+                    })],
+                );
+            }
             _ => {}
         }
+    }
+    if cache {
+        if let Some(last) = system.last_mut() {
+            last["cache_control"] = json!({"type": "ephemeral"});
+        }
+        mark_history_breakpoint(&mut turns);
     }
     let converted = turns
         .into_iter()
         .map(|(role, content)| json!({"role": role, "content": content}))
         .collect();
     (system, converted)
+}
+
+/// Put the rolling cache breakpoint on the last content block that is not
+/// volatile session context, so the cached prefix is exactly the stable history.
+fn mark_history_breakpoint(turns: &mut [(String, Vec<Value>)]) {
+    for (_, blocks) in turns.iter_mut().rev() {
+        for block in blocks.iter_mut().rev() {
+            if block["type"] == "text"
+                && block["text"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("<session_context>"))
+            {
+                continue;
+            }
+            block["cache_control"] = json!({"type": "ephemeral"});
+            return;
+        }
+    }
 }
 
 /// Convert one message's `content` (a string or Abacus's vision-part array)
@@ -1430,15 +1805,16 @@ fn apply_anthropic_event(
                 *truncated = true;
             }
             // The final usage carries output_tokens; fold it onto the input
-            // count captured at message_start.
+            // and cache counts captured at message_start.
             if let Some(output) = value
                 .pointer("/usage/output_tokens")
                 .and_then(Value::as_u64)
             {
-                let prompt = usage.map(|usage| usage.prompt).unwrap_or(0);
+                let start = usage.unwrap_or_default();
                 *usage = Some(Usage {
-                    prompt,
-                    total: prompt + output,
+                    total: start.prompt + output,
+                    completion: output,
+                    ..start
                 });
             }
         }
@@ -1569,7 +1945,7 @@ mod tests {
             json!({"role": "tool", "tool_call_id": "call_1", "content": "fn a() {}"}),
         ];
         let (system, messages) =
-            anthropic_messages(&history, Some("x-anthropic-billing-header: cc"));
+            anthropic_messages(&history, Some("x-anthropic-billing-header: cc"), false);
 
         // Billing prefix is the first system block, then the system prompt.
         assert_eq!(system[0]["text"], "x-anthropic-billing-header: cc");
@@ -1597,6 +1973,18 @@ mod tests {
         assert_eq!(result["type"], "tool_result");
         assert_eq!(result["tool_use_id"], "call_1");
         assert_eq!(result["content"], "fn a() {}");
+    }
+
+    #[test]
+    fn tool_results_are_sent_without_a_name() {
+        let messages = vec![
+            json!({"role": "user", "content": "hi", "name": "op"}),
+            json!({"role": "tool", "tool_call_id": "c1", "name": "read_file", "content": "x"}),
+        ];
+        let sent = strip_tool_names(&messages);
+        assert_eq!(sent[0]["name"], "op");
+        assert!(sent[1].get("name").is_none());
+        assert_eq!(sent[1]["tool_call_id"], "c1");
     }
 
     #[test]
@@ -1699,9 +2087,12 @@ mod tests {
             web_search: crate::web::WebConfig::default(),
             endpoint: None,
             aux_model: None,
+            subagent_model: None,
+            compaction_model: None,
             reasoning_effort: None,
             token_compression: false,
             one_stream: true,
+            prompt_cache: true,
             paths: crate::config::AbacusPaths::under(directory.path().join("home")),
         };
         let provider = Provider::new(&config).unwrap();
@@ -1711,6 +2102,78 @@ mod tests {
 
         config.one_stream = false;
         assert!(Provider::new(&config).unwrap().stream_gate.is_none());
+    }
+
+    /// OpenCode's gateways answer `400 MissingSessionID` without the header,
+    /// and want one id for the whole conversation — so the aux model's calls
+    /// have to carry the same one.
+    #[test]
+    fn opencode_endpoints_get_a_stable_session_header() {
+        fn provider_for(base_url: &str) -> Provider {
+            let directory = tempfile::tempdir().unwrap();
+            let config = Config {
+                workspace: directory.path().to_path_buf(),
+                profile: "test".into(),
+                model: "test".into(),
+                base_url: base_url.into(),
+                protocol: ProviderProtocol::ChatCompletions,
+                api_key: None,
+                max_steps: 8,
+                tool_output_limit: 30_000,
+                yes: false,
+                no_session: true,
+                model_limits: crate::model_info::ModelLimits::default(),
+                tool_format: ToolFormat::default(),
+                mode: None,
+                trace_enabled: false,
+                routing: Default::default(),
+                web_search: crate::web::WebConfig::default(),
+                endpoint: None,
+                aux_model: None,
+                subagent_model: None,
+                compaction_model: None,
+                reasoning_effort: None,
+                token_compression: false,
+                one_stream: false,
+                prompt_cache: true,
+                paths: crate::config::AbacusPaths::under(directory.path().join("home")),
+            };
+            Provider::new(&config).unwrap()
+        }
+
+        let mut provider = provider_for("https://opencode.ai/zen/go/v1");
+        let session = provider
+            .opencode_session()
+            .expect("gateway needs a session");
+        assert!(!session.is_empty());
+        assert_eq!(
+            provider.with_model("aux").opencode_session(),
+            Some(session),
+            "the aux model is the same conversation"
+        );
+
+        // A model switch or settings save rebuilds the provider mid-run; the
+        // gateway must still see one conversation.
+        let mut rebuilt = provider_for("https://opencode.ai/zen/go/v1");
+        assert_ne!(rebuilt.opencode_session(), Some(session));
+        rebuilt.adopt_session(&provider);
+        assert_eq!(rebuilt.opencode_session(), Some(session));
+
+        // Every other endpoint is left alone.
+        assert_eq!(
+            provider_for("https://api.openai.com/v1").opencode_session(),
+            None
+        );
+
+        // A scripted endpoint that sets the header itself stays authoritative,
+        // so the request carries one value rather than two.
+        provider.scripted = Some(
+            serde_yaml::from_str(
+                "url: https://opencode.ai/zen/go/v1/chat/completions\nheaders:\n  X-OpenCode-Session: mine\n",
+            )
+            .unwrap(),
+        );
+        assert_eq!(provider.opencode_session(), None);
     }
 
     /// The body is the whole contract: an adaptive model must get
@@ -1738,9 +2201,12 @@ mod tests {
                 web_search: crate::web::WebConfig::default(),
                 endpoint: None,
                 aux_model: None,
+                subagent_model: None,
+                compaction_model: None,
                 reasoning_effort: None,
                 token_compression: false,
                 one_stream: false,
+                prompt_cache: true,
                 paths: crate::config::AbacusPaths::under(directory.path().join("home")),
             };
             Provider::new(&config).unwrap()
@@ -2087,7 +2553,9 @@ mod tests {
             parse_chat_usage(&chat),
             Some(Usage {
                 total: 15,
-                prompt: 10
+                prompt: 10,
+                completion: 5,
+                ..Usage::default()
             })
         );
         // A total with no breakdown still gives a usable session count, and the
@@ -2097,7 +2565,7 @@ mod tests {
             parse_chat_usage(&chat_total),
             Some(Usage {
                 total: 99,
-                prompt: 0
+                ..Usage::default()
             })
         );
         let responses = json!({
@@ -2108,9 +2576,83 @@ mod tests {
             parse_responses_usage(&responses),
             Some(Usage {
                 total: 27,
-                prompt: 20
+                prompt: 20,
+                completion: 7,
+                ..Usage::default()
             })
         );
+    }
+
+    #[test]
+    fn cached_prompt_tokens_are_read_in_every_dialect() {
+        // OpenAI: the cached count is a subset of `prompt_tokens`.
+        let openai = json!({"usage": {
+            "prompt_tokens": 1_000, "completion_tokens": 20,
+            "prompt_tokens_details": {"cached_tokens": 900}
+        }});
+        let usage = parse_chat_usage(&openai).unwrap();
+        assert_eq!(
+            (usage.prompt, usage.cache_read, usage.uncached()),
+            (1_000, 900, 100)
+        );
+
+        // DeepSeek: a flat hit/miss pair, hits again a subset of the prompt.
+        let deepseek = json!({"usage": {
+            "prompt_tokens": 1_000, "completion_tokens": 20,
+            "prompt_cache_hit_tokens": 768, "prompt_cache_miss_tokens": 232
+        }});
+        assert_eq!(parse_chat_usage(&deepseek).unwrap().cache_read, 768);
+
+        // Anthropic: `input_tokens` counts ONLY the uncached read, so the real
+        // prompt size is the three fields added together. Reporting the raw
+        // field as the prompt would show a 40k context as 200 tokens.
+        let anthropic = json!({"usage": {
+            "input_tokens": 200, "output_tokens": 50,
+            "cache_read_input_tokens": 38_000, "cache_creation_input_tokens": 1_800
+        }});
+        let usage = usage_total(&anthropic["usage"]).unwrap();
+        assert_eq!(usage.prompt, 40_000);
+        assert_eq!(usage.cache_read, 38_000);
+        assert_eq!(usage.cache_write, 1_800);
+        assert_eq!(
+            usage.uncached(),
+            2_000,
+            "read plus written is what was paid for"
+        );
+        assert_eq!(usage.total, 40_050);
+    }
+
+    #[test]
+    fn ledger_splits_directions_and_reports_a_cache_rate() {
+        let ledger = TokenLedger::new(1_000);
+        assert_eq!(ledger.snapshot().cache_rate(), None, "nothing counted yet");
+        ledger.record(&Usage {
+            total: 1_100,
+            prompt: 1_000,
+            completion: 100,
+            cache_read: 800,
+            cache_write: 200,
+        });
+        let usage = ledger.snapshot();
+        assert_eq!(usage.total, 2_100, "resumed total is carried, not replaced");
+        assert_eq!((usage.input, usage.output), (1_000, 100));
+        assert_eq!(usage.uncached_input(), 200);
+        assert_eq!(usage.cache_rate(), Some(80));
+
+        // An endpoint that reports no cache figures at all says nothing rather
+        // than claiming a 0% hit rate.
+        let silent = TokenLedger::default();
+        silent.record(&Usage {
+            total: 300,
+            prompt: 200,
+            completion: 100,
+            ..Usage::default()
+        });
+        assert_eq!(silent.snapshot().cache_rate(), None);
+
+        // A worker's ledger folds in whole.
+        ledger.absorb(&silent);
+        assert_eq!(ledger.snapshot().input, 1_200);
     }
 
     #[test]
@@ -2131,15 +2673,81 @@ mod tests {
             usage,
             Some(Usage {
                 total: 42,
-                prompt: 30
+                prompt: 30,
+                ..Usage::default()
             })
         );
     }
 
     #[test]
+    fn trailing_system_context_stays_out_of_the_cached_prefix() {
+        // What build_provider_messages produces: the static system prompt, the
+        // conversation, then one volatile context block at the end.
+        let history = vec![
+            json!({"role": "system", "content": "You are Abacus."}),
+            json!({"role": "user", "content": "read the file"}),
+            json!({"role": "assistant", "content": "On it."}),
+            json!({"role": "system", "content": "goal: ship it"}),
+        ];
+        let (system, messages) = anthropic_messages(&history, None, true);
+
+        // Only the leading block is a system block. Hoisting the trailing one
+        // would put turn-by-turn churn ahead of the whole history.
+        assert_eq!(system.len(), 1);
+        assert_eq!(system[0]["text"], "You are Abacus.");
+        assert_eq!(
+            system[0]["cache_control"]["type"], "ephemeral",
+            "the static prompt is a breakpoint"
+        );
+
+        // The volatile block rides along in the final user turn, tagged so the
+        // model does not read it as the user speaking.
+        let last = messages.last().unwrap();
+        assert_eq!(last["role"], "user");
+        let text = last["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("<session_context>"), "got {text}");
+        assert!(text.contains("goal: ship it"));
+        assert!(
+            last["content"][0].get("cache_control").is_none(),
+            "caching a block that changes every turn only pays for a write nobody reads"
+        );
+
+        // The rolling breakpoint sits on the last *stable* block instead.
+        assert_eq!(
+            messages[1]["content"][0]["cache_control"]["type"], "ephemeral",
+            "the end of the conversation is what the next turn reads back"
+        );
+    }
+
+    #[test]
+    fn cache_breakpoints_are_absent_when_caching_is_off() {
+        let history = vec![
+            json!({"role": "system", "content": "You are Abacus."}),
+            json!({"role": "user", "content": "hi"}),
+        ];
+        let (system, messages) = anthropic_messages(&history, None, false);
+        assert!(system[0].get("cache_control").is_none());
+        assert!(messages[0]["content"][0].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn a_system_message_before_any_turn_is_still_an_instruction() {
+        // Compaction inserts its drop-notice mid-array, before the kept tail.
+        let history = vec![
+            json!({"role": "system", "content": "You are Abacus."}),
+            json!({"role": "system", "content": "3 older messages were omitted"}),
+            json!({"role": "user", "content": "carry on"}),
+        ];
+        let (system, messages) = anthropic_messages(&history, None, false);
+        assert_eq!(system.len(), 2, "both precede the conversation");
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
     fn estimates_tokens_when_usage_is_absent() {
-        // 8 prompt chars + 4 completion chars = 12 chars, ~4 chars/token => 3.
+        // 8 prompt chars => 2 tokens, 4 completion chars => 1, at ~4 chars each.
         let messages = vec![json!({"role": "user", "content": "12345678"})];
-        assert_eq!(estimate_tokens(&messages, "abcd", &BTreeMap::new()), 3);
+        let usage = estimate_usage(&messages, "abcd", &BTreeMap::new());
+        assert_eq!((usage.prompt, usage.completion, usage.total), (2, 1, 3));
     }
 }

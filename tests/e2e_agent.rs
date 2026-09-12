@@ -76,9 +76,12 @@ async fn streamed_agent_searches_workspace_and_finishes() {
         web_search: abacus_agent::web::WebConfig::default(),
         endpoint: None,
         aux_model: None,
+        subagent_model: None,
+        compaction_model: None,
         reasoning_effort: None,
         token_compression: false,
         one_stream: false,
+        prompt_cache: true,
         paths: AbacusPaths::under(directory.path().join("home")),
     };
     let provider = Provider::new(&config).unwrap();
@@ -110,6 +113,8 @@ async fn streamed_agent_searches_workspace_and_finishes() {
             tether: abacus_agent::tether::TetherState::default(),
             hive: abacus_agent::hive::HiveHandle::default(),
             aux_model: None,
+            subagent_model: None,
+            compaction_model: None,
             injections: abacus_agent::agent::InjectionQueue::default(),
             modes: abacus_agent::modes::ModeCoach::default(),
             safety: abacus_agent::safety::SafetyCache::default(),
@@ -205,9 +210,12 @@ async fn a_cancelled_turn_keeps_the_work_it_already_did() {
         web_search: abacus_agent::web::WebConfig::default(),
         endpoint: None,
         aux_model: None,
+        subagent_model: None,
+        compaction_model: None,
         reasoning_effort: None,
         token_compression: false,
         one_stream: false,
+        prompt_cache: true,
         paths: AbacusPaths::under(directory.path().join("home")),
     };
     let provider = Provider::new(&config).unwrap();
@@ -240,6 +248,8 @@ async fn a_cancelled_turn_keeps_the_work_it_already_did() {
             tether: abacus_agent::tether::TetherState::default(),
             hive: abacus_agent::hive::HiveHandle::default(),
             aux_model: None,
+            subagent_model: None,
+            compaction_model: None,
             injections: abacus_agent::agent::InjectionQueue::default(),
             modes: abacus_agent::modes::ModeCoach::default(),
             safety: abacus_agent::safety::SafetyCache::default(),
@@ -330,9 +340,12 @@ async fn responses_protocol_uses_responses_endpoint_and_stream_format() {
         web_search: abacus_agent::web::WebConfig::default(),
         endpoint: None,
         aux_model: None,
+        subagent_model: None,
+        compaction_model: None,
         reasoning_effort: None,
         token_compression: false,
         one_stream: false,
+        prompt_cache: true,
         paths: AbacusPaths::under(directory.path().join("home")),
     };
     let provider = Provider::new(&config).unwrap();
@@ -402,9 +415,12 @@ async fn edit_requires_reviewable_approval_before_atomic_write() {
         web_search: abacus_agent::web::WebConfig::default(),
         endpoint: None,
         aux_model: None,
+        subagent_model: None,
+        compaction_model: None,
         reasoning_effort: None,
         token_compression: false,
         one_stream: false,
+        prompt_cache: true,
         paths: AbacusPaths::under(directory.path().join("home")),
     };
     let provider = Provider::new(&config).unwrap();
@@ -436,6 +452,8 @@ async fn edit_requires_reviewable_approval_before_atomic_write() {
             tether: abacus_agent::tether::TetherState::default(),
             hive: abacus_agent::hive::HiveHandle::default(),
             aux_model: None,
+            subagent_model: None,
+            compaction_model: None,
             injections: abacus_agent::agent::InjectionQueue::default(),
             modes: abacus_agent::modes::ModeCoach::default(),
             safety: abacus_agent::safety::SafetyCache::default(),
@@ -535,6 +553,8 @@ async fn text_emitted_tool_calls_are_parsed_when_native_calls_absent() {
             tether: abacus_agent::tether::TetherState::default(),
             hive: abacus_agent::hive::HiveHandle::default(),
             aux_model: None,
+            subagent_model: None,
+            compaction_model: None,
             injections: abacus_agent::agent::InjectionQueue::default(),
             modes: abacus_agent::modes::ModeCoach::default(),
             safety: abacus_agent::safety::SafetyCache::default(),
@@ -633,6 +653,8 @@ async fn auto_mode_blocks_mutation_until_model_selects_build() {
             tether: abacus_agent::tether::TetherState::default(),
             hive: abacus_agent::hive::HiveHandle::default(),
             aux_model: None,
+            subagent_model: None,
+            compaction_model: None,
             injections: abacus_agent::agent::InjectionQueue::default(),
             modes: abacus_agent::modes::ModeCoach::default(),
             safety: abacus_agent::safety::SafetyCache::default(),
@@ -721,6 +743,8 @@ async fn auto_mode_selection_enables_later_tool_in_same_completion() {
             tether: abacus_agent::tether::TetherState::default(),
             hive: abacus_agent::hive::HiveHandle::default(),
             aux_model: None,
+            subagent_model: None,
+            compaction_model: None,
             injections: abacus_agent::agent::InjectionQueue::default(),
             modes: abacus_agent::modes::ModeCoach::default(),
             safety: abacus_agent::safety::SafetyCache::default(),
@@ -747,6 +771,18 @@ async fn auto_mode_selection_enables_later_tool_in_same_completion() {
     );
 }
 
+/// Phrases that identify a compaction request. A summariser that is the
+/// conversation's own model asks from inside the live context; one on another
+/// model builds a detached prompt. Mocks recognise both.
+const IN_CONTEXT_SUMMARY: &str = "Your context is full";
+const DETACHED_SUMMARY: &str = "context-aware state summary";
+
+/// Whether a request is the refinement review gate, detached or in-context.
+fn is_review_gate(request: &str) -> bool {
+    request.contains("refinement review gate")
+        || request.contains("Looking back at the turn you have just finished")
+}
+
 #[tokio::test]
 async fn rolling_summary_compaction_fires_on_large_context() {
     let directory = tempdir().unwrap();
@@ -758,19 +794,27 @@ async fn rolling_summary_compaction_fires_on_large_context() {
     let address = listener.local_addr().unwrap();
     let saw_summary = Arc::new(AtomicBool::new(false));
     let saw_summary_server = saw_summary.clone();
+    let summarised_in_context = Arc::new(AtomicBool::new(false));
+    let summarised_in_context_server = summarised_in_context.clone();
     let server = tokio::spawn(async move {
         // Serve up to a few connections. The first should be the compaction
-        // summarization call (no tools, contains the summary prompt); the next
-        // is the normal turn. Stop once the real turn is served.
+        // summarization call; the next is the normal turn. Stop once the real
+        // turn is served.
         for _ in 0..4 {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request = String::from_utf8(read_request(&mut stream).await).unwrap();
-            let is_summary = request.contains("context-aware state summary");
+            let in_context_summary = request.contains(IN_CONTEXT_SUMMARY);
+            let is_summary = in_context_summary || request.contains(DETACHED_SUMMARY);
             // The refinement review gate runs before summary compaction;
             // refuse it so no planning call fires and the flow continues.
-            let is_gate = request.contains("refinement review gate");
+            let is_gate = is_review_gate(&request);
             let payload = if is_summary {
                 saw_summary_server.store(true, Ordering::Relaxed);
+                // In-context means the instruction rode on the live
+                // conversation itself — the history is in the same request.
+                if in_context_summary && request.contains("BIGBLOB") {
+                    summarised_in_context_server.store(true, Ordering::Relaxed);
+                }
                 let summary_text = "1. Primary Request and Intent: do the thing. \
 9. Required Files:\n- src/main.rs\n10. Next Step: continue.";
                 let chunk =
@@ -840,6 +884,8 @@ async fn rolling_summary_compaction_fires_on_large_context() {
             tether: abacus_agent::tether::TetherState::default(),
             hive: abacus_agent::hive::HiveHandle::default(),
             aux_model: None,
+            subagent_model: None,
+            compaction_model: None,
             injections: abacus_agent::agent::InjectionQueue::default(),
             modes: abacus_agent::modes::ModeCoach::default(),
             safety: abacus_agent::safety::SafetyCache::default(),
@@ -868,6 +914,14 @@ async fn rolling_summary_compaction_fires_on_large_context() {
     assert!(
         saw_summary.load(Ordering::Relaxed),
         "compaction summarization call was not made"
+    );
+    // With no compaction model assigned the summariser is the conversation's
+    // own model, so the summary is asked for inside the live context — the
+    // request whose prefix the provider already has cached — rather than
+    // under a freshly built prompt that shares none of it.
+    assert!(
+        summarised_in_context.load(Ordering::Relaxed),
+        "summary was not requested in-context"
     );
     // The LLM path was taken (not the drop-only fallback, which would inject an
     // "older conversation messages were omitted" system note).
@@ -1017,9 +1071,11 @@ async fn a_refusing_review_gate_skips_the_planning_call() {
         for _ in 0..5 {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request = String::from_utf8(read_request(&mut stream).await).unwrap();
-            let is_gate = request.contains("refinement review gate");
-            let is_plan = request.contains("continual-harness refiner");
-            let is_summary = request.contains("context-aware state summary");
+            let is_gate = is_review_gate(&request);
+            let is_plan = request.contains("continual-harness refiner")
+                || request.contains("to your own reusable state");
+            let is_summary =
+                request.contains(IN_CONTEXT_SUMMARY) || request.contains(DETACHED_SUMMARY);
             let payload = if is_gate {
                 gate_counter.fetch_add(1, Ordering::Relaxed);
                 let chunk = serde_json::to_string(&json!({"choices":[{"delta":{"content":
@@ -1699,6 +1755,8 @@ fn base_options(workspace: &std::path::Path) -> TurnOptions {
         tether: abacus_agent::tether::TetherState::default(),
         hive: abacus_agent::hive::HiveHandle::default(),
         aux_model: None,
+        subagent_model: None,
+        compaction_model: None,
         injections: abacus_agent::agent::InjectionQueue::default(),
         modes: abacus_agent::modes::ModeCoach::default(),
         safety: abacus_agent::safety::SafetyCache::default(),
@@ -1731,9 +1789,12 @@ fn test_config(
         web_search: abacus_agent::web::WebConfig::default(),
         endpoint: None,
         aux_model: None,
+        subagent_model: None,
+        compaction_model: None,
         reasoning_effort: None,
         token_compression: false,
         one_stream: false,
+        prompt_cache: true,
         paths: AbacusPaths::under(directory.path().join("home")),
     }
 }

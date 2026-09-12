@@ -36,27 +36,12 @@ const PLAN_TRAJECTORY_CHARS: usize = 60_000;
 /// The gate sees less; it is deciding whether, not what.
 const REVIEW_TRAJECTORY_CHARS: usize = 24_000;
 
-const REVIEW_PROMPT: &str = "\
-You are Abacus's refinement review gate. Decide whether this finished turn \
-contains evidence worth writing into the agent's durable harness.
-
-Say yes when the turn produced something a future turn would genuinely need: a \
-convention discovered, a decision and its reason, an architecture fact learned \
-the hard way, a correction from the user that should stick, or a harness entry \
-now shown to be wrong. Say no for routine work, one-off details, transient tool \
-output, and anything the agent merely guessed at. Most turns are a no, and a \
-no costs nothing — recording noise is worse than recording nothing.
-
-Return JSON only:
-{\"should_refine\": true|false, \"rationale\": \"one short sentence\", \
-\"instructions\": \"optional focus for the refiner\"}";
-
-const PLAN_PROMPT: &str = "\
-You are Abacus's continual-harness refiner. From the finished trajectory, emit \
-precise edits to the agent's reusable state. This is like compaction, except \
-you are not summarising the conversation — you are updating what the agent \
-carries into future work.
-
+// Everything after the framing paragraph: the kinds, the rules, and the reply
+// shape. Shared verbatim by the detached and in-context planning prompts so the
+// two can never drift into asking for different JSON.
+macro_rules! plan_rules {
+    () => {
+        "\
 The three kinds:
 - prompt: a narrow behavioural addendum. The base system prompt is immutable \
 and must never be restated or rewritten here.
@@ -96,7 +81,59 @@ Return JSON only, with this shape:
 \"tripwires\": [\"distinctive substring of the failure\"], \
 \"references\": [\"optional paths or commands\"]}
   ]
-}";
+}"
+    };
+}
+
+const REVIEW_PROMPT: &str = "\
+You are Abacus's refinement review gate. Decide whether this finished turn \
+contains evidence worth writing into the agent's durable harness.
+
+Say yes when the turn produced something a future turn would genuinely need: a \
+convention discovered, a decision and its reason, an architecture fact learned \
+the hard way, a correction from the user that should stick, or a harness entry \
+now shown to be wrong. Say no for routine work, one-off details, transient tool \
+output, and anything the agent merely guessed at. Most turns are a no, and a \
+no costs nothing — recording noise is worse than recording nothing.
+
+Return JSON only:
+{\"should_refine\": true|false, \"rationale\": \"one short sentence\", \
+\"instructions\": \"optional focus for the refiner\"}";
+
+/// The gate, asked from inside the conversation it is judging.
+const IN_CONTEXT_REVIEW_PROMPT: &str = "\
+Step out of the task for one answer. Looking back at the turn you have just finished, decide \
+whether it produced evidence worth writing into your durable harness — the state you carry \
+into future sessions.\n\n\
+Say yes when the turn produced something a future turn would genuinely need: a convention \
+discovered, a decision and its reason, an architecture fact learned the hard way, a correction \
+from the user that should stick, or a harness entry now shown to be wrong. Say no for routine \
+work, one-off details, transient tool output, and anything you merely guessed at. Most turns \
+are a no, and a no costs nothing — recording noise is worse than recording nothing.\n\n\
+Do not call a tool. Return JSON only:\n\
+{\"should_refine\": true|false, \"rationale\": \"one short sentence\", \
+\"instructions\": \"optional focus for the refiner\"}";
+
+/// The planner, asked from inside the conversation it is learning from. Shares
+/// [`PLAN_RULES`] with the detached prompt; only the framing differs, because
+/// here the evidence is the context rather than a rendering of it.
+const IN_CONTEXT_PLAN_PROMPT: &str = concat!(
+    "\
+Step out of the task for one answer. From the turn you have just finished, emit precise edits \
+to your own reusable state. This is like compaction, except you are not summarising the \
+conversation — you are updating what you carry into future work. Your current state is listed \
+below; the evidence is the conversation you are in. Do not call a tool.\n",
+    plan_rules!()
+);
+
+const PLAN_PROMPT: &str = concat!(
+    "\
+You are Abacus's continual-harness refiner. From the finished trajectory, emit \
+precise edits to the agent's reusable state. This is like compaction, except \
+you are not summarising the conversation — you are updating what the agent \
+carries into future work.\n",
+    plan_rules!()
+);
 
 /// What a finished refinement did, for the transcript.
 pub struct RefineOutcome {
@@ -107,19 +144,90 @@ pub struct RefineOutcome {
     pub result: RefinementResult,
 }
 
+/// Who reflects, and whether it can do so from inside the live context.
+///
+/// The detached form renders the finished turn into a `<trajectory>` block and
+/// sends it under its own system prompt — a prompt that shares no prefix with
+/// the conversation it describes, so both refinement calls are full-price cache
+/// misses over content the provider already has cached verbatim.
+///
+/// The in-context form appends the question to the conversation instead. The
+/// trajectory is not rendered at all: the model is looking at the real thing,
+/// which is both cheaper and strictly more evidence than a summary of it.
+/// Available only when the reflector is the conversation's own model, since
+/// another model has a different cache and nothing to hit.
+pub struct Reflector<'a> {
+    pub provider: &'a Provider,
+    pub in_context: bool,
+    /// The conversation's tool definitions, sent unchanged on an in-context call
+    /// so the cached prefix still matches. See [`crate::compaction::Summariser`].
+    pub tools: &'a [Value],
+}
+
+impl<'a> Reflector<'a> {
+    /// A reflector that builds its own prompt, with no cache to reuse.
+    pub fn detached(provider: &'a Provider) -> Self {
+        Self {
+            provider,
+            in_context: false,
+            tools: &[],
+        }
+    }
+
+    /// Ask for one JSON answer, in the live context when that is possible.
+    async fn ask(
+        &self,
+        system: &str,
+        in_context_prompt: &str,
+        detail: &str,
+        conversation: &[Value],
+        cancel: &AtomicBool,
+    ) -> Option<String> {
+        if self.in_context {
+            let mut messages = conversation.to_vec();
+            messages.push(json!({
+                "role": "user",
+                "content": format!("{in_context_prompt}\n\n{detail}"),
+            }));
+            if let Some(reply) = complete(self.provider, &messages, self.tools, cancel).await {
+                return Some(reply);
+            }
+            // Fall through: a refinement is optional, but if the cheap call
+            // fails the detached prompt is still worth one attempt.
+        }
+        let messages = vec![
+            json!({"role": "system", "content": system}),
+            json!({"role": "user", "content": detail}),
+        ];
+        complete(self.provider, &messages, &[], cancel).await
+    }
+}
+
 /// Ask the gate whether this trajectory is worth refining.
 pub async fn should_refine(
-    provider: &Provider,
+    reflector: &Reflector<'_>,
     messages: &[Value],
     harness: &HarnessStore,
     cancel: &AtomicBool,
 ) -> Option<(bool, Option<String>)> {
-    let prompt = format!(
-        "<harness_state>\n{}\n</harness_state>\n\n<trajectory>\n{}\n</trajectory>",
-        harness.overview(),
-        trajectory(messages, REVIEW_TRAJECTORY_CHARS)
-    );
-    let reply = complete_json(provider, REVIEW_PROMPT, &prompt, cancel).await?;
+    let detail = if reflector.in_context {
+        format!("<harness_state>\n{}\n</harness_state>", harness.overview())
+    } else {
+        format!(
+            "<harness_state>\n{}\n</harness_state>\n\n<trajectory>\n{}\n</trajectory>",
+            harness.overview(),
+            trajectory(messages, REVIEW_TRAJECTORY_CHARS)
+        )
+    };
+    let reply = reflector
+        .ask(
+            REVIEW_PROMPT,
+            IN_CONTEXT_REVIEW_PROMPT,
+            &detail,
+            messages,
+            cancel,
+        )
+        .await?;
     let value = extract_json(&reply).ok()?;
     Some((
         value.get("should_refine").and_then(Value::as_bool) == Some(true),
@@ -135,7 +243,7 @@ pub async fn should_refine(
 /// beyond this session.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
-    provider: &Provider,
+    reflector: &Reflector<'_>,
     messages: &[Value],
     harness: &HarnessStore,
     papercuts: &crate::papercuts::PapercutStore,
@@ -148,19 +256,31 @@ pub async fn run(
     // touched it, rather than being silently overwritten.
     let baseline = harness.baseline(lifetime);
 
-    let mut prompt = format!(
-        "<harness_state>\n{}\n</harness_state>\n\n<trajectory>\n{}\n</trajectory>",
-        harness.overview(),
-        trajectory(messages, PLAN_TRAJECTORY_CHARS)
-    );
+    let mut detail = if reflector.in_context {
+        format!("<harness_state>\n{}\n</harness_state>", harness.overview())
+    } else {
+        format!(
+            "<harness_state>\n{}\n</harness_state>\n\n<trajectory>\n{}\n</trajectory>",
+            harness.overview(),
+            trajectory(messages, PLAN_TRAJECTORY_CHARS)
+        )
+    };
     if let Some(instructions) = instructions {
-        prompt.push_str(&format!("\n\n<focus>\n{instructions}\n</focus>"));
+        detail.push_str(&format!("\n\n<focus>\n{instructions}\n</focus>"));
     }
-    prompt.push_str(
+    detail.push_str(
         "\n\nReturn only the JSON object. If nothing is justified, return an empty edits array.",
     );
 
-    let reply = complete_json(provider, PLAN_PROMPT, &prompt, cancel).await?;
+    let reply = reflector
+        .ask(
+            PLAN_PROMPT,
+            IN_CONTEXT_PLAN_PROMPT,
+            &detail,
+            messages,
+            cancel,
+        )
+        .await?;
     let (proposal, drafts) = parse_reply(&reply).ok()?;
 
     // Papercuts go through the ordinary tool path, so they inherit its
@@ -195,20 +315,16 @@ pub async fn run(
     })
 }
 
-async fn complete_json(
+async fn complete(
     provider: &Provider,
-    system: &str,
-    user: &str,
+    messages: &[Value],
+    tools: &[Value],
     cancel: &AtomicBool,
 ) -> Option<String> {
-    let conversation = vec![
-        json!({"role": "system", "content": system}),
-        json!({"role": "user", "content": user}),
-    ];
     // Deltas are discarded: a refinement is bookkeeping, not output.
     let (deltas, _sink) = mpsc::unbounded_channel();
     let completion = provider
-        .complete(&conversation, &[], deltas, cancel)
+        .complete(messages, tools, deltas, cancel)
         .await
         .ok()?;
     if completion.cancelled || completion.content.trim().is_empty() {

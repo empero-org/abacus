@@ -57,13 +57,13 @@ pub struct WorkerStatus {
     /// its streamed answer — clipped to one line.
     pub activity: String,
     pub started: Instant,
-    /// Live token counter for this worker's own provider clone.
-    pub tokens: Arc<AtomicU64>,
+    /// Live token ledger for this worker's own provider clone.
+    pub tokens: Arc<crate::provider::TokenLedger>,
 }
 
 impl WorkerStatus {
     pub fn tokens_used(&self) -> u64 {
-        self.tokens.load(Ordering::Relaxed)
+        self.tokens.total()
     }
 }
 
@@ -86,7 +86,7 @@ pub struct SubagentBoard {
 impl SubagentBoard {
     /// Register a worker; a new batch starting while only finished workers
     /// remain replaces them, so the strip always shows the current swarm.
-    pub fn begin(&self, name: &str, role: &str, tokens: Arc<AtomicU64>) -> u64 {
+    pub fn begin(&self, name: &str, role: &str, tokens: Arc<crate::provider::TokenLedger>) -> u64 {
         let mut inner = self.inner.write().expect("board lock");
         if inner
             .workers
@@ -492,7 +492,7 @@ mod tests {
             "nothing running, nothing to say"
         );
 
-        let tokens = Arc::new(AtomicU64::new(0));
+        let tokens = Arc::new(crate::provider::TokenLedger::default());
         let id = hive.board.begin("recon", "scout", tokens.clone());
         hive.board.activity(id, "reading src/agent.rs");
         hive.board.begin("builder", "drone", tokens);
@@ -629,8 +629,16 @@ mod tests {
     fn board_tracks_workers_and_clusters_at_scale() {
         let board = SubagentBoard::default();
         assert_eq!(board.strip_rows(), 0);
-        let a = board.begin("alpha", "scout", Arc::new(AtomicU64::new(0)));
-        let b = board.begin("beta", "drone", Arc::new(AtomicU64::new(0)));
+        let a = board.begin(
+            "alpha",
+            "scout",
+            Arc::new(crate::provider::TokenLedger::default()),
+        );
+        let b = board.begin(
+            "beta",
+            "drone",
+            Arc::new(crate::provider::TokenLedger::default()),
+        );
         assert_eq!(board.strip_rows(), 2, "small swarms list individually");
         board.activity(a, "running tests\npass 3 of 9");
         assert_eq!(board.snapshot()[0].activity, "pass 3 of 9");
@@ -643,7 +651,7 @@ mod tests {
             board.begin(
                 &format!("worker-{index}"),
                 "worker",
-                Arc::new(AtomicU64::new(0)),
+                Arc::new(crate::provider::TokenLedger::default()),
             );
         }
         // The new batch replaced the settled one, and five workers cluster.

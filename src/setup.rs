@@ -356,6 +356,7 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
             allow_fallbacks: true,
             context_window: None,
             max_output_tokens: None,
+            roles: Default::default(),
         },
     );
     settings.default_profile = profile_id.clone();
@@ -580,6 +581,40 @@ pub async fn discover_endpoints(
         .collect())
 }
 
+/// Fetch the provider's model list with everything the payload says about each
+/// one — context window, pricing, modality — so a picker can show a model's
+/// shape instead of just its name.
+///
+/// An OpenAI-compatible endpoint that reports nothing but ids still works: the
+/// cards come back with their optional fields empty and the interface drops the
+/// columns it has no data for.
+pub async fn discover_model_cards(
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Result<Vec<crate::model_info::ModelCard>> {
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(12))
+        .user_agent(concat!("abacus-agent/", env!("CARGO_PKG_VERSION")))
+        .build()?;
+    let mut request = client
+        .get(format!("{}/models", base_url.trim_end_matches('/')))
+        .header(header::ACCEPT, "application/json");
+    if let Some(key) = api_key {
+        request = request.bearer_auth(key);
+    }
+    let response = request.send().await.context("could not reach provider")?;
+    let status = response.status();
+    if !status.is_success() {
+        let detail = response.text().await.unwrap_or_default();
+        bail!("provider returned {status}: {}", one_line(&detail, 240));
+    }
+    let value: Value = response
+        .json()
+        .await
+        .context("provider returned invalid JSON")?;
+    Ok(crate::model_info::parse_model_cards(&value))
+}
+
 pub async fn discover_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<String>> {
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(12))
@@ -601,15 +636,10 @@ pub async fn discover_models(base_url: &str, api_key: Option<&str>) -> Result<Ve
         .json()
         .await
         .context("provider returned invalid JSON")?;
-    let mut models = value["data"]
-        .as_array()
+    Ok(crate::model_info::parse_model_cards(&value)
         .into_iter()
-        .flatten()
-        .filter_map(|item| item["id"].as_str().map(str::to_owned))
-        .collect::<Vec<_>>();
-    models.sort_by_key(|value| value.to_ascii_lowercase());
-    models.dedup();
-    Ok(models)
+        .map(|card| card.id)
+        .collect())
 }
 
 /// Present the discovered models. A provider can list hundreds, so the list is

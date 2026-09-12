@@ -106,8 +106,44 @@ pub fn needs_summary(
     under_pressure(messages, state, budget) && messages.len() > KEEP_FIRST + 1
 }
 
+/// Who summarises, and whether it can do so from inside the live context.
+///
+/// An out-of-context summarisation builds a fresh prompt — its own system
+/// message, then the slice of history being summarised — which shares no prefix
+/// with the conversation's own requests and is therefore a total prompt-cache
+/// miss: the most expensive call of the session, paid at the exact moment the
+/// session is longest. An in-context summarisation instead *appends* the
+/// instruction to the conversation as it stands, so every token before it is a
+/// cache read at a fraction of the price, and the model summarises from the
+/// evidence it already has rather than from a re-serialised copy of it.
+///
+/// It is only available when the summariser is the model running the
+/// conversation — a different model has a different cache, and nothing to hit.
+pub struct Summariser<'a> {
+    pub provider: &'a Provider,
+    /// True when `provider` is the conversation's own model.
+    pub in_context: bool,
+    /// The tool definitions the conversation's requests carry, sent unchanged on
+    /// an in-context call. They sit ahead of the system prompt and the history
+    /// in the cached prefix, so omitting them — which a summarisation call has
+    /// no other reason to include — would move the prefix and miss everything
+    /// behind it.
+    pub tools: &'a [Value],
+}
+
+impl<'a> Summariser<'a> {
+    /// An out-of-context summariser: a fresh prompt, no cache to reuse.
+    pub fn detached(provider: &'a Provider) -> Self {
+        Self {
+            provider,
+            in_context: false,
+            tools: &[],
+        }
+    }
+}
+
 pub async fn compact(
-    provider: &Provider,
+    summariser: &Summariser<'_>,
     messages: &mut Vec<Value>,
     state: &mut CompactionState,
     budget: &CompactionBudget,
@@ -149,7 +185,7 @@ pub async fn compact(
     }
 
     let to_summarize: Vec<Value> = messages[head_end..cut].to_vec();
-    match summarize_range(provider, state, &to_summarize, budget, cancel).await {
+    match summarize(summariser, state, messages, &to_summarize, budget, cancel).await {
         Ok(summary) => {
             // Backstop: a model that ignores the compression directive must not
             // be able to reinstate the growth loop, so an oversized summary is
@@ -414,6 +450,93 @@ fn shrink_tool_result(name: &str, subject: &str, content: &str) -> String {
     format!("{header}, began:\n{preview}\n…]")
 }
 
+/// Produce the next running summary, preferring the in-context call.
+///
+/// The in-context attempt is one request; if it comes back empty or errors, the
+/// detached ladder below runs exactly as it did before, so the cheap path can
+/// never cost the session its compaction.
+async fn summarize(
+    summariser: &Summariser<'_>,
+    state: &CompactionState,
+    conversation: &[Value],
+    range: &[Value],
+    budget: &CompactionBudget,
+    cancel: &AtomicBool,
+) -> Result<String, String> {
+    if summariser.in_context {
+        match summarize_in_context(summariser, state, conversation, budget, cancel).await {
+            Ok(summary) => return Ok(summary),
+            // Falling through is the point: an in-context call can fail for
+            // reasons the detached one will not (a request one turn's worth
+            // larger than the last, a model that answers with a tool call
+            // despite being told not to), and compaction must still happen.
+            Err(_) if cancel.load(std::sync::atomic::Ordering::Relaxed) => {
+                return Err("cancelled".to_owned());
+            }
+            Err(_) => {}
+        }
+    }
+    summarize_range(summariser.provider, state, range, budget, cancel).await
+}
+
+/// Summarise by appending the instruction to the live conversation.
+///
+/// The request is the conversation's own message list plus one trailing user
+/// turn, and it carries the same tools, so everything up to the last cache
+/// breakpoint is a cache read. The model is addressed in the second person
+/// about its own context, because that is what it is looking at.
+async fn summarize_in_context(
+    summariser: &Summariser<'_>,
+    state: &CompactionState,
+    conversation: &[Value],
+    budget: &CompactionBudget,
+    cancel: &AtomicBool,
+) -> Result<String, String> {
+    let mut directive = String::from(IN_CONTEXT_PROMPT);
+    if let Some(prior) = state
+        .running_summary
+        .as_deref()
+        .filter(|summary| !summary.trim().is_empty())
+    {
+        directive.push_str(&format!(
+            "\n\nEarlier conversation was already compacted into this summary. Fold everything \
+             from it that still matters into the new one; do not lose a decision or constraint it \
+             records:\n{prior}"
+        ));
+    }
+    directive.push_str(&format!(
+        "\n\nKeep the summary under {} characters. Respond with the summary text only — no tool \
+         calls, no preamble.",
+        budget.summary_budget_chars
+    ));
+
+    let mut messages = conversation.to_vec();
+    messages.push(json!({"role": "user", "content": directive}));
+
+    let (delta_tx, mut delta_rx) = mpsc::unbounded_channel::<crate::provider::Chunk>();
+    let drain = tokio::spawn(async move { while delta_rx.recv().await.is_some() {} });
+    let result = summariser
+        .provider
+        .complete(&messages, summariser.tools, delta_tx, cancel)
+        .await;
+    let _ = drain.await;
+
+    let completion = result.map_err(|error| format!("{error:#}"))?;
+    if completion.cancelled {
+        return Err("cancelled".to_owned());
+    }
+    // A model that answered with a tool call instead of a summary has not
+    // summarised anything; the detached path asks again without tools.
+    if !completion.tool_calls.is_empty() {
+        return Err("summariser called a tool instead of answering".to_owned());
+    }
+    let summary = strip_analysis(&completion.content).trim().to_owned();
+    if summary.is_empty() {
+        return Err("in-context summarisation returned no text".to_owned());
+    }
+    Ok(summary)
+}
+
 async fn summarize_range(
     provider: &Provider,
     state: &CompactionState,
@@ -549,6 +672,24 @@ fn strip_analysis(text: &str) -> String {
     out.push_str(rest);
     out
 }
+
+/// The in-context compaction instruction, appended to the conversation itself.
+///
+/// Written in the second person and in the present tense, because the model is
+/// looking at the context it is being asked to replace — there is no
+/// "conversation above" to describe from outside. Short on purpose: the
+/// structure a detached summariser has to be told about (roles, ordering, what
+/// a tool result was) is visible to this one.
+const IN_CONTEXT_PROMPT: &str = "\
+Your context is full, so this conversation is about to be replaced by your summary of it. \
+Write the summary you need to continue seamlessly: the user's requests and constraints \
+(quote the precise ones), what has been done and learned, files changed, the current state, \
+and the exact next steps. Be dense and complete.\n\n\
+Write it as notes to yourself, not as a report to the user. Prefer specifics over \
+characterisations: exact paths, identifiers, commands, numbers, and error text. Anything you \
+omit is gone — but a file's contents can be re-read from disk, so spend the space on what \
+cannot be recovered that way: decisions and their reasons, what was ruled out, what failed \
+and how, and what you were about to do next.";
 
 const SUMMARY_PROMPT: &str = "\
 You are maintaining a context-aware state summary for a long-running coding agent.\n\

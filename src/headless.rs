@@ -1,8 +1,5 @@
 use std::io::{self, Write};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU64},
-};
+use std::sync::{Arc, atomic::AtomicBool};
 use std::time::Instant;
 
 use anyhow::{Result, bail};
@@ -37,7 +34,10 @@ pub async fn run(
         .as_ref()
         .map(|session| session.tokens_used)
         .unwrap_or(0);
-    let provider = Provider::with_tokens(&config, Arc::new(AtomicU64::new(initial_tokens)))?;
+    let provider = Provider::with_tokens(
+        &config,
+        Arc::new(crate::provider::TokenLedger::new(initial_tokens)),
+    )?;
     let session_id = session.as_ref().map(|session| session.id.to_string());
     services
         .run_hooks(
@@ -537,6 +537,8 @@ fn turn_options(
         tether: tether.clone(),
         hive: crate::hive::HiveHandle::load(config.paths.hive_file.clone()),
         aux_model: config.aux_model.clone(),
+        subagent_model: config.subagent_model.clone(),
+        compaction_model: config.compaction_model.clone(),
         injections: crate::agent::InjectionQueue::default(),
         modes: crate::modes::ModeCoach::load(config.paths.modes_file.clone()),
         web_search: config.web_search.clone(),

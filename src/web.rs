@@ -1147,9 +1147,12 @@ mod tests {
             web_search: Default::default(),
             endpoint: None,
             aux_model: None,
+            subagent_model: None,
+            compaction_model: None,
             reasoning_effort: None,
             token_compression: false,
             one_stream: false,
+            prompt_cache: true,
             paths: crate::config::AbacusPaths::under(std::env::temp_dir().join("abacus-web-test")),
         };
         crate::provider::Provider::new(&config).expect("provider")

@@ -22,7 +22,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -345,7 +345,7 @@ async fn run_once(
             .await
             .context("discover extensions")?,
     );
-    let tokens = Arc::new(AtomicU64::new(0));
+    let tokens = Arc::new(crate::provider::TokenLedger::default());
     let provider = Provider::with_tokens(&config, tokens.clone())?;
 
     let mut messages = initial_messages(&config.workspace);
@@ -384,6 +384,8 @@ async fn run_once(
         tether: crate::tether::TetherState::default(),
         hive: crate::hive::HiveHandle::load(config.paths.hive_file.clone()),
         aux_model: config.aux_model.clone(),
+        subagent_model: config.subagent_model.clone(),
+        compaction_model: config.compaction_model.clone(),
         injections: crate::agent::InjectionQueue::default(),
         modes: crate::modes::ModeCoach::load(config.paths.modes_file.clone()),
         safety: crate::safety::SafetyCache::default(),
@@ -471,7 +473,7 @@ async fn run_once(
         passed,
         tool_calls,
         assistant_steps,
-        tokens: tokens.load(Ordering::Relaxed),
+        tokens: tokens.total(),
         wall_ms,
         papercut_recalls,
         timed_out,

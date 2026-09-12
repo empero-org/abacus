@@ -18,8 +18,9 @@
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::symbols::border;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Padding};
+use ratatui::widgets::{Block, Borders, Padding};
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
@@ -72,6 +73,26 @@ pub struct Glyphs {
     pub down: &'static str,
     /// Vertical ellipsis marking an elided gap between diff hunks.
     pub gap: &'static str,
+    /// Selection cursor for a list row. Selection is the cursor plus accent
+    /// text — never a fill; the fill band belongs to the mouse (see
+    /// [`list_row`](../tui/fn.list_row.html)).
+    pub cursor: &'static str,
+    /// Bracket state marks for a list of things that are on or off. Three
+    /// cells, so they hold a column the way a single glyph cannot, and the
+    /// bracket reads as a checkbox rather than as a verdict.
+    pub enabled: &'static str,
+    pub disabled: &'static str,
+    /// Junctions where an interior column divider meets the outer border.
+    pub tee_down: &'static str,
+    pub tee_up: &'static str,
+    /// Corners of an overlay's outline. Paired with `rule` and `track` for the
+    /// edges, these are the whole box — so a preset that cannot draw box
+    /// characters degrades the outline along with everything else, instead of
+    /// leaving a rounded Unicode frame around ASCII contents.
+    pub corner_tl: &'static str,
+    pub corner_tr: &'static str,
+    pub corner_bl: &'static str,
+    pub corner_br: &'static str,
     /// Half-block wordmark rows, or `None` where the blocks won't render and
     /// the splash falls back to plain letters.
     pub wordmark: Option<[&'static str; 2]>,
@@ -106,6 +127,15 @@ impl Glyphs {
         tasks: "▦",
         down: "↓",
         gap: "⋮",
+        cursor: "❯",
+        enabled: "[x]",
+        disabled: "[/]",
+        tee_down: "┬",
+        tee_up: "┴",
+        corner_tl: "╭",
+        corner_tr: "╮",
+        corner_bl: "╰",
+        corner_br: "╯",
         wordmark: Some(["▄▀█ █▄▄ ▄▀█ █▀▀ █ █ █▀", "█▀█ █▄█ █▀█ █▄▄ █▄█ ▄█"]),
     };
 
@@ -135,26 +165,172 @@ impl Glyphs {
         tasks: "#",
         down: "v",
         gap: ":",
+        cursor: ">",
+        enabled: "[x]",
+        disabled: "[/]",
+        tee_down: "+",
+        tee_up: "+",
+        corner_tl: "+",
+        corner_tr: "+",
+        corner_bl: "+",
+        corner_br: "+",
         wordmark: None,
+    };
+
+    /// Nerd Font glyphs, for a terminal running a patched font.
+    ///
+    /// Only the *semantic* marks change. The box drawing, meters, rules, and
+    /// braille spinner are already the right shapes in plain Unicode, and
+    /// swapping them for private-use codepoints would trade legibility for
+    /// novelty and break on any terminal whose fallback font is consulted.
+    ///
+    /// Every glyph below is written as an escape with the Nerd Fonts name in a
+    /// comment, because the literal characters are unreadable in a source file
+    /// and impossible to review. All of them live in a private-use area, which
+    /// `unicode-width` measures as one cell — the same measure a patched font
+    /// draws them at, so the column arithmetic elsewhere holds.
+    ///
+    /// There is no detecting this: nothing a terminal reports says whether its
+    /// font has these glyphs, and guessing wrong fills the interface with
+    /// tofu. It is opt-in only.
+    pub const NERD: Glyphs = Glyphs {
+        bar: "▌",
+        prompt: "\u{f054}", // nf-fa-chevron_right
+        ok: "\u{f00c}",     // nf-fa-check
+        failed: "\u{f00d}", // nf-fa-close
+        paused: "\u{f04c}", // nf-fa-pause
+        notice: "\u{f05a}", // nf-fa-info_circle
+        spinner: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+        still: "\u{f111}", // nf-fa-circle
+        rule: "─",
+        meter_full: "▰",
+        meter_empty: "▱",
+        thumb: "▐",
+        track: "│",
+        separator: "·",
+        fold_closed: "\u{f0da}", // nf-fa-caret_right
+        fold_open: "\u{f0d7}",   // nf-fa-caret_down
+        quote_rail: "┃",
+        branch: "\u{e725}",   // nf-dev-git_branch
+        queued: "\u{f017}",   // nf-fa-clock_o
+        attached: "\u{f0c6}", // nf-fa-paperclip
+        goal: "\u{f140}",     // nf-fa-bullseye
+        repeat: "\u{f01e}",   // nf-fa-repeat
+        tasks: "\u{f0ae}",    // nf-fa-tasks
+        down: "\u{f063}",     // nf-fa-arrow_down
+        gap: "\u{f142}",      // nf-fa-ellipsis_v
+        cursor: "\u{f054}",   // nf-fa-chevron_right
+        // A filled circle against a ban sign, rather than a bracket pair: with
+        // a real icon font the shape carries the state on its own, and the
+        // column shrinks from three cells to one.
+        enabled: "\u{f111}",  // nf-fa-circle
+        disabled: "\u{f05e}", // nf-fa-ban
+        tee_down: "┬",
+        tee_up: "┴",
+        corner_tl: "╭",
+        corner_tr: "╮",
+        corner_bl: "╰",
+        corner_br: "╯",
+        wordmark: Some(["▄▀█ █▄▄ ▄▀█ █▀▀ █ █ █▀", "█▀█ █▄█ █▀█ █▄▄ █▄█ ▄█"]),
     };
 }
 
-/// The active glyph set, resolved once from the environment.
-pub fn glyphs() -> &'static Glyphs {
-    static ACTIVE: std::sync::OnceLock<Glyphs> = std::sync::OnceLock::new();
-    ACTIVE.get_or_init(|| {
-        let forced = std::env::var("ABACUS_ASCII")
-            .map(|value| matches!(value.trim(), "1" | "true" | "yes"))
-            .unwrap_or(false);
-        let bare = std::env::var("TERM")
-            .map(|term| matches!(term.trim(), "dumb" | "linux"))
-            .unwrap_or(false);
-        if forced || bare {
-            Glyphs::ASCII
-        } else {
-            Glyphs::UNICODE
+/// Which glyph table the interface draws with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GlyphChoice {
+    /// ASCII on a terminal that announces itself as bare, Unicode otherwise.
+    /// Never Nerd — see [`Glyphs::NERD`].
+    #[default]
+    Auto,
+    Unicode,
+    Nerd,
+    Ascii,
+}
+
+impl GlyphChoice {
+    pub fn label(self) -> &'static str {
+        match self {
+            GlyphChoice::Auto => "auto",
+            GlyphChoice::Unicode => "unicode",
+            GlyphChoice::Nerd => "nerd",
+            GlyphChoice::Ascii => "ascii",
         }
-    })
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(GlyphChoice::Auto),
+            "unicode" => Some(GlyphChoice::Unicode),
+            "nerd" | "nerdfont" | "nerd-font" => Some(GlyphChoice::Nerd),
+            "ascii" | "plain" => Some(GlyphChoice::Ascii),
+            _ => None,
+        }
+    }
+
+    /// The table this choice selects, resolving `Auto` against the terminal.
+    pub fn resolve(self) -> &'static Glyphs {
+        match self {
+            GlyphChoice::Unicode => &Glyphs::UNICODE,
+            GlyphChoice::Nerd => &Glyphs::NERD,
+            GlyphChoice::Ascii => &Glyphs::ASCII,
+            GlyphChoice::Auto => {
+                let bare = std::env::var("TERM")
+                    .map(|term| matches!(term.trim(), "dumb" | "linux"))
+                    .unwrap_or(false);
+                if bare {
+                    &Glyphs::ASCII
+                } else {
+                    &Glyphs::UNICODE
+                }
+            }
+        }
+    }
+}
+
+/// The environment's say in the matter, which overrides the setting.
+///
+/// `ABACUS_GLYPHS` names a preset outright. `ABACUS_ASCII=1` predates it and
+/// still forces the fallback, because it is in people's shell profiles.
+fn glyph_override() -> Option<GlyphChoice> {
+    if let Ok(value) = std::env::var("ABACUS_GLYPHS")
+        && let Some(choice) = GlyphChoice::parse(&value)
+    {
+        return Some(choice);
+    }
+    let forced = std::env::var("ABACUS_ASCII")
+        .map(|value| matches!(value.trim(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    forced.then_some(GlyphChoice::Ascii)
+}
+
+/// The active preset, as an index into the tables below. An atomic rather than
+/// a lock: this is read several times per drawn row.
+static ACTIVE_GLYPHS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(u8::MAX);
+
+/// Point the interface at `choice`, unless the environment has overridden it.
+pub fn set_glyphs(choice: GlyphChoice) {
+    let choice = glyph_override().unwrap_or(choice);
+    let index = match choice {
+        GlyphChoice::Auto => 0,
+        GlyphChoice::Unicode => 1,
+        GlyphChoice::Nerd => 2,
+        GlyphChoice::Ascii => 3,
+    };
+    ACTIVE_GLYPHS.store(index, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The active glyph set. Defaults to the environment's choice, or `Auto`,
+/// until [`set_glyphs`] is called with the loaded settings.
+pub fn glyphs() -> &'static Glyphs {
+    let choice = match ACTIVE_GLYPHS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => GlyphChoice::Auto,
+        1 => GlyphChoice::Unicode,
+        2 => GlyphChoice::Nerd,
+        3 => GlyphChoice::Ascii,
+        _ => glyph_override().unwrap_or_default(),
+    };
+    choice.resolve()
 }
 
 /// The status header with a highlight band sweeping across it — the "alive"
@@ -280,6 +456,32 @@ pub fn dot() -> Span<'static> {
     )
 }
 
+/// Spell a key name for the active preset.
+///
+/// Hint strips name keys with arrow characters — `↑↓`, `←`, `⇧⇥` — which are
+/// the clearest form where they render and mojibake where they do not. Folding
+/// them here means every hint site writes the good spelling and the ASCII
+/// preset still degrades, rather than each site carrying a pair of strings.
+pub fn key_label(key: &str) -> String {
+    if !std::ptr::eq(glyphs(), &Glyphs::ASCII) {
+        return key.to_owned();
+    }
+    let mut out = String::with_capacity(key.len());
+    for ch in key.chars() {
+        match ch {
+            '↑' => out.push('^'),
+            '↓' => out.push('v'),
+            '←' => out.push('<'),
+            '→' => out.push('>'),
+            '⇧' => out.push_str("Shift+"),
+            '⇥' => out.push_str("Tab"),
+            '⏎' => out.push_str("Enter"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// `key label` pairs for a hint strip: the key in the accent, the description
 /// muted. Rendered with two spaces between pairs.
 pub fn hints(pairs: &[(&str, &str)]) -> Vec<Span<'static>> {
@@ -289,7 +491,7 @@ pub fn hints(pairs: &[(&str, &str)]) -> Vec<Span<'static>> {
             spans.push(Span::styled("   ", Style::default()));
         }
         spans.push(Span::styled(
-            (*key).to_owned(),
+            key_label(key),
             Style::default().fg(primary()).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
@@ -392,7 +594,7 @@ pub fn overlay_block(title: &str, accent: Color, footer: Option<Line<'static>>) 
     let palette = theme::active();
     let mut block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_set(border_set())
         .border_style(Style::default().fg(palette.border))
         .style(Style::default().bg(palette.overlay))
         .padding(Padding::horizontal(1))
@@ -405,6 +607,22 @@ pub fn overlay_block(title: &str, accent: Color, footer: Option<Line<'static>>) 
         block = block.title_bottom(footer);
     }
     block
+}
+
+/// The outline glyphs for the active preset, so an overlay's frame degrades
+/// with everything else it contains.
+pub fn border_set() -> border::Set<'static> {
+    let set = glyphs();
+    border::Set {
+        top_left: set.corner_tl,
+        top_right: set.corner_tr,
+        bottom_left: set.corner_bl,
+        bottom_right: set.corner_br,
+        vertical_left: set.track,
+        vertical_right: set.track,
+        horizontal_top: set.rule,
+        horizontal_bottom: set.rule,
+    }
 }
 
 /// Bottom-edge hint strip for an overlay, wrapped in spaces so it doesn't touch
@@ -440,6 +658,256 @@ pub fn measure(area: Rect, max: u16) -> Rect {
         x: area.x + (area.width - max) / 2,
         width: max,
         ..area
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Selectable lists
+// ---------------------------------------------------------------------------
+
+/// How a list row is currently marked out.
+///
+/// Selection and hover are deliberately different signals rather than two
+/// spellings of one. A filled band is what the pointer paints as it moves — if
+/// the keyboard cursor also paints one, a list with a mouse over it shows two
+/// identical highlights and neither one means anything. So the keyboard cursor
+/// is a glyph plus accent text, and the fill belongs to the pointer alone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RowState {
+    /// The keyboard cursor is on this row.
+    pub selected: bool,
+    /// The pointer is over this row.
+    pub hovered: bool,
+}
+
+impl RowState {
+    pub fn selected(selected: bool) -> Self {
+        Self {
+            selected,
+            hovered: false,
+        }
+    }
+}
+
+/// One row of a selectable list, padded to `width` columns.
+///
+/// A two-column marker gutter opens every row — the cursor glyph on the
+/// selected row, blanks elsewhere — so the labels stay on one column whether
+/// or not the cursor is present.
+pub fn list_row(state: RowState, width: usize, content: Vec<Span<'static>>) -> Line<'static> {
+    let palette = theme::active();
+    let fill = if state.hovered {
+        palette.selection
+    } else {
+        palette.overlay
+    };
+    let mut spans = vec![Span::styled(
+        if state.selected {
+            format!("{} ", glyphs().cursor)
+        } else {
+            "  ".to_owned()
+        },
+        Style::default()
+            .fg(primary())
+            .bg(fill)
+            .add_modifier(Modifier::BOLD),
+    )];
+    for span in content {
+        let mut style = span.style.bg(fill);
+        // Without colour the accent says nothing, so the selected row leans on
+        // its cursor glyph and bold text instead.
+        if state.selected && palette.plain {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        spans.push(Span::styled(span.content, style));
+    }
+    let used = spans_width(&spans);
+    if used < width {
+        spans.push(Span::styled(
+            " ".repeat(width - used),
+            Style::default().bg(fill),
+        ));
+    }
+    Line::from(spans)
+}
+
+// ---------------------------------------------------------------------------
+// Two-column overlays
+// ---------------------------------------------------------------------------
+
+/// The rects of a two-column overlay body: a fixed-width sidebar, a column
+/// divider, and the remaining body.
+///
+/// The divider is a real column of the surface rather than a gap between two
+/// separately-outlined panels, so the whole overlay reads as one box with an
+/// interior rule — the border ties the columns together instead of fencing
+/// them apart. `divider_x` is where the caller draws the rule and pokes the
+/// `┬`/`┴` junctions into the outer border.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Split {
+    pub sidebar: Rect,
+    pub divider_x: u16,
+    pub body: Rect,
+}
+
+/// Split an overlay's inner rect into `sidebar_width` columns, a one-column
+/// rule with a blank on either side, and the rest.
+///
+/// A body narrower than [`MIN_SPLIT_BODY`] means the terminal cannot carry two
+/// columns; the caller should fall back to a single-column layout rather than
+/// render a sidebar with a two-character body beside it.
+pub fn split(inner: Rect, sidebar_width: u16) -> Split {
+    let sidebar_width = sidebar_width.min(inner.width.saturating_sub(4));
+    let divider_x = inner.x + sidebar_width + 1;
+    let body_x = divider_x + 2;
+    Split {
+        sidebar: Rect {
+            width: sidebar_width,
+            ..inner
+        },
+        divider_x,
+        body: Rect {
+            x: body_x,
+            width: inner.right().saturating_sub(body_x),
+            ..inner
+        },
+    }
+}
+
+/// Below this many body columns a split layout is worse than a plain list.
+pub const MIN_SPLIT_BODY: u16 = 32;
+
+/// Pad or truncate a run of spans to exactly `width` columns.
+///
+/// Exactness is the point: a split row is assembled by concatenating cells, so
+/// a cell that renders one column short slides everything to its right out of
+/// alignment. Padding is an unstyled span, which picks up whatever background
+/// the caller applies to the row.
+pub fn fit(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
+    let have = spans_width(&spans);
+    if have == width {
+        return spans;
+    }
+    if have < width {
+        let mut out = spans;
+        out.push(Span::raw(" ".repeat(width - have)));
+        return out;
+    }
+    if width == 0 {
+        return Vec::new();
+    }
+    let budget = width - 1;
+    let mut out = Vec::with_capacity(spans.len());
+    let mut used = 0usize;
+    for span in spans {
+        let span_width = UnicodeWidthStr::width(span.content.as_ref());
+        if used + span_width <= budget {
+            used += span_width;
+            out.push(span);
+            continue;
+        }
+        let mut kept = String::new();
+        for ch in span.content.chars() {
+            let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + w > budget {
+                break;
+            }
+            kept.push(ch);
+            used += w;
+        }
+        if !kept.is_empty() {
+            out.push(Span::styled(kept, span.style));
+        }
+        break;
+    }
+    out.push(Span::styled("…", Style::default().fg(muted())));
+    if used + 1 < width {
+        out.push(Span::raw(" ".repeat(width - used - 1)));
+    }
+    out
+}
+
+/// Right-align `value` in `width` columns, measuring in cells.
+///
+/// Metric columns are padded on the left so the unit lands on a fixed column
+/// instead of drifting with the number's width — `200k ctx` under `1m ctx`
+/// keeps `ctx` in one place, which is what makes the block scannable.
+pub fn pad_left(value: &str, width: usize) -> String {
+    let have = UnicodeWidthStr::width(value);
+    if have >= width {
+        return value.to_owned();
+    }
+    format!("{}{value}", " ".repeat(width - have))
+}
+
+/// Column widths for a block of right-aligned metric cells, sized to the
+/// widest value in each column and **zero where every row is empty**.
+///
+/// Collapsing per column matters: a provider that reports no pricing should
+/// not leave a ragged empty gutter down the list. Each column disappears on
+/// its own, so the ones that do carry data close up against the labels.
+pub fn metric_widths<'a>(rows: impl Iterator<Item = &'a [String]>, columns: usize) -> Vec<usize> {
+    let mut widths = vec![0usize; columns];
+    for row in rows {
+        for (index, value) in row.iter().take(columns).enumerate() {
+            widths[index] = widths[index].max(UnicodeWidthStr::width(value.as_str()));
+        }
+    }
+    widths
+}
+
+/// Render one row's metric cells against [`metric_widths`], dim and
+/// right-aligned, two columns apart. Zero-width columns emit nothing.
+pub fn metric_cells(values: &[String], widths: &[usize]) -> Vec<Span<'static>> {
+    let style = Style::default().fg(muted());
+    let mut spans = Vec::new();
+    for (index, width) in widths.iter().enumerate() {
+        if *width == 0 {
+            continue;
+        }
+        if !spans.is_empty() {
+            spans.push(Span::raw("  "));
+        }
+        let value = values.get(index).map(String::as_str).unwrap_or("");
+        spans.push(Span::styled(pad_left(value, *width), style));
+    }
+    spans
+}
+
+/// Total columns a metric block occupies, for budgeting the label beside it.
+pub fn metrics_width(widths: &[usize]) -> usize {
+    let live = widths.iter().filter(|width| **width > 0).count();
+    widths.iter().sum::<usize>() + live.saturating_sub(1) * 2
+}
+
+/// A `·`-joined line of facts about the selected thing — `200k ctx · 128k out
+/// · reasoning · vision`.
+///
+/// One muted line of comparable, order-stable facts says more than a labelled
+/// table and costs one row. Empty entries are dropped so a caller can push
+/// conditionally without guarding each one.
+pub fn facts(items: &[String]) -> Line<'static> {
+    let separator = glyphs().separator;
+    let mut spans = Vec::new();
+    for item in items.iter().filter(|item| !item.trim().is_empty()) {
+        if !spans.is_empty() {
+            spans.push(Span::styled(
+                format!(" {separator} "),
+                Style::default().fg(rail()),
+            ));
+        }
+        spans.push(Span::styled(item.clone(), Style::default().fg(muted())));
+    }
+    Line::from(spans)
+}
+
+/// The `[x]` / `[/]` state mark for a row that is on or off.
+pub fn state_mark(on: bool) -> Span<'static> {
+    let set = glyphs();
+    if on {
+        Span::styled(set.enabled.to_owned(), Style::default().fg(success()))
+    } else {
+        Span::styled(set.disabled.to_owned(), Style::default().fg(rail()))
     }
 }
 
@@ -1082,6 +1550,10 @@ pub fn welcome(info: &Welcome<'_>, width: usize) -> Vec<Line<'static>> {
 mod tests {
     use super::*;
 
+    /// Glyph selection reads process-wide environment variables, which the
+    /// test harness would otherwise let two tests write underneath each other.
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn plain(line: &Line<'_>) -> String {
         line.spans
             .iter()
@@ -1258,6 +1730,163 @@ mod tests {
     /// width would shift every column to its right, which is worse than the
     /// missing glyph it replaces.
     #[test]
+    fn fit_pads_and_truncates_to_exactly_the_measure() {
+        let spans = vec![Span::raw("abc"), Span::raw("def")];
+        for width in [0, 1, 3, 6, 9] {
+            assert_eq!(
+                spans_width(&fit(spans.clone(), width)),
+                width,
+                "fit to {width} columns"
+            );
+        }
+        let cut = fit(spans.clone(), 4);
+        let joined: String = cut.iter().map(|span| span.content.as_ref()).collect();
+        assert_eq!(joined, "abc…");
+        // Styles survive a cut that lands mid-run.
+        let styled = vec![
+            Span::styled("abcdef", Style::default().fg(Color::Red)),
+            Span::raw("ghi"),
+        ];
+        let cut = fit(styled, 4);
+        assert_eq!(cut[0].style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn split_leaves_a_divider_column_between_the_panes() {
+        let inner = Rect {
+            x: 10,
+            y: 4,
+            width: 80,
+            height: 20,
+        };
+        let panes = split(inner, 20);
+        assert_eq!(panes.sidebar.x, 10);
+        assert_eq!(panes.sidebar.width, 20);
+        // One blank column, the rule, one blank column.
+        assert_eq!(panes.divider_x, panes.sidebar.right() + 1);
+        assert_eq!(panes.body.x, panes.divider_x + 2);
+        assert_eq!(panes.body.right(), inner.right());
+        // A sidebar wider than the surface collapses instead of overflowing.
+        let cramped = split(Rect { width: 10, ..inner }, 40);
+        assert!(cramped.body.right() <= inner.x + 10);
+    }
+
+    #[test]
+    fn metric_columns_collapse_one_at_a_time() {
+        let rows = [
+            vec!["200k ctx".to_owned(), String::new()],
+            vec!["1m ctx".to_owned(), String::new()],
+        ];
+        let widths = metric_widths(rows.iter().map(Vec::as_slice), 2);
+        assert_eq!(widths, vec![8, 0], "the empty column collapses to nothing");
+        assert_eq!(metrics_width(&widths), 8, "and takes its gap with it");
+        let cells = metric_cells(&rows[1], &widths);
+        let joined: String = cells.iter().map(|span| span.content.as_ref()).collect();
+        assert_eq!(
+            joined, "  1m ctx",
+            "values are right-aligned under the widest"
+        );
+    }
+
+    #[test]
+    fn facts_drops_empty_entries() {
+        let line = facts(&["200k ctx".to_owned(), String::new(), "reasoning".to_owned()]);
+        let joined = plain(&line);
+        assert!(joined.contains("200k ctx"));
+        assert!(joined.contains("reasoning"));
+        assert_eq!(
+            joined.matches(glyphs().separator).count(),
+            1,
+            "one separator, not two: {joined:?}"
+        );
+    }
+
+    /// Every Nerd Font glyph must measure exactly one cell.
+    ///
+    /// The layout budgets columns by measuring, so a two-cell glyph would not
+    /// corrupt a row — but it would silently shift a metric column on the Nerd
+    /// preset alone, which is the kind of drift nobody reports and nobody can
+    /// reproduce. Private-use codepoints measure one; anything that does not
+    /// belong in this table has been picked by mistake.
+    #[test]
+    fn every_nerd_glyph_is_one_cell() {
+        let nerd = Glyphs::NERD;
+        let glyphs: Vec<(&str, &str)> = vec![
+            ("bar", nerd.bar),
+            ("prompt", nerd.prompt),
+            ("ok", nerd.ok),
+            ("failed", nerd.failed),
+            ("paused", nerd.paused),
+            ("notice", nerd.notice),
+            ("still", nerd.still),
+            ("rule", nerd.rule),
+            ("meter_full", nerd.meter_full),
+            ("meter_empty", nerd.meter_empty),
+            ("thumb", nerd.thumb),
+            ("track", nerd.track),
+            ("separator", nerd.separator),
+            ("fold_closed", nerd.fold_closed),
+            ("fold_open", nerd.fold_open),
+            ("quote_rail", nerd.quote_rail),
+            ("branch", nerd.branch),
+            ("queued", nerd.queued),
+            ("attached", nerd.attached),
+            ("goal", nerd.goal),
+            ("repeat", nerd.repeat),
+            ("tasks", nerd.tasks),
+            ("down", nerd.down),
+            ("gap", nerd.gap),
+            ("cursor", nerd.cursor),
+            ("enabled", nerd.enabled),
+            ("disabled", nerd.disabled),
+            ("tee_down", nerd.tee_down),
+            ("tee_up", nerd.tee_up),
+        ];
+        for (name, glyph) in glyphs {
+            assert_eq!(
+                UnicodeWidthStr::width(glyph),
+                1,
+                "{name} ({glyph:?}) is not one cell"
+            );
+        }
+        for frame in nerd.spinner {
+            assert_eq!(UnicodeWidthStr::width(frame), 1);
+        }
+    }
+
+    #[test]
+    fn the_glyph_preset_is_chosen_by_setting_then_overridden_by_the_environment() {
+        let _guard = ENV.lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::remove_var("ABACUS_GLYPHS");
+            std::env::remove_var("ABACUS_ASCII");
+        }
+        assert_eq!(GlyphChoice::parse("nerd-font"), Some(GlyphChoice::Nerd));
+        assert_eq!(GlyphChoice::parse("shiny"), None);
+        set_glyphs(GlyphChoice::Nerd);
+        assert_eq!(glyphs().ok, Glyphs::NERD.ok);
+        set_glyphs(GlyphChoice::Unicode);
+        assert_eq!(glyphs().ok, Glyphs::UNICODE.ok);
+        // The environment wins: a shell that has said "no fancy glyphs" is not
+        // talked out of it by a settings file.
+        unsafe {
+            std::env::set_var("ABACUS_ASCII", "1");
+        }
+        set_glyphs(GlyphChoice::Nerd);
+        assert_eq!(glyphs().ok, Glyphs::ASCII.ok);
+        unsafe {
+            std::env::set_var("ABACUS_GLYPHS", "unicode");
+        }
+        set_glyphs(GlyphChoice::Ascii);
+        assert_eq!(glyphs().ok, Glyphs::UNICODE.ok);
+        unsafe {
+            std::env::remove_var("ABACUS_GLYPHS");
+            std::env::remove_var("ABACUS_ASCII");
+        }
+        set_glyphs(GlyphChoice::Auto);
+    }
+
+    #[test]
     fn glyph_pairs_are_width_stable() {
         let unicode = Glyphs::UNICODE;
         let ascii = Glyphs::ASCII;
@@ -1285,6 +1914,9 @@ mod tests {
             ("repeat", unicode.repeat, ascii.repeat),
             ("tasks", unicode.tasks, ascii.tasks),
             ("down", unicode.down, ascii.down),
+            ("cursor", unicode.cursor, ascii.cursor),
+            ("tee_down", unicode.tee_down, ascii.tee_down),
+            ("tee_up", unicode.tee_up, ascii.tee_up),
         ];
         for (name, rich, plain) in pairs {
             assert_eq!(
@@ -1293,6 +1925,20 @@ mod tests {
                 "{name}: {rich:?} and {plain:?} differ in width"
             );
             assert_eq!(UnicodeWidthStr::width(rich), 1, "{name} is not one cell");
+        }
+        // The bracket marks hold a column rather than a cell, so they are
+        // checked at their own width instead of against the one-cell rule.
+        // The Nerd preset spends one cell on them and is checked below.
+        for (name, rich, plain) in [
+            ("enabled", unicode.enabled, ascii.enabled),
+            ("disabled", unicode.disabled, ascii.disabled),
+        ] {
+            assert_eq!(
+                UnicodeWidthStr::width(rich),
+                UnicodeWidthStr::width(plain),
+                "{name}: {rich:?} and {plain:?} differ in width"
+            );
+            assert_eq!(UnicodeWidthStr::width(rich), 3, "{name} is not three cells");
         }
         for (rich, plain) in unicode.spinner.iter().zip(ascii.spinner.iter()) {
             assert_eq!(UnicodeWidthStr::width(*rich), 1);

@@ -210,9 +210,19 @@ pub struct TurnOptions {
     /// Delegation record and the live subagent board.
     pub hive: crate::hive::HiveHandle,
     /// Model for secondary calls (refine, tether, command classification,
-    /// draft recommendations) on the same endpoint. Compaction stays on the
-    /// main model. None reuses the main model.
+    /// draft recommendations) on the same endpoint. None reuses the main
+    /// model. See [`crate::roles`] — this is the `aux` role.
     pub aux_model: Option<String>,
+    /// Model for delegated agents that do not name one themselves — the
+    /// `subagent` role. None reuses the main model.
+    pub subagent_model: Option<String>,
+    /// Model for the rolling compaction summary — the `compaction` role.
+    ///
+    /// Unassigned means the main model, which is the right default: the
+    /// summary is re-injected every turn and is load-bearing for the whole
+    /// session, so it is the last thing to move onto something cheap. The role
+    /// exists so that stays a decision rather than a hardcode.
+    pub compaction_model: Option<String>,
     /// Mid-turn arrivals — user steering and finished background workers —
     /// drained between tool calls.
     pub injections: InjectionQueue,
@@ -251,12 +261,15 @@ async fn run_turn_inner(
     // main model does not pay for them. Compaction deliberately stays on the
     // main model — the rolling summary is load-bearing for the whole session.
     // Falls back to the main provider when no aux model is set.
-    let aux = match options.aux_model.as_deref() {
+    let for_role = |assigned: Option<&str>| match assigned {
         Some(model) if !model.trim().is_empty() && model != provider.model() => {
             provider.with_model(model)
         }
         _ => provider.clone(),
     };
+    let aux = for_role(options.aux_model.as_deref());
+    let summariser = for_role(options.compaction_model.as_deref());
+    let delegate = for_role(options.subagent_model.as_deref());
 
     // Paths outside the workspace that the safety layer has cleared for
     // reading. The executor consults it; the loop below fills it in.
@@ -284,7 +297,7 @@ async fn run_turn_inner(
     }
     let subagents = SubagentRuntime::new(
         options.workspace.clone(),
-        provider.clone(),
+        delegate,
         options.services.clone(),
         options.max_steps,
         options.tool_output_limit,
@@ -357,7 +370,13 @@ async fn run_turn_inner(
             )
         {
             rethought = true;
-            run_refine(&aux, &messages, &options, &events).await;
+            run_refine(
+                &reflector(&aux, &provider, &specs),
+                &messages,
+                &options,
+                &events,
+            )
+            .await;
             // Refresh the tether snapshot while the evidence is still
             // verbatim — this is the one point mid-turn where history is about
             // to be replaced by a summary. The snapshot is owned, so it can
@@ -383,8 +402,18 @@ async fn run_turn_inner(
         // Tiered compaction (microcompact + rolling LLM summary) runs before each
         // model call so a long loop never overruns the context window. It mutates
         // `messages` in place and maintains the rolling summary in `options.compaction`.
+        //
+        // When the summariser is the conversation's own model — the default,
+        // since the `compaction` role falls back to `default` — the summary is
+        // written from inside the live context, reusing its cached prefix
+        // instead of paying full price for a freshly serialised copy of the
+        // history at the very moment that history is largest.
         crate::compaction::compact(
-            &provider,
+            &crate::compaction::Summariser {
+                provider: &summariser,
+                in_context: summariser.model() == provider.model(),
+                tools: &specs,
+            },
             &mut messages,
             &mut options.compaction,
             &options.compaction_budget,
@@ -552,7 +581,13 @@ async fn run_turn_inner(
                 && !rethought
                 && tool_calls_executed >= crate::refine::LONG_TURN_TOOL_CALLS
             {
-                run_refine(&aux, &messages, &options, &events).await;
+                run_refine(
+                    &reflector(&aux, &provider, &specs),
+                    &messages,
+                    &options,
+                    &events,
+                )
+                .await;
             }
             // Collect the intent snapshot started when the turn began. It has
             // had the whole turn to finish, so this is a formality — the
@@ -974,7 +1009,13 @@ async fn run_turn_inner(
     // A limit-length turn is by definition long, so it earns the reflection
     // pass on the way out.
     if !options.token_compression && !rethought {
-        run_refine(&aux, &messages, &options, &events).await;
+        run_refine(
+            &reflector(&aux, &provider, &specs),
+            &messages,
+            &options,
+            &events,
+        )
+        .await;
     }
     let _ = events.send(AgentEvent::Done {
         messages,
@@ -1449,44 +1490,45 @@ fn build_provider_messages(
     active_mode: AgentMode,
 ) -> Vec<Value> {
     let mut provider_messages = messages.to_vec();
-    let extension_context = options.services.prompt_context();
-    if !extension_context.is_empty() {
-        provider_messages.push(json!({
-            "role":"system",
-            "content":extension_context
-        }));
-    }
-    let summary_context = options.compaction.prompt_context();
-    if !summary_context.is_empty() {
-        provider_messages.push(json!({"role":"system","content":summary_context}));
-    }
-    let memory_context = options.harness.prompt_context();
-    if !memory_context.is_empty() {
-        provider_messages.push(json!({"role":"system","content":memory_context}));
-    }
+    // Everything below is volatile: the rolling summary, harness memory, goal,
+    // task list, mode and tether correction all move as the session works. It
+    // goes in ONE block at the very end of the request, after the conversation.
+    //
+    // That position is the whole point. A provider-side prompt cache is a
+    // prefix cache: it can only reuse a request whose leading bytes are
+    // identical to a previous one. Layering this context into the leading
+    // system message — which is what this function used to do, via
+    // `merge_system_messages` — rewrote the first tokens of every request, so a
+    // long session re-paid full price for its entire history on every single
+    // turn. Appended last, the cacheable prefix is the static system prompt
+    // plus the append-only conversation, and only the small volatile tail is
+    // ever uncached.
+    let mut layers: Vec<String> = Vec::new();
+    let mut layer = |text: String| {
+        if !text.trim().is_empty() {
+            layers.push(text);
+        }
+    };
+    layer(options.services.prompt_context());
+    layer(options.compaction.prompt_context());
+    layer(options.harness.prompt_context());
     if let Some(correction) = options.tether.correction_layer() {
-        provider_messages.push(json!({"role":"system","content":correction}));
+        layer(correction);
     }
     if options.allow_subagents {
-        provider_messages.push(json!({"role":"system","content":options.hive.guidance()}));
+        layer(options.hive.guidance());
     }
-    let goal_context = options.goal.prompt_context();
-    if !goal_context.is_empty() {
-        provider_messages.push(json!({"role":"system","content":goal_context}));
+    layer(options.goal.prompt_context());
+    layer(options.tasks.prompt_context());
+    layer(mode_prompt(active_mode).to_owned());
+    layer(options.modes.reminder());
+    if !layers.is_empty() {
+        provider_messages.push(json!({"role":"system","content": layers.join("\n\n")}));
     }
-    let task_context = options.tasks.prompt_context();
-    if !task_context.is_empty() {
-        provider_messages.push(json!({"role":"system","content":task_context}));
-    }
-    provider_messages.push(json!({
-        "role": "system",
-        "content": mode_prompt(active_mode)
-    }));
-    let mode_reminder = options.modes.reminder();
-    if !mode_reminder.is_empty() {
-        provider_messages.push(json!({"role":"system","content":mode_reminder}));
-    }
-    merge_system_messages(provider_messages)
+    // Strict chat templates that demand a leading system message are handled in
+    // the provider, which is the layer that knows (and learns) what an endpoint
+    // accepts — and which pays for the rewrite in cache misses.
+    provider_messages
 }
 
 /// Fold every non-leading `system` message into a single leading one.
@@ -1504,7 +1546,7 @@ fn build_provider_messages(
 /// same session now works on both permissive and strict backends. Non-string
 /// system content (multimodal parts; Abacus never builds one) is left in place
 /// rather than dropped.
-fn merge_system_messages(messages: Vec<Value>) -> Vec<Value> {
+pub(crate) fn merge_system_messages(messages: Vec<Value>) -> Vec<Value> {
     if !messages
         .iter()
         .skip(1)
@@ -1553,6 +1595,24 @@ fn abort_capture(handle: Option<tokio::task::JoinHandle<Option<String>>>) {
     }
 }
 
+/// The reflector for this turn.
+///
+/// In-context whenever the reflection model *is* the conversation's model — the
+/// default, since the `aux` role falls back to `default` — so the two
+/// refinement calls read the conversation's cached prefix instead of paying full
+/// price for a rendered copy of it.
+fn reflector<'a>(
+    aux: &'a Provider,
+    provider: &Provider,
+    specs: &'a [Value],
+) -> crate::refine::Reflector<'a> {
+    crate::refine::Reflector {
+        provider: aux,
+        in_context: aux.model() == provider.model(),
+        tools: specs,
+    }
+}
+
 /// The reflection pass: decide whether this turn taught anything, and if so
 /// write it to the harness.
 ///
@@ -1563,13 +1623,13 @@ fn abort_capture(handle: Option<tokio::task::JoinHandle<Option<String>>>) {
 /// recurrence across sessions or adopted deliberately with `/refine --durable`,
 /// so one turn's mistaken conclusion cannot quietly follow the user forever.
 async fn run_refine(
-    provider: &Provider,
+    reflector: &crate::refine::Reflector<'_>,
     messages: &[Value],
     options: &TurnOptions,
     events: &mpsc::UnboundedSender<AgentEvent>,
 ) {
     let instructions =
-        match crate::refine::should_refine(provider, messages, &options.harness, &options.cancel)
+        match crate::refine::should_refine(reflector, messages, &options.harness, &options.cancel)
             .await
         {
             Some((true, instructions)) => instructions,
@@ -1578,7 +1638,7 @@ async fn run_refine(
             _ => return,
         };
     if let Some(outcome) = crate::refine::run(
-        provider,
+        reflector,
         messages,
         &options.harness,
         &options.papercuts,
@@ -1848,6 +1908,8 @@ mod tests {
             tether: crate::tether::TetherState::default(),
             hive: crate::hive::HiveHandle::default(),
             aux_model: None,
+            subagent_model: None,
+            compaction_model: None,
             injections,
             modes: crate::modes::ModeCoach::default(),
             safety: crate::safety::SafetyCache::default(),
@@ -1855,6 +1917,47 @@ mod tests {
             trace: None,
             cancel: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[test]
+    fn volatile_context_is_appended_and_never_rewrites_the_prefix() {
+        let options = test_turn_options(InjectionQueue::default());
+        let history = vec![
+            json!({"role": "system", "content": "base prompt"}),
+            json!({"role": "user", "content": "fix the parser"}),
+            json!({"role": "assistant", "content": "on it"}),
+        ];
+
+        let first = build_provider_messages(&history, &options, AgentMode::Build);
+        // The conversation is passed through untouched, in order, with the
+        // volatile context as one block after it.
+        assert_eq!(&first[..3], &history[..]);
+        assert_eq!(first.len(), 4);
+        assert_eq!(first[3]["role"], "system");
+        let volatile = first[3]["content"].as_str().unwrap();
+        assert!(
+            volatile.contains("BUILD"),
+            "mode rides in the tail: {volatile}"
+        );
+
+        // Change the volatile state the way a turn does, and the prefix — the
+        // system prompt and every conversation message — must be byte-identical.
+        // This is the whole prompt-cache story: a rewritten first message means
+        // the provider has nothing to reuse and the session re-pays for its own
+        // history every turn.
+        options
+            .goal
+            .set(Some(crate::goal::Goal::new("ship the parser fix").unwrap()))
+            .unwrap();
+        let second = build_provider_messages(&history, &options, AgentMode::Plan);
+        assert_eq!(
+            &second[..3],
+            &first[..3],
+            "the cacheable prefix must not move when context changes"
+        );
+        let volatile = second.last().unwrap()["content"].as_str().unwrap();
+        assert!(volatile.contains("ship the parser fix"));
+        assert!(volatile.contains("PLAN"));
     }
 
     #[test]

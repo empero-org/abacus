@@ -517,8 +517,7 @@ impl SubagentRuntime {
         let outcome = self
             .run_one_inner(&context, &task, board_id, worker_provider, injections)
             .await;
-        self.provider
-            .add_tokens(worker_tokens.load(std::sync::atomic::Ordering::Relaxed));
+        self.provider.add_tokens(&worker_tokens);
         match outcome {
             Ok((response, _patch, new_transcript)) => {
                 self.hive.board.finish(board_id, true);
@@ -564,8 +563,7 @@ impl SubagentRuntime {
             .await;
         // Fold the worker's usage into the session total — the per-worker
         // counter exists for the board, not to hide cost.
-        self.provider
-            .add_tokens(worker_tokens.load(std::sync::atomic::Ordering::Relaxed));
+        self.provider.add_tokens(&worker_tokens);
         match outcome {
             Ok((response, patch, transcript)) => {
                 // Coercion happens after the work, not during it: a worker told
@@ -733,6 +731,8 @@ impl SubagentRuntime {
                 tether: crate::tether::TetherState::default(),
                 hive: crate::hive::HiveHandle::default(),
                 aux_model: None,
+                subagent_model: None,
+                compaction_model: None,
                 injections,
                 modes: crate::modes::ModeCoach::default(),
             },

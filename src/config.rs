@@ -201,6 +201,9 @@ pub enum Command {
         #[command(subcommand)]
         action: CronCommand,
     },
+    /// Serve a session over newline-delimited JSON on stdin/stdout, for a
+    /// desktop front end. One process, one workspace, one active session.
+    AppServer,
     /// Run the eval suite in `examples/evals` and score it
     Eval {
         /// Only run tasks whose directory name contains this substring
@@ -389,12 +392,20 @@ pub struct Config {
     pub endpoint: Option<crate::endpoint::ScriptedEndpoint>,
     /// The auxiliary model for secondary calls, or None to reuse `model`.
     pub aux_model: Option<String>,
+    /// Model for delegated agents that name none themselves — the `subagent`
+    /// role — or None to reuse `model`.
+    pub subagent_model: Option<String>,
+    /// Model for the rolling compaction summary — the `compaction` role — or
+    /// None to reuse `model`.
+    pub compaction_model: Option<String>,
     /// Reasoning effort sent with every request, when set.
     pub reasoning_effort: Option<ReasoningEffort>,
     /// Aggressively reduce upstream context and nonessential auxiliary calls.
     pub token_compression: bool,
     /// Serialize foreground and auxiliary requests on this provider session.
     pub one_stream: bool,
+    /// Mark prompt-cache breakpoints on requests that support them.
+    pub prompt_cache: bool,
     pub paths: AbacusPaths,
 }
 
@@ -515,9 +526,21 @@ impl Config {
             aux_model: profile
                 .and_then(|profile| profile.aux_model.clone())
                 .filter(|model| !model.trim().is_empty()),
+            // Only an *explicit* role assignment travels here. An unassigned
+            // role stays `None` so the turn falls back to the main model,
+            // which is what the fallback chain resolves to anyway — resolving
+            // it here instead would pin the main model at startup and stop
+            // `/model` from moving these along with it.
+            subagent_model: profile
+                .and_then(|profile| profile.role_model("subagent"))
+                .map(str::to_owned),
+            compaction_model: profile
+                .and_then(|profile| profile.role_model("compaction"))
+                .map(str::to_owned),
             reasoning_effort: profile.and_then(|profile| profile.reasoning_effort),
             token_compression: settings.agent.token_compression,
             one_stream: settings.agent.one_stream,
+            prompt_cache: settings.agent.prompt_cache,
             paths,
         })
     }
@@ -748,6 +771,34 @@ pub struct ProviderProfile {
     /// detect, or leave it to the server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<usize>,
+    /// Models assigned to named jobs beyond the conversation itself — see
+    /// [`crate::roles`]. `default` and `aux` are stored in `model` and
+    /// `aux_model` above rather than here, so this map stays empty on a
+    /// profile that only uses the two slots that always existed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub roles: BTreeMap<String, String>,
+}
+
+impl ProviderProfile {
+    /// A profile with nothing filled in, for `..ProviderProfile::empty()` at
+    /// the several call sites that only care about a few fields.
+    pub fn empty() -> Self {
+        Self {
+            name: String::new(),
+            base_url: String::new(),
+            model: String::new(),
+            protocol: ProviderProtocol::default(),
+            api_key_env: None,
+            aux_model: None,
+            reasoning_effort: None,
+            endpoint: None,
+            providers: Vec::new(),
+            allow_fallbacks: true,
+            context_window: None,
+            max_output_tokens: None,
+            roles: BTreeMap::new(),
+        }
+    }
 }
 
 fn is_profile_id_char(ch: char) -> bool {
@@ -858,6 +909,10 @@ pub struct UiSettings {
     pub animations: bool,
     pub show_tooltips: bool,
     pub theme: crate::theme::ThemeChoice,
+    /// Which glyph table the interface draws with. `nerd` needs a patched
+    /// font and is never selected automatically.
+    #[serde(default)]
+    pub glyphs: crate::ui::GlyphChoice,
     /// Show the model's reasoning in the transcript, where the provider streams
     /// it apart from the answer.
     #[serde(default = "default_true")]
@@ -948,6 +1003,7 @@ impl Default for UiSettings {
             animations: true,
             show_tooltips: true,
             theme: crate::theme::ThemeChoice::Auto,
+            glyphs: crate::ui::GlyphChoice::Auto,
             show_thinking: true,
             check_updates: true,
             safety_uses_main: false,
@@ -984,6 +1040,17 @@ pub struct AgentSettings {
     /// Allow only one non-subagent upstream request at a time.
     #[serde(default)]
     pub one_stream: bool,
+    /// Ask the provider to cache the request prefix (Anthropic
+    /// `cache_control`). On by default; a repeated prefix is then billed at a
+    /// fraction of its uncached rate. Turn it off only for an endpoint that
+    /// claims the Anthropic protocol and chokes on the field.
+    #[serde(default = "yes")]
+    pub prompt_cache: bool,
+}
+
+/// `serde(default)` for a bool that defaults to true.
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1031,6 +1098,7 @@ impl Default for AgentSettings {
             tool_format: None,
             token_compression: false,
             one_stream: false,
+            prompt_cache: true,
         }
     }
 }
@@ -1082,6 +1150,8 @@ pub struct AbacusPaths {
     pub harness_dir: PathBuf,
     pub hive_file: PathBuf,
     pub endpoints_dir: PathBuf,
+    /// User-authored theme files, one JSON palette per name.
+    pub themes_dir: PathBuf,
     pub modes_file: PathBuf,
     /// Caches the last release check so startup asks GitHub at most daily.
     pub update_file: PathBuf,
@@ -1106,6 +1176,7 @@ impl AbacusPaths {
             config_file: root.join("config.toml"),
             credentials_file: root.join("credentials.toml"),
             sessions_dir: root.join("sessions"),
+            themes_dir: root.join("themes"),
             traces_dir: root.join("traces"),
             attachments_dir: root.join("attachments"),
             papercuts_file: root.join("papercuts.json"),
@@ -1286,6 +1357,7 @@ mod tests {
                 allow_fallbacks: true,
                 context_window: None,
                 max_output_tokens: None,
+                roles: Default::default(),
             },
         );
         settings.profiles.get_mut("local").unwrap().context_window = Some(1_000_000);
@@ -1329,6 +1401,7 @@ mod tests {
                 allow_fallbacks: true,
                 context_window: Some(1_000_000),
                 max_output_tokens: Some(64_000),
+                roles: Default::default(),
             },
         );
         settings.profiles.insert(
@@ -1346,6 +1419,7 @@ mod tests {
                 allow_fallbacks: true,
                 context_window: None,
                 max_output_tokens: None,
+                roles: Default::default(),
             },
         );
         assert_eq!(
@@ -1394,6 +1468,7 @@ mod tests {
                 allow_fallbacks: true,
                 context_window: Some(1_000_000),
                 max_output_tokens: Some(64_000),
+                roles: Default::default(),
             },
         );
         settings.profiles.insert(
@@ -1411,6 +1486,7 @@ mod tests {
                 allow_fallbacks: true,
                 context_window: None,
                 max_output_tokens: None,
+                roles: Default::default(),
             },
         );
         let credentials = Credentials::default();

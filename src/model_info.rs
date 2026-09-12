@@ -358,6 +358,182 @@ fn extract_limits_from_models(value: &Value, model: &str) -> Option<(usize, Opti
     Some((context, output))
 }
 
+/// What a provider's `/models` listing says about one model.
+///
+/// The limits above are resolved for the *active* model, one field at a time.
+/// This is the other half: everything the same payload already carries about
+/// *every* model, kept so a picker can show what a model costs and how much it
+/// holds instead of a bare list of ids. Every field past `id` is optional — an
+/// OpenAI-compatible endpoint typically reports nothing but the id, and the
+/// interface collapses the columns it has no data for rather than inventing
+/// any.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ModelCard {
+    pub id: String,
+    /// The upstream supplier, taken from an `owner/model` id. Rendered as a
+    /// dim prefix so a long list groups visually without indentation.
+    pub provider: Option<String>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub context_length: Option<usize>,
+    pub max_output_tokens: Option<usize>,
+    /// USD per million tokens, in and out.
+    pub input_cost: Option<f64>,
+    pub output_cost: Option<f64>,
+    pub vision: bool,
+    pub reasoning: bool,
+}
+
+impl ModelCard {
+    /// The id with any `owner/` prefix removed — what the row's label shows.
+    pub fn short_id(&self) -> &str {
+        match self.provider {
+            Some(ref provider) => &self.id[provider.len() + 1..],
+            None => &self.id,
+        }
+    }
+
+    /// `200k ctx`, or empty when the provider does not report a window.
+    pub fn context_label(&self) -> String {
+        match self.context_length {
+            Some(context) => format!("{} ctx", compact_count(context)),
+            None => String::new(),
+        }
+    }
+
+    /// `$3/15` per million tokens, `free` at zero, empty when unpriced.
+    ///
+    /// Both halves share one cell because in/out prices are only ever read
+    /// against each other — two columns would double the width to say the same
+    /// thing.
+    pub fn cost_label(&self) -> String {
+        let (input, output) = match (self.input_cost, self.output_cost) {
+            (Some(input), Some(output)) => (input, output),
+            (Some(input), None) => (input, 0.0),
+            (None, Some(output)) => (0.0, output),
+            (None, None) => return String::new(),
+        };
+        if input <= 0.0 && output <= 0.0 {
+            return "free".to_owned();
+        }
+        format!("${}/{}", compact_price(input), compact_price(output))
+    }
+
+    /// Parse one entry of a `/models` payload.
+    pub fn from_entry(entry: &Value) -> Option<Self> {
+        let id = entry["id"].as_str()?.to_owned();
+        let provider = id
+            .split_once('/')
+            .map(|(provider, _)| provider.to_owned())
+            .filter(|provider| !provider.is_empty());
+        let pricing = entry.get("pricing");
+        // Pricing is quoted per *token* by OpenRouter-shaped endpoints and is
+        // unreadable at that scale — every model is `$0.000003`. Scale to the
+        // per-million figure vendors actually publish.
+        let cost = |keys: &[&str]| -> Option<f64> {
+            let pricing = pricing?;
+            keys.iter()
+                .find_map(|key| pricing.get(*key).and_then(f64_from_value))
+                .map(|per_token| per_token * 1_000_000.0)
+        };
+        let modalities = entry
+            .pointer("/architecture/input_modalities")
+            .and_then(Value::as_array);
+        Some(ModelCard {
+            provider,
+            name: entry["name"].as_str().map(str::to_owned),
+            description: entry["description"]
+                .as_str()
+                .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|text| !text.is_empty()),
+            context_length: read_usize(
+                entry,
+                &["context_length", "max_context_length", "context_window"],
+            ),
+            max_output_tokens: read_usize(entry, &["max_completion_tokens", "max_output_tokens"])
+                .or_else(|| {
+                    entry.get("top_provider").and_then(|top| {
+                        read_usize(top, &["max_completion_tokens", "max_output_tokens"])
+                    })
+                }),
+            input_cost: cost(&["prompt", "input"]),
+            output_cost: cost(&["completion", "output"]),
+            vision: modalities
+                .is_some_and(|list| list.iter().any(|value| value.as_str() == Some("image"))),
+            reasoning: entry["supported_parameters"]
+                .as_array()
+                .is_some_and(|list| {
+                    list.iter().any(|value| {
+                        matches!(
+                            value.as_str(),
+                            Some("reasoning") | Some("include_reasoning")
+                        )
+                    })
+                }),
+            id,
+        })
+    }
+}
+
+/// Parse a whole `/models` payload into cards, sorted by id.
+pub fn parse_model_cards(value: &Value) -> Vec<ModelCard> {
+    let data = value["data"]
+        .as_array()
+        .or_else(|| value["models"].as_array())
+        .or_else(|| value.as_array());
+    let mut cards: Vec<ModelCard> = data
+        .into_iter()
+        .flatten()
+        .filter_map(ModelCard::from_entry)
+        .collect();
+    cards.sort_by_key(|card| card.id.to_ascii_lowercase());
+    cards.dedup_by(|a, b| a.id == b.id);
+    cards
+}
+
+/// `128k`, `1m`, `4096` — the scale a context window is quoted at, lowercase so
+/// it sits quietly beside its unit.
+fn compact_count(value: usize) -> String {
+    if value >= 1_000_000 {
+        let millions = value as f64 / 1_000_000.0;
+        format!("{}m", trim_zeros(millions))
+    } else if value >= 1_000 {
+        format!("{}k", value / 1_000)
+    } else {
+        value.to_string()
+    }
+}
+
+/// Prices are compared, not audited: three significant figures at most, and no
+/// trailing zeros, so `$0.15/0.6` and `$3/15` line up as numbers.
+fn compact_price(value: f64) -> String {
+    let text = if value >= 100.0 {
+        format!("{:.0}", value)
+    } else if value >= 10.0 {
+        format!("{:.1}", value)
+    } else {
+        format!("{:.2}", value)
+    };
+    trim_zeros_str(&text)
+}
+
+fn trim_zeros(value: f64) -> String {
+    trim_zeros_str(&format!("{value:.1}"))
+}
+
+fn trim_zeros_str(text: &str) -> String {
+    if !text.contains('.') {
+        return text.to_owned();
+    }
+    text.trim_end_matches('0').trim_end_matches('.').to_owned()
+}
+
+fn f64_from_value(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+}
+
 fn read_usize(value: &Value, keys: &[&str]) -> Option<usize> {
     keys.iter()
         .find_map(|key| value.get(*key).and_then(usize_from_value))
@@ -649,5 +825,72 @@ mod tests {
         // guess and let the caller fall back to the heuristic/default.
         let body = serde_json::json!({ "data": [{ "id": "qwen-max" }] });
         assert!(extract_limits_from_models(&body, "qwen-max").is_none());
+    }
+
+    #[test]
+    fn cards_carry_the_shape_of_an_openrouter_listing() {
+        let body = serde_json::json!({ "data": [{
+            "id": "anthropic/claude-sonnet-4.5",
+            "name": "Claude Sonnet 4.5",
+            "description": "A  model\n  with  ragged   whitespace",
+            "context_length": 200_000,
+            "top_provider": { "max_completion_tokens": 64_000 },
+            "pricing": { "prompt": "0.000003", "completion": "0.000015" },
+            "architecture": { "input_modalities": ["text", "image"] },
+            "supported_parameters": ["reasoning", "tools"],
+        }]});
+        let cards = parse_model_cards(&body);
+        assert_eq!(cards.len(), 1);
+        let card = &cards[0];
+        assert_eq!(card.provider.as_deref(), Some("anthropic"));
+        assert_eq!(card.short_id(), "claude-sonnet-4.5");
+        assert_eq!(card.context_label(), "200k ctx");
+        // Per-token prices are scaled to the per-million figures vendors quote.
+        assert_eq!(card.cost_label(), "$3/15");
+        assert_eq!(card.max_output_tokens, Some(64_000));
+        assert!(card.vision && card.reasoning);
+        assert_eq!(
+            card.description.as_deref(),
+            Some("A model with ragged whitespace"),
+            "prose is flattened to one renderable line"
+        );
+    }
+
+    #[test]
+    fn a_bare_openai_listing_still_produces_cards() {
+        // The common case for a self-hosted endpoint: ids and nothing else. The
+        // columns collapse rather than showing invented numbers.
+        let body = serde_json::json!({ "data": [
+            { "id": "qwen-max", "object": "model" },
+            { "id": "Llama-3", "object": "model" },
+        ]});
+        let cards = parse_model_cards(&body);
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[0].id, "Llama-3", "sorted case-insensitively by id");
+        assert_eq!(cards[0].provider, None);
+        assert_eq!(cards[0].short_id(), "Llama-3");
+        assert_eq!(cards[0].context_label(), "");
+        assert_eq!(cards[0].cost_label(), "");
+    }
+
+    #[test]
+    fn free_models_say_so_and_prices_lose_trailing_zeros() {
+        let card = |input: f64, output: f64| ModelCard {
+            input_cost: Some(input / 1_000_000.0 * 1_000_000.0),
+            output_cost: Some(output),
+            ..ModelCard::default()
+        };
+        assert_eq!(card(0.0, 0.0).cost_label(), "free");
+        assert_eq!(card(2.0, 6.0).cost_label(), "$2/6");
+        assert_eq!(card(0.15, 0.6).cost_label(), "$0.15/0.6");
+        assert_eq!(card(150.0, 3.5).cost_label(), "$150/3.5");
+        assert_eq!(
+            ModelCard {
+                context_length: Some(1_000_000),
+                ..ModelCard::default()
+            }
+            .context_label(),
+            "1m ctx"
+        );
     }
 }

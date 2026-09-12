@@ -315,6 +315,7 @@ every request.
 | `/sessions` / `/resume <id>` | Pick or resume a saved session |
 | `/rename <title>` | Rename the active session |
 | `/model [id]` | Inspect or switch model |
+| `/models` | Browse every model an endpoint serves, and assign the roles they fill |
 | `/profile [id]` | List or switch provider profiles |
 | `/profile rename <id>` / `/profile delete [id]` / `/profile add` | Rename, delete, or add a profile |
 | `/providers [names\|clear\|strict\|fallback]` | Pin which upstream suppliers may serve the model |
@@ -333,7 +334,8 @@ every request.
 | `Auxiliary model` (in `/config`) | A cheaper model on the same endpoint for background calls; blank = same as the main model |
 | `Token Compression` (in `/config`) | Balanced high-savings mode: tighter context, fewer drift checks, and no drafts or routine rethink calls |
 | `One Stream` (in `/config`) | Serialize main and auxiliary upstream requests; explicitly spawned subagents remain parallel |
-| `/theme [auto\|dark\|light]` | Switch the Empero-derived palette; `auto` detects the terminal |
+| `/theme [auto\|dark\|light\|<name>]` | Switch the palette; `auto` detects the terminal, `<name>` loads a theme file |
+| `/theme export <name>` | Write the current palette to `~/.abacus/themes/<name>.json` to edit |
 | `/feedback` | Send product feedback |
 | `/compact` | Compact old conversation context |
 | `/papercuts` / `/papercuts delete <n>` | List or delete recorded failure lessons |
@@ -536,12 +538,57 @@ did); pressing again forces an immediate stop. With no turn running, `Ctrl+c`
 clears the prompt, and twice in a row exits. `Ctrl+q` exits immediately. `F1` (or
 `?` in normal mode) opens the key reference.
 
-Set `ABACUS_ASCII=1` to swap box-drawing, braille, and block glyphs for
-width-stable ASCII stand-ins for terminals whose fonts lack them. Colour depth is
-detected from `COLORTERM` and `TERM` and the palette quantized to match —
-truecolor, 256, or a role-mapped sixteen — with `ABACUS_COLOR=none|16|256|truecolor`
-to override. `NO_COLOR` is honoured: the interface drops to the terminal's own
-palette and leans on structure, bold, and reverse video instead.
+### Glyphs
+
+Three glyph sets, chosen in `/config` under **INTERFACE** or with
+`ABACUS_GLYPHS=auto|unicode|nerd|ascii`:
+
+- **`unicode`** — box drawing, braille, and block glyphs. The default.
+- **`nerd`** — icon glyphs from a patched [Nerd Font](https://www.nerdfonts.com).
+  **Never selected automatically**: nothing a terminal reports says whether its
+  font has these glyphs, and guessing wrong fills the screen with tofu. Turn it
+  on yourself once you know you have the font.
+- **`ascii`** — width-stable stand-ins for terminals whose fonts lack the rest,
+  including the panel outlines and the arrows in the hint strips.
+
+`auto` picks `ascii` on a `dumb` or `linux` `TERM` and `unicode` everywhere
+else. `ABACUS_ASCII=1` still forces `ascii`, and the environment overrides the
+setting either way.
+
+### Colour
+
+Colour depth is detected from `COLORTERM` and `TERM` and the palette quantized
+to match — truecolor, 256, or a role-mapped sixteen — with
+`ABACUS_COLOR=none|16|256|truecolor` to override. `NO_COLOR` is honoured: the
+interface drops to the terminal's own palette and leans on structure, bold, and
+reverse video instead.
+
+`/theme dark|light|auto` switches the built-in palettes. Beyond those, a theme
+is a JSON file in `~/.abacus/themes/`, and `/theme <name>` loads it:
+
+```json
+{
+  "name": "gruv",
+  "mode": "dark",
+  "vars": { "fg": "#ebdbb2", "orange": "#fe8019", "bg1": "#3c3836" },
+  "colors": { "primary": "orange", "text": "fg", "selection": "bg1", "border": "" }
+}
+```
+
+`vars` names the palette once; `colors` says where each colour goes. A role's
+value is a `vars` name, a `#rrggbb` (or `#rgb`) literal, an xterm-256 index, or
+`""` for the terminal's own colour. Every role is optional and falls back to the
+built-in palette for `mode`, so a file that sets nothing but `primary` is a
+complete theme. Custom colours are quantized to the terminal's depth like any
+other, and collapse to the role mapping at sixteen colours.
+
+The roles are `primary`, `secondary`, `success`, `warning`, `danger`, `muted`,
+`border`, `surface`, `text`, `inverse`, `code_bg`, `add_fg`, `add_bg`, `del_fg`,
+`del_bg`, `rail`, `selection`, `user_bg`, and `overlay` — but rather than
+transcribe that, run `/theme export <name>` to write the palette you are
+currently looking at out as a file with every role filled in, and edit it. A
+theme that fails to load reports why and falls back to the built-in one; it
+never leaves you without a readable screen.
 
 ---
 
