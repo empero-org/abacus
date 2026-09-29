@@ -557,8 +557,6 @@ struct App {
     /// cursor into it; `None` means "at the live input, not browsing history".
     input_history: Vec<String>,
     input_history_index: Option<usize>,
-    /// Prompt queued while a turn is running so it fires the moment the agent
-    /// finishes. Only one slot — the latest queued message wins.
     show_help: bool,
     normal_prefix: Option<char>,
     agent_mode: AgentMode,
@@ -667,20 +665,9 @@ pub async fn run(
     // Heartbeat the open session so the dashboard shows live tokens and so a
     // session that is killed (terminal closed) drops off "active" instead of
     // lingering. The shared token counter survives model switches.
-    let heartbeat = reporter.clone().map(|reporter| {
-        let tokens = app.tokens.clone();
-        let session = activity_session.clone();
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_secs(
-                crate::activity::HEARTBEAT_INTERVAL_SECS,
-            ));
-            ticker.tick().await; // the first tick fires immediately; skip it
-            loop {
-                ticker.tick().await;
-                reporter.report_heartbeat(&session, tokens.total()).await;
-            }
-        })
-    });
+    let heartbeat = reporter
+        .as_ref()
+        .map(|reporter| reporter.heartbeat(activity_session.clone(), app.tokens.clone()));
     // Before the first frame: a reply an earlier run died in the middle of is
     // handed back at the top of the transcript.
     app.surface_recovered_reply();
@@ -1090,8 +1077,16 @@ fn tool_preview(output: &str) -> String {
     if output.lines().count() > 8 {
         preview.push_str("\n…");
     }
-    let preview = crate::text::clip_bytes(&preview, 1_200, "…");
-    preview
+    crate::text::clip_bytes(&preview, 1_200, "…")
+}
+
+/// Record a result on a tool row: the outcome read out of it, the collapsed
+/// preview, and the text kept for expansion.
+fn settle(call: &mut ToolCall, output: &str, duration_ms: Option<u64>) {
+    call.status = if tool_failed(output) { ToolStatus::Failed } else { ToolStatus::Ok };
+    call.output = tool_preview(output);
+    call.full = retain_output(output);
+    call.duration_ms = duration_ms;
 }
 
 fn entries_from_messages(messages: &[Value]) -> Vec<Entry> {
@@ -1113,30 +1108,15 @@ fn entries_from_messages(messages: &[Value]) -> Vec<Entry> {
             // A restored session has no timings — the durations were never
             // persisted — but the outcome is still readable from the output, so
             // resumed tool rows keep their pass/fail colouring.
-            "tool" => entries.push(Entry::tool(ToolCall {
-                name: message["name"].as_str().unwrap_or("tool").to_owned(),
-                summary: String::new(),
-                status: if tool_failed(content) { ToolStatus::Failed } else { ToolStatus::Ok },
-                output: tool_preview(content),
-                full: retain_output(content),
-                duration_ms: None,
-                expanded: false,
-            })),
+            "tool" => {
+                let mut call = ToolCall::running(message["name"].as_str().unwrap_or("tool"), "");
+                settle(&mut call, content, None);
+                entries.push(Entry::tool(call));
+            }
             _ => {}
         }
     }
     entries
-}
-
-/// The provider secondary calls use: the main one with the model swapped to
-/// the configured aux model, or the main provider itself when none is set.
-fn aux_provider_for(config: &Config, provider: &Provider) -> Provider {
-    match config.aux_model.as_deref() {
-        Some(model) if !model.trim().is_empty() && model != provider.model() => {
-            provider.with_model(model)
-        }
-        _ => provider.clone(),
-    }
 }
 
 /// The name a session goes by in the harness: its id, or a fresh one for a
@@ -1185,7 +1165,7 @@ impl App {
             session.as_ref().map(|session| session.active_secs).unwrap_or(0);
         let tokens = Arc::new(crate::provider::TokenLedger::new(initial_tokens));
         let provider = Provider::with_tokens(&config, tokens.clone())?;
-        let aux_provider = aux_provider_for(&config, &provider);
+        let aux_provider = provider.for_role(config.aux_model.as_deref());
         let hive = crate::hive::HiveHandle::load(config.paths.hive_file.clone());
         let modes = crate::modes::ModeCoach::load(config.paths.modes_file.clone());
         let ralph_loop = session.as_ref().and_then(|session| session.ralph_loop.clone());
@@ -1584,20 +1564,11 @@ impl App {
                     self.receiving_delta = false;
                     self.turn_had_tools = true;
                     self.tool_started = Some(Instant::now());
-                    self.push_entry(Entry::tool(ToolCall {
-                        name: name.clone(),
-                        summary,
-                        status: ToolStatus::Running,
-                        output: String::new(),
-                        full: String::new(),
-                        duration_ms: None,
-                        expanded: false,
-                    }));
                     self.status = format!("running {name}");
+                    self.push_entry(Entry::tool(ToolCall::running(name, summary)));
                 }
                 AgentEvent::ToolFinished { name, output } => {
                     self.receiving_delta = false;
-                    let preview = tool_preview(&output);
                     // The full tool result (not the preview) lands in the
                     // messages array; estimate its JSON size for the live ctx %.
                     self.ctx_chars = self.ctx_chars.saturating_add(output.len() + name.len() + 80);
@@ -1605,27 +1576,14 @@ impl App {
                         .tool_started
                         .take()
                         .map(|started| started.elapsed().as_millis() as u64);
-                    let status =
-                        if tool_failed(&output) { ToolStatus::Failed } else { ToolStatus::Ok };
                     // Settle the row the matching `ToolStarted` opened, keeping
                     // the argument summary it already shows rather than
                     // replacing the row wholesale.
-                    let retained = retain_output(&output);
+                    if self.open_tool().is_none() {
+                        self.push_entry(Entry::tool(ToolCall::running(name, "")));
+                    }
                     if let Some(call) = self.open_tool() {
-                        call.status = status;
-                        call.output = preview;
-                        call.full = retained;
-                        call.duration_ms = duration_ms;
-                    } else {
-                        self.push_entry(Entry::tool(ToolCall {
-                            name,
-                            summary: String::new(),
-                            status,
-                            output: preview,
-                            full: retained,
-                            duration_ms,
-                            expanded: false,
-                        }));
+                        settle(call, &output, duration_ms);
                     }
                     self.group_exploration();
                     self.status = "thinking".to_owned();
@@ -1636,9 +1594,6 @@ impl App {
                     self.status = format!("{} mode", mode.label().to_ascii_lowercase());
                 }
                 AgentEvent::Done { messages, reason } => {
-                    // Reported back, so there is no half-finished reply to
-                    // recover on the way out.
-                    crate::recovery::clear();
                     let assistant_output = crate::text::last_reply(&messages).to_owned();
                     self.messages = messages;
                     // Resynthe live ctx estimate from the authoritative messages.
@@ -1663,7 +1618,6 @@ impl App {
                     if let Some(remote) = &self.remote_outbound {
                         let _ = remote.send(assistant_output.clone());
                     }
-                    self.running = None;
                     if !continue_loop {
                         self.sync_idle_since = Some(Instant::now());
                     }
@@ -1704,11 +1658,7 @@ impl App {
                             self.status = "step limit reached".to_owned();
                         }
                     }
-                    self.turn_started = None;
-                    self.tool_started = None;
-                    self.resolved_agent_mode = None;
-                    self.receiving_delta = false;
-                    self.receiving_thinking = false;
+                    self.close_turn();
                     if reason == DoneReason::Complete && !continue_loop {
                         self.start_draft();
                     }
@@ -1726,15 +1676,10 @@ impl App {
                     }
                 }
                 AgentEvent::Failed { error, messages } => {
-                    crate::recovery::clear();
+                    self.close_turn();
                     self.messages = messages;
                     self.ctx_chars = message_chars(&self.messages);
-                    self.running = None;
                     self.last_outcome = Some(TurnOutcome::Failed);
-                    self.turn_started = None;
-                    self.tool_started = None;
-                    self.resolved_agent_mode = None;
-                    self.receiving_delta = false;
                     self.approval = None;
                     // Provider rejections are very often not transient: an
                     // interrupted turn leaves history that strict providers
@@ -1769,12 +1714,7 @@ impl App {
             && handle.is_finished()
             && matches!(self.event_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty))
         {
-            self.running = None;
-            crate::recovery::clear();
-            self.turn_started = None;
-            self.tool_started = None;
-            self.receiving_delta = false;
-            self.receiving_thinking = false;
+            self.close_turn();
             self.fail(
                 "The turn ended unexpectedly. Partial output was kept — \
                  send a message to continue.",
@@ -1787,23 +1727,30 @@ impl App {
         changed
     }
 
-    /// True when the worker board changed since the last draw. The strip must
-    /// update while no turn is running — during that window nothing else marks
-    /// the frame dirty, so background swarms looked frozen between keystrokes.
+    /// The turn is over, however it ended: it reported back, so there is no
+    /// half-finished reply to recover, and nothing of it is still in flight.
+    fn close_turn(&mut self) {
+        crate::recovery::clear();
+        self.running = None;
+        self.turn_started = None;
+        self.tool_started = None;
+        self.resolved_agent_mode = None;
+        self.receiving_delta = false;
+        self.receiving_thinking = false;
+    }
+
     /// A termination signal arrived; the loop should wind down gracefully.
     /// Called on the UI thread, which notices within one poll tick (~150ms).
     fn pending_signal(&self) -> bool {
         PENDING_SIGNAL.load(Ordering::SeqCst) != 0
     }
 
+    /// True when the worker board changed since the last draw. The strip must
+    /// update while no turn is running — during that window nothing else marks
+    /// the frame dirty, so background swarms looked frozen between keystrokes.
     fn board_changed(&mut self) -> bool {
         let version = self.hive.board.version();
-        if version != self.last_board_version {
-            self.last_board_version = version;
-            true
-        } else {
-            false
-        }
+        std::mem::replace(&mut self.last_board_version, version) != version
     }
 
     fn set_approval(&mut self, request: ApprovalRequest) {
@@ -2543,15 +2490,6 @@ impl App {
         }
     }
 
-    /// Lines to move for one scroll event, chosen from how fast the events are
-    /// arriving.
-    ///
-    /// A mouse wheel sends one chunky notch at a time; a trackpad sends a dense
-    /// stream of small ones. Moving three lines per event suits the wheel and
-    /// makes a trackpad fly past whatever you were reading, so a burst is
-    /// treated as a trackpad and moves one line. The first event after a pause
-    /// keeps the wheel's larger step, which is what makes a single notch still
-    /// feel responsive.
     /// Generation rate for the running turn, or `None` before there is enough
     /// to measure.
     ///
@@ -2568,8 +2506,6 @@ impl App {
         Some((self.turn_output_chars as f64 / 4.0) / elapsed)
     }
 
-    /// Fire a message queued with `submit` while a turn was running. Called once
-    /// the agent finishes (Done) so the user can steer without retyping.
     /// A background subagent that finished after its turn ended still has a
     /// report to deliver. Start a turn to hand it over, the same way a running
     /// turn would have picked it up between tool calls.

@@ -996,6 +996,19 @@ pub const MAX_RETAINED_OUTPUT: usize = 64 * 1024;
 const MAX_EXPANDED_ROWS: usize = 400;
 
 impl ToolCall {
+    /// A call that has started and not reported back yet.
+    pub fn running(name: impl Into<String>, summary: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            summary: summary.into(),
+            status: ToolStatus::Running,
+            output: String::new(),
+            full: String::new(),
+            duration_ms: None,
+            expanded: false,
+        }
+    }
+
     /// Whether opening this row would show anything the collapsed row does not.
     pub fn has_more(&self) -> bool {
         self.full.trim() != self.output.trim() && !self.full.trim().is_empty()
@@ -1454,13 +1467,11 @@ mod tests {
         let entries = vec![
             Entry::new(EntryKind::User, "please refactor the parser module"),
             Entry::tool(ToolCall {
-                name: "read_file".into(),
-                summary: "src/parser.rs".into(),
                 status: ToolStatus::Ok,
                 output: "1203 lines".into(),
                 full: "1203 lines".into(),
                 duration_ms: Some(240),
-                expanded: false,
+                ..ToolCall::running("read_file", "src/parser.rs")
             }),
         ];
         let text = transcript(&entries, 40, "⠋", None, true);
@@ -1471,34 +1482,17 @@ mod tests {
 
     #[test]
     fn running_tools_show_the_spinner_and_finished_tools_the_duration() {
-        let running = transcript(
-            &[Entry::tool(ToolCall {
-                name: "grep".into(),
-                summary: "fn parse".into(),
-                status: ToolStatus::Running,
-                output: String::new(),
-                full: String::new(),
-                duration_ms: None,
-                expanded: false,
-            })],
-            60,
-            "⠹",
-            None,
-            true,
-        );
+        let running =
+            transcript(&[Entry::tool(ToolCall::running("grep", "fn parse"))], 60, "⠹", None, true);
         let row = plain(&running.lines[0]);
         assert!(row.contains('⠹'), "{row}");
         assert!(row.trim_end().ends_with("running"), "{row}");
 
         let done = transcript(
             &[Entry::tool(ToolCall {
-                name: "grep".into(),
-                summary: "fn parse".into(),
                 status: ToolStatus::Ok,
-                output: String::new(),
-                full: String::new(),
                 duration_ms: Some(1_500),
-                expanded: false,
+                ..ToolCall::running("grep", "fn parse")
             })],
             60,
             "⠹",
@@ -1514,13 +1508,9 @@ mod tests {
     fn consecutive_tool_rows_group_without_a_blank_between_them() {
         let call = || {
             Entry::tool(ToolCall {
-                name: "grep".into(),
-                summary: String::new(),
                 status: ToolStatus::Ok,
-                output: String::new(),
-                full: String::new(),
                 duration_ms: Some(5),
-                expanded: false,
+                ..ToolCall::running("grep", "")
             })
         };
         let text = transcript(&[call(), call()], 60, "⠋", None, true);

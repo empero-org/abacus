@@ -28,10 +28,8 @@ pub async fn run(
     reporter: Option<ActivityReporter>,
 ) -> Result<()> {
     let initial_tokens = session.as_ref().map(|session| session.tokens_used).unwrap_or(0);
-    let provider = Provider::with_tokens(
-        &config,
-        Arc::new(crate::provider::TokenLedger::new(initial_tokens)),
-    )?;
+    let tokens = Arc::new(crate::provider::TokenLedger::new(initial_tokens));
+    let provider = Provider::with_tokens(&config, tokens.clone())?;
     let session_id = session.as_ref().map(|session| session.id.to_string());
     services
         .run_hooks(
@@ -54,22 +52,8 @@ pub async fn run(
     if let Some(reporter) = &reporter {
         reporter.report_start(&activity_session, &config.model).await;
     }
-    // Keep long-running headless sessions (e.g. loops) visible with live tokens,
-    // and let them drop off "active" if the process is killed.
-    let heartbeat = reporter.clone().map(|reporter| {
-        let provider = provider.clone();
-        let session = activity_session.clone();
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
-                crate::activity::HEARTBEAT_INTERVAL_SECS,
-            ));
-            ticker.tick().await;
-            loop {
-                ticker.tick().await;
-                reporter.report_heartbeat(&session, provider.tokens_used()).await;
-            }
-        })
-    });
+    let heartbeat =
+        reporter.as_ref().map(|reporter| reporter.heartbeat(activity_session.clone(), tokens));
     let (events, mut receiver) = mpsc::unbounded_channel();
     let allow = Arc::new(AtomicBool::new(config.yes));
     // Keyed by the session id so promotion counts distinct sessions rather

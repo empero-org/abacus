@@ -290,6 +290,17 @@ impl Provider {
         }
     }
 
+    /// This provider for a role: on the role's model when one is assigned and
+    /// differs from the current one, otherwise as it is.
+    pub fn for_role(&self, assigned: Option<&str>) -> Provider {
+        match assigned {
+            Some(model) if !model.trim().is_empty() && model != self.model => {
+                self.with_model(model)
+            }
+            _ => self.clone(),
+        }
+    }
+
     /// Carry `previous`'s session id onto this freshly built provider.
     ///
     /// The id is what hosts that route by conversation are told (see

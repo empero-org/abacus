@@ -952,6 +952,15 @@ impl App {
         self.cursor_pending = false;
     }
 
+    /// Lines to move for one scroll event, chosen from how fast the events are
+    /// arriving.
+    ///
+    /// A mouse wheel sends one chunky notch at a time; a trackpad sends a dense
+    /// stream of small ones. Moving three lines per event suits the wheel and
+    /// makes a trackpad fly past whatever you were reading, so a burst is
+    /// treated as a trackpad and moves one line. The first event after a pause
+    /// keeps the wheel's larger step, which is what makes a single notch still
+    /// feel responsive.
     pub(super) fn scroll_step(&mut self) -> u16 {
         const TRACKPAD_GAP: Duration = Duration::from_millis(80);
         let now = Instant::now();

@@ -88,8 +88,6 @@ impl ToolFormat {
     }
 }
 
-/// Parse `raw` assistant text under `format`, returning the cleaned prose
-/// (tool-call blocks removed) and any tool calls found.
 /// Byte offset of the first tool-call marker in `text` for `format`, if any.
 ///
 /// Used to stop streaming text to the transcript at the point the model starts
@@ -120,6 +118,8 @@ pub fn marker_index(format: ToolFormat, text: &str) -> Option<usize> {
     markers.iter().filter_map(|marker| text.find(marker)).min()
 }
 
+/// Parse `raw` assistant text under `format`, returning the cleaned prose
+/// (tool-call blocks removed) and any tool calls found.
 pub fn parse(format: ToolFormat, raw: &str) -> (String, Vec<ParsedToolCall>) {
     match format {
         ToolFormat::None => (raw.to_owned(), Vec::new()),

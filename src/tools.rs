@@ -208,12 +208,7 @@ pub type OutsideReads = std::sync::Arc<std::sync::RwLock<std::collections::HashS
 
 impl ToolExecutor {
     pub fn new(root: PathBuf) -> Self {
-        Self {
-            root,
-            output_limit: MAX_OUTPUT,
-            web: crate::web::WebConfig::default(),
-            outside_reads: OutsideReads::default(),
-        }
+        Self::with_output_limit(root, MAX_OUTPUT)
     }
 
     pub fn with_output_limit(root: PathBuf, output_limit: usize) -> Self {
@@ -376,16 +371,7 @@ impl ToolExecutor {
         let depth = args.depth.clamp(1, 8);
         let mut entries = Vec::new();
 
-        for entry in WalkBuilder::new(&base)
-            .max_depth(Some(depth))
-            .hidden(false)
-            .git_ignore(true)
-            .git_global(false)
-            .filter_entry(skip_vcs_dir)
-            .build()
-            .filter_map(Result::ok)
-            .skip(1)
-        {
+        for entry in walk(&base, Some(depth)).skip(1) {
             if entries.len() >= 500 {
                 entries.push("… output capped at 500 entries".to_owned());
                 break;
@@ -395,7 +381,7 @@ impl ToolExecutor {
             entries.push(format!("{}{suffix}", relative.display()));
         }
 
-        if entries.is_empty() { Ok("(empty directory)".to_owned()) } else { Ok(entries.join("\n")) }
+        Ok(or_note(entries.join("\n"), "(empty directory)"))
     }
 
     fn grep(&self, arguments: &str) -> Result<String> {
@@ -425,14 +411,7 @@ impl ToolExecutor {
         let mut matches = Vec::new();
         let mut match_count = 0usize;
 
-        for entry in WalkBuilder::new(base)
-            .hidden(false)
-            .git_ignore(true)
-            .git_global(false)
-            .filter_entry(skip_vcs_dir)
-            .build()
-            .filter_map(Result::ok)
-        {
+        for entry in walk(&base, None) {
             if !entry.file_type().is_some_and(|kind| kind.is_file()) {
                 continue;
             }
@@ -506,7 +485,7 @@ impl ToolExecutor {
             }
         }
 
-        if matches.is_empty() { Ok("No matches.".to_owned()) } else { Ok(matches.join("\n")) }
+        Ok(or_note(matches.join("\n"), "No matches."))
     }
 
     fn glob(&self, arguments: &str) -> Result<String> {
@@ -524,14 +503,7 @@ impl ToolExecutor {
         let base = self.resolve_for_read(&args.path)?;
         let max_results = args.max_results.clamp(1, 5_000);
         let mut results = Vec::new();
-        for entry in WalkBuilder::new(base)
-            .hidden(false)
-            .git_ignore(true)
-            .git_global(false)
-            .filter_entry(skip_vcs_dir)
-            .build()
-            .filter_map(Result::ok)
-        {
+        for entry in walk(&base, None) {
             let relative = entry.path().strip_prefix(&self.root).unwrap_or(entry.path());
             if matcher.is_match(relative) {
                 let suffix =
@@ -543,11 +515,7 @@ impl ToolExecutor {
                 }
             }
         }
-        if results.is_empty() {
-            Ok("No matching paths.".to_owned())
-        } else {
-            Ok(results.join("\n"))
-        }
+        Ok(or_note(results.join("\n"), "No matching paths."))
     }
 
     fn tool_search(&self, arguments: &str) -> Result<String> {
@@ -1043,9 +1011,6 @@ impl ToolExecutor {
                     unsafe extern "C" {
                         fn setsid() -> i32;
                     }
-                    // SAFETY: pre_exec runs after fork, before exec; async-signal-safe.
-                    // SAFETY: setsid is async-signal-safe; allowed inside
-                    // pre_exec without an extra unsafe block (unsafe extern).
                     if setsid() < 0 {
                         return Err(std::io::Error::last_os_error());
                     }
@@ -1424,6 +1389,18 @@ fn ensure_inside(root: &Path, path: &Path) -> Result<()> {
 /// other hidden files (so `.github`, dotfiles, etc. remain searchable), but a
 /// `.git` directory holds thousands of loose objects and is never worth reading
 /// — descending into it made `grep`/`glob`/`list_files` take tens of seconds.
+/// Everything under `base` that git would not ignore, hidden files included.
+fn walk(base: &Path, depth: Option<usize>) -> impl Iterator<Item = ignore::DirEntry> {
+    WalkBuilder::new(base)
+        .max_depth(depth)
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(false)
+        .filter_entry(skip_vcs_dir)
+        .build()
+        .filter_map(Result::ok)
+}
+
 fn skip_vcs_dir(entry: &ignore::DirEntry) -> bool {
     if entry.depth() == 0 {
         return true;

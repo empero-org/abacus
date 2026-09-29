@@ -433,7 +433,7 @@ impl App {
         // that routes by it does not see a switch as a second conversation.
         provider.adopt_session(&self.provider);
         self.provider = provider;
-        self.aux_provider = aux_provider_for(&self.config, &self.provider);
+        self.aux_provider = self.provider.for_role(self.config.aux_model.as_deref());
         if let Some(session) = &mut self.session {
             session.profile = self.config.profile.clone();
             session.model = self.config.model.clone();
@@ -909,9 +909,6 @@ impl App {
         }
     }
 
-    /// Offer the stored profiles, plus a way to add one. Cycling was the only
-    /// way to switch before, which does nothing visible when there is a single
-    /// profile and gives no way to create a second.
     /// Undo a provider that never got a model, restoring the previous profile.
     pub(super) fn cancel_pending_provider(&mut self) {
         let Some(pending) = self.pending_provider.take() else {
@@ -933,6 +930,9 @@ impl App {
         self.status = "provider discarded — no model was set".to_owned();
     }
 
+    /// Offer the stored profiles, plus a way to add one. Cycling was the only
+    /// way to switch before, which does nothing visible when there is a single
+    /// profile and gives no way to create a second.
     pub(super) fn open_profile_picker(&mut self) {
         let mut items = self
             .settings

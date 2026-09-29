@@ -903,13 +903,10 @@ async fn ctrl_o_opens_the_newest_tool_block_even_mid_run() {
     let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
     let tool = |summary: &str, preview: &str, full: &str, status| {
         Entry::tool(ui::ToolCall {
-            name: "run_command".to_owned(),
-            summary: summary.to_owned(),
             status,
             output: preview.to_owned(),
             full: full.to_owned(),
-            duration_ms: None,
-            expanded: false,
+            ..ui::ToolCall::running("run_command", summary)
         })
     };
     app.push_entry(tool("first", "short", "short\nand more", ui::ToolStatus::Ok));
@@ -943,15 +940,7 @@ async fn ctrl_o_explains_itself_when_there_is_nothing_to_open() {
     assert!(app.status.contains("no tool output"), "{}", app.status);
 
     // A running tool that has printed nothing yet.
-    app.push_entry(Entry::tool(ui::ToolCall {
-        name: "run_command".to_owned(),
-        summary: "cargo build".to_owned(),
-        status: ui::ToolStatus::Running,
-        output: String::new(),
-        full: String::new(),
-        duration_ms: None,
-        expanded: false,
-    }));
+    app.push_entry(Entry::tool(ui::ToolCall::running("run_command", "cargo build")));
     assert!(!app.toggle_latest_tool());
     assert!(app.status.contains("nothing buffered yet"), "{}", app.status);
 }
@@ -2019,15 +2008,9 @@ fn editing_the_draft_resets_the_highlight_and_revives_a_dismissed_popup() {
 }
 
 fn tool_entry(output: &str) -> Entry {
-    Entry::tool(ToolCall {
-        name: "run_command".into(),
-        summary: "cargo test".into(),
-        status: ToolStatus::Ok,
-        output: tool_preview(output),
-        full: retain_output(output),
-        duration_ms: Some(120),
-        expanded: false,
-    })
+    let mut call = ToolCall::running("run_command", "cargo test");
+    settle(&mut call, output, Some(120));
+    Entry::tool(call)
 }
 
 #[test]
@@ -2196,15 +2179,7 @@ async fn esc_asks_a_running_turn_to_stop_before_killing_it() {
 async fn a_second_interrupt_escalates_and_settles_the_open_tool_row() {
     let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
     app.start_turn("check the tests".into(), "check the tests".into(), true);
-    app.push_entry(Entry::tool(ToolCall {
-        name: "run_command".into(),
-        summary: "cargo test".into(),
-        status: ToolStatus::Running,
-        output: String::new(),
-        full: String::new(),
-        duration_ms: None,
-        expanded: false,
-    }));
+    app.push_entry(Entry::tool(ToolCall::running("run_command", "cargo test")));
     app.tool_started = Some(Instant::now());
 
     press(&mut app, KeyCode::Esc);

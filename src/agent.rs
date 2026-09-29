@@ -330,15 +330,9 @@ async fn run_turn_inner(
     // main model does not pay for them. Compaction deliberately stays on the
     // main model — the rolling summary is load-bearing for the whole session.
     // Falls back to the main provider when no aux model is set.
-    let for_role = |assigned: Option<&str>| match assigned {
-        Some(model) if !model.trim().is_empty() && model != provider.model() => {
-            provider.with_model(model)
-        }
-        _ => provider.clone(),
-    };
-    let aux = for_role(options.aux_model.as_deref());
-    let summariser = for_role(options.compaction_model.as_deref());
-    let delegate = for_role(options.subagent_model.as_deref());
+    let aux = provider.for_role(options.aux_model.as_deref());
+    let summariser = provider.for_role(options.compaction_model.as_deref());
+    let delegate = provider.for_role(options.subagent_model.as_deref());
 
     // Paths outside the workspace that the safety layer has cleared for
     // reading. The executor consults it; the loop below fills it in.
