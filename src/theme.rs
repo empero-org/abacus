@@ -169,28 +169,9 @@ impl Theme {
     /// `NO_COLOR`. Structure — bold, the gutter rails, the badges' reverse
     /// video — carries the whole interface, so it stays legible rather than
     /// merely uncoloured.
-    pub const PLAIN: Theme = Theme {
-        primary: Color::Reset,
-        secondary: Color::Reset,
-        success: Color::Reset,
-        warning: Color::Reset,
-        danger: Color::Reset,
-        muted: Color::Reset,
-        border: Color::Reset,
-        surface: Color::Reset,
-        text: Color::Reset,
-        inverse: Color::Reset,
-        code_bg: Color::Reset,
-        add_fg: Color::Reset,
-        add_bg: Color::Reset,
-        del_fg: Color::Reset,
-        del_bg: Color::Reset,
-        rail: Color::Reset,
-        selection: Color::Reset,
-        user_bg: Color::Reset,
-        overlay: Color::Reset,
-        plain: true,
-    };
+    pub fn plain() -> Theme {
+        Theme { plain: true, ..Theme::DARK }.map(|_| Color::Reset)
+    }
 
     /// The built-in palette for a mode, before any depth adaptation.
     pub fn base(mode: ThemeMode) -> Theme {
@@ -221,7 +202,7 @@ impl Theme {
     /// the mapping at least keeps the interface's structure legible.
     pub fn adapt(self, mode: ThemeMode, depth: ColorDepth) -> Theme {
         match depth {
-            ColorDepth::None => Theme::PLAIN,
+            ColorDepth::None => Theme::plain(),
             ColorDepth::TrueColor => self,
             ColorDepth::Ansi256 => self.map(quantize_256),
             ColorDepth::Ansi16 => self.map_roles(mode),
@@ -229,29 +210,12 @@ impl Theme {
     }
 
     /// Apply `f` to every colour role, leaving `plain` alone.
-    fn map(self, f: impl Fn(Color) -> Color) -> Theme {
-        Theme {
-            primary: f(self.primary),
-            secondary: f(self.secondary),
-            success: f(self.success),
-            warning: f(self.warning),
-            danger: f(self.danger),
-            muted: f(self.muted),
-            border: f(self.border),
-            surface: f(self.surface),
-            text: f(self.text),
-            inverse: f(self.inverse),
-            code_bg: f(self.code_bg),
-            add_fg: f(self.add_fg),
-            add_bg: f(self.add_bg),
-            del_fg: f(self.del_fg),
-            del_bg: f(self.del_bg),
-            rail: f(self.rail),
-            selection: f(self.selection),
-            user_bg: f(self.user_bg),
-            overlay: f(self.overlay),
-            plain: self.plain,
+    fn map(mut self, f: impl Fn(Color) -> Color) -> Theme {
+        for role in THEME_ROLES {
+            let color = role_color(&self, role).expect("a listed role");
+            set_role(&mut self, role, f(color));
         }
+        self
     }
 
     /// The sixteen-colour palette, assigned by role rather than by nearest RGB.
@@ -624,7 +588,6 @@ fn distance(a: (u8, u8, u8), b: (u8, u8, u8)) -> i32 {
 
 static ACTIVE: RwLock<Theme> = RwLock::new(Theme::DARK);
 
-/// The active theme, copied out (cheap — `Theme` is `Copy`).
 /// The active palette's roles as plain functions, so draw code reads
 /// `muted()` rather than `theme::active().muted` at every call site.
 macro_rules! roles {
@@ -636,6 +599,7 @@ macro_rules! roles {
 }
 roles!(primary, secondary, success, warning, danger, muted, border, surface, text, inverse, rail);
 
+/// The active theme, copied out (cheap — `Theme` is `Copy`).
 pub fn active() -> Theme {
     *ACTIVE.read().expect("theme lock poisoned")
 }

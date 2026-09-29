@@ -107,54 +107,35 @@ impl TetherState {
 pub fn compact_history(messages: &[Value]) -> String {
     // (is_user, text): what the user asked is the evidence both callers judge
     // against, so it is budgeted separately from what the agent has been doing.
+    let excerpt =
+        |text: &str, max: usize| crate::text::clip(&crate::text::flat(text.trim()), max, "…");
+    let said = |message: &Value, field: &str| {
+        let text = message.get(field).and_then(Value::as_str);
+        text.filter(|text| !text.trim().is_empty()).map(|text| excerpt(text, EXCERPT_CHARS))
+    };
     let mut lines: Vec<(bool, String)> = Vec::new();
     for message in messages {
         match message.get("role").and_then(Value::as_str) {
             Some("user") => {
                 if let Some(text) = message.get("content").and_then(Value::as_str) {
-                    lines.push((
-                        true,
-                        format!(
-                            "user: {}",
-                            crate::text::clip(&crate::text::flat(text.trim()), EXCERPT_CHARS, "…")
-                        ),
-                    ));
+                    lines.push((true, format!("user: {}", excerpt(text, EXCERPT_CHARS))));
                 }
             }
             Some("assistant") => {
                 let mut line = String::from("assistant:");
                 // The thinking first: intentions drift before actions do.
-                if let Some(thinking) = message.get("reasoning_content").and_then(Value::as_str)
-                    && !thinking.trim().is_empty()
-                {
-                    line.push_str(&format!(
-                        " (thinking: {})",
-                        crate::text::clip(&crate::text::flat(thinking.trim()), EXCERPT_CHARS, "…")
-                    ));
+                if let Some(thinking) = said(message, "reasoning_content") {
+                    line.push_str(&format!(" (thinking: {thinking})"));
                 }
-                if let Some(text) = message.get("content").and_then(Value::as_str)
-                    && !text.trim().is_empty()
-                {
-                    line.push(' ');
-                    line.push_str(&crate::text::clip(
-                        &crate::text::flat(text.trim()),
-                        EXCERPT_CHARS,
-                        "…",
-                    ));
+                if let Some(text) = said(message, "content") {
+                    line.push_str(&format!(" {text}"));
                 }
-                if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
-                    for call in calls {
-                        if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
-                            let arguments = call
-                                .pointer("/function/arguments")
-                                .and_then(Value::as_str)
-                                .unwrap_or("");
-                            line.push_str(&format!(
-                                " [{} {}]",
-                                name,
-                                crate::text::clip(&crate::text::flat(arguments.trim()), 80, "…")
-                            ));
-                        }
+                let calls = message.get("tool_calls").and_then(Value::as_array);
+                for call in calls.into_iter().flatten() {
+                    if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
+                        let arguments = call.pointer("/function/arguments").and_then(Value::as_str);
+                        let arguments = excerpt(arguments.unwrap_or(""), 80);
+                        line.push_str(&format!(" [{name} {arguments}]"));
                     }
                 }
                 if line != "assistant:" {
