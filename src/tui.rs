@@ -562,28 +562,30 @@ struct FeedbackForm {
 
 const FEEDBACK_CATEGORIES: &[&str] = &["General", "Bug", "Feature", "Performance"];
 
-/// A finished `/models` fetch, posted back from the request task.
-struct CatalogFetched {
-    profile: String,
-    result: Result<Vec<crate::model_info::ModelCard>, String>,
+/// Work finished off the UI thread, posted back to it over one channel.
+enum Background {
+    /// A predicted next message for the empty composer.
+    Draft(Option<String>),
+    /// A profile's model list, for the `/models` hub.
+    Catalog {
+        profile: String,
+        result: Result<Vec<crate::model_info::ModelCard>, String>,
+    },
+    Feedback(Result<crate::feedback::FeedbackReceipt, String>),
+    /// The outcome of a manual `/refine`.
+    Refined(String),
+    Services(Result<Box<AgentServices>, String>),
+    Remote(Remote),
+    /// A newer release exists.
+    Update(crate::update::Available),
 }
 
-struct FeedbackResult {
-    result: std::result::Result<crate::feedback::FeedbackReceipt, String>,
-}
-
-/// The outcome of a manual `/refine`, delivered back to the UI thread.
-struct RefineResult {
-    message: String,
-    failed: bool,
-}
-
-struct ServicesResult {
-    result: std::result::Result<AgentServices, String>,
-}
-
-struct RemoteResult {
-    result: std::result::Result<String, String>,
+/// What the `/remote` connection reports.
+enum Remote {
+    Status(String),
+    Prompt(String),
+    Interrupt,
+    Closed(String),
 }
 
 struct App {
@@ -625,6 +627,8 @@ struct App {
     running: Option<JoinHandle<()>>,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     event_rx: mpsc::UnboundedReceiver<AgentEvent>,
+    background_tx: mpsc::UnboundedSender<Background>,
+    background_rx: mpsc::UnboundedReceiver<Background>,
     approval: Option<PendingApproval>,
     approval_scroll: u16,
     approval_horizontal: u16,
@@ -634,8 +638,6 @@ struct App {
     config_panel: Option<ConfigPanel>,
     raw_config: Option<RawConfigEditor>,
     feedback_form: Option<FeedbackForm>,
-    feedback_tx: mpsc::UnboundedSender<FeedbackResult>,
-    feedback_rx: mpsc::UnboundedReceiver<FeedbackResult>,
     model_hub: Option<crate::model_hub::ModelHub>,
     /// Body rows the last frame had room for. Keyboard paging needs the
     /// measure the renderer arrived at, and only the renderer knows it.
@@ -643,14 +645,10 @@ struct App {
     /// Model catalogs by profile id, fetched on first visit and kept for the
     /// session so reopening the hub is instant.
     catalogs: HashMap<String, crate::model_hub::Catalog>,
-    catalog_tx: mpsc::UnboundedSender<CatalogFetched>,
-    catalog_rx: mpsc::UnboundedReceiver<CatalogFetched>,
     /// Where the pointer last was, so a row under it can paint a hover band.
     /// Cleared on any keystroke: once you are back on the keyboard, a stale
     /// band beside the cursor is two highlights saying different things.
     pointer: Option<(u16, u16)>,
-    remote_tx: mpsc::UnboundedSender<RemoteResult>,
-    remote_rx: mpsc::UnboundedReceiver<RemoteResult>,
     remote_task: Option<JoinHandle<()>>,
     remote_outbound: Option<mpsc::UnboundedSender<String>>,
     sync_idle_since: Option<Instant>,
@@ -658,14 +656,8 @@ struct App {
     last_board_version: u64,
     reload_services: bool,
     services_reloading: bool,
-    services_tx: mpsc::UnboundedSender<ServicesResult>,
-    services_rx: mpsc::UnboundedReceiver<ServicesResult>,
-    refine_tx: mpsc::UnboundedSender<RefineResult>,
-    refine_rx: mpsc::UnboundedReceiver<RefineResult>,
     /// A manual refinement is in flight; a second would race it for the store.
     refining: bool,
-    /// Delivers a newer-release notice from the startup check, if there is one.
-    update_rx: mpsc::UnboundedReceiver<crate::update::Available>,
     /// Safety verdicts, kept for the session rather than the turn.
     safety: crate::safety::SafetyCache,
     allow_mutations: Arc<AtomicBool>,
@@ -703,8 +695,6 @@ struct App {
     /// A predicted next message, offered in the empty composer. Cleared the
     /// moment the user types — it is a suggestion, never a commitment.
     draft: Option<String>,
-    draft_tx: mpsc::UnboundedSender<Option<String>>,
-    draft_rx: mpsc::UnboundedReceiver<Option<String>>,
     draft_task: Option<JoinHandle<()>>,
     /// Appends one training record per model call. `None` when disabled or when
     /// the session has not been saved yet, since a trace is keyed by session id.
@@ -838,27 +828,22 @@ impl App {
             entries.push(Entry::new(EntryKind::Error, format!("Extension warning: {diagnostic}")));
         }
         let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let (feedback_tx, feedback_rx) = mpsc::unbounded_channel();
-        let (catalog_tx, catalog_rx) = mpsc::unbounded_channel();
-        let (remote_tx, remote_rx) = mpsc::unbounded_channel();
-        let (services_tx, services_rx) = mpsc::unbounded_channel();
-        let (refine_tx, refine_rx) = mpsc::unbounded_channel();
-        let (draft_tx, draft_rx) = mpsc::unbounded_channel();
+        let (background_tx, background_rx) = mpsc::unbounded_channel();
         // Detached, so a slow or unreachable GitHub never delays the first
         // frame, and silent on failure — being offline is not a problem worth
         // reporting.
-        let (update_tx, update_rx) = mpsc::unbounded_channel();
         // `try_current` rather than `spawn`: the app is also constructed in
         // synchronous tests, where there is no reactor to spawn onto.
         if settings.ui.check_updates
             && let Ok(runtime) = tokio::runtime::Handle::try_current()
         {
             let cache = config.paths.update_file.clone();
+            let updates = background_tx.clone();
             runtime.spawn(async move {
                 if let Ok(Some(available)) =
                     crate::update::check(&cache, env!("CARGO_PKG_VERSION")).await
                 {
-                    let _ = update_tx.send(available);
+                    let _ = updates.send(Background::Update(available));
                 }
             });
         }
@@ -950,6 +935,8 @@ impl App {
             running: None,
             event_tx,
             event_rx,
+            background_tx,
+            background_rx,
             approval: None,
             approval_scroll: 0,
             approval_horizontal: 0,
@@ -959,16 +946,10 @@ impl App {
             config_panel: None,
             raw_config: None,
             feedback_form: None,
-            feedback_tx,
-            feedback_rx,
             model_hub: None,
             hub_rows: std::cell::Cell::new(1),
             catalogs: HashMap::new(),
-            catalog_tx,
-            catalog_rx,
             pointer: None,
-            remote_tx,
-            remote_rx,
             remote_task: None,
             remote_outbound: None,
             sync_idle_since: None,
@@ -976,12 +957,7 @@ impl App {
             last_board_version: 0,
             reload_services: false,
             services_reloading: false,
-            services_tx,
-            services_rx,
-            refine_tx,
-            refine_rx,
             refining: false,
-            update_rx,
             safety: crate::safety::SafetyCache::default(),
             allow_mutations: Arc::new(AtomicBool::new(yes)),
             receiving_delta: false,
@@ -997,8 +973,6 @@ impl App {
             trace: None,
             last_scroll: None,
             draft: None,
-            draft_tx,
-            draft_rx,
             draft_task: None,
             cancel: Arc::new(AtomicBool::new(false)),
             pending_provider: None,
@@ -1042,6 +1016,18 @@ impl App {
         self.receiving_thinking = false;
         self.entries_rev = self.entries_rev.wrapping_add(1);
         self.entries.push(entry);
+    }
+
+    /// Tell the user something, in the transcript, and bring it into view.
+    fn say(&mut self, text: impl Into<String>) {
+        self.push_entry(Entry::new(EntryKind::System, text));
+        self.follow = true;
+    }
+
+    /// Report a problem in the transcript and bring it into view.
+    fn fail(&mut self, text: impl Into<String>) {
+        self.push_entry(Entry::new(EntryKind::Error, text));
+        self.follow = true;
     }
 
     /// Replace the whole transcript, as a session resume does.
@@ -1145,10 +1131,10 @@ impl App {
         // model so a heavy main model does not pay for a throwaway guess.
         let provider = self.aux_provider.clone();
         let messages = self.messages.clone();
-        let sender = self.draft_tx.clone();
+        let sender = self.background_tx.clone();
         self.draft_task = Some(tokio::spawn(async move {
             let draft = crate::agent::draft_reply(&provider, &messages).await;
-            let _ = sender.send(draft);
+            let _ = sender.send(Background::Draft(draft));
         }));
     }
 
@@ -1159,16 +1145,6 @@ impl App {
         if let Some(task) = self.draft_task.take() {
             task.abort();
         }
-    }
-
-    fn drain_draft_events(&mut self) -> bool {
-        let mut changed = false;
-        while let Ok(draft) = self.draft_rx.try_recv() {
-            changed = true;
-            // Discard anything that arrived after the user started typing.
-            self.draft = draft.filter(|_| self.input.is_empty() && self.running.is_none());
-        }
-        changed
     }
 
     fn drain_agent_events(&mut self) -> bool {
@@ -1184,12 +1160,10 @@ impl App {
                 // subagent's report would never trigger its turn.
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     if self.running.take().is_some() {
-                        self.push_entry(Entry::new(
-                            EntryKind::Error,
+                        self.fail(
                             "The turn ended unexpectedly (the agent task exited). \
-                             Any partial output was saved to the recovery file."
-                                .to_owned(),
-                        ));
+                             Any partial output was saved to the recovery file.",
+                        );
                         changed = true;
                     }
                     break;
@@ -1222,18 +1196,14 @@ impl App {
                     // Reported once; capture is already disabled for the run.
                     self.trace = None;
                     let required = self.credentials.sync.is_some();
-                    self.push_entry(Entry::new(
-                        EntryKind::Error,
-                        if required {
-                            format!("Sync trace failed — session sync is paused: {error}")
-                        } else {
-                            format!("Training trace disabled — {error}")
-                        },
-                    ));
+                    self.fail(if required {
+                        format!("Sync trace failed — session sync is paused: {error}")
+                    } else {
+                        format!("Training trace disabled — {error}")
+                    });
                 }
                 AgentEvent::Notice(notice) => {
-                    self.push_entry(Entry::new(EntryKind::System, notice));
-                    self.follow = true;
+                    self.say(notice);
                 }
                 AgentEvent::Reasoning(piece) => {
                     self.turn_output_chars = self.turn_output_chars.saturating_add(piece.len());
@@ -1314,10 +1284,7 @@ impl App {
                 }
                 AgentEvent::ModeChanged { mode, reason } => {
                     self.resolved_agent_mode = Some(mode);
-                    self.push_entry(Entry::new(
-                        EntryKind::System,
-                        format!("{} mode — {reason}", mode.label()),
-                    ));
+                    self.say(format!("{} mode — {reason}", mode.label()));
                     self.status = format!("{} mode", mode.label().to_ascii_lowercase());
                 }
                 AgentEvent::Done { messages, reason } => {
@@ -1376,18 +1343,15 @@ impl App {
                     match reason {
                         DoneReason::Complete => {}
                         DoneReason::Interrupted => {
-                            self.push_entry(Entry::new(EntryKind::System, "Interrupted."));
+                            self.say("Interrupted.");
                             self.status = "interrupted".to_owned();
                         }
                         DoneReason::StepLimit => {
-                            self.push_entry(Entry::new(
-                                EntryKind::System,
-                                format!(
-                                    "Stopped after {} steps — the step limit for one turn. \
+                            self.say(format!(
+                                "Stopped after {} steps — the step limit for one turn. \
                                      Send another message to continue, or raise \
                                      `Maximum agent steps` in /config.",
-                                    self.config.max_steps
-                                ),
+                                self.config.max_steps
                             ));
                             self.status = "step limit reached".to_owned();
                         }
@@ -1432,14 +1396,12 @@ impl App {
                     if let Some(remote) = &self.remote_outbound {
                         let _ = remote.send(format!("Error: {error}"));
                     }
-                    self.push_entry(Entry::new(EntryKind::Error, error));
+                    self.fail(error);
                     if provider_rejection {
-                        self.push_entry(Entry::new(
-                            EntryKind::System,
+                        self.say(
                             "If this error repeats, the session history may be corrupted — \
-                             run /repair to check and fix it."
-                                .to_owned(),
-                        ));
+                             run /repair to check and fix it.",
+                        );
                     }
                     self.status = "error".to_owned();
                     if let Some(state) = &mut self.ralph_loop {
@@ -1465,12 +1427,10 @@ impl App {
             self.tool_started = None;
             self.receiving_delta = false;
             self.receiving_thinking = false;
-            self.push_entry(Entry::new(
-                EntryKind::Error,
+            self.fail(
                 "The turn ended unexpectedly. Partial output was kept — \
-                 send a message to continue."
-                    .to_owned(),
-            ));
+                 send a message to continue.",
+            );
             self.status = "turn ended unexpectedly".to_owned();
             self.persist_session();
             self.sync_idle_since = Some(Instant::now());
@@ -1557,17 +1517,9 @@ impl App {
                 let prompt = self.input.take();
                 self.slash_command(prompt.trim());
             } else {
-                // Steering, not queueing: the message is handed to the running
-                // turn, which picks it up after its current tool call. Waiting
-                // for the whole turn to end makes a correction arrive too late
-                // to change what it was correcting.
                 let prompt = self.input.take();
-                let prompt = prompt.trim().to_owned();
-                self.record_history(&prompt);
-                self.push_entry(Entry::new(EntryKind::User, prompt.clone()));
-                self.injections.push(crate::agent::Injection::UserMessage(prompt));
-                self.follow = true;
-                self.status = "steering · delivered after the current step".to_owned();
+                self.record_history(prompt.trim());
+                self.steer(prompt.trim().to_owned());
             }
             return;
         }
@@ -1575,6 +1527,16 @@ impl App {
         let prompt = prompt.trim().to_owned();
         self.record_history(&prompt);
         self.submit_prompt(prompt);
+    }
+
+    /// Hand a message to the running turn, which picks it up after its
+    /// current tool call. Steering, not queueing: a correction that waits for
+    /// the whole turn to end arrives too late to change what it was correcting.
+    fn steer(&mut self, prompt: String) {
+        self.push_entry(Entry::new(EntryKind::User, prompt.clone()));
+        self.injections.push(crate::agent::Injection::UserMessage(prompt));
+        self.follow = true;
+        self.status = "steering · delivered after the current step".to_owned();
     }
 
     /// Resolve a prompt (slash command, extension, or plain prompt) and start a
@@ -1801,703 +1763,452 @@ impl App {
         }));
     }
 
+    /// Run `input` if it is a slash command. Returns whether it was one.
     fn slash_command(&mut self, input: &str) -> bool {
         let (command, argument) = input.split_once(' ').unwrap_or((input, ""));
+        let argument = argument.trim();
         match command {
-            "/help" => {
-                self.show_help = true;
-                true
-            }
-            "/clear" | "/new" => {
-                self.new_session();
-                true
-            }
-            "/fork" => {
-                self.fork_session();
-                true
-            }
-            "/quit" | "/q" | "/exit" => {
-                self.quit = true;
-                true
-            }
-            "/btw" => {
-                let note = argument.trim().to_owned();
-                if note.is_empty() {
-                    self.push_entry(Entry::new(
-                        EntryKind::Error,
-                        "Usage: /btw <side question or remark>".to_owned(),
-                    ));
-                    self.follow = true;
-                    return true;
+            "/help" => self.show_help = true,
+            "/clear" | "/new" => self.new_session(),
+            "/fork" => self.fork_session(),
+            "/quit" | "/q" | "/exit" => self.quit = true,
+            "/btw" => self.btw_command(argument),
+            "/effort" => self.effort_command(argument),
+            "/profile" => self.profile_command(argument),
+            "/models" => self.open_model_hub(),
+            "/model" => self.model_command(argument),
+            "/providers" => self.providers_command(argument),
+            "/sessions" => self.list_sessions(),
+            "/usage" => self.open_usage(),
+            "/resume" => self.resume_session(argument),
+            "/rename" => self.rename_session(argument),
+            "/tools" | "/skills" | "/plugins" | "/mcps" => self.list_extensions(command),
+            "/plan" => self.set_agent_mode(match self.agent_mode {
+                AgentMode::Plan => AgentMode::Auto,
+                _ => AgentMode::Plan,
+            }),
+            "/thinking" => self.thinking_command(argument),
+            "/mode" => self.mode_command(argument),
+            "/goal" => self.goal_command(argument),
+            "/loop" => self.loop_command(argument),
+            "/swarm" => self.swarm_command(argument),
+            "/cancel-loop" | "/cancel-ralph" => self.cancel_ralph_loop(),
+            "/config" => self.open_config(argument),
+            "/theme" => self.theme_command(argument),
+            "/feedback" => self.open_feedback(),
+            "/remote" => self.toggle_remote(),
+            "/compact" => self.compact_command(),
+            "/repair" => self.repair_command(),
+            "/papercuts" => self.papercuts_command(argument),
+            "/memories" => self.memories_command(argument),
+            "/refine" => self.start_refine(argument),
+            "/harness" => self.harness_command(argument),
+            _ if command.starts_with('/') => self.fail(format!("Unknown command: {command}")),
+            _ => return false,
+        }
+        self.follow = true;
+        true
+    }
+
+    /// Put the outcome of a settings change in the status bar: `done` when it
+    /// saved, the error under `failure` when it did not.
+    fn report(&mut self, result: Result<()>, done: impl Into<String>, failure: &str) -> bool {
+        let saved = result.is_ok();
+        self.status = match result {
+            Ok(()) => done.into(),
+            Err(error) => format!("{failure}: {error:#}"),
+        };
+        saved
+    }
+
+    fn set_agent_mode(&mut self, mode: AgentMode) {
+        self.agent_mode = mode;
+        self.status = format!("{} mode", mode.label().to_ascii_lowercase());
+    }
+
+    /// Show or hide the model's reasoning, everywhere, and persist the choice.
+    fn set_show_thinking(&mut self, show: bool) -> bool {
+        let previous = std::mem::replace(&mut self.settings.ui.show_thinking, show);
+        let result = self.save_and_apply_settings();
+        let done = if show { "thinking shown" } else { "thinking hidden" };
+        let saved = self.report(result, done, "configuration error");
+        if !saved {
+            self.settings.ui.show_thinking = previous;
+        }
+        saved
+    }
+
+    fn btw_command(&mut self, note: &str) {
+        if note.is_empty() {
+            return self.fail("Usage: /btw <side question or remark>");
+        }
+        if self.running.is_none() {
+            // With nothing running there is nothing to avoid derailing, and a
+            // note the model only sees "later" would just be lost.
+            return self.say("/btw is for while a turn is running — ask it directly instead.");
+        }
+        self.say(format!("Noted, by the way: {note}"));
+        self.injections.push(crate::agent::Injection::SideNote(note.to_owned()));
+        self.status = "noted · delivered after the current step".to_owned();
+    }
+
+    fn effort_command(&mut self, argument: &str) {
+        let label = |effort: Option<crate::config::ReasoningEffort>, unset: &str| {
+            effort.map_or(unset.to_owned(), |effort| effort.label().to_owned())
+        };
+        if argument.is_empty() {
+            let current = label(self.config.reasoning_effort, "auto (provider default)");
+            return self.say(format!(
+                "Reasoning effort: {current}. Set it with /effort \
+                 minimal|low|medium|high|xhigh|max, or /effort auto to leave it to the provider."
+            ));
+        }
+        let cleared =
+            matches!(argument.to_ascii_lowercase().as_str(), "auto" | "default" | "unset");
+        let parsed = crate::config::ReasoningEffort::parse(argument);
+        if !cleared && parsed.is_none() {
+            return self.fail("Usage: /effort minimal|low|medium|high|xhigh|max|auto");
+        }
+        if let Ok(profile) = self.active_profile_mut() {
+            profile.reasoning_effort = parsed;
+        }
+        let described = label(parsed, "auto");
+        let result = self.save_and_apply_settings();
+        if self.report(result, format!("effort {described}"), "configuration error") {
+            self.say(match parsed {
+                Some(_) => format!(
+                    "Reasoning effort set to {described}. Sent with every request on this \
+                     profile; models without reasoning ignore it."
+                ),
+                None => "Reasoning effort cleared — the provider's own default applies.".to_owned(),
+            });
+        }
+    }
+
+    fn model_command(&mut self, model: &str) {
+        if model.is_empty() {
+            return self.say(format!(
+                "Model: {}\nEndpoint: {}\n\nSwitch with /model <id>; discover IDs with `abacus models`.",
+                self.config.model, self.config.base_url
+            ));
+        }
+        let result = self
+            .active_profile_mut()
+            .map(|profile| profile.model = model.to_owned())
+            .and_then(|()| self.save_and_apply_settings());
+        self.report(result, format!("model: {model} · saved"), "model switch failed");
+    }
+
+    /// OpenRouter fronts many suppliers for one model and they differ in
+    /// context length and quantization, so which one serves a request is a
+    /// decision worth making rather than accepting by default.
+    fn providers_command(&mut self, argument: &str) {
+        if argument.is_empty() {
+            let profile = self.settings.profiles.get(&self.settings.default_profile);
+            let pinned = profile.map(|profile| profile.providers.clone()).unwrap_or_default();
+            let body = if pinned.is_empty() {
+                "No providers pinned — the endpoint chooses.".to_owned()
+            } else {
+                format!(
+                    "Pinned, in order: {}\nFallbacks: {}",
+                    pinned.join(", "),
+                    on_off(profile.is_none_or(|profile| profile.allow_fallbacks))
+                        .to_ascii_lowercase()
+                )
+            };
+            return self.say(format!(
+                "{body}\n\nSet with /providers <name, name>; \
+                 /providers clear removes the pin; \
+                 /providers strict|fallback controls whether anything else may serve it. \
+                 List what is available with `abacus providers`."
+            ));
+        }
+        let change =
+            self.active_profile_mut().map(|profile| match argument.to_ascii_lowercase().as_str() {
+                "clear" | "none" | "off" => {
+                    profile.providers.clear();
+                    "providers unpinned".to_owned()
                 }
-                if self.running.is_none() {
-                    // With nothing running there is nothing to avoid derailing,
-                    // and a note the model only sees "later" would just be lost.
-                    self.push_entry(Entry::new(
-                        EntryKind::System,
-                        "/btw is for while a turn is running — ask it directly instead.".to_owned(),
-                    ));
-                    self.follow = true;
-                    return true;
+                "strict" => {
+                    profile.allow_fallbacks = false;
+                    "strict: only pinned providers may serve this model".to_owned()
                 }
-                self.push_entry(Entry::new(
-                    EntryKind::System,
-                    format!("Noted, by the way: {note}"),
-                ));
-                self.injections.push(crate::agent::Injection::SideNote(note));
-                self.status = "noted · delivered after the current step".to_owned();
-                self.follow = true;
-                true
-            }
-            "/effort" => {
-                let argument = argument.trim();
-                if argument.is_empty() {
-                    let current = self
-                        .config
-                        .reasoning_effort
-                        .map(|effort| effort.label().to_owned())
-                        .unwrap_or_else(|| "auto (provider default)".to_owned());
-                    self.push_entry(Entry::new(
-                        EntryKind::System,
-                        format!(
-                            "Reasoning effort: {current}. Set it with /effort \
-                             minimal|low|medium|high|xhigh|max, or /effort auto to leave it to the \
-                             provider."
-                        ),
-                    ));
-                    self.follow = true;
-                    return true;
+                "fallback" | "fallbacks" => {
+                    profile.allow_fallbacks = true;
+                    "fallbacks allowed".to_owned()
                 }
-                let cleared =
-                    matches!(argument.to_ascii_lowercase().as_str(), "auto" | "default" | "unset");
-                let parsed = crate::config::ReasoningEffort::parse(argument);
-                if !cleared && parsed.is_none() {
-                    self.push_entry(Entry::new(
-                        EntryKind::Error,
-                        "Usage: /effort minimal|low|medium|high|xhigh|max|auto".to_owned(),
-                    ));
-                    self.follow = true;
-                    return true;
+                _ => {
+                    profile.providers = crate::config::Routing::parse_order(argument);
+                    format!("pinned to {}", profile.providers.join(", "))
                 }
-                if let Ok(profile) = self.active_profile_mut() {
-                    profile.reasoning_effort = parsed;
-                }
-                match self.save_and_apply_settings() {
-                    Ok(()) => {
-                        let described = parsed
-                            .map(|effort| effort.label().to_owned())
-                            .unwrap_or_else(|| "auto".to_owned());
-                        self.status = format!("effort {described}");
-                        self.push_entry(Entry::new(
-                            EntryKind::System,
-                            match parsed {
-                                Some(_) => format!(
-                                    "Reasoning effort set to {described}. Sent with every request \
-                                     on this profile; models without reasoning ignore it."
-                                ),
-                                None => "Reasoning effort cleared — the provider's own default \
-                                         applies."
-                                    .to_owned(),
-                            },
-                        ));
-                    }
-                    Err(error) => self.status = format!("configuration error: {error:#}"),
-                }
-                self.follow = true;
-                true
+            });
+        match change {
+            Ok(summary) => {
+                let result = self.save_and_apply_settings();
+                self.report(result, summary, "routing error");
             }
-            "/profile" => {
-                self.profile_command(argument);
-                true
-            }
-            "/models" => {
-                self.open_model_hub();
-                true
-            }
-            "/model" => {
-                if argument.trim().is_empty() {
-                    self.push_entry(Entry::new(EntryKind::System, format!(
-                            "Model: {}\nEndpoint: {}\n\nSwitch with /model <id>; discover IDs with `abacus models`.",
-                            self.config.model, self.config.base_url
-                        )
-                    ));
-                } else {
-                    let model = argument.trim().to_owned();
-                    let result = self.active_profile_mut().map(|profile| {
-                        profile.model = model.clone();
-                    });
-                    match result.and_then(|()| self.save_and_apply_settings()) {
-                        Ok(()) => self.status = format!("model: {} · saved", self.config.model),
-                        Err(error) => self.status = format!("model switch failed: {error:#}"),
-                    }
-                }
-                self.follow = true;
-                true
-            }
-            // OpenRouter fronts many suppliers for one model and they differ in
-            // context length and quantization, so which one serves a request is
-            // a decision worth making rather than accepting by default.
-            "/providers" => {
-                let argument = argument.trim();
-                if argument.is_empty() {
-                    let profile = self.settings.profiles.get(&self.settings.default_profile);
-                    let pinned =
-                        profile.map(|profile| profile.providers.clone()).unwrap_or_default();
-                    let body = if pinned.is_empty() {
-                        "No providers pinned — the endpoint chooses.".to_owned()
-                    } else {
-                        format!(
-                            "Pinned, in order: {}\nFallbacks: {}",
-                            pinned.join(", "),
-                            on_off(profile.is_none_or(|profile| profile.allow_fallbacks))
-                                .to_ascii_lowercase()
-                        )
-                    };
-                    self.push_entry(Entry::new(
-                        EntryKind::System,
-                        format!(
-                            "{body}\n\nSet with /providers <name, name>; \
-                             /providers clear removes the pin; \
-                             /providers strict|fallback controls whether anything else may serve it. \
-                             List what is available with `abacus providers`."
-                        ),
-                    ));
-                    self.follow = true;
-                    return true;
-                }
-                let lowered = argument.to_ascii_lowercase();
-                let outcome = match lowered.as_str() {
-                    "clear" | "none" | "off" => self.active_profile_mut().map(|profile| {
-                        profile.providers.clear();
-                        "providers unpinned".to_owned()
-                    }),
-                    "strict" => self.active_profile_mut().map(|profile| {
-                        profile.allow_fallbacks = false;
-                        "strict: only pinned providers may serve this model".to_owned()
-                    }),
-                    "fallback" | "fallbacks" => self.active_profile_mut().map(|profile| {
-                        profile.allow_fallbacks = true;
-                        "fallbacks allowed".to_owned()
-                    }),
-                    _ => {
-                        let order = crate::config::Routing::parse_order(argument);
-                        self.active_profile_mut().map(|profile| {
-                            let summary = order.join(", ");
-                            profile.providers = order;
-                            format!("pinned to {summary}")
-                        })
-                    }
-                };
-                match outcome.and_then(|summary| {
-                    self.save_and_apply_settings()?;
-                    Ok(summary)
-                }) {
-                    Ok(summary) => self.status = summary,
-                    Err(error) => self.status = format!("routing error: {error:#}"),
-                }
-                self.follow = true;
-                true
-            }
-            "/sessions" => {
-                self.list_sessions();
-                true
-            }
-            "/usage" => {
-                self.open_usage();
-                true
-            }
-            "/resume" => {
-                self.resume_session(argument);
-                true
-            }
-            "/rename" => {
-                self.rename_session(argument);
-                true
-            }
+            Err(error) => self.status = format!("routing error: {error:#}"),
+        }
+    }
+
+    /// `/tools`, `/skills`, `/plugins`, `/mcps`: what the agent can reach.
+    fn list_extensions(&mut self, command: &str) {
+        let services = self.services.clone();
+        let (title, empty, rows): (_, _, Vec<String>) = match command {
             "/tools" => {
-                let mut names = self
-                    .services
+                let mut names: Vec<String> = services
                     .tool_specs()
-                    .into_iter()
+                    .iter()
                     .filter_map(|spec| spec["function"]["name"].as_str().map(str::to_owned))
-                    .collect::<Vec<_>>();
-                names.extend([
-                    "goal_status".to_owned(),
-                    "goal_update".to_owned(),
-                    "spawn_subagents".to_owned(),
-                ]);
-                self.push_entry(Entry::new(
-                    EntryKind::System,
-                    format!("Tools: {}", names.join(", ")),
-                ));
-                self.follow = true;
-                true
+                    .collect();
+                names.extend(["goal_status", "goal_update", "spawn_subagents"].map(str::to_owned));
+                return self.say(format!("Tools: {}", names.join(", ")));
             }
-            "/skills" => {
-                let text = self
-                    .services
+            "/skills" => (
+                "Skills",
+                "No skills discovered.",
+                services
                     .skills
                     .read()
                     .expect("skill registry lock")
                     .list()
                     .map(|skill| format!("/{}  {}", skill.name, skill.description))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                self.push_entry(Entry::new(
-                    EntryKind::System,
-                    if text.is_empty() {
-                        "No skills discovered.".to_owned()
-                    } else {
-                        format!("Skills\n{text}")
-                    },
-                ));
-                self.follow = true;
-                true
-            }
-            "/plugins" => {
-                let text = self
-                    .services
+                    .collect(),
+            ),
+            "/plugins" => (
+                "Plugins",
+                "No plugins enabled.",
+                services
                     .plugins
                     .list()
                     .map(|plugin| {
                         format!("{} {}  {}", plugin.name, plugin.version, plugin.description)
                     })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                self.push_entry(Entry::new(
-                    EntryKind::System,
-                    if text.is_empty() {
-                        "No plugins enabled.".to_owned()
-                    } else {
-                        format!("Plugins\n{text}")
-                    },
-                ));
-                self.follow = true;
-                true
-            }
-            "/mcps" => {
-                let text = self
-                    .services
+                    .collect(),
+            ),
+            _ => (
+                "MCP tools",
+                "No MCP tools connected.",
+                services
                     .mcp
                     .tools()
                     .map(|tool| format!("{}  {}", tool.exposed_name, tool.description))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                self.push_entry(Entry::new(
-                    EntryKind::System,
-                    if text.is_empty() {
-                        "No MCP tools connected.".to_owned()
-                    } else {
-                        format!("MCP tools\n{text}")
-                    },
-                ));
-                self.follow = true;
-                true
-            }
-            "/plan" => {
-                self.agent_mode = if self.agent_mode == AgentMode::Plan {
-                    AgentMode::Auto
-                } else {
-                    AgentMode::Plan
-                };
-                self.status = format!("{} mode", self.agent_mode.label().to_ascii_lowercase());
-                true
-            }
-            // Worth a command of its own rather than only a /config row: whether
-            // you want to watch a model reason changes from task to task, and
-            // reaching for it should not mean opening a panel.
-            "/thinking" => {
-                let requested = match argument.trim().to_ascii_lowercase().as_str() {
-                    "" => Some(!self.settings.ui.show_thinking),
-                    "on" | "show" | "yes" => Some(true),
-                    "off" | "hide" | "no" => Some(false),
-                    _ => None,
-                };
-                let Some(show) = requested else {
-                    self.push_entry(Entry::new(
-                        EntryKind::Error,
-                        "Usage: /thinking [on|off]".to_owned(),
-                    ));
-                    self.follow = true;
-                    return true;
-                };
-                self.settings.ui.show_thinking = show;
-                match self.save_and_apply_settings() {
-                    Ok(()) => {
-                        self.status = if show {
-                            "thinking shown".to_owned()
-                        } else {
-                            "thinking hidden".to_owned()
-                        };
-                        // Say where it went, so hiding it does not look like
-                        // the reasoning stopped being captured.
-                        self.push_entry(Entry::new(
-                            EntryKind::System,
-                            if show {
-                                "Reasoning will be shown above each reply.".to_owned()
-                            } else {
-                                "Reasoning hidden. It is still recorded in training traces."
-                                    .to_owned()
-                            },
-                        ));
-                    }
-                    Err(error) => {
-                        self.settings.ui.show_thinking = !show;
-                        self.status = format!("configuration error: {error:#}");
-                    }
-                }
-                self.follow = true;
-                true
-            }
-            "/mode" => {
-                let requested = match argument.trim().to_ascii_lowercase().as_str() {
-                    "" => None,
-                    "auto" => Some(AgentMode::Auto),
-                    "plan" => Some(AgentMode::Plan),
-                    "build" => Some(AgentMode::Build),
-                    _ => {
-                        self.push_entry(Entry::new(
-                            EntryKind::Error,
-                            "Usage: /mode auto|plan|build".to_owned(),
-                        ));
-                        self.follow = true;
-                        return true;
-                    }
-                };
-                if let Some(mode) = requested {
-                    self.agent_mode = mode;
-                    self.status = format!("{} mode", mode.label().to_ascii_lowercase());
-                } else {
-                    self.push_entry(Entry::new(EntryKind::System, format!(
-                            "Mode: {}\nAUTO lets the model choose PLAN or BUILD per turn; pinned modes enforce your choice.",
-                            self.agent_mode.label()
-                        )
-                    ));
-                    self.follow = true;
-                }
-                true
-            }
-            "/goal" => {
-                self.goal_command(argument);
-                true
-            }
-            "/loop" => {
-                self.loop_command(argument);
-                true
-            }
-            "/swarm" => {
-                self.swarm_command(argument);
-                true
-            }
-            "/cancel-loop" | "/cancel-ralph" => {
-                self.cancel_ralph_loop();
-                true
-            }
-            "/config" => {
-                self.open_config(argument);
-                true
-            }
-            "/theme" => {
-                self.theme_command(argument);
-                true
-            }
-            "/feedback" => {
-                self.open_feedback();
-                true
-            }
-            "/remote" => {
-                self.toggle_remote();
-                true
-            }
-            "/compact" => {
-                // Manual quick-compaction: a synchronous drop-only shrink for when
-                // the user wants to cut context immediately. The rolling LLM
-                // summary compaction (compaction::compact) runs automatically each
-                // turn and maintains `self.compaction`; this command does not touch
-                // that state, so any prior rolling summary is preserved.
-                let before = self.messages.len();
-                // Sized from the model's own window, not a fixed number. A
-                // hardcoded 160k chars cut a 1M-context session down to a few
-                // percent of what it could hold, and under-compacted a small one.
-                let budget = self.config.model_limits.compaction_budget();
-                self.messages = compact_messages(&self.messages, budget.recent_budget_chars);
-                self.persist_session();
-                self.push_entry(Entry::new(
-                    EntryKind::System,
-                    format!(
-                        "Quick-compacted conversation from {before} to {} messages, \
-                         targeting {} chars for this model. Dropped messages are not summarised; \
-                         rolling-summary compaction runs automatically as the context grows.",
-                        self.messages.len(),
-                        budget.recent_budget_chars
-                    ),
-                ));
-                self.follow = true;
-                true
-            }
-            "/repair" => {
-                // An interrupted or failed turn can leave the saved history in
-                // a state strict providers reject wholesale (a tool call whose
-                // streamed arguments were cut short, a call with no result).
-                // The failure mode is every turn erroring from then on, so the
-                // fix has to be reachable from inside the stuck session.
-                if self.running.is_some() {
-                    self.status = "cannot repair while a turn is running".to_owned();
-                    return true;
-                }
-                let fixes = crate::session::repair_messages(&mut self.messages);
-                if fixes.is_empty() {
-                    self.push_entry(Entry::new(
-                        EntryKind::System,
-                        "No corruption found: every tool call parses and has a result.".to_owned(),
-                    ));
-                } else {
-                    self.ctx_chars = message_chars(&self.messages);
-                    self.persist_session();
-                    self.push_entry(Entry::new(
-                        EntryKind::System,
-                        format!("Repaired the session history: {}.", fixes.join("; ")),
-                    ));
-                }
-                self.follow = true;
-                true
-            }
-            "/papercuts" => {
-                let argument = argument.trim();
-                let snapshot = self.papercuts.snapshot();
-                if let Some(target) = argument.strip_prefix("delete") {
-                    let target = target.trim();
-                    let removed = target
-                        .parse::<usize>()
-                        .ok()
-                        .and_then(|number| snapshot.get(number.saturating_sub(1)))
-                        .map(|papercut| (papercut.title.clone(), papercut.id));
-                    match removed {
-                        Some((title, id)) if self.papercuts.remove(id) => {
-                            self.push_entry(Entry::new(
-                                EntryKind::System,
-                                format!("Papercut \"{title}\" deleted."),
-                            ));
-                        }
-                        _ => {
-                            self.push_entry(Entry::new(
-                                EntryKind::Error,
-                                "Usage: /papercuts delete <number> — numbers from /papercuts"
-                                    .to_owned(),
-                            ));
-                        }
-                    }
-                } else if snapshot.is_empty() {
-                    self.push_entry(Entry::new(
-                        EntryKind::System,
-                        "No papercuts yet. When Abacus works through a snag it records the \
-                         lesson here and recalls it the next time a tripwire matches."
-                            .to_owned(),
-                    ));
-                } else {
-                    let now = chrono::Utc::now();
-                    let mut lines =
-                        vec![format!("{} papercut(s) for this workspace:", snapshot.len())];
-                    for (index, papercut) in snapshot.iter().enumerate() {
-                        lines.push(format!(
-                            "{}. {} — tripped {}x, recalled {}x, strength {:.1}\n   fix: {}\n   tripwires: {}",
-                            index + 1,
-                            papercut.title,
-                            papercut.trip_count,
-                            papercut.recall_count,
-                            papercut.decayed_strength(now),
-                            papercut.fix,
-                            papercut.tripwires.join(" · "),
-                        ));
-                    }
-                    lines.push("Delete one with /papercuts delete <number>.".to_owned());
-                    self.push_entry(Entry::new(EntryKind::System, lines.join("\n")));
-                }
-                self.follow = true;
-                true
-            }
-            "/memories" => {
-                let argument = argument.trim();
-                // One ordering for display and delete alike, or the numbers
-                // the user sees would target different entries.
-                let snapshot = self.harness.snapshot_of(crate::harness::EntryKind::Memory);
-                if let Some(target) = argument.strip_prefix("delete") {
-                    let target = target.trim();
-                    let removed = target
-                        .parse::<usize>()
-                        .ok()
-                        .and_then(|number| snapshot.get(number.saturating_sub(1)))
-                        .map(|memory| (memory.title.clone(), memory.id.clone()));
-                    match removed {
-                        Some((title, id))
-                            if self.harness.remove(crate::harness::EntryKind::Memory, &id) =>
-                        {
-                            self.push_entry(Entry::new(
-                                EntryKind::System,
-                                format!("Memory \"{title}\" deleted."),
-                            ));
-                        }
-                        _ => {
-                            self.push_entry(Entry::new(
-                                EntryKind::Error,
-                                "Usage: /memories delete <number> — numbers from /memories"
-                                    .to_owned(),
-                            ));
-                        }
-                    }
-                } else if snapshot.is_empty() {
-                    self.push_entry(Entry::new(
-                        EntryKind::System,
-                        "No memories yet. Abacus records durable knowledge here — on its \
-                         own after long turns (refine), or whenever the model calls \
-                         memory_record — and injects it into future sessions."
-                            .to_owned(),
-                    ));
-                } else {
-                    let mut lines = vec![format!(
-                        "{} memori(es) for this workspace, newest first:",
-                        snapshot.len()
-                    )];
-                    for (index, memory) in snapshot.iter().enumerate() {
-                        // The lifetime is the part a user needs to see: a
-                        // session memory disappears when the session ends.
-                        lines.push(format!(
-                            "{}. [{}] {} — {}",
-                            index + 1,
-                            memory.lifetime_label(),
-                            memory.title,
-                            crate::ui::truncate(&memory.content, 120),
-                        ));
-                    }
-                    lines.push("Delete one with /memories delete <number>.".to_owned());
-                    self.push_entry(Entry::new(EntryKind::System, lines.join("\n")));
-                }
-                self.follow = true;
-                true
-            }
-            "/refine" => {
-                self.start_refine(argument);
-                self.follow = true;
-                true
-            }
-            "/harness" => {
-                let entry = self.harness_command(argument.trim());
-                self.push_entry(entry);
-                self.follow = true;
-                true
-            }
-            value if value.starts_with('/') => {
-                self.push_entry(Entry::new(EntryKind::Error, format!("Unknown command: {value}")));
-                self.follow = true;
-                true
-            }
-            _ => false,
+                    .collect(),
+            ),
+        };
+        if rows.is_empty() {
+            self.say(empty);
+        } else {
+            self.say(format!("{title}\n{}", rows.join("\n")));
         }
+    }
+
+    /// Worth a command of its own rather than only a /config row: whether you
+    /// want to watch a model reason changes from task to task.
+    fn thinking_command(&mut self, argument: &str) {
+        let show = match argument.to_ascii_lowercase().as_str() {
+            "" => !self.settings.ui.show_thinking,
+            "on" | "show" | "yes" => true,
+            "off" | "hide" | "no" => false,
+            _ => return self.fail("Usage: /thinking [on|off]"),
+        };
+        if self.set_show_thinking(show) {
+            // Say where it went, so hiding it does not look like the reasoning
+            // stopped being captured.
+            self.say(if show {
+                "Reasoning will be shown above each reply."
+            } else {
+                "Reasoning hidden. It is still recorded in training traces."
+            });
+        }
+    }
+
+    fn mode_command(&mut self, argument: &str) {
+        match argument.to_ascii_lowercase().as_str() {
+            "" => self.say(format!(
+                "Mode: {}\nAUTO lets the model choose PLAN or BUILD per turn; pinned modes enforce your choice.",
+                self.agent_mode.label()
+            )),
+            "auto" => self.set_agent_mode(AgentMode::Auto),
+            "plan" => self.set_agent_mode(AgentMode::Plan),
+            "build" => self.set_agent_mode(AgentMode::Build),
+            _ => self.fail("Usage: /mode auto|plan|build"),
+        }
+    }
+
+    /// Manual quick-compaction: a synchronous drop-only shrink for when the
+    /// user wants to cut context immediately. The rolling summary runs on its
+    /// own each turn and is left untouched. Sized from the model's window —
+    /// a fixed number over-cuts a large context and under-cuts a small one.
+    fn compact_command(&mut self) {
+        let before = self.messages.len();
+        let target = self.config.model_limits.compaction_budget().recent_budget_chars;
+        self.messages = compact_messages(&self.messages, target);
+        self.persist_session();
+        self.say(format!(
+            "Quick-compacted conversation from {before} to {} messages, targeting {target} chars \
+             for this model. Dropped messages are not summarised; rolling-summary compaction \
+             runs automatically as the context grows.",
+            self.messages.len(),
+        ));
+    }
+
+    /// An interrupted or failed turn can leave history that strict providers
+    /// reject wholesale, after which every turn errors — so the fix has to be
+    /// reachable from inside the stuck session.
+    fn repair_command(&mut self) {
+        if self.running.is_some() {
+            self.status = "cannot repair while a turn is running".to_owned();
+            return;
+        }
+        let fixes = crate::session::repair_messages(&mut self.messages);
+        if fixes.is_empty() {
+            return self.say("No corruption found: every tool call parses and has a result.");
+        }
+        self.ctx_chars = message_chars(&self.messages);
+        self.persist_session();
+        self.say(format!("Repaired the session history: {}.", fixes.join("; ")));
+    }
+
+    fn papercuts_command(&mut self, argument: &str) {
+        let snapshot = self.papercuts.snapshot();
+        if let Some(number) = argument.strip_prefix("delete") {
+            return match numbered(&snapshot, number).filter(|cut| self.papercuts.remove(cut.id)) {
+                Some(cut) => self.say(format!("Papercut \"{}\" deleted.", cut.title)),
+                None => self.fail("Usage: /papercuts delete <number> — numbers from /papercuts"),
+            };
+        }
+        if snapshot.is_empty() {
+            return self.say(
+                "No papercuts yet. When Abacus works through a snag it records the lesson \
+                 here and recalls it the next time a tripwire matches.",
+            );
+        }
+        let now = chrono::Utc::now();
+        let mut lines = vec![format!("{} papercut(s) for this workspace:", snapshot.len())];
+        lines.extend(snapshot.iter().enumerate().map(|(index, cut)| {
+            format!(
+                "{}. {} — tripped {}x, recalled {}x, strength {:.1}\n   fix: {}\n   tripwires: {}",
+                index + 1,
+                cut.title,
+                cut.trip_count,
+                cut.recall_count,
+                cut.decayed_strength(now),
+                cut.fix,
+                cut.tripwires.join(" · "),
+            )
+        }));
+        lines.push("Delete one with /papercuts delete <number>.".to_owned());
+        self.say(lines.join("\n"));
+    }
+
+    fn memories_command(&mut self, argument: &str) {
+        use crate::harness::EntryKind::Memory;
+        // One ordering for display and delete alike, or the numbers the user
+        // sees would target different entries.
+        let snapshot = self.harness.snapshot_of(Memory);
+        if let Some(number) = argument.strip_prefix("delete") {
+            let removed = numbered(&snapshot, number)
+                .filter(|memory| self.harness.remove(Memory, &memory.id));
+            return match removed {
+                Some(memory) => self.say(format!("Memory \"{}\" deleted.", memory.title)),
+                None => self.fail("Usage: /memories delete <number> — numbers from /memories"),
+            };
+        }
+        if snapshot.is_empty() {
+            return self.say(
+                "No memories yet. Abacus records durable knowledge here — on its own after \
+                 long turns (refine), or whenever the model calls memory_record — and injects \
+                 it into future sessions.",
+            );
+        }
+        let mut lines =
+            vec![format!("{} memori(es) for this workspace, newest first:", snapshot.len())];
+        // The lifetime is the part a user needs to see: a session memory
+        // disappears when the session ends.
+        lines.extend(snapshot.iter().enumerate().map(|(index, memory)| {
+            format!(
+                "{}. [{}] {} — {}",
+                index + 1,
+                memory.lifetime_label(),
+                memory.title,
+                ui::truncate(&memory.content, 120),
+            )
+        }));
+        lines.push("Delete one with /memories delete <number>.".to_owned());
+        self.say(lines.join("\n"));
     }
 
     /// `/harness`, `/harness log`, `/harness revert <id>`.
     ///
     /// The point of the harness is that its changes are inspectable and
     /// undoable, which only helps if there is a way to look and to undo.
-    fn harness_command(&mut self, argument: &str) -> Entry {
-        use crate::harness::EntryKind as Kind;
-
-        if let Some(id) = argument.strip_prefix("revert") {
-            let id = id.trim();
+    fn harness_command(&mut self, argument: &str) {
+        let applied = |changes: Vec<String>, none: &str| {
+            if changes.is_empty() { none.to_owned() } else { changes.join(", ") }
+        };
+        if let Some(id) = argument.strip_prefix("revert").map(str::trim) {
             if id.is_empty() {
-                return Entry::new(
-                    EntryKind::Error,
-                    "Usage: /harness revert <refinement-id> — ids come from /harness log"
-                        .to_owned(),
-                );
+                return self
+                    .fail("Usage: /harness revert <refinement-id> — ids come from /harness log");
             }
             return match self.harness.rollback(id) {
-                Ok(result) => {
-                    let changes = result.changes();
-                    Entry::new(
-                        EntryKind::System,
-                        format!(
-                            "Reverted {id} ({} edit(s) undone): {}\nThis rollback is itself \
-                             {} — revert it to redo.",
-                            result.applied_count(),
-                            if changes.is_empty() {
-                                "nothing applied".to_owned()
-                            } else {
-                                changes.join(", ")
-                            },
-                            result.id
-                        ),
-                    )
-                }
-                Err(error) => Entry::new(EntryKind::Error, format!("{error:#}")),
+                Ok(result) => self.say(format!(
+                    "Reverted {id} ({} edit(s) undone): {}\nThis rollback is itself {} — \
+                     revert it to redo.",
+                    result.applied_count(),
+                    applied(result.changes(), "nothing applied"),
+                    result.id
+                )),
+                Err(error) => self.fail(format!("{error:#}")),
             };
         }
-
         if argument == "log" {
             let history = self.harness.history();
             if history.is_empty() {
-                return Entry::new(
-                    EntryKind::System,
-                    "No refinements recorded yet. Abacus refines after a long turn, or \
-                     when you run /refine."
-                        .to_owned(),
+                return self.say(
+                    "No refinements recorded yet. Abacus refines after a long turn, or when \
+                     you run /refine.",
                 );
             }
             let mut lines = vec![format!("{} refinement(s), newest first:", history.len())];
-            for result in history.iter().rev().take(15) {
-                let changes = result.changes();
-                lines.push(format!(
-                    "- {} — {} [{}]",
-                    result.id,
-                    result.summary,
-                    if changes.is_empty() {
-                        "no applied edits".to_owned()
-                    } else {
-                        changes.join(", ")
-                    }
-                ));
-            }
+            lines.extend(history.iter().rev().take(15).map(|result| {
+                let changes = applied(result.changes(), "no applied edits");
+                format!("- {} — {} [{changes}]", result.id, result.summary)
+            }));
             lines.push("Undo one with /harness revert <id>.".to_owned());
-            return Entry::new(EntryKind::System, lines.join("\n"));
+            return self.say(lines.join("\n"));
         }
-
         if !argument.is_empty() {
-            return Entry::new(
-                EntryKind::Error,
-                "Usage: /harness | /harness log | /harness revert <id>".to_owned(),
-            );
+            return self.fail("Usage: /harness | /harness log | /harness revert <id>");
         }
-
         let mut lines: Vec<String> = Vec::new();
-        for kind in Kind::ALL {
+        for kind in crate::harness::EntryKind::ALL {
             let entries = self.harness.snapshot_of(kind);
             if entries.is_empty() {
                 continue;
             }
             lines.push(format!("{} ({}):", kind.label(), entries.len()));
-            for entry in entries {
-                lines.push(format!(
+            lines.extend(entries.iter().map(|entry| {
+                format!(
                     "  [{}] {} — {} (v{}, {})",
                     entry.id,
                     entry.title,
-                    crate::ui::truncate(&entry.content, 100),
+                    ui::truncate(&entry.content, 100),
                     entry.version,
                     entry.lifetime_label(),
-                ));
-            }
+                )
+            }));
         }
         if lines.is_empty() {
-            return Entry::new(
-                EntryKind::System,
+            return self.say(
                 "The harness is empty. Abacus fills it as it works — new entries start \
-                 session-scoped and become durable once they recur across sessions."
-                    .to_owned(),
+                 session-scoped and become durable once they recur across sessions.",
             );
         }
         lines.push("/harness log for history, /harness revert <id> to undo.".to_owned());
-        Entry::new(EntryKind::System, lines.join("\n"))
+        self.say(lines.join("\n"));
     }
-
     fn persist_session(&mut self) {
         // A turn may have switched branches or committed; re-read cheaply here
         // rather than on the draw path.
@@ -2576,12 +2287,11 @@ impl App {
     }
 
     fn toggle_agent_mode(&mut self) {
-        self.agent_mode = match self.agent_mode {
+        self.set_agent_mode(match self.agent_mode {
             AgentMode::Auto => AgentMode::Plan,
             AgentMode::Plan => AgentMode::Build,
             AgentMode::Build => AgentMode::Auto,
-        };
-        self.status = format!("{} mode", self.agent_mode.label().to_ascii_lowercase());
+        });
     }
 
     fn goal_command(&mut self, argument: &str) {
@@ -2655,13 +2365,10 @@ impl App {
             }
         };
         match result {
-            Ok(text) => self.push_entry(Entry::new(EntryKind::System, text)),
-            Err(error) => {
-                self.push_entry(Entry::new(EntryKind::Error, format!("Goal error: {error:#}")))
-            }
+            Ok(text) => self.say(text),
+            Err(error) => self.fail(format!("Goal error: {error:#}")),
         }
         self.persist_session();
-        self.follow = true;
         if let Some((display, prompt)) = start_prompt {
             self.start_turn(display, prompt, true);
         }
@@ -2675,13 +2382,11 @@ impl App {
     fn swarm_command(&mut self, argument: &str) {
         let objective = argument.trim();
         if objective.is_empty() {
-            self.push_entry(Entry::new(
-                EntryKind::System,
+            self.say(
                 "Usage: /swarm <objective>. Abacus splits the objective into independent \
                        units and delegates them to parallel subagents (one approval, isolated git \
-                       worktrees). Best for separable work; a single repository is required."
-                    .to_owned(),
-            ));
+                       worktrees). Best for separable work; a single repository is required.",
+            );
             self.follow = true;
             return;
         }
@@ -2711,8 +2416,7 @@ impl App {
                     state.prompt
                 ),
             );
-            self.push_entry(Entry::new(EntryKind::System, text));
-            self.follow = true;
+            self.say(text);
             return;
         }
         if argument == "pause" {
@@ -2746,9 +2450,7 @@ impl App {
                 self.continue_ralph_loop();
             }
             Err(error) => {
-                self.push_entry(Entry::new(EntryKind::Error, format!("Could not start loop: {error:#}\n\nUsage: /loop \"<prompt>\" --max-iterations 20 --completion-promise \"DONE\"")
-                ));
-                self.follow = true;
+                self.fail(format!("Could not start loop: {error:#}\n\nUsage: /loop \"<prompt>\" --max-iterations 20 --completion-promise \"DONE\""));
             }
         }
     }
@@ -2772,10 +2474,7 @@ impl App {
             }
         };
         let prompt = state.prompt.clone();
-        self.push_entry(Entry::new(
-            EntryKind::System,
-            format!("Ralph loop · iteration {iteration}"),
-        ));
+        self.say(format!("Ralph loop · iteration {iteration}"));
         self.persist_session();
         self.start_turn(prompt.clone(), prompt, false);
     }
@@ -2793,8 +2492,7 @@ impl App {
         }
         self.persist_session();
         self.status = "Ralph loop cancelled".to_owned();
-        self.push_entry(Entry::new(EntryKind::System, "Ralph loop cancelled by user.".to_owned()));
-        self.follow = true;
+        self.say("Ralph loop cancelled by user.");
     }
 
     fn new_session(&mut self) {
@@ -2809,7 +2507,7 @@ impl App {
         self.tokens.store_total(0);
         self.session_initial_active_secs = 0;
         self.started = Instant::now();
-        self.push_entry(Entry::new(EntryKind::System, "New session.".to_owned()));
+        self.say("New session.");
         self.scroll = 0;
         self.follow = true;
         self.ctx_chars = message_chars(&self.messages);
@@ -2871,12 +2569,10 @@ impl App {
         self.tokens.store_total(0);
         self.session_initial_active_secs = 0;
         self.started = Instant::now();
-        self.push_entry(Entry::new(
-            EntryKind::System,
+        self.say(
             "Session forked — the conversation continues in a new session; the \
-             original is still saved."
-                .to_owned(),
-        ));
+             original is still saved.",
+        );
         self.follow = true;
         self.status = "session forked — the original is untouched".to_owned();
     }
@@ -2916,10 +2612,9 @@ impl App {
             return;
         };
         match store.list() {
-            Ok(sessions) if sessions.is_empty() => self.push_entry(Entry::new(
-                EntryKind::System,
-                "No saved sessions for this workspace.".to_owned(),
-            )),
+            Ok(sessions) if sessions.is_empty() => {
+                self.say("No saved sessions for this workspace.")
+            }
             Ok(sessions) => {
                 self.picker = Some(Picker {
                     title: "sessions".to_owned(),
@@ -2943,10 +2638,7 @@ impl App {
                     selected: 0,
                 });
             }
-            Err(error) => self.push_entry(Entry::new(
-                EntryKind::Error,
-                format!("Could not list sessions: {error}"),
-            )),
+            Err(error) => self.fail(format!("Could not list sessions: {error}")),
         }
         self.follow = true;
     }
@@ -2965,10 +2657,7 @@ impl App {
             Ok(session) => {
                 self.messages = session.messages.clone();
                 self.set_entries(entries_from_messages(&self.messages));
-                self.push_entry(Entry::new(
-                    EntryKind::System,
-                    format!("Resumed {} ({})", session.title, &session.id.to_string()[..8]),
-                ));
+                self.say(format!("Resumed {} ({})", session.title, &session.id.to_string()[..8]));
                 self.goal = GoalState::new(session.goal.clone());
                 self.tasks = TaskList::new(session.tasks.clone());
                 self.compaction = session.compaction.clone().unwrap_or_default();
@@ -2982,11 +2671,7 @@ impl App {
                 self.ctx_chars = message_chars(&self.messages);
             }
             Err(error) => {
-                self.push_entry(Entry::new(
-                    EntryKind::Error,
-                    format!("Could not resume session: {error}"),
-                ));
-                self.follow = true;
+                self.fail(format!("Could not resume session: {error}"));
             }
         }
     }
@@ -3202,8 +2887,7 @@ impl App {
             } else {
                 body.push_str(&format!("\nAvailable: {}", custom.join(", ")));
             }
-            self.push_entry(Entry::new(EntryKind::System, body));
-            self.follow = true;
+            self.say(body);
             return;
         }
         if let Some(name) = argument.strip_prefix("export") {
@@ -3216,8 +2900,7 @@ impl App {
         // later launch too.
         let (theme, error) = crate::theme::resolve(&choice, &self.config.paths.themes_dir);
         if let Some(error) = error {
-            self.push_entry(Entry::new(EntryKind::Error, error));
-            self.follow = true;
+            self.fail(error);
             return;
         }
         crate::theme::set_active(theme);
@@ -3234,11 +2917,7 @@ impl App {
     fn export_theme(&mut self, name: &str) {
         let name = if name.is_empty() { "custom" } else { name };
         if !name.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')) {
-            self.push_entry(Entry::new(
-                EntryKind::Error,
-                "Theme names may use letters, digits, `.`, `_`, and `-`.".to_owned(),
-            ));
-            self.follow = true;
+            self.fail("Theme names may use letters, digits, `.`, `_`, and `-`.");
             return;
         }
         let mode = self.settings.ui.theme.resolve();
@@ -3251,19 +2930,13 @@ impl App {
         });
         match written {
             Ok(()) => {
-                self.push_entry(Entry::new(
-                    EntryKind::System,
-                    format!(
-                        "Wrote {}.\nEdit the colours, then `/theme {name}` to use it.",
-                        path.display()
-                    ),
+                self.say(format!(
+                    "Wrote {}.\nEdit the colours, then `/theme {name}` to use it.",
+                    path.display()
                 ));
                 self.status = format!("theme exported: {name}");
             }
-            Err(error) => self.push_entry(Entry::new(
-                EntryKind::Error,
-                format!("could not write {}: {error}", path.display()),
-            )),
+            Err(error) => self.fail(format!("could not write {}: {error}", path.display())),
         }
         self.follow = true;
     }
@@ -3451,28 +3124,14 @@ impl App {
             profile.api_key_env.as_deref().and_then(|name| std::env::var(name).ok())
         };
         self.catalogs.insert(profile_id.to_owned(), Catalog::Loading);
-        let sender = self.catalog_tx.clone();
+        let sender = self.background_tx.clone();
         let profile = profile_id.to_owned();
         tokio::spawn(async move {
             let result = crate::setup::discover_model_cards(&base_url, api_key.as_deref())
                 .await
                 .map_err(|error| format!("{error:#}"));
-            let _ = sender.send(CatalogFetched { profile, result });
+            let _ = sender.send(Background::Catalog { profile, result });
         });
-    }
-
-    fn drain_catalog_events(&mut self) -> bool {
-        use crate::model_hub::Catalog;
-        let mut changed = false;
-        while let Ok(event) = self.catalog_rx.try_recv() {
-            changed = true;
-            let state = match event.result {
-                Ok(cards) => Catalog::Ready(cards),
-                Err(error) => Catalog::Failed(error),
-            };
-            self.catalogs.insert(event.profile, state);
-        }
-        changed
     }
 
     /// The catalog for whichever profile the hub is scoped to.
@@ -4169,8 +3828,7 @@ impl App {
                 "Switch with /profile <id>; /profile rename <id>; /profile delete <id>; /profile add."
                     .to_owned(),
             );
-            self.push_entry(Entry::new(EntryKind::System, lines.join("\n")));
-            self.follow = true;
+            self.say(lines.join("\n"));
             return;
         }
         let (verb, rest) = argument
@@ -4303,11 +3961,7 @@ impl App {
 
     fn open_feedback(&mut self) {
         if !self.settings.feedback.enabled {
-            self.push_entry(Entry::new(
-                EntryKind::Error,
-                "Feedback is disabled. Enable it in /config.".to_owned(),
-            ));
-            self.follow = true;
+            self.fail("Feedback is disabled. Enable it in /config.");
             return;
         }
         self.feedback_form = Some(FeedbackForm {
@@ -4344,214 +3998,69 @@ impl App {
             arch: std::env::consts::ARCH.to_owned(),
         };
         let endpoint = self.settings.feedback.endpoint.clone();
-        let sender = self.feedback_tx.clone();
+        let sender = self.background_tx.clone();
         tokio::spawn(async move {
             let result = match crate::feedback::FeedbackClient::new(&endpoint) {
                 Ok(client) => client.submit(&payload).await.map_err(|error| format!("{error:#}")),
                 Err(error) => Err(format!("{error:#}")),
             };
-            let _ = sender.send(FeedbackResult { result });
+            let _ = sender.send(Background::Feedback(result));
         });
     }
 
+    /// `/remote`: share this session through Abacus Sync, or stop sharing it.
     fn toggle_remote(&mut self) {
         self.persist_session();
         let Some(session) = self.session.clone() else {
             self.status = "send a message before enabling remote".to_owned();
             return;
         };
+        let client = crate::sync::configured_client(&self.config.paths);
         if let Some(task) = self.remote_task.take() {
             task.abort();
             self.remote_outbound = None;
-            if let Ok(client) = crate::sync::configured_client(&self.config.paths) {
-                let id = session.id.to_string();
+            if let Ok(client) = client {
                 tokio::spawn(async move {
-                    let _ = client.disable_remote(&id).await;
+                    let _ = client.disable_remote(&session.id.to_string()).await;
                 });
             }
             self.status = "remote disabled".to_owned();
             return;
         }
-        let Ok(client) = crate::sync::configured_client(&self.config.paths) else {
+        let Ok(client) = client else {
             self.status = "run `abacus sync login` before /remote".to_owned();
             return;
         };
-        let paths = self.config.paths.clone();
-        let result_tx = self.remote_tx.clone();
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<String>();
-        self.remote_outbound = Some(outbound_tx);
+        let (outbound, replies) = mpsc::unbounded_channel();
+        self.remote_outbound = Some(outbound);
         self.config.trace_enabled = true;
         self.persist_session();
         self.status = "enabling remote".to_owned();
-        // Snapshot of current transcript so browser sees history immediately,
-        // mapped to role-distinguishable entries (user/assistant/tool/system).
-        let snapshot_entries: Vec<Value> = {
-            use crate::ui::EntryKind;
-            self.entries
-                .iter()
-                .map(|entry| {
-                    let kind = match entry.kind {
-                        EntryKind::User => "user",
-                        EntryKind::Assistant => "assistant",
-                        EntryKind::Tool => "tool",
-                        EntryKind::Thinking => "thinking",
-                        EntryKind::System => "system",
-                        EntryKind::Error => "error",
-                        EntryKind::Rule => "system",
-                    };
-                    json!({"kind": kind, "text": entry.text, "tool": entry.tool})
-                })
-                .collect()
-        };
+        // The transcript so far, so the browser opens on the history rather
+        // than on a blank page.
+        let snapshot = self
+            .entries
+            .iter()
+            .map(|entry| {
+                let kind = match entry.kind {
+                    EntryKind::User => "user",
+                    EntryKind::Assistant => "assistant",
+                    EntryKind::Tool => "tool",
+                    EntryKind::Thinking => "thinking",
+                    EntryKind::System | EntryKind::Rule => "system",
+                    EntryKind::Error => "error",
+                };
+                json!({"kind": kind, "text": entry.text, "tool": entry.tool})
+            })
+            .collect();
+        let trace = self.config.paths.traces_dir.join(format!("{}.jsonl", session.id));
+        let events = self.background_tx.clone();
         self.remote_task = Some(tokio::spawn(async move {
-            let trace = std::fs::read(paths.traces_dir.join(format!("{}.jsonl", session.id)))
-                .unwrap_or_default();
-            if let Err(error) = client.push(&session, &trace, true).await {
-                let _ =
-                    result_tx.send(RemoteResult { result: Err(format!("sync failed: {error:#}")) });
-                return;
-            }
-            let result = async {
-                let socket_url = client.enable_remote(&session.id.to_string()).await?;
-                let (socket, _) = tokio_tungstenite::connect_async(&socket_url).await?;
-                let (mut sink, mut stream) = socket.split();
-                let mut seq: u64 = 1;
-                let snapshot = json!({"v":1,"type":"snapshot","id":uuid::Uuid::new_v4().to_string(),"seq":seq,"payload":{"entries": snapshot_entries}});
-                seq += 1;
-                sink.send(tokio_tungstenite::tungstenite::Message::Text(snapshot.to_string().into())).await?;
-                let _ = result_tx.send(RemoteResult { result: Ok("remote enabled — open the server /remote page".to_owned()) });
-                // Send deltas as they arrive from the running turn (via outbound channel)
-                // and forward browser prompts; track sequence for dedup.
-                loop {
-                    tokio::select! {
-                        Some(text) = outbound_rx.recv() => {
-                            // Detect role prefix from outbound if present, else assistant.
-                            let (kind, body) = if text.starts_with("user:") { ("user", text.trim_start_matches("user:").to_string()) }
-                            else if text.starts_with("tool:") { ("tool", text.trim_start_matches("tool:").to_string()) }
-                            else if text.starts_with("system:") { ("system", text.trim_start_matches("system:").to_string()) }
-                            else { ("assistant", text) };
-                            let frame = json!({"v":1,"type":"entry","id":uuid::Uuid::new_v4().to_string(),"seq":seq,"payload":{"kind":kind,"text":body}});
-                            seq += 1;
-                            sink.send(tokio_tungstenite::tungstenite::Message::Text(frame.to_string().into())).await?;
-                        }
-                        message = stream.next() => {
-                            let Some(message) = message else { break; };
-                            let message = message?;
-                            if let Ok(text) = message.to_text()
-                                && let Ok(frame) = serde_json::from_str::<Value>(text)
-                            {
-                                let frame_type = frame.get("type").and_then(Value::as_str).unwrap_or("");
-                                match frame_type {
-                                    "prompt" => {
-                                        if let Some(prompt) = frame.pointer("/payload/text").and_then(Value::as_str) {
-                                            let _ = result_tx.send(RemoteResult { result: Ok(format!("remote prompt: {prompt}")) });
-                                        }
-                                    }
-                                    "interrupt" => {
-                                        let _ = result_tx.send(RemoteResult { result: Ok("remote interrupt".to_string()) });
-                                    }
-                                    "ping" => {
-                                        let pong = json!({"v":1,"type":"pong","id":uuid::Uuid::new_v4().to_string(),"seq":seq,"payload":{}});
-                                        seq += 1;
-                                        sink.send(tokio_tungstenite::tungstenite::Message::Text(pong.to_string().into())).await?;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                }
-                anyhow::Ok(())
-            }.await;
-            if let Err(error) = result {
-                let _ = result_tx
-                    .send(RemoteResult { result: Err(format!("remote disconnected: {error:#}")) });
+            let served = serve_remote(client, session, trace, snapshot, replies, &events).await;
+            if let Err(error) = served {
+                let _ = events.send(Background::Remote(Remote::Closed(format!("{error:#}"))));
             }
         }));
-    }
-
-    fn drain_remote_events(&mut self) -> bool {
-        let mut changed = false;
-        let mut queued: Vec<String> = Vec::new();
-        while let Ok(event) = self.remote_rx.try_recv() {
-            changed = true;
-            match event.result {
-                Ok(message) if message.starts_with("remote prompt: ") => {
-                    let prompt = message.trim_start_matches("remote prompt: ").to_owned();
-                    // Guard against echo loops: ignore prompt that equals last assistant output
-                    let echo = self
-                        .entries
-                        .iter()
-                        .rev()
-                        .find(|e| e.kind == crate::ui::EntryKind::Assistant)
-                        .map(|e| e.text.trim().to_owned());
-                    if echo.as_deref() == Some(prompt.trim()) {
-                        continue;
-                    }
-                    if self.running.is_none() {
-                        self.start_turn(prompt.clone(), prompt, true);
-                    } else {
-                        queued.push(prompt);
-                        self.status = "remote prompt queued".to_owned();
-                    }
-                }
-                Ok(message) if message == "remote interrupt" => {
-                    if let Some(handle) = self.running.take() {
-                        handle.abort();
-                        self.status = "interrupted via remote".to_owned();
-                    }
-                }
-                Ok(message) => {
-                    if message.starts_with("remote interrupt")
-                        || message.starts_with("remote prompt")
-                    {
-                        // handled above
-                    } else {
-                        self.status = message;
-                    }
-                }
-                Err(error) => {
-                    self.status = error;
-                    self.remote_task = None;
-                    self.remote_outbound = None;
-                }
-            }
-        }
-        // Flush queued remote prompts after turn finished
-        if self.running.is_none() && !queued.is_empty() {
-            let prompt = queued.remove(0);
-            self.start_turn(prompt.clone(), prompt, true);
-        }
-        changed
-    }
-
-    fn drain_feedback_events(&mut self) -> bool {
-        let mut changed = false;
-        while let Ok(event) = self.feedback_rx.try_recv() {
-            changed = true;
-            match event.result {
-                Ok(receipt) => {
-                    self.feedback_form = None;
-                    let reference =
-                        receipt.id.map(|id| format!(" Reference: {id}.")).unwrap_or_default();
-                    self.push_entry(Entry::new(
-                        EntryKind::System,
-                        format!("Thank you — your feedback was sent.{reference}"),
-                    ));
-                    self.status = "feedback sent".to_owned();
-                    self.follow = true;
-                }
-                Err(error) => {
-                    if let Some(form) = &mut self.feedback_form {
-                        form.sending = false;
-                        form.error = Some(format!(
-                            "Could not send feedback: {error}\nThe endpoint is a placeholder until the Empero API is available."
-                        ));
-                    }
-                }
-            }
-        }
-        changed
     }
 
     fn start_services_reload(&mut self) {
@@ -4561,64 +4070,29 @@ impl App {
         self.reload_services = false;
         self.services_reloading = true;
         self.status = "reloading extensions".to_owned();
-        let workspace = self.config.workspace.clone();
-        let paths = self.config.paths.clone();
+        let (workspace, paths) = (self.config.workspace.clone(), self.config.paths.clone());
         let settings = self.settings.clone();
-        let sender = self.services_tx.clone();
+        let events = self.background_tx.clone();
         tokio::spawn(async move {
             let result = AgentServices::discover(&workspace, &paths, &settings)
                 .await
+                .map(Box::new)
                 .map_err(|error| format!("{error:#}"));
-            let _ = sender.send(ServicesResult { result });
+            let _ = events.send(Background::Services(result));
         });
     }
 
-    /// Tell the user about a reply an earlier run died in the middle of. It is
-    /// shown once — `take` removes the file — because the point is to hand the
-    /// text back, not to keep reminding them a crash happened.
+    /// Hand back a reply an earlier run died in the middle of. Shown once —
+    /// `take` removes the file, so the transcript and the session now hold
+    /// the only copy, which is where the user and the model will look.
     fn surface_recovered_reply(&mut self) {
-        let path = self.config.paths.recovery_file.clone();
-        let Some(content) = crate::recovery::take(&path) else {
+        let Some(content) = crate::recovery::take(&self.config.paths.recovery_file) else {
             return;
         };
-        // The text goes back into the transcript rather than being left as a
-        // path to go and find. `take` removed the file, so this is now the only
-        // copy — which is exactly why it belongs where the user is looking.
-        self.push_entry(Entry::new(
-            EntryKind::System,
-            "A previous run stopped mid-reply. This is how far the model got:".to_owned(),
-        ));
-        self.push_entry(Entry::new(EntryKind::Assistant, content.trim().to_owned()));
-        // The transcript alone dies with the terminal; the answer belongs in
-        // the session too, so it survives a restart and stays in model context.
+        self.say("A previous run stopped mid-reply. This is how far the model got:");
+        self.push_entry(Entry::new(EntryKind::Assistant, content.trim()));
         self.messages.push(json!({"role": "assistant", "content": content.trim()}));
         self.persist_session();
-        self.follow = true;
-    }
-
-    /// Surface a newer release once, as an ordinary transcript line. It is a
-    /// notice, not a prompt: nothing is downloaded and nothing is blocked.
-    fn drain_update_events(&mut self) -> bool {
-        let mut changed = false;
-        while let Ok(available) = self.update_rx.try_recv() {
-            changed = true;
-            self.push_entry(Entry::new(EntryKind::System, available.message()));
-        }
-        changed
-    }
-
-    fn drain_refine_events(&mut self) -> bool {
-        let mut changed = false;
-        while let Ok(event) = self.refine_rx.try_recv() {
-            changed = true;
-            self.refining = false;
-            self.push_entry(Entry::new(
-                if event.failed { EntryKind::Error } else { EntryKind::System },
-                event.message,
-            ));
-            self.follow = true;
-        }
-        changed
     }
 
     /// Run the refinement pass on demand. `--durable` writes straight to the
@@ -4626,37 +4100,28 @@ impl App {
     /// how a user adopts something deliberately.
     fn start_refine(&mut self, argument: &str) {
         if self.refining {
-            self.push_entry(Entry::new(
-                EntryKind::Error,
-                "A refinement is already running.".to_owned(),
-            ));
-            return;
+            return self.fail("A refinement is already running.");
         }
-        let argument = argument.trim();
-        let (durable, instructions) = match argument.strip_prefix("--durable") {
+        let (durable, instructions) = match argument.trim().strip_prefix("--durable") {
             Some(rest) => (true, rest.trim()),
-            None => (false, argument),
+            None => (false, argument.trim()),
         };
-        let lifetime = if durable {
-            crate::harness::Lifetime::Durable
+        let (lifetime, scope) = if durable {
+            (crate::harness::Lifetime::Durable, "durable")
         } else {
-            crate::harness::Lifetime::Session
+            (crate::harness::Lifetime::Session, "this session")
         };
-
         self.refining = true;
         self.status = "refining the harness".to_owned();
         let provider = self.aux_provider.clone();
         let messages = self.messages.clone();
-        let harness = self.harness.clone();
-        let papercuts = self.papercuts.clone();
+        let (harness, papercuts) = (self.harness.clone(), self.papercuts.clone());
         let workspace = self.config.workspace.clone();
         let instructions = (!instructions.is_empty()).then(|| instructions.to_owned());
-        let sender = self.refine_tx.clone();
+        let events = self.background_tx.clone();
         tokio::spawn(async move {
             // A user asking for this has already made the judgement the review
-            // gate exists to make, so the gate is skipped and the planning call
-            // runs directly.
-            let cancel = std::sync::atomic::AtomicBool::new(false);
+            // gate exists to make, so the planning call runs directly.
             let outcome = crate::refine::run(
                 &crate::refine::Reflector::detached(&provider),
                 &messages,
@@ -4664,61 +4129,119 @@ impl App {
                 &papercuts,
                 lifetime,
                 instructions.as_deref(),
-                &cancel,
+                &AtomicBool::new(false),
             )
             .await;
-            let result = match outcome {
+            let message = match outcome {
+                None => "refine — nothing worth recording from this conversation.".to_owned(),
                 Some(outcome) => {
                     if durable {
                         // Durable prompt entries are what AGENTS.md renders.
                         let _ = harness.render_notes(&workspace);
                     }
-                    let mut message = format!(
-                        "refine — {} ({} harness edit(s)",
-                        outcome.summary, outcome.applied
-                    );
-                    if outcome.papercuts > 0 {
-                        message.push_str(&format!(", {} papercut(s)", outcome.papercuts));
-                    }
-                    message.push_str(&format!(
-                        ", {}). Undo with /harness revert {}.",
-                        if durable { "durable" } else { "this session" },
-                        outcome.result.id
-                    ));
-                    RefineResult { message, failed: false }
+                    let papercuts = match outcome.papercuts {
+                        0 => String::new(),
+                        count => format!(", {count} papercut(s)"),
+                    };
+                    format!(
+                        "refine — {} ({} harness edit(s){papercuts}, {scope}). Undo with \
+                         /harness revert {}.",
+                        outcome.summary, outcome.applied, outcome.result.id
+                    )
                 }
-                None => RefineResult {
-                    message: "refine — nothing worth recording from this conversation.".to_owned(),
-                    failed: false,
-                },
             };
-            let _ = sender.send(result);
+            let _ = events.send(Background::Refined(message));
         });
     }
 
-    fn drain_services_events(&mut self) -> bool {
+    /// Apply everything background tasks have posted since the last frame.
+    fn drain_background(&mut self) -> bool {
         let mut changed = false;
-        while let Ok(event) = self.services_rx.try_recv() {
+        while let Ok(event) = self.background_rx.try_recv() {
             changed = true;
-            self.services_reloading = false;
-            match event.result {
-                Ok(services) => {
-                    self.services = Arc::new(services);
-                    self.status = "configuration active".to_owned();
+            match event {
+                // Discard a draft that arrived after the user started typing.
+                Background::Draft(draft) => {
+                    self.draft = draft.filter(|_| self.input.is_empty() && self.running.is_none());
                 }
-                Err(error) => {
-                    self.push_entry(Entry::new(
-                        EntryKind::Error,
-                        format!("Configuration saved, but extensions could not reload: {error}"),
-                    ));
-                    self.status = "extension reload failed".to_owned();
-                    self.follow = true;
+                Background::Catalog { profile, result } => {
+                    use crate::model_hub::Catalog;
+                    let state = result.map_or_else(Catalog::Failed, Catalog::Ready);
+                    self.catalogs.insert(profile, state);
                 }
+                // A notice, not a prompt: nothing is downloaded or blocked.
+                Background::Update(available) => self.say(available.message()),
+                Background::Refined(message) => {
+                    self.refining = false;
+                    self.say(message);
+                }
+                Background::Feedback(Ok(receipt)) => {
+                    self.feedback_form = None;
+                    let reference =
+                        receipt.id.map(|id| format!(" Reference: {id}.")).unwrap_or_default();
+                    self.say(format!("Thank you — your feedback was sent.{reference}"));
+                    self.status = "feedback sent".to_owned();
+                }
+                Background::Feedback(Err(error)) => {
+                    if let Some(form) = &mut self.feedback_form {
+                        form.sending = false;
+                        form.error = Some(format!(
+                            "Could not send feedback: {error}\nThe endpoint is a placeholder until the Empero API is available."
+                        ));
+                    }
+                }
+                Background::Services(result) => {
+                    self.services_reloading = false;
+                    match result {
+                        Ok(services) => {
+                            self.services = Arc::new(*services);
+                            self.status = "configuration active".to_owned();
+                        }
+                        Err(error) => {
+                            self.fail(format!(
+                                "Configuration saved, but extensions could not reload: {error}"
+                            ));
+                            self.status = "extension reload failed".to_owned();
+                        }
+                    }
+                }
+                Background::Remote(event) => self.remote_event(event),
             }
         }
         changed
     }
 
+    fn remote_event(&mut self, event: Remote) {
+        match event {
+            Remote::Status(status) => self.status = status,
+            Remote::Closed(reason) => {
+                self.status = reason;
+                self.remote_task = None;
+                self.remote_outbound = None;
+            }
+            Remote::Interrupt => {
+                if let Some(handle) = self.running.take() {
+                    handle.abort();
+                    self.status = "interrupted via remote".to_owned();
+                }
+            }
+            Remote::Prompt(prompt) => {
+                // The browser echoing the last reply back must not start a loop.
+                let echoed = self
+                    .entries
+                    .iter()
+                    .rev()
+                    .find(|entry| entry.kind == EntryKind::Assistant)
+                    .is_some_and(|entry| entry.text.trim() == prompt.trim());
+                if echoed {
+                } else if self.running.is_some() {
+                    self.steer(prompt);
+                } else {
+                    self.start_turn(prompt.clone(), prompt, true);
+                }
+            }
+        }
+    }
     /// Ctrl+C is contextual: the first press interrupts an active turn or clears
     /// a non-empty prompt; a second press within the window exits. This gives the
     /// familiar "press Ctrl+C twice to quit" escape hatch without making a single
@@ -4783,7 +4306,7 @@ impl App {
                 call.output = "interrupted".to_owned();
                 call.duration_ms = elapsed;
             }
-            self.push_entry(Entry::new(EntryKind::System, "Interrupted.".to_owned()));
+            self.say("Interrupted.");
             self.status = "interrupted".to_owned();
             self.last_outcome = Some(TurnOutcome::Interrupted);
             self.follow = true;
@@ -5019,20 +4542,14 @@ impl App {
                     // A side note whose turn ended before it landed has nothing
                     // to nudge; surface it rather than dropping it silently.
                     crate::agent::Injection::SideNote(note) => {
-                        self.push_entry(Entry::new(
-                            EntryKind::System,
-                            format!("Side note not delivered — the turn ended first: {note}"),
-                        ));
+                        self.say(format!("Side note not delivered — the turn ended first: {note}"));
                         delivered = true;
                     }
                     crate::agent::Injection::SubagentReport(_) => {}
                 }
                 continue;
             };
-            self.push_entry(Entry::new(
-                EntryKind::System,
-                "A background subagent finished.".to_owned(),
-            ));
+            self.say("A background subagent finished.");
             self.submit_prompt(format!(
                 "[background subagent finished] {report}\n\nFold this into the work; if it \
                  changes the plan, say so."
@@ -5128,10 +4645,7 @@ pub async fn run(
     let mut app =
         App::new(config, settings, credentials, session, session_store, services.clone())?;
     if let Some(error) = theme_error {
-        app.push_entry(Entry::new(
-            EntryKind::Error,
-            format!("{error}\nFalling back to the built-in theme."),
-        ));
+        app.fail(format!("{error}\nFalling back to the built-in theme."));
     }
     if crate::sync::is_configured(&app.credentials) {
         let workspace = app.config.workspace.clone();
@@ -5326,13 +4840,7 @@ async fn event_loop(
     let mut dirty = true;
     while !app.quit {
         dirty |= app.drain_agent_events();
-        dirty |= app.drain_feedback_events();
-        dirty |= app.drain_catalog_events();
-        dirty |= app.drain_remote_events();
-        dirty |= app.drain_services_events();
-        dirty |= app.drain_refine_events();
-        dirty |= app.drain_update_events();
-        dirty |= app.drain_draft_events();
+        dirty |= app.drain_background();
         app.maybe_idle_sync();
         // A worker that finished after its turn ended delivers here.
         dirty |= app.deliver_pending_injections();
@@ -5445,13 +4953,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     // F3 flips reasoning visibility everywhere — including blocks already in
     // the transcript — so a busy answer can be read without the deliberation.
     if key.code == KeyCode::F(3) {
-        app.settings.ui.show_thinking = !app.settings.ui.show_thinking;
-        let _ = app.save_and_apply_settings();
-        app.status = if app.settings.ui.show_thinking {
-            "thinking shown".to_owned()
-        } else {
-            "thinking hidden".to_owned()
-        };
+        app.set_show_thinking(!app.settings.ui.show_thinking);
         return;
     }
     // Ctrl+O steps an open approval or question aside so the output behind it
@@ -8900,6 +8402,61 @@ fn handle_picker_prompt(app: &mut App, key: KeyEvent) {
     }
 }
 
+/// Push the session, open the remote socket, and relay in both directions
+/// until the server hangs up: replies out, browser prompts and interrupts in.
+async fn serve_remote(
+    client: crate::sync::SyncClient,
+    session: Session,
+    trace: std::path::PathBuf,
+    snapshot: Vec<Value>,
+    mut replies: mpsc::UnboundedReceiver<String>,
+    events: &mpsc::UnboundedSender<Background>,
+) -> Result<()> {
+    use tokio_tungstenite::tungstenite::Message;
+    let trace = std::fs::read(trace).unwrap_or_default();
+    client.push(&session, &trace, true).await.context("sync failed")?;
+    let socket_url = client.enable_remote(&session.id.to_string()).await?;
+    let (socket, _) = tokio_tungstenite::connect_async(&socket_url).await?;
+    let (mut sink, mut stream) = socket.split();
+    let mut seq = 0_u64;
+    let mut frame = |kind: &str, payload: Value| {
+        seq += 1;
+        let id = uuid::Uuid::new_v4().to_string();
+        let frame = json!({"v": 1, "type": kind, "id": id, "seq": seq, "payload": payload});
+        Message::Text(frame.to_string().into())
+    };
+    sink.send(frame("snapshot", json!({"entries": snapshot}))).await?;
+    let status = "remote enabled — open the server /remote page".to_owned();
+    let _ = events.send(Background::Remote(Remote::Status(status)));
+    loop {
+        tokio::select! {
+            Some(text) = replies.recv() => {
+                sink.send(frame("entry", json!({"kind": "assistant", "text": text}))).await?;
+            }
+            message = stream.next() => {
+                let Some(message) = message else { break };
+                let message = message?;
+                let Some(incoming) = message.to_text().ok().and_then(|text| serde_json::from_str::<Value>(text).ok()) else {
+                    continue;
+                };
+                match incoming["type"].as_str().unwrap_or_default() {
+                    "prompt" => {
+                        if let Some(prompt) = incoming.pointer("/payload/text").and_then(Value::as_str) {
+                            let _ = events.send(Background::Remote(Remote::Prompt(prompt.to_owned())));
+                        }
+                    }
+                    "interrupt" => {
+                        let _ = events.send(Background::Remote(Remote::Interrupt));
+                    }
+                    "ping" => sink.send(frame("pong", json!({}))).await?,
+                    _ => {}
+                }
+            }
+        }
+    }
+    bail!("remote disconnected")
+}
+
 /// The slice of a tool result kept for expansion, bounded so one enormous
 /// result cannot grow the session's footprint without limit.
 fn retain_output(output: &str) -> String {
@@ -9149,6 +8706,11 @@ fn config_value_spans(value: &str, width: usize, selected: bool) -> Vec<Span<'st
         ],
         _ => vec![Span::styled(ui::truncate(value, width), style)],
     }
+}
+
+/// The row a 1-based `number` names in a listing.
+fn numbered<'a, T>(rows: &'a [T], number: &str) -> Option<&'a T> {
+    rows.get(number.trim().parse::<usize>().ok()?.saturating_sub(1))
 }
 
 fn on_off(value: bool) -> String {
@@ -10107,14 +9669,14 @@ mod tests {
 
         // A draft arriving late, after the user has started typing, is dropped
         // rather than replacing what they wrote.
-        let _ = app.draft_tx.send(Some("too late".into()));
-        app.drain_draft_events();
+        let _ = app.background_tx.send(Background::Draft(Some("too late".into())));
+        app.drain_background();
         assert_eq!(app.draft, None);
 
         // With an empty composer it is kept.
         app.input.clear();
-        let _ = app.draft_tx.send(Some("run the tests".into()));
-        app.drain_draft_events();
+        let _ = app.background_tx.send(Background::Draft(Some("run the tests".into())));
+        app.drain_background();
         assert_eq!(app.draft.as_deref(), Some("run the tests"));
     }
 
