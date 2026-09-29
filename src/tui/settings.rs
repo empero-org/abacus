@@ -357,6 +357,11 @@ impl App {
         self.config.model = profile.model;
         self.config.aux_model = profile.aux_model.clone().filter(|model| !model.trim().is_empty());
         self.config.reasoning_effort = profile.reasoning_effort;
+        // Pins take effect on the running session, not on the next launch.
+        self.config.routing = crate::config::Routing {
+            order: profile.providers.clone(),
+            allow_fallbacks: profile.allow_fallbacks,
+        };
         self.config.base_url = profile.base_url.trim_end_matches('/').to_owned();
         self.config.protocol = profile.protocol;
         // Re-resolve the scripted endpoint for the new profile — without this a
