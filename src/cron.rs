@@ -49,10 +49,7 @@ struct JobFile {
 
 impl Default for JobFile {
     fn default() -> Self {
-        Self {
-            version: STORE_VERSION,
-            jobs: Vec::new(),
-        }
+        Self { version: STORE_VERSION, jobs: Vec::new() }
     }
 }
 
@@ -102,10 +99,7 @@ impl CronStore {
         let content = fs::read(&self.jobs_file)?;
         let jobs: JobFile = serde_json::from_slice(&content).context("invalid cron job store")?;
         if jobs.version > STORE_VERSION {
-            bail!(
-                "cron store version {} is newer than supported",
-                jobs.version
-            );
+            bail!("cron store version {} is newer than supported", jobs.version);
         }
         Ok(jobs)
     }
@@ -291,9 +285,7 @@ pub async fn handle(
                     "{}\t{}\t{}\t{}\t{}",
                     &job.id.to_string()[..8],
                     if job.enabled { "enabled" } else { "disabled" },
-                    job.next_run
-                        .with_timezone(&Local)
-                        .format("%Y-%m-%d %H:%M:%S %Z"),
+                    job.next_run.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S %Z"),
                     job.schedule,
                     job.name
                 );
@@ -371,13 +363,7 @@ async fn run_job(job: &CronJob, store: &CronStore) -> Result<bool> {
     let mut command = Command::new(executable);
     command
         .arg(&job.workspace)
-        .args([
-            "--prompt",
-            &job.prompt,
-            "--output-format",
-            "json",
-            "--no-session",
-        ])
+        .args(["--prompt", &job.prompt, "--output-format", "json", "--no-session"])
         .env("ABACUS_CRON_JOB_ID", job.id.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -409,22 +395,14 @@ async fn run_job(job: &CronJob, store: &CronStore) -> Result<bool> {
     };
     let stdout = bounded_text(&output.stdout);
     let stderr = bounded_text(&output.stderr);
-    let status = if output.status.success() {
-        "ok"
-    } else {
-        "failed"
-    };
+    let status = if output.status.success() { "ok" } else { "failed" };
     let log = format!(
         "=== {} | {} | {} ===\n{}{}{}",
         started,
         job.name,
         status,
         stdout,
-        if !stdout.is_empty() && !stderr.is_empty() {
-            "\n"
-        } else {
-            ""
-        },
+        if !stdout.is_empty() && !stderr.is_empty() { "\n" } else { "" },
         stderr
     );
     store.finish(job.id, status.into(), &log)?;
@@ -443,11 +421,7 @@ fn bounded_text(bytes: &[u8]) -> String {
         start += 1;
     }
     let text = String::from_utf8_lossy(&bytes[start..]);
-    if start > 0 {
-        format!("… output truncated …\n{text}")
-    } else {
-        text.into_owned()
-    }
+    if start > 0 { format!("… output truncated …\n{text}") } else { text.into_owned() }
 }
 
 fn default_timeout_seconds() -> u64 {
@@ -499,9 +473,7 @@ impl FileLock {
             match OpenOptions::new().write(true).create_new(true).open(path) {
                 Ok(mut file) => {
                     writeln!(file, "{}", std::process::id())?;
-                    return Ok(Self {
-                        path: path.to_owned(),
-                    });
+                    return Ok(Self { path: path.to_owned() });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     if !lock_owner_alive(path) {
@@ -538,9 +510,7 @@ impl DaemonGuard {
             match OpenOptions::new().write(true).create_new(true).open(path) {
                 Ok(mut file) => {
                     writeln!(file, "{}", std::process::id())?;
-                    return Ok(Self {
-                        path: path.to_owned(),
-                    });
+                    return Ok(Self { path: path.to_owned() });
                 }
                 Err(error)
                     if error.kind() == std::io::ErrorKind::AlreadyExists
@@ -598,9 +568,7 @@ fn process_alive(_pid: u32) -> bool {
 
 #[cfg(target_os = "macos")]
 fn install_service(paths: &AbacusPaths) -> Result<()> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .context("HOME is unavailable")?;
+    let home = std::env::var_os("HOME").map(PathBuf::from).context("HOME is unavailable")?;
     let directory = home.join("Library/LaunchAgents");
     fs::create_dir_all(&directory)?;
     let path = directory.join("com.abacus.agent.plist");
@@ -623,11 +591,7 @@ fn install_service(paths: &AbacusPaths) -> Result<()> {
         .args(["bootout", &domain, path.to_str().unwrap_or_default()])
         .status();
     let status = std::process::Command::new("launchctl")
-        .args([
-            "bootstrap",
-            &domain,
-            path.to_str().context("service path is not UTF-8")?,
-        ])
+        .args(["bootstrap", &domain, path.to_str().context("service path is not UTF-8")?])
         .status()?;
     if !status.success() {
         bail!("launchctl bootstrap failed");
@@ -638,9 +602,7 @@ fn install_service(paths: &AbacusPaths) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn uninstall_service(_paths: &AbacusPaths) -> Result<()> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .context("HOME is unavailable")?;
+    let home = std::env::var_os("HOME").map(PathBuf::from).context("HOME is unavailable")?;
     let path = home.join("Library/LaunchAgents/com.abacus.agent.plist");
     let domain = format!("gui/{}", unsafe { libc_getuid() });
     let _ = std::process::Command::new("launchctl")
@@ -663,9 +625,7 @@ unsafe fn libc_getuid() -> u32 {
 
 #[cfg(target_os = "linux")]
 fn install_service(paths: &AbacusPaths) -> Result<()> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .context("HOME is unavailable")?;
+    let home = std::env::var_os("HOME").map(PathBuf::from).context("HOME is unavailable")?;
     let directory = home.join(".config/systemd/user");
     fs::create_dir_all(&directory)?;
     let path = directory.join("abacus-agent.service");
@@ -676,19 +636,14 @@ fn install_service(paths: &AbacusPaths) -> Result<()> {
     );
     atomic_write(&path, content.as_bytes(), false)?;
     run_service_command("systemctl", &["--user", "daemon-reload"])?;
-    run_service_command(
-        "systemctl",
-        &["--user", "enable", "--now", "abacus-agent.service"],
-    )?;
+    run_service_command("systemctl", &["--user", "enable", "--now", "abacus-agent.service"])?;
     println!("Installed and started {}", path.display());
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
 fn uninstall_service(_paths: &AbacusPaths) -> Result<()> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .context("HOME is unavailable")?;
+    let home = std::env::var_os("HOME").map(PathBuf::from).context("HOME is unavailable")?;
     let path = home.join(".config/systemd/user/abacus-agent.service");
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "disable", "--now", "abacus-agent.service"])
@@ -706,16 +661,7 @@ fn install_service(paths: &AbacusPaths) -> Result<()> {
     let executable = std::env::current_exe()?;
     let command = format!("\\\"{}\\\" cron daemon", executable.display());
     let status = std::process::Command::new("schtasks")
-        .args([
-            "/Create",
-            "/F",
-            "/SC",
-            "ONLOGON",
-            "/TN",
-            "Abacus Agent",
-            "/TR",
-            &command,
-        ])
+        .args(["/Create", "/F", "/SC", "ONLOGON", "/TN", "Abacus Agent", "/TR", &command])
         .env("ABACUS_HOME", &paths.root)
         .status()?;
     if !status.success() {
@@ -758,11 +704,7 @@ fn run_service_command(program: &str, args: &[&str]) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn xml_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+    value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
 #[cfg(target_os = "linux")]
@@ -795,16 +737,8 @@ mod tests {
             .unwrap();
         assert_eq!(job.schedule, "0 0 9 * * *");
         assert_eq!(store.list().unwrap().len(), 1);
-        assert!(
-            !store
-                .set_enabled(&job.id.to_string(), false)
-                .unwrap()
-                .enabled
-        );
-        assert_eq!(
-            store.remove(&job.id.to_string()[..8]).unwrap().name,
-            "daily"
-        );
+        assert!(!store.set_enabled(&job.id.to_string(), false).unwrap().enabled);
+        assert_eq!(store.remove(&job.id.to_string()[..8]).unwrap().name, "daily");
     }
 
     #[test]

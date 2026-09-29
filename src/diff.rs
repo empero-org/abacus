@@ -31,9 +31,7 @@ impl DiffFile {
         } else {
             &self.new_path
         };
-        path.strip_prefix("a/")
-            .or_else(|| path.strip_prefix("b/"))
-            .unwrap_or(path)
+        path.strip_prefix("a/").or_else(|| path.strip_prefix("b/")).unwrap_or(path)
     }
 }
 
@@ -62,10 +60,7 @@ impl DiffDocument {
                 if let Some(current) = file.take() {
                     push_file(&mut document, current);
                 }
-                file = Some(DiffFile {
-                    old_path: clean_path(path),
-                    ..DiffFile::default()
-                });
+                file = Some(DiffFile { old_path: clean_path(path), ..DiffFile::default() });
                 in_hunk = false;
                 continue;
             }
@@ -140,12 +135,7 @@ impl DiffDocument {
 }
 
 fn clean_path(value: &str) -> String {
-    value
-        .split_once('\t')
-        .map(|(path, _)| path)
-        .unwrap_or(value)
-        .trim()
-        .to_owned()
+    value.split_once('\t').map(|(path, _)| path).unwrap_or(value).trim().to_owned()
 }
 
 fn push_file(document: &mut DiffDocument, file: DiffFile) {

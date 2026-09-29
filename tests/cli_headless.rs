@@ -63,11 +63,7 @@ fn headless_json_runs_without_prior_setup() {
         .unwrap();
     server.join().unwrap();
 
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["ok"], true);
     assert_eq!(value["text"], "headless works");
@@ -93,11 +89,7 @@ fn headless_loop_stops_when_promise_appears() {
                 continue;
             }
             // First chat turn: no promise yet. Second: emits DONE and ends the loop.
-            let content = if served_chat == 0 {
-                "still working"
-            } else {
-                "all green DONE"
-            };
+            let content = if served_chat == 0 { "still working" } else { "all green DONE" };
             let body = format!(
                 "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{content}\"}}}}]}}\n\ndata: [DONE]\n\n"
             );
@@ -138,11 +130,7 @@ fn headless_loop_stops_when_promise_appears() {
         .unwrap();
     server.join().unwrap();
 
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["ok"], true);
     assert!(value["text"].as_str().unwrap().contains("DONE"));

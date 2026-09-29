@@ -301,10 +301,7 @@ impl SubagentRuntime {
             let known = roster
                 .iter()
                 .map(|(worker, running)| {
-                    format!(
-                        "{worker} ({})",
-                        if *running { "running" } else { "finished" }
-                    )
+                    format!("{worker} ({})", if *running { "running" } else { "finished" })
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -322,8 +319,7 @@ impl SubagentRuntime {
             }
             // Finished: continue the same thread of work with its context.
             crate::hive::WorkerChannel::Finished(transcript) if !transcript.is_empty() => {
-                self.resume_worker(name.to_owned(), transcript, args.message)
-                    .await
+                self.resume_worker(name.to_owned(), transcript, args.message).await
             }
             crate::hive::WorkerChannel::Finished(_) => bail!(
                 "`{name}` finished without a usable conversation (it failed early); \
@@ -346,10 +342,7 @@ impl SubagentRuntime {
         let injections = self.injections.clone();
         let reported = name.clone();
         tokio::spawn(async move {
-            let report = match runtime
-                .run_resumed(context, &name, transcript, message)
-                .await
-            {
+            let report = match runtime.run_resumed(context, &name, transcript, message).await {
                 Ok(response) => format!("worker `{name}` (resumed): {response}"),
                 Err(error) => format!("worker `{name}` (resumed) failed: {error:#}"),
             };
@@ -368,14 +361,12 @@ impl SubagentRuntime {
                 let names = args
                     .tasks
                     .iter()
-                    .map(
-                        |task| match task.model.as_deref().filter(|m| !m.trim().is_empty()) {
-                            Some(model) => {
-                                format!("{} ({}, {model})", task.name, task.role.label())
-                            }
-                            None => format!("{} ({})", task.name, task.role.label()),
-                        },
-                    )
+                    .map(|task| match task.model.as_deref().filter(|m| !m.trim().is_empty()) {
+                        Some(model) => {
+                            format!("{} ({}, {model})", task.name, task.role.label())
+                        }
+                        None => format!("{} ({})", task.name, task.role.label()),
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(
@@ -406,12 +397,10 @@ impl SubagentRuntime {
         let roster = args
             .tasks
             .iter()
-            .map(
-                |task| match task.model.as_deref().filter(|m| !m.trim().is_empty()) {
-                    Some(model) => format!("{} ({}, {model})", task.name, task.role.label()),
-                    None => format!("{} ({})", task.name, task.role.label()),
-                },
-            )
+            .map(|task| match task.model.as_deref().filter(|m| !m.trim().is_empty()) {
+                Some(model) => format!("{} ({}, {model})", task.name, task.role.label()),
+                None => format!("{} ({})", task.name, task.role.label()),
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let count = args.tasks.len();
@@ -475,16 +464,10 @@ impl SubagentRuntime {
         // The delegation record grows with every swarm, and the model sees
         // its own track record in the result — confidence is earned, in
         // writing.
-        let failures = results
-            .iter()
-            .filter(|result| result.error.is_some())
-            .count();
+        let failures = results.iter().filter(|result| result.error.is_some()).count();
         let record = self.hive.record_run(results.len() as u32, failures as u32);
-        let body = if all_typed {
-            format_results_json(&results)
-        } else {
-            format_results(&results, apply)
-        };
+        let body =
+            if all_typed { format_results_json(&results) } else { format_results(&results, apply) };
         format!("{body}\n\n{record}")
     }
 
@@ -498,10 +481,7 @@ impl SubagentRuntime {
         message: String,
     ) -> Result<String> {
         let (worker_provider, worker_tokens) = self.provider.with_detached_counter();
-        let board_id = self
-            .hive
-            .board
-            .begin(name, "resumed", worker_tokens.clone());
+        let board_id = self.hive.board.begin(name, "resumed", worker_tokens.clone());
         let injections = self.hive.workers.open(name);
         let task = SubagentTask {
             name: name.to_owned(),
@@ -514,9 +494,8 @@ impl SubagentRuntime {
             spec: None,
             resume_from: Some(transcript.clone()),
         };
-        let outcome = self
-            .run_one_inner(&context, &task, board_id, worker_provider, injections)
-            .await;
+        let outcome =
+            self.run_one_inner(&context, &task, board_id, worker_provider, injections).await;
         self.provider.add_tokens(&worker_tokens);
         match outcome {
             Ok((response, _patch, new_transcript)) => {
@@ -537,30 +516,16 @@ impl SubagentRuntime {
     async fn run_one(&self, context: Arc<WorktreeContext>, task: SubagentTask) -> SubagentResult {
         let name = task.name.clone();
         let (mut worker_provider, worker_tokens) = self.provider.with_detached_counter();
-        if let Some(model) = task
-            .model
-            .as_deref()
-            .filter(|model| !model.trim().is_empty())
-        {
+        if let Some(model) = task.model.as_deref().filter(|model| !model.trim().is_empty()) {
             worker_provider = worker_provider.with_model(model);
         }
         let role_label = self.resolve_role(&task).label;
-        let board_id = self
-            .hive
-            .board
-            .begin(&name, &role_label, worker_tokens.clone());
+        let board_id = self.hive.board.begin(&name, &role_label, worker_tokens.clone());
         // Register before starting so a message addressed to this worker mid-run
         // reaches the turn that is about to begin.
         let worker_injections = self.hive.workers.open(&name);
-        let outcome = self
-            .run_one_inner(
-                &context,
-                &task,
-                board_id,
-                worker_provider,
-                worker_injections,
-            )
-            .await;
+        let outcome =
+            self.run_one_inner(&context, &task, board_id, worker_provider, worker_injections).await;
         // Fold the worker's usage into the session total — the per-worker
         // counter exists for the board, not to hide cost.
         self.provider.add_tokens(&worker_tokens);
@@ -595,13 +560,7 @@ impl SubagentRuntime {
                 // Keep the conversation so the orchestrator can follow up with
                 // this worker and have it continue where it left off.
                 self.hive.workers.close(&name, transcript);
-                SubagentResult {
-                    name,
-                    response,
-                    patch,
-                    structured,
-                    error: None,
-                }
+                SubagentResult { name, response, patch, structured, error: None }
             }
             Err(error) => {
                 self.hive.board.finish(board_id, false);
@@ -641,9 +600,8 @@ impl SubagentRuntime {
         }
 
         let mut guard = WorktreeGuard::new(context.repo_root.clone(), worker_root.clone());
-        let result = self
-            .run_in_worktree(context, &worker_root, task, board_id, provider, injections)
-            .await;
+        let result =
+            self.run_in_worktree(context, &worker_root, task, board_id, provider, injections).await;
         let cleanup = context.remove(&worker_root).await;
         if cleanup.is_ok() {
             guard.disarm();
@@ -708,11 +666,7 @@ impl SubagentRuntime {
                 // Scouts are mechanically read-only, not just instructed so:
                 // PLAN mode plus a mutation lock that nothing in the worker
                 // can flip.
-                mode: if role.read_only {
-                    AgentMode::Plan
-                } else {
-                    AgentMode::Build
-                },
+                mode: if role.read_only { AgentMode::Plan } else { AgentMode::Build },
                 allow_mutations: Arc::new(AtomicBool::new(!role.read_only)),
                 services,
                 session_id: None,
@@ -770,9 +724,7 @@ impl SubagentRuntime {
     fn note_activity(&self, board_id: u64, event: &AgentEvent) {
         match event {
             AgentEvent::ToolStarted { name, summary } => {
-                self.hive
-                    .board
-                    .activity(board_id, &format!("{name} {summary}"));
+                self.hive.board.activity(board_id, &format!("{name} {summary}"));
             }
             AgentEvent::Delta(text) => self.hive.board.activity(board_id, text),
             _ => {}
@@ -808,10 +760,8 @@ async fn coerce_to_schema(provider: &Provider, report: &str, schema: &Value) -> 
                  Return corrected JSON only."
             );
         }
-        let conversation = vec![
-            json!({"role":"system","content":system}),
-            json!({"role":"user","content":user}),
-        ];
+        let conversation =
+            vec![json!({"role":"system","content":system}), json!({"role":"user","content":user})];
         let (deltas, _sink) = mpsc::unbounded_channel();
         let cancel = AtomicBool::new(false);
         let completion = match provider.complete(&conversation, &[], deltas, &cancel).await {
@@ -861,11 +811,7 @@ struct WorktreeGuard {
 
 impl WorktreeGuard {
     fn new(repo_root: PathBuf, worker_root: PathBuf) -> Self {
-        Self {
-            repo_root,
-            worker_root,
-            active: true,
-        }
+        Self { repo_root, worker_root, active: true }
     }
 
     fn disarm(&mut self) {
@@ -908,22 +854,12 @@ impl WorktreeContext {
             .context("workspace is outside its git repository")?
             .to_owned();
         let scope = git_scope(&workspace_relative);
-        let baseline_patch = git_output_bytes(
-            &repo_root,
-            &["diff", "--binary", "HEAD", "--", scope.as_str()],
-            None,
-        )
-        .await?;
+        let baseline_patch =
+            git_output_bytes(&repo_root, &["diff", "--binary", "HEAD", "--", scope.as_str()], None)
+                .await?;
         let untracked_raw = git_output_bytes(
             &repo_root,
-            &[
-                "ls-files",
-                "--others",
-                "--exclude-standard",
-                "-z",
-                "--",
-                scope.as_str(),
-            ],
+            &["ls-files", "--others", "--exclude-standard", "-z", "--", scope.as_str()],
             None,
         )
         .await?;
@@ -950,36 +886,21 @@ impl WorktreeContext {
                 bail!("untracked workspace data exceeds 500 MB");
             }
         }
-        Ok(Self {
-            repo_root,
-            workspace_relative,
-            baseline_patch,
-            untracked,
-        })
+        Ok(Self { repo_root, workspace_relative, baseline_patch, untracked })
     }
 
     async fn create(&self, worker_root: &Path) -> Result<()> {
         run_git(
             &self.repo_root,
-            &[
-                "worktree",
-                "add",
-                "--detach",
-                path_text(worker_root)?,
-                "HEAD",
-            ],
+            &["worktree", "add", "--detach", path_text(worker_root)?, "HEAD"],
             None,
         )
         .await
         .context("could not create isolated git worktree")?;
         if !self.baseline_patch.is_empty() {
-            run_git(
-                worker_root,
-                &["apply", "--binary", "-"],
-                Some(&self.baseline_patch),
-            )
-            .await
-            .context("could not seed worker with current tracked changes")?;
+            run_git(worker_root, &["apply", "--binary", "-"], Some(&self.baseline_patch))
+                .await
+                .context("could not seed worker with current tracked changes")?;
         }
         for relative in &self.untracked {
             let source = self.repo_root.join(relative);
@@ -995,13 +916,7 @@ impl WorktreeContext {
         if !status.success() {
             let mut command = Command::new("git");
             command
-                .args([
-                    "-C",
-                    path_text(worker_root)?,
-                    "commit",
-                    "-m",
-                    "abacus worker baseline",
-                ])
+                .args(["-C", path_text(worker_root)?, "commit", "-m", "abacus worker baseline"])
                 .env("GIT_AUTHOR_NAME", "Abacus")
                 .env("GIT_AUTHOR_EMAIL", "abacus@localhost")
                 .env("GIT_COMMITTER_NAME", "Abacus")
@@ -1074,11 +989,7 @@ fn safe_name(name: &str) -> String {
         .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
         .take(24)
         .collect();
-    if value.is_empty() {
-        "worker".into()
-    } else {
-        value
-    }
+    if value.is_empty() { "worker".into() } else { value }
 }
 
 fn git_scope(relative: &Path) -> String {
@@ -1090,8 +1001,7 @@ fn git_scope(relative: &Path) -> String {
 }
 
 fn path_text(path: &Path) -> Result<&str> {
-    path.to_str()
-        .ok_or_else(|| anyhow!("git path is not UTF-8"))
+    path.to_str().ok_or_else(|| anyhow!("git path is not UTF-8"))
 }
 
 async fn git_output(directory: &Path, args: &[&str]) -> Result<String> {
@@ -1106,11 +1016,7 @@ async fn git_output_bytes(
 ) -> Result<Vec<u8>> {
     let output = run_git_output(directory, args, stdin).await?;
     if !output.status.success() {
-        bail!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        bail!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim());
     }
     Ok(output.stdout)
 }
@@ -1118,11 +1024,7 @@ async fn git_output_bytes(
 async fn run_git(directory: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<()> {
     let output = run_git_output(directory, args, stdin).await?;
     if !output.status.success() {
-        bail!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        bail!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim());
     }
     Ok(())
 }
@@ -1140,11 +1042,7 @@ async fn run_git_output(
         // defaults to core.autocrlf=true, which would rewrite line endings).
         .args(["-c", "core.autocrlf=false"])
         .args(args)
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
+        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -1156,18 +1054,8 @@ async fn run_git_output(
 }
 
 async fn apply_patch(repo_root: &Path, patch: &str) -> Result<()> {
-    run_git(
-        repo_root,
-        &["apply", "--check", "--binary", "-"],
-        Some(patch.as_bytes()),
-    )
-    .await?;
-    run_git(
-        repo_root,
-        &["apply", "--binary", "-"],
-        Some(patch.as_bytes()),
-    )
-    .await
+    run_git(repo_root, &["apply", "--check", "--binary", "-"], Some(patch.as_bytes())).await?;
+    run_git(repo_root, &["apply", "--binary", "-"], Some(patch.as_bytes())).await
 }
 
 fn copy_entry(source: &Path, destination: &Path) -> Result<()> {
@@ -1230,11 +1118,7 @@ fn format_results(results: &[SubagentResult], applied: bool) -> String {
             output.push_str(&format!("Status: failed\n{error}\n\n"));
             continue;
         }
-        output.push_str(if applied {
-            "Status: patch applied\n"
-        } else {
-            "Status: completed\n"
-        });
+        output.push_str(if applied { "Status: patch applied\n" } else { "Status: completed\n" });
         output.push_str(&result.response);
         output.push('\n');
         if let Some(value) = &result.structured {
@@ -1289,15 +1173,10 @@ mod tests {
     fn an_authored_spec_overrides_the_built_in_role() {
         let dir = tempdir().unwrap();
         let harness = crate::harness::HarnessStore::load(dir.path().join("h"), dir.path());
-        harness
-            .migrate(&dir.path().join("none.json"), dir.path())
-            .unwrap();
+        harness.migrate(&dir.path().join("none.json"), dir.path()).unwrap();
 
         // A seeded built-in resolves by id, and its read-only flag is honoured.
-        let scout = resolve_role(
-            &harness,
-            &task_with_spec(Some("scout"), SubagentRole::Drone),
-        );
+        let scout = resolve_role(&harness, &task_with_spec(Some("scout"), SubagentRole::Drone));
         assert_eq!(scout.label, "scout");
         assert!(scout.read_only, "a scout spec must lock mutations off");
         assert!(scout.system_prompt.contains("SCOUT"));
@@ -1323,10 +1202,8 @@ mod tests {
             None,
             None,
         );
-        let authored = resolve_role(
-            &harness,
-            &task_with_spec(Some("release_auditor"), SubagentRole::Worker),
-        );
+        let authored =
+            resolve_role(&harness, &task_with_spec(Some("release_auditor"), SubagentRole::Worker));
         assert_eq!(authored.label, "release_auditor");
         assert!(authored.system_prompt.contains("audit a release branch"));
         // No read_only metadata means it may build, like a worker.
@@ -1339,10 +1216,8 @@ mod tests {
         let harness = crate::harness::HarnessStore::load(dir.path().join("h"), dir.path());
         // The roster is advisory context, so a stale id should cost fidelity,
         // not the task.
-        let resolved = resolve_role(
-            &harness,
-            &task_with_spec(Some("deleted_spec"), SubagentRole::Scout),
-        );
+        let resolved =
+            resolve_role(&harness, &task_with_spec(Some("deleted_spec"), SubagentRole::Scout));
         assert_eq!(resolved.label, "scout");
         assert!(resolved.read_only);
 
@@ -1365,11 +1240,7 @@ mod tests {
     fn a_fully_typed_swarm_renders_json_the_parent_can_consume() {
         let results = vec![
             result("auditor", Some(json!({"verdict": "pass"})), None),
-            result(
-                "scanner",
-                Some(json!({"verdict": "fail", "count": 2})),
-                None,
-            ),
+            result("scanner", Some(json!({"verdict": "fail", "count": 2})), None),
         ];
         let rendered = format_results_json(&results);
         let parsed: Value = serde_json::from_str(&rendered).expect("valid JSON");
@@ -1395,22 +1266,15 @@ mod tests {
         let array = parsed.as_array().unwrap();
         assert_eq!(array[1]["error"], "worker stopped");
         assert!(array[1].get("result").is_none());
-        assert!(
-            array[2]["error"]
-                .as_str()
-                .unwrap()
-                .contains("no structured result")
-        );
+        assert!(array[2]["error"].as_str().unwrap().contains("no structured result"));
     }
 
     #[test]
     fn a_structured_result_is_still_shown_in_the_markdown_report() {
         // Background swarms and mixed swarms deliver prose; the data must not
         // vanish just because the rendering is markdown.
-        let rendered = format_results(
-            &[result("auditor", Some(json!({"verdict": "pass"})), None)],
-            false,
-        );
+        let rendered =
+            format_results(&[result("auditor", Some(json!({"verdict": "pass"})), None)], false);
         assert!(rendered.contains("```json"), "{rendered}");
         assert!(rendered.contains("\"verdict\""), "{rendered}");
         assert!(rendered.contains("auditor did the work"));
@@ -1451,19 +1315,12 @@ mod tests {
         assert_eq!(args.tasks[0].model, None);
         // Explicit slug is carried per worker.
         assert_eq!(args.tasks[1].role, SubagentRole::Drone);
-        assert_eq!(
-            args.tasks[1].model.as_deref(),
-            Some("anthropic/claude-sonnet-4.6")
-        );
+        assert_eq!(args.tasks[1].model.as_deref(), Some("anthropic/claude-sonnet-4.6"));
     }
 
     #[tokio::test]
     async fn worktree_is_seeded_from_dirty_parent_and_returns_only_worker_changes() {
-        if std::process::Command::new("git")
-            .arg("--version")
-            .status()
-            .is_err()
-        {
+        if std::process::Command::new("git").arg("--version").status().is_err() {
             return;
         }
         let directory = tempdir().unwrap();
@@ -1488,14 +1345,8 @@ mod tests {
         let context = WorktreeContext::capture(&repo).await.unwrap();
         let worker = directory.path().join("worker");
         context.create(&worker).await.unwrap();
-        assert_eq!(
-            std::fs::read_to_string(worker.join("tracked.txt")).unwrap(),
-            "parent state\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(worker.join("untracked.txt")).unwrap(),
-            "parent new\n"
-        );
+        assert_eq!(std::fs::read_to_string(worker.join("tracked.txt")).unwrap(), "parent state\n");
+        assert_eq!(std::fs::read_to_string(worker.join("untracked.txt")).unwrap(), "parent new\n");
 
         std::fs::write(worker.join("tracked.txt"), "worker state\n").unwrap();
         std::fs::write(worker.join("worker.txt"), "created\n").unwrap();
@@ -1503,14 +1354,8 @@ mod tests {
         assert!(patch.contains("worker state"));
         assert!(patch.contains("worker.txt"));
         apply_patch(&repo, &patch).await.unwrap();
-        assert_eq!(
-            std::fs::read_to_string(repo.join("tracked.txt")).unwrap(),
-            "worker state\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(repo.join("worker.txt")).unwrap(),
-            "created\n"
-        );
+        assert_eq!(std::fs::read_to_string(repo.join("tracked.txt")).unwrap(), "worker state\n");
+        assert_eq!(std::fs::read_to_string(repo.join("worker.txt")).unwrap(), "created\n");
         context.remove(&worker).await.unwrap();
 
         let cancelled_worker = directory.path().join("cancelled-worker");

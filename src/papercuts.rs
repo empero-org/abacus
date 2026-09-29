@@ -93,9 +93,7 @@ fn is_generic_tripwire(tripwire: &str) -> bool {
         .trim()
         .trim_matches(|ch: char| ch.is_ascii_punctuation() || ch.is_whitespace())
         .to_ascii_lowercase();
-    GENERIC_TRIPWIRES
-        .iter()
-        .any(|generic| normalized == *generic)
+    GENERIC_TRIPWIRES.iter().any(|generic| normalized == *generic)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,8 +142,7 @@ impl Papercut {
     }
 
     fn off_cooldown(&self, now: DateTime<Utc>) -> bool {
-        self.last_recalled_at
-            .is_none_or(|last| now - last >= self.cooldown(now))
+        self.last_recalled_at.is_none_or(|last| now - last >= self.cooldown(now))
     }
 
     fn matches(&self, haystack_lower: &str) -> bool {
@@ -155,9 +152,7 @@ impl Papercut {
     }
 
     fn in_scope(&self, workspace: &str) -> bool {
-        self.workspace
-            .as_deref()
-            .is_none_or(|scope| scope == workspace)
+        self.workspace.as_deref().is_none_or(|scope| scope == workspace)
     }
 
     /// The reminder as the model sees it, inline in a tool result.
@@ -193,10 +188,7 @@ impl PapercutStore {
             .and_then(|content| serde_json::from_str::<Vec<Papercut>>(&content).ok())
             .unwrap_or_default();
         Self {
-            inner: Arc::new(RwLock::new(Inner {
-                papercuts,
-                file: Some(file),
-            })),
+            inner: Arc::new(RwLock::new(Inner { papercuts, file: Some(file) })),
             workspace: workspace.to_string_lossy().into_owned(),
         }
     }
@@ -285,9 +277,8 @@ impl PapercutStore {
         }
         // A too-short tripwire matches everything and turns the lesson into
         // spam; the floor forces something distinctive.
-        if let Some(short) = tripwires
-            .iter()
-            .find(|value| value.chars().count() < MIN_TRIPWIRE_CHARS)
+        if let Some(short) =
+            tripwires.iter().find(|value| value.chars().count() < MIN_TRIPWIRE_CHARS)
         {
             bail!(
                 "tripwire `{short}` is too short — use a distinctive string of \
@@ -318,11 +309,7 @@ impl PapercutStore {
             existing.last_tripped_at = Some(now);
             existing.fix = arguments.fix.trim().to_owned();
             for tripwire in tripwires {
-                if !existing
-                    .tripwires
-                    .iter()
-                    .any(|known| known.eq_ignore_ascii_case(&tripwire))
-                {
+                if !existing.tripwires.iter().any(|known| known.eq_ignore_ascii_case(&tripwire)) {
                     existing.tripwires.push(tripwire);
                 }
             }
@@ -346,9 +333,7 @@ impl PapercutStore {
             last_recalled_at: None,
         });
         Self::save_locked(&inner);
-        Ok(format!(
-            "Papercut \"{title}\" recorded. It will be recalled when a tripwire matches."
-        ))
+        Ok(format!("Papercut \"{title}\" recorded. It will be recalled when a tripwire matches."))
     }
 
     fn list_for_model(&self) -> String {
@@ -421,9 +406,7 @@ impl PapercutStore {
         ranked.sort_by(|&a, &b| {
             let strength_a = inner.papercuts[a].decayed_strength(now);
             let strength_b = inner.papercuts[b].decayed_strength(now);
-            strength_b
-                .partial_cmp(&strength_a)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            strength_b.partial_cmp(&strength_a).unwrap_or(std::cmp::Ordering::Equal)
         });
         let mut reminders = Vec::new();
         for index in ranked.into_iter().take(limit) {
@@ -483,36 +466,21 @@ mod tests {
                 .to_string(),
             )
             .expect("papercut_record handled");
-        assert!(
-            output.contains("recorded") || output.contains("reinforced"),
-            "{output}"
-        );
+        assert!(output.contains("recorded") || output.contains("reinforced"), "{output}");
     }
 
     #[test]
     fn records_recalls_on_tripwire_and_persists() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
-        record(
-            &store,
-            "sqlx needs DATABASE_URL",
-            "error: DATABASE_URL must be set",
-        );
+        record(&store, "sqlx needs DATABASE_URL", "error: DATABASE_URL must be set");
 
         let reminders =
             store.touch_and_recall("exit: 1\nstderr: error: DATABASE_URL must be set to compile");
         assert_eq!(reminders.len(), 1);
-        assert!(
-            reminders[0].contains("export DATABASE_URL first"),
-            "{}",
-            reminders[0]
-        );
+        assert!(reminders[0].contains("export DATABASE_URL first"), "{}", reminders[0]);
         // Unrelated output trips nothing.
-        assert!(
-            store
-                .touch_and_recall("exit: 0\nall tests passed")
-                .is_empty()
-        );
+        assert!(store.touch_and_recall("exit: 0\nall tests passed").is_empty());
 
         // A fresh store from the same file sees the persisted lesson.
         let reloaded = store2(dir.path());
@@ -622,10 +590,7 @@ mod tests {
             last_recalled_at: None,
         };
         let decayed = papercut.decayed_strength(now);
-        assert!(
-            (decayed - 1.0).abs() < 0.05,
-            "two half-lives: 4.0 -> ~1.0, got {decayed}"
-        );
+        assert!((decayed - 1.0).abs() < 0.05, "two half-lives: 4.0 -> ~1.0, got {decayed}");
         // And the cooldown grows correspondingly (weaker => rarer reminders).
         assert!(papercut.cooldown(now) > Duration::minutes(180));
     }

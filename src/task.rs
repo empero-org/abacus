@@ -22,11 +22,7 @@ impl TaskList {
     }
 
     pub fn snapshot(&self) -> Vec<Task> {
-        self.0
-            .read()
-            .ok()
-            .map(|tasks| tasks.clone())
-            .unwrap_or_default()
+        self.0.read().ok().map(|tasks| tasks.clone()).unwrap_or_default()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -34,10 +30,7 @@ impl TaskList {
     }
 
     fn create(&self, texts: Vec<String>) -> Result<Vec<Task>> {
-        let mut state = self
-            .0
-            .write()
-            .map_err(|_| anyhow::anyhow!("task lock poisoned"))?;
+        let mut state = self.0.write().map_err(|_| anyhow::anyhow!("task lock poisoned"))?;
         if state.len() + texts.len() > MAX_TASKS {
             bail!("task list would exceed the {MAX_TASKS} entry limit");
         }
@@ -61,13 +54,9 @@ impl TaskList {
     }
 
     fn update(&self, index: usize, done: bool) -> Result<Task> {
-        let mut state = self
-            .0
-            .write()
-            .map_err(|_| anyhow::anyhow!("task lock poisoned"))?;
-        let position = index
-            .checked_sub(1)
-            .context("task index is 1-based and must be at least 1")?;
+        let mut state = self.0.write().map_err(|_| anyhow::anyhow!("task lock poisoned"))?;
+        let position =
+            index.checked_sub(1).context("task index is 1-based and must be at least 1")?;
         let task = state.get_mut(position).context("no task at that index")?;
         task.done = done;
         Ok(task.clone())
@@ -82,12 +71,7 @@ impl TaskList {
             .iter()
             .enumerate()
             .map(|(index, task)| {
-                format!(
-                    "{}. [{}] {}",
-                    index + 1,
-                    if task.done { 'x' } else { ' ' },
-                    task.text
-                )
+                format!("{}. [{}] {}", index + 1, if task.done { 'x' } else { ' ' }, task.text)
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -168,11 +152,7 @@ impl TaskList {
         }
         let args: Args = serde_json::from_str(arguments)?;
         let added = self.create(args.tasks)?;
-        Ok(format!(
-            "Created {} task(s).\n{}",
-            added.len(),
-            render_tasks(&self.snapshot())
-        ))
+        Ok(format!("Created {} task(s).\n{}", added.len(), render_tasks(&self.snapshot())))
     }
 
     fn update_from_args(&self, arguments: &str) -> Result<String> {
@@ -196,12 +176,7 @@ fn render_tasks(tasks: &[Task]) -> String {
         .iter()
         .enumerate()
         .map(|(index, task)| {
-            format!(
-                "{}. [{}] {}",
-                index + 1,
-                if task.done { 'x' } else { ' ' },
-                task.text
-            )
+            format!("{}. [{}] {}", index + 1, if task.done { 'x' } else { ' ' }, task.text)
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -221,8 +196,7 @@ mod tests {
     #[test]
     fn task_lifecycle_create_update_and_render() {
         let list = TaskList::default();
-        list.create_from_args(r#"{"tasks":["write tests","run lint"]}"#)
-            .unwrap();
+        list.create_from_args(r#"{"tasks":["write tests","run lint"]}"#).unwrap();
         assert!(list.prompt_context().contains("1. [ ] write tests"));
         list.update_from_args(r#"{"index":1,"done":true}"#).unwrap();
         assert!(list.prompt_context().contains("1. [x] write tests"));

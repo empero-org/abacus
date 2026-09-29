@@ -50,21 +50,12 @@ async fn a_searxng_instance_answers_and_is_asked_for_json() {
 
     let rendered = config.search("tokio signal handler", 2).await.unwrap();
     assert!(rendered.contains("signal-hook"), "{rendered}");
-    assert!(
-        rendered.contains("https://docs.rs/tokio/latest/tokio/signal/"),
-        "{rendered}"
-    );
-    assert!(
-        !rendered.contains("third result"),
-        "max_results is honoured: {rendered}"
-    );
+    assert!(rendered.contains("https://docs.rs/tokio/latest/tokio/signal/"), "{rendered}");
+    assert!(!rendered.contains("third result"), "max_results is honoured: {rendered}");
 
     let request = seen.lock().unwrap().clone();
     assert!(request.contains("format=json"), "asks for JSON: {request}");
-    assert!(
-        request.contains("GET /search?"),
-        "no doubled slash: {request}"
-    );
+    assert!(request.contains("GET /search?"), "no doubled slash: {request}");
 }
 
 /// SearXNG ships with the JSON format disabled, so this is the mistake users
@@ -73,15 +64,9 @@ async fn a_searxng_instance_answers_and_is_asked_for_json() {
 /// serving scraped results would leave a broken instance broken indefinitely.
 #[tokio::test]
 async fn an_instance_without_json_enabled_says_exactly_that() {
-    let (url, _seen) = instance(
-        "<!DOCTYPE html><html><body>results</body></html>",
-        "text/html",
-    )
-    .await;
-    let settings = SearchSettings {
-        instance_url: Some(url),
-        ..SearchSettings::default()
-    };
+    let (url, _seen) =
+        instance("<!DOCTYPE html><html><body>results</body></html>", "text/html").await;
+    let settings = SearchSettings { instance_url: Some(url), ..SearchSettings::default() };
     let config = settings.resolve_with(|_| None);
     // The chain is searxng then bing; with no network in CI both may miss, so
     // assert on the diagnostic rather than on results arriving.
@@ -89,9 +74,6 @@ async fn an_instance_without_json_enabled_says_exactly_that() {
         Ok(rendered) => rendered,
         Err(error) => format!("{error:#}"),
     };
-    assert!(
-        rendered.contains("settings.yml"),
-        "names the fix: {rendered}"
-    );
+    assert!(rendered.contains("settings.yml"), "names the fix: {rendered}");
     assert!(rendered.contains("json"), "{rendered}");
 }

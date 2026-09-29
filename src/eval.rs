@@ -154,10 +154,8 @@ pub fn discover(workspace: &Path, filter: Option<&str>) -> Result<Vec<EvalTask>>
         if !manifest.is_file() {
             continue;
         }
-        let name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let name =
+            path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
         if let Some(filter) = filter
             && !name.contains(filter)
         {
@@ -167,11 +165,7 @@ pub fn discover(workspace: &Path, filter: Option<&str>) -> Result<Vec<EvalTask>>
             .with_context(|| format!("read {}", manifest.display()))?;
         let file: TaskFile =
             toml::from_str(&raw).with_context(|| format!("parse {}", manifest.display()))?;
-        tasks.push(EvalTask {
-            name,
-            root: path,
-            file,
-        });
+        tasks.push(EvalTask { name, root: path, file });
     }
     if tasks.is_empty() {
         bail!("no eval tasks matched");
@@ -298,11 +292,7 @@ async fn run_once(
     run_root: &Path,
     model_override: Option<&str>,
 ) -> Result<RunOutcome> {
-    let label = format!(
-        "{}-{}-{repetition}",
-        task.name,
-        if state_on { "on" } else { "off" }
-    );
+    let label = format!("{}-{}-{repetition}", task.name, if state_on { "on" } else { "off" });
     let case_root = run_root.join(&label);
     let workspace = case_root.join("workspace");
     std::fs::create_dir_all(&workspace)
@@ -440,20 +430,13 @@ async fn run_once(
                 });
             }
             AgentEvent::Done { messages, .. } => {
-                assistant_steps = messages
-                    .iter()
-                    .filter(|message| message["role"] == "assistant")
-                    .count();
+                assistant_steps =
+                    messages.iter().filter(|message| message["role"] == "assistant").count();
                 break;
             }
-            AgentEvent::Failed {
-                error: failure,
-                messages,
-            } => {
-                assistant_steps = messages
-                    .iter()
-                    .filter(|message| message["role"] == "assistant")
-                    .count();
+            AgentEvent::Failed { error: failure, messages } => {
+                assistant_steps =
+                    messages.iter().filter(|message| message["role"] == "assistant").count();
                 error = Some(failure);
                 break;
             }
@@ -507,25 +490,14 @@ async fn run_check(task: &EvalTask, workspace: &Path) -> Result<(bool, String)> 
     let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
     combined.push_str(&String::from_utf8_lossy(&output.stderr));
     let passed = output.status.success();
-    Ok((
-        passed,
-        if passed {
-            String::new()
-        } else {
-            truncate(&combined, 2_000)
-        },
-    ))
+    Ok((passed, if passed { String::new() } else { truncate(&combined, 2_000) }))
 }
 
 fn truncate(text: &str, limit: usize) -> String {
     if text.chars().count() <= limit {
         return text.trim().to_owned();
     }
-    let mut boundary = text
-        .char_indices()
-        .nth(limit)
-        .map(|(index, _)| index)
-        .unwrap_or(text.len());
+    let mut boundary = text.char_indices().nth(limit).map(|(index, _)| index).unwrap_or(text.len());
     while !text.is_char_boundary(boundary) {
         boundary -= 1;
     }
@@ -599,10 +571,7 @@ fn print_summary(outcomes: &[RunOutcome], repeat: usize, state: EvalState) {
     }
 
     println!("\n{:-<72}", "");
-    println!(
-        "{:<28} {:>10} {:>10} {:>10} {:>10}",
-        "task", "state", "pass", "calls", "tokens"
-    );
+    println!("{:<28} {:>10} {:>10} {:>10} {:>10}", "task", "state", "pass", "calls", "tokens");
     println!("{:-<72}", "");
     for name in &names {
         for arm in ["on", "off"] {
@@ -627,14 +596,9 @@ fn print_summary(outcomes: &[RunOutcome], repeat: usize, state: EvalState) {
     println!("{:-<72}", "");
 
     let rate = |arm: &str| -> (usize, usize) {
-        let runs: Vec<&RunOutcome> = outcomes
-            .iter()
-            .filter(|outcome| outcome.state == arm)
-            .collect();
-        (
-            runs.iter().filter(|outcome| outcome.passed).count(),
-            runs.len(),
-        )
+        let runs: Vec<&RunOutcome> =
+            outcomes.iter().filter(|outcome| outcome.state == arm).collect();
+        (runs.iter().filter(|outcome| outcome.passed).count(), runs.len())
     };
     if state == EvalState::Both {
         let (on_passed, on_total) = rate("on");
@@ -666,12 +630,7 @@ mod tests {
     #[test]
     fn discovers_and_parses_tasks_with_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        write_task(
-            dir.path(),
-            "fix-importer",
-            "prompt = \"fix it\"\n",
-            "exit 0\n",
-        );
+        write_task(dir.path(), "fix-importer", "prompt = \"fix it\"\n", "exit 0\n");
         let tasks = discover(dir.path(), None).unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].name, "fix-importer");
@@ -699,24 +658,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // deny_unknown_fields: a typo'd key must fail loudly rather than
         // silently score a task that is not the one that was written.
-        write_task(
-            dir.path(),
-            "typo",
-            "prompt = \"x\"\nmax_step = 3\n",
-            "exit 0\n",
-        );
+        write_task(dir.path(), "typo", "prompt = \"x\"\nmax_step = 3\n", "exit 0\n");
         assert!(discover(dir.path(), None).is_err());
     }
 
     #[test]
     fn unknown_mode_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
-        write_task(
-            dir.path(),
-            "weird",
-            "prompt = \"x\"\nmode = \"turbo\"\n",
-            "exit 0\n",
-        );
+        write_task(dir.path(), "weird", "prompt = \"x\"\nmode = \"turbo\"\n", "exit 0\n");
         let tasks = discover(dir.path(), None).unwrap();
         assert!(tasks[0].mode().is_err());
     }
@@ -731,10 +680,7 @@ mod tests {
         let destination = dir.path().join("dst");
         std::fs::create_dir_all(&destination).unwrap();
         copy_tree(&source, &destination).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(destination.join("top.txt")).unwrap(),
-            "top"
-        );
+        assert_eq!(std::fs::read_to_string(destination.join("top.txt")).unwrap(), "top");
         assert_eq!(
             std::fs::read_to_string(destination.join("nested/deep/leaf.txt")).unwrap(),
             "leaf"
@@ -744,18 +690,8 @@ mod tests {
     #[tokio::test]
     async fn check_script_decides_pass_and_keeps_output_only_on_failure() {
         let dir = tempfile::tempdir().unwrap();
-        write_task(
-            dir.path(),
-            "passing",
-            "prompt = \"x\"\n",
-            "echo looks-good\nexit 0\n",
-        );
-        write_task(
-            dir.path(),
-            "failing",
-            "prompt = \"x\"\n",
-            "echo what-went-wrong >&2\nexit 1\n",
-        );
+        write_task(dir.path(), "passing", "prompt = \"x\"\n", "echo looks-good\nexit 0\n");
+        write_task(dir.path(), "failing", "prompt = \"x\"\n", "echo what-went-wrong >&2\nexit 1\n");
         let workspace = dir.path().join("ws");
         std::fs::create_dir_all(&workspace).unwrap();
         let tasks = discover(dir.path(), None).unwrap();
@@ -775,12 +711,7 @@ mod tests {
     #[tokio::test]
     async fn a_check_script_reads_the_mutated_workspace() {
         let dir = tempfile::tempdir().unwrap();
-        write_task(
-            dir.path(),
-            "reads-workspace",
-            "prompt = \"x\"\n",
-            "test -f done.txt\n",
-        );
+        write_task(dir.path(), "reads-workspace", "prompt = \"x\"\n", "test -f done.txt\n");
         let workspace = dir.path().join("ws");
         std::fs::create_dir_all(&workspace).unwrap();
         let task = &discover(dir.path(), None).unwrap()[0];
@@ -817,18 +748,13 @@ mod tests {
         let tasks = discover(repo, None).expect("shipped eval suite must parse");
         assert!(!tasks.is_empty());
         for task in &tasks {
-            assert!(
-                task.root.join("check.sh").is_file(),
-                "task `{}` has no check.sh",
-                task.name
-            );
+            assert!(task.root.join("check.sh").is_file(), "task `{}` has no check.sh", task.name);
             assert!(
                 !task.file.prompt.trim().is_empty(),
                 "task `{}` has an empty prompt",
                 task.name
             );
-            task.mode()
-                .unwrap_or_else(|error| panic!("task `{}`: {error}", task.name));
+            task.mode().unwrap_or_else(|error| panic!("task `{}`: {error}", task.name));
         }
     }
 

@@ -79,9 +79,7 @@ impl Session {
         self.updated_at = Utc::now();
         if self.title == "New session"
             && let Some(prompt) = self.messages.iter().find_map(|message| {
-                (message["role"] == "user")
-                    .then(|| message["content"].as_str())
-                    .flatten()
+                (message["role"] == "user").then(|| message["content"].as_str()).flatten()
             })
         {
             self.title = title_from_prompt(prompt);
@@ -138,10 +136,7 @@ pub struct SessionStore {
 impl SessionStore {
     pub fn new(paths: &AbacusPaths, workspace: PathBuf) -> Self {
         let directory = paths.sessions_dir.join(workspace_key(&workspace));
-        Self {
-            directory,
-            workspace,
-        }
+        Self { directory, workspace }
     }
 
     pub fn create(&self, profile: String, model: String, messages: Vec<Value>) -> Result<Session> {
@@ -244,11 +239,7 @@ impl SessionStore {
                 // Legacy sessions predate persisted totals. The file's size
                 // stands in for the transcript's size, which is what the old
                 // estimate measured anyway — without re-encoding it to find out.
-                let tokens_used = if tokens_estimated {
-                    size / 4
-                } else {
-                    header.tokens_used
-                };
+                let tokens_used = if tokens_estimated { size / 4 } else { header.tokens_used };
                 SessionUsage {
                     id: header.id,
                     model: header.model,
@@ -455,11 +446,7 @@ mod tests {
         let paths = AbacusPaths::under(dir.path().join("home"));
         let store = SessionStore::new(&paths, workspace.canonicalize().unwrap());
         let mut session = store
-            .create(
-                "local".into(),
-                "model".into(),
-                vec![json!({"role":"system","content":"x"})],
-            )
+            .create("local".into(), "model".into(), vec![json!({"role":"system","content":"x"})])
             .unwrap();
         session.update_messages(vec![
             json!({"role":"system","content":"x"}),
@@ -535,12 +522,7 @@ mod tests {
         // The valid-but-unanswered call gained a synthetic result right after it.
         assert_eq!(messages[1]["role"], "tool");
         assert_eq!(messages[1]["tool_call_id"], "unanswered");
-        assert!(
-            messages[1]["content"]
-                .as_str()
-                .unwrap()
-                .contains("interrupted")
-        );
+        assert!(messages[1]["content"].as_str().unwrap().contains("interrupted"));
         // The ghost result is gone.
         assert!(!messages.iter().any(|m| m["tool_call_id"] == "ghost"));
     }

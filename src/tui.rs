@@ -107,42 +107,21 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/mode", "Set auto, plan, or build mode"),
     ("/plan", "Toggle plan pin"),
     ("/thinking", "Show or hide the model's reasoning"),
-    (
-        "/effort",
-        "Set reasoning effort: minimal, low, medium, high, xhigh, max, auto",
-    ),
-    (
-        "/btw",
-        "Note a side question without derailing the running turn",
-    ),
+    ("/effort", "Set reasoning effort: minimal, low, medium, high, xhigh, max, auto"),
+    ("/btw", "Note a side question without derailing the running turn"),
     ("/model", "Inspect or switch model"),
-    (
-        "/models",
-        "Browse every model and assign the roles they serve",
-    ),
-    (
-        "/profile",
-        "List, switch, rename, or delete a provider profile",
-    ),
-    (
-        "/providers",
-        "Pin which upstream providers may serve the model",
-    ),
+    ("/models", "Browse every model and assign the roles they serve"),
+    ("/profile", "List, switch, rename, or delete a provider profile"),
+    ("/providers", "Pin which upstream providers may serve the model"),
     ("/usage", "View local usage and activity"),
     ("/sessions", "Browse saved sessions"),
     ("/new", "Start a new session"),
-    (
-        "/fork",
-        "Fork the session — conversation continues in a new one",
-    ),
+    ("/fork", "Fork the session — conversation continues in a new one"),
     ("/compact", "Compact conversation context"),
     ("/repair", "Fix corrupted session history"),
     ("/papercuts", "List or delete recorded lessons"),
     ("/memories", "List or delete stored memories"),
-    (
-        "/harness",
-        "Inspect the continual harness, its log, and revert",
-    ),
+    ("/harness", "Inspect the continual harness, its log, and revert"),
     ("/refine", "Update the harness from this conversation now"),
     ("/skills", "Browse Agent Skills"),
     ("/plugins", "Inspect plugins"),
@@ -278,23 +257,13 @@ impl PendingUserQuestion {
             if *on {
                 // Strip the trailing " — description" added for display, keeping
                 // just the option label so the LLM sees clean identifiers.
-                let raw = self.options[index]
-                    .split(" — ")
-                    .next()
-                    .unwrap_or(&self.options[index]);
+                let raw = self.options[index].split(" — ").next().unwrap_or(&self.options[index]);
                 selected_labels.push(raw.to_owned());
             }
         }
         let custom_text = self.custom.text();
-        let custom = if custom_text.trim().is_empty() {
-            None
-        } else {
-            Some(custom_text)
-        };
-        crate::agent::UserAnswer {
-            selected_labels,
-            custom_text: custom,
-        }
+        let custom = if custom_text.trim().is_empty() { None } else { Some(custom_text) };
+        crate::agent::UserAnswer { selected_labels, custom_text: custom }
     }
 }
 
@@ -873,14 +842,9 @@ impl App {
         if config.yes {
             settings.ui.permission_mode = PermissionMode::AlwaysApprove;
         }
-        let initial_tokens = session
-            .as_ref()
-            .map(|session| session.tokens_used)
-            .unwrap_or(0);
-        let session_initial_active_secs = session
-            .as_ref()
-            .map(|session| session.active_secs)
-            .unwrap_or(0);
+        let initial_tokens = session.as_ref().map(|session| session.tokens_used).unwrap_or(0);
+        let session_initial_active_secs =
+            session.as_ref().map(|session| session.active_secs).unwrap_or(0);
         let tokens = Arc::new(crate::provider::TokenLedger::new(initial_tokens));
         let provider = Provider::with_tokens(&config, tokens.clone())?;
         let aux_provider = aux_provider_for(&config, &provider);
@@ -891,18 +855,11 @@ impl App {
         let hive = crate::hive::HiveHandle::load(config.paths.hive_file.clone());
         let modes = crate::modes::ModeCoach::load(config.paths.modes_file.clone());
         let tasks = TaskList::new(
-            session
-                .as_ref()
-                .map(|session| session.tasks.clone())
-                .unwrap_or_default(),
+            session.as_ref().map(|session| session.tasks.clone()).unwrap_or_default(),
         );
-        let compaction = session
-            .as_ref()
-            .and_then(|session| session.compaction.clone())
-            .unwrap_or_default();
-        let ralph_loop = session
-            .as_ref()
-            .and_then(|session| session.ralph_loop.clone());
+        let compaction =
+            session.as_ref().and_then(|session| session.compaction.clone()).unwrap_or_default();
+        let ralph_loop = session.as_ref().and_then(|session| session.ralph_loop.clone());
         let messages = session
             .as_ref()
             .map(|value| value.messages.clone())
@@ -913,10 +870,7 @@ impl App {
             entries.push(Entry::new(EntryKind::System, "Session resumed.".to_owned()));
         }
         for diagnostic in services.diagnostics() {
-            entries.push(Entry::new(
-                EntryKind::Error,
-                format!("Extension warning: {diagnostic}"),
-            ));
+            entries.push(Entry::new(EntryKind::Error, format!("Extension warning: {diagnostic}")));
         }
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (feedback_tx, feedback_rx) = mpsc::unbounded_channel();
@@ -978,10 +932,7 @@ impl App {
                 {
                     let _ = std::fs::remove_file(store.path_for(summary.id));
                     let _ = std::fs::remove_file(
-                        config
-                            .paths
-                            .traces_dir
-                            .join(format!("{}.jsonl", summary.id)),
+                        config.paths.traces_dir.join(format!("{}.jsonl", summary.id)),
                     );
                 }
             }
@@ -1160,10 +1111,7 @@ impl App {
                 && !call.expanded
                 && crate::agent::tool_reads_only(&call.name)
         };
-        let current_fits = self.entries[count - 1]
-            .tool
-            .as_ref()
-            .is_some_and(explorable);
+        let current_fits = self.entries[count - 1].tool.as_ref().is_some_and(explorable);
         let previous = self.entries[count - 2].tool.as_ref();
         let previous_is_group =
             previous.is_some_and(|call| call.name == "explored" && call.status == ToolStatus::Ok);
@@ -1182,11 +1130,7 @@ impl App {
                 "── {} {} ──\n{}",
                 target.name,
                 target.summary,
-                if target.full.is_empty() {
-                    "(no output)"
-                } else {
-                    &target.full
-                }
+                if target.full.is_empty() { "(no output)" } else { &target.full }
             );
             target.summary = format!("{} {}", explore_verb(&target.name), target.summary);
             target.name = "explored".to_owned();
@@ -1195,23 +1139,14 @@ impl App {
             target.output = String::new();
         }
         target.summary = ui::truncate(
-            &format!(
-                "{} · {} {}",
-                target.summary,
-                explore_verb(&current.name),
-                current.summary
-            ),
+            &format!("{} · {} {}", target.summary, explore_verb(&current.name), current.summary),
             200,
         );
         target.full.push_str(&format!(
             "\n\n── {} {} ──\n{}",
             current.name,
             current.summary,
-            if current.full.is_empty() {
-                "(no output)"
-            } else {
-                &current.full
-            }
+            if current.full.is_empty() { "(no output)" } else { &current.full }
         ));
         if target.full.len() > ui::MAX_RETAINED_OUTPUT {
             let mut boundary = ui::MAX_RETAINED_OUTPUT;
@@ -1382,18 +1317,13 @@ impl App {
                     let preview = tool_preview(&output);
                     // The full tool result (not the preview) lands in the
                     // messages array; estimate its JSON size for the live ctx %.
-                    self.ctx_chars = self
-                        .ctx_chars
-                        .saturating_add(output.len() + name.len() + 80);
+                    self.ctx_chars = self.ctx_chars.saturating_add(output.len() + name.len() + 80);
                     let duration_ms = self
                         .tool_started
                         .take()
                         .map(|started| started.elapsed().as_millis() as u64);
-                    let status = if tool_failed(&output) {
-                        ToolStatus::Failed
-                    } else {
-                        ToolStatus::Ok
-                    };
+                    let status =
+                        if tool_failed(&output) { ToolStatus::Failed } else { ToolStatus::Ok };
                     // Settle the row the matching `ToolStarted` opened, keeping
                     // the argument summary it already shows rather than
                     // replacing the row wholesale.
@@ -1562,10 +1492,7 @@ impl App {
         // finished handle with an empty event queue is the only signal.
         if let Some(handle) = &self.running
             && handle.is_finished()
-            && matches!(
-                self.event_rx.try_recv(),
-                Err(mpsc::error::TryRecvError::Empty)
-            )
+            && matches!(self.event_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty))
         {
             self.running = None;
             crate::recovery::clear();
@@ -1614,11 +1541,7 @@ impl App {
             tool: request.tool,
             summary: request.summary,
             details: request.details,
-            view: if diff.is_some() {
-                ApprovalView::Unified
-            } else {
-                ApprovalView::Raw
-            },
+            view: if diff.is_some() { ApprovalView::Unified } else { ApprovalView::Raw },
             diff,
             respond: request.respond,
         });
@@ -1677,8 +1600,7 @@ impl App {
                 let prompt = prompt.trim().to_owned();
                 self.record_history(&prompt);
                 self.push_entry(Entry::new(EntryKind::User, prompt.clone()));
-                self.injections
-                    .push(crate::agent::Injection::UserMessage(prompt));
+                self.injections.push(crate::agent::Injection::UserMessage(prompt));
                 self.follow = true;
                 self.status = "steering · delivered after the current step".to_owned();
             }
@@ -1700,14 +1622,12 @@ impl App {
         let command_name = command.strip_prefix('/');
         let extension_prompt = command_name.and_then(|name| {
             let skills = self.services.skills.read().expect("skill registry lock");
-            skills
-                .get(name)
-                .map(|_| skills.invocation(name, argument))
-                .or_else(|| {
-                    self.services.plugins.command(name).map(|plugin_command| {
-                        Ok(plugin_command.prompt.replace("{{args}}", argument))
-                    })
-                })
+            skills.get(name).map(|_| skills.invocation(name, argument)).or_else(|| {
+                self.services
+                    .plugins
+                    .command(name)
+                    .map(|plugin_command| Ok(plugin_command.prompt.replace("{{args}}", argument)))
+            })
         });
         let effective_prompt = match extension_prompt {
             Some(Ok(prompt)) => prompt,
@@ -1726,10 +1646,8 @@ impl App {
     /// is discarded from history (and from the saved session — this is a
     /// fork, not an undo stack). Repeating steps back one prompt at a time.
     fn rewind_to_previous_prompt(&mut self) {
-        let Some(entry_index) = self
-            .entries
-            .iter()
-            .rposition(|entry| entry.kind == EntryKind::User)
+        let Some(entry_index) =
+            self.entries.iter().rposition(|entry| entry.kind == EntryKind::User)
         else {
             self.status = "nothing to rewind".to_owned();
             return;
@@ -1776,11 +1694,8 @@ impl App {
 
     /// Copy the most recent assistant reply — the thing most often wanted.
     fn yank_last_reply(&mut self) {
-        let Some(entry) = self
-            .entries
-            .iter()
-            .rev()
-            .find(|entry| entry.kind == EntryKind::Assistant)
+        let Some(entry) =
+            self.entries.iter().rev().find(|entry| entry.kind == EntryKind::Assistant)
         else {
             self.status = "no reply to copy yet".to_owned();
             return;
@@ -1877,9 +1792,7 @@ impl App {
             &model_prompt,
         );
         let message = json!({"role": "user", "content": content});
-        self.ctx_chars = self
-            .ctx_chars
-            .saturating_add(crate::agent::message_chars_one(&message));
+        self.ctx_chars = self.ctx_chars.saturating_add(crate::agent::message_chars_one(&message));
         self.messages.push(message);
         self.persist_session();
         // The session now exists (first prompt creates it), so recovery can
@@ -1979,8 +1892,7 @@ impl App {
                     EntryKind::System,
                     format!("Noted, by the way: {note}"),
                 ));
-                self.injections
-                    .push(crate::agent::Injection::SideNote(note));
+                self.injections.push(crate::agent::Injection::SideNote(note));
                 self.status = "noted · delivered after the current step".to_owned();
                 self.follow = true;
                 true
@@ -2004,10 +1916,8 @@ impl App {
                     self.follow = true;
                     return true;
                 }
-                let cleared = matches!(
-                    argument.to_ascii_lowercase().as_str(),
-                    "auto" | "default" | "unset"
-                );
+                let cleared =
+                    matches!(argument.to_ascii_lowercase().as_str(), "auto" | "default" | "unset");
                 let parsed = crate::config::ReasoningEffort::parse(argument);
                 if !cleared && parsed.is_none() {
                     self.push_entry(Entry::new(
@@ -2079,9 +1989,8 @@ impl App {
                 let argument = argument.trim();
                 if argument.is_empty() {
                     let profile = self.settings.profiles.get(&self.settings.default_profile);
-                    let pinned = profile
-                        .map(|profile| profile.providers.clone())
-                        .unwrap_or_default();
+                    let pinned =
+                        profile.map(|profile| profile.providers.clone()).unwrap_or_default();
                     let body = if pinned.is_empty() {
                         "No providers pinned — the endpoint chooses.".to_owned()
                     } else {
@@ -2435,10 +2344,8 @@ impl App {
                     ));
                 } else {
                     let now = chrono::Utc::now();
-                    let mut lines = vec![format!(
-                        "{} papercut(s) for this workspace:",
-                        snapshot.len()
-                    )];
+                    let mut lines =
+                        vec![format!("{} papercut(s) for this workspace:", snapshot.len())];
                     for (index, papercut) in snapshot.iter().enumerate() {
                         lines.push(format!(
                             "{}. {} — tripped {}x, recalled {}x, strength {:.1}\n   fix: {}\n   tripwires: {}",
@@ -2528,10 +2435,7 @@ impl App {
                 true
             }
             value if value.starts_with('/') => {
-                self.push_entry(Entry::new(
-                    EntryKind::Error,
-                    format!("Unknown command: {value}"),
-                ));
+                self.push_entry(Entry::new(EntryKind::Error, format!("Unknown command: {value}")));
                 self.follow = true;
                 true
             }
@@ -2674,9 +2578,8 @@ impl App {
         session.compaction = Some(self.compaction.clone());
         session.ralph_loop = self.ralph_loop.clone();
         session.tokens_used = self.provider.tokens_used();
-        session.active_secs = self
-            .session_initial_active_secs
-            .saturating_add(self.started.elapsed().as_secs());
+        session.active_secs =
+            self.session_initial_active_secs.saturating_add(self.started.elapsed().as_secs());
         // A fresh screen that has never received a prompt is not a real session
         // yet — keep it out of storage and out of the trace set. The first
         // `start_turn` persists immediately, before calling the model.
@@ -2709,9 +2612,7 @@ impl App {
         if idle_since.elapsed() < crate::sync::AUTO_PUSH_IDLE {
             return;
         }
-        if self
-            .last_auto_push
-            .is_some_and(|pushed| pushed.elapsed() < crate::sync::AUTO_PUSH_IDLE)
+        if self.last_auto_push.is_some_and(|pushed| pushed.elapsed() < crate::sync::AUTO_PUSH_IDLE)
         {
             return;
         }
@@ -2754,10 +2655,8 @@ impl App {
                 None,
             )
         } else if argument == "pause" {
-            let result = self
-                .goal
-                .pause()
-                .map(|_| "Goal paused. Use /goal resume when ready.".to_owned());
+            let result =
+                self.goal.pause().map(|_| "Goal paused. Use /goal resume when ready.".to_owned());
             if result.is_ok()
                 && let Some(handle) = self.running.take()
             {
@@ -2780,10 +2679,7 @@ impl App {
                 Err(error) => (Err(error), None),
             }
         } else if argument == "clear" {
-            (
-                self.goal.set(None).map(|()| "Goal cleared.".to_owned()),
-                None,
-            )
+            (self.goal.set(None).map(|()| "Goal cleared.".to_owned()), None)
         } else if matches!(argument, "done" | "complete") {
             (
                 Ok(self
@@ -2794,9 +2690,7 @@ impl App {
             )
         } else if let Some(objective) = argument.strip_prefix("edit ") {
             (
-                self.goal
-                    .edit(objective)
-                    .map(|goal| format!("Goal updated: {}", goal.objective)),
+                self.goal.edit(objective).map(|goal| format!("Goal updated: {}", goal.objective)),
                 None,
             )
         } else {
@@ -2810,10 +2704,9 @@ impl App {
         };
         match result {
             Ok(text) => self.push_entry(Entry::new(EntryKind::System, text)),
-            Err(error) => self.push_entry(Entry::new(
-                EntryKind::Error,
-                format!("Goal error: {error:#}"),
-            )),
+            Err(error) => {
+                self.push_entry(Entry::new(EntryKind::Error, format!("Goal error: {error:#}")))
+            }
         }
         self.persist_session();
         self.follow = true;
@@ -2948,10 +2841,7 @@ impl App {
         }
         self.persist_session();
         self.status = "Ralph loop cancelled".to_owned();
-        self.push_entry(Entry::new(
-            EntryKind::System,
-            "Ralph loop cancelled by user.".to_owned(),
-        ));
+        self.push_entry(Entry::new(EntryKind::System, "Ralph loop cancelled by user.".to_owned()));
         self.follow = true;
     }
 
@@ -3008,10 +2898,7 @@ impl App {
                     return;
                 }
             };
-            fork.title = format!("(fork) {}", current.title)
-                .chars()
-                .take(100)
-                .collect();
+            fork.title = format!("(fork) {}", current.title).chars().take(100).collect();
             // A fork is a branch of the work, so the session state that shapes
             // it carries over; time and token accounting start fresh.
             fork.goal = current.goal.clone();
@@ -3067,11 +2954,8 @@ impl App {
                 active_secs: elapsed.as_secs(),
             }]
         };
-        self.usage_panel = Some(UsagePanel {
-            records,
-            tab: UsageTab::Overview,
-            range: UsageRange::AllTime,
-        });
+        self.usage_panel =
+            Some(UsagePanel { records, tab: UsageTab::Overview, range: UsageRange::AllTime });
     }
 
     fn list_sessions(&mut self) {
@@ -3097,10 +2981,7 @@ impl App {
                                 format!(
                                     "{}  {}  {}",
                                     &session.id.to_string()[..8],
-                                    session
-                                        .updated_at
-                                        .with_timezone(&Local)
-                                        .format("%m-%d %H:%M"),
+                                    session.updated_at.with_timezone(&Local).format("%m-%d %H:%M"),
                                     session.title
                                 ),
                                 session.id.to_string(),
@@ -3134,11 +3015,7 @@ impl App {
                 self.set_entries(entries_from_messages(&self.messages));
                 self.push_entry(Entry::new(
                     EntryKind::System,
-                    format!(
-                        "Resumed {} ({})",
-                        session.title,
-                        &session.id.to_string()[..8]
-                    ),
+                    format!("Resumed {} ({})", session.title, &session.id.to_string()[..8]),
                 ));
                 self.goal = GoalState::new(session.goal.clone());
                 self.tasks = TaskList::new(session.tasks.clone());
@@ -3182,10 +3059,7 @@ impl App {
         if argument.trim() == "raw" {
             self.open_raw_config();
         } else {
-            self.config_panel = Some(ConfigPanel {
-                selected: 0,
-                editing: None,
-            });
+            self.config_panel = Some(ConfigPanel { selected: 0, editing: None });
         }
     }
 
@@ -3254,10 +3128,7 @@ impl App {
         self.config.subagent_model = profile.role_model("subagent").map(str::to_owned);
         self.config.compaction_model = profile.role_model("compaction").map(str::to_owned);
         self.config.model = profile.model;
-        self.config.aux_model = profile
-            .aux_model
-            .clone()
-            .filter(|model| !model.trim().is_empty());
+        self.config.aux_model = profile.aux_model.clone().filter(|model| !model.trim().is_empty());
         self.config.reasoning_effort = profile.reasoning_effort;
         self.config.base_url = profile.base_url.trim_end_matches('/').to_owned();
         self.config.protocol = profile.protocol;
@@ -3295,11 +3166,7 @@ impl App {
             .as_deref()
             .and_then(|name| std::env::var(name).ok())
             .or_else(|| self.credentials.keys.get(&profile_name).cloned())
-            .or_else(|| {
-                (profile_name == prior_profile)
-                    .then_some(prior_key)
-                    .flatten()
-            });
+            .or_else(|| (profile_name == prior_profile).then_some(prior_key).flatten());
         self.config.max_steps = self.settings.agent.max_steps.clamp(1, 128);
         self.config.tool_output_limit = self.settings.agent.tool_output_limit.clamp(2_000, 200_000);
         self.config.token_compression = self.settings.agent.token_compression;
@@ -3325,8 +3192,7 @@ impl App {
         }
         let always = self.settings.ui.permission_mode == PermissionMode::AlwaysApprove;
         self.config.yes = always;
-        self.allow_mutations
-            .store(always, std::sync::atomic::Ordering::Relaxed);
+        self.allow_mutations.store(always, std::sync::atomic::Ordering::Relaxed);
         if !self.settings.ui.vim_mode {
             self.mode = InputMode::Insert;
         }
@@ -3371,11 +3237,7 @@ impl App {
             let mut body = format!(
                 "Theme: {} (showing {}).\nSwitch with /theme dark, /theme light, /theme auto, or /theme <name>.",
                 self.settings.ui.theme.label(),
-                if resolved == ThemeMode::Dark {
-                    "dark"
-                } else {
-                    "light"
-                },
+                if resolved == ThemeMode::Dark { "dark" } else { "light" },
             );
             body.push_str(&format!(
                 "\n\nTheme files live in {}.",
@@ -3419,10 +3281,7 @@ impl App {
     /// Write the active palette out as a theme file to edit.
     fn export_theme(&mut self, name: &str) {
         let name = if name.is_empty() { "custom" } else { name };
-        if !name
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
-        {
+        if !name.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')) {
             self.push_entry(Entry::new(
                 EntryKind::Error,
                 "Theme names may use letters, digits, `.`, `_`, and `-`.".to_owned(),
@@ -3618,10 +3477,7 @@ impl App {
     /// Fetch a profile's model list, unless it is already loaded or in flight.
     fn fetch_catalog(&mut self, profile_id: &str) {
         use crate::model_hub::Catalog;
-        if matches!(
-            self.catalogs.get(profile_id),
-            Some(Catalog::Loading | Catalog::Ready(_))
-        ) {
+        if matches!(self.catalogs.get(profile_id), Some(Catalog::Loading | Catalog::Ready(_))) {
             return;
         }
         let Some(profile) = self.settings.profiles.get(profile_id) else {
@@ -3640,13 +3496,9 @@ impl App {
         let api_key = if profile_id == self.settings.default_profile {
             self.config.api_key.clone()
         } else {
-            profile
-                .api_key_env
-                .as_deref()
-                .and_then(|name| std::env::var(name).ok())
+            profile.api_key_env.as_deref().and_then(|name| std::env::var(name).ok())
         };
-        self.catalogs
-            .insert(profile_id.to_owned(), Catalog::Loading);
+        self.catalogs.insert(profile_id.to_owned(), Catalog::Loading);
         let sender = self.catalog_tx.clone();
         let profile = profile_id.to_owned();
         tokio::spawn(async move {
@@ -3743,10 +3595,7 @@ impl App {
     }
 
     fn commit_config_edit(&mut self) {
-        let edit = self
-            .config_panel
-            .as_mut()
-            .and_then(|panel| panel.editing.take());
+        let edit = self.config_panel.as_mut().and_then(|panel| panel.editing.take());
         let Some((key, input)) = edit else {
             return;
         };
@@ -3801,17 +3650,17 @@ impl App {
             ConfigKey::Providers => self.active_profile_mut().map(|profile| {
                 profile.providers = crate::config::Routing::parse_order(&value);
             }),
-            ConfigKey::MaxSteps => value
-                .trim()
-                .parse::<usize>()
-                .context("max steps must be a number")
-                .and_then(|number| {
-                    if !(1..=128).contains(&number) {
-                        bail!("max steps must be between 1 and 128");
-                    }
-                    self.settings.agent.max_steps = number;
-                    Ok(())
-                }),
+            ConfigKey::MaxSteps => {
+                value.trim().parse::<usize>().context("max steps must be a number").and_then(
+                    |number| {
+                        if !(1..=128).contains(&number) {
+                            bail!("max steps must be between 1 and 128");
+                        }
+                        self.settings.agent.max_steps = number;
+                        Ok(())
+                    },
+                )
+            }
             // Blank returns the limit to auto-resolution; a value (with `k`/`m`
             // suffixes accepted) becomes a hard override sent to the provider.
             ConfigKey::ContextWindow => parse_optional_tokens(&value).and_then(|tokens| {
@@ -3885,16 +3734,12 @@ impl App {
                 .and_then(|value| value.reasoning_effort)
                 .map(|effort| effort.label().to_owned())
                 .unwrap_or_else(|| "auto".to_owned()),
-            ConfigKey::BaseUrl => profile
-                .map(|value| value.base_url.clone())
-                .unwrap_or_default(),
-            ConfigKey::Protocol => profile
-                .map(|value| format!("{:?}", value.protocol))
-                .unwrap_or_default(),
+            ConfigKey::BaseUrl => profile.map(|value| value.base_url.clone()).unwrap_or_default(),
+            ConfigKey::Protocol => {
+                profile.map(|value| format!("{:?}", value.protocol)).unwrap_or_default()
+            }
             ConfigKey::Providers => {
-                let pinned = profile
-                    .map(|profile| profile.providers.clone())
-                    .unwrap_or_default();
+                let pinned = profile.map(|profile| profile.providers.clone()).unwrap_or_default();
                 if pinned.is_empty() {
                     "any (endpoint chooses)".to_owned()
                 } else {
@@ -3917,10 +3762,7 @@ impl App {
                 {
                     "set · stored locally".to_owned()
                 } else if env.is_some() {
-                    format!(
-                        "not set · export {} or press enter",
-                        env.unwrap_or_default()
-                    )
+                    format!("not set · export {} or press enter", env.unwrap_or_default())
                 } else {
                     "not set".to_owned()
                 }
@@ -3928,11 +3770,7 @@ impl App {
             ConfigKey::Permission => format!("{:?}", self.settings.ui.permission_mode),
             ConfigKey::Theme => {
                 let resolved = self.settings.ui.theme.resolve();
-                let polarity = if resolved == ThemeMode::Dark {
-                    "dark"
-                } else {
-                    "light"
-                };
+                let polarity = if resolved == ThemeMode::Dark { "dark" } else { "light" };
                 match &self.settings.ui.theme {
                     crate::theme::ThemeChoice::Auto => format!("auto · {polarity}"),
                     other => other.label().to_owned(),
@@ -3994,12 +3832,10 @@ impl App {
             ConfigKey::TokenCompression => on_off(self.settings.agent.token_compression),
             ConfigKey::OneStream => on_off(self.settings.agent.one_stream),
             ConfigKey::CheckUpdates => on_off(self.settings.ui.check_updates),
-            ConfigKey::SafetyModel => if self.settings.ui.safety_uses_main {
-                "Main model"
-            } else {
-                "Auxiliary model"
+            ConfigKey::SafetyModel => {
+                if self.settings.ui.safety_uses_main { "Main model" } else { "Auxiliary model" }
+                    .to_owned()
             }
-            .to_owned(),
             ConfigKey::TraceLogging => match (&self.trace, self.settings.trace.enabled) {
                 (Some(trace), true) => format!("On · {} records", trace.steps()),
                 (None, true) => "On".to_owned(),
@@ -4077,21 +3913,11 @@ impl App {
             .profiles
             .iter()
             .map(|(id, profile)| {
-                let marker = if *id == self.settings.default_profile {
-                    "● "
-                } else {
-                    "  "
-                };
-                (
-                    format!("{marker}{id}  —  {}  ·  {}", profile.name, profile.model),
-                    id.clone(),
-                )
+                let marker = if *id == self.settings.default_profile { "● " } else { "  " };
+                (format!("{marker}{id}  —  {}  ·  {}", profile.name, profile.model), id.clone())
             })
             .collect::<Vec<_>>();
-        items.push((
-            "  + Add a provider…".to_owned(),
-            NEW_PROVIDER_SENTINEL.to_owned(),
-        ));
+        items.push(("  + Add a provider…".to_owned(), NEW_PROVIDER_SENTINEL.to_owned()));
         self.picker = Some(Picker {
             title: "profile".to_owned(),
             items,
@@ -4112,10 +3938,7 @@ impl App {
                     Some(name) => format!("  {name}"),
                     None => "  no key needed".to_owned(),
                 };
-                (
-                    format!("  {:<18}{:<32}{key}", preset.name, preset.hint),
-                    preset.id.to_owned(),
-                )
+                (format!("  {:<18}{:<32}{key}", preset.name, preset.hint), preset.id.to_owned())
             })
             .collect::<Vec<_>>();
         // Scripted endpoints from ~/.abacus/endpoints, so a YAML-defined
@@ -4207,10 +4030,7 @@ impl App {
         // Without one, persist-but-don't-apply and open the model field, the
         // same contract the preset path uses.
         if model.trim().is_empty() {
-            self.pending_provider = Some(PendingProvider {
-                profile: profile_id.clone(),
-                previous,
-            });
+            self.pending_provider = Some(PendingProvider { profile: profile_id.clone(), previous });
             if let Err(error) = self.settings.save(&self.config.paths) {
                 self.status = format!("could not add endpoint: {error:#}");
                 return;
@@ -4271,11 +4091,7 @@ impl App {
             return None;
         }
         let id = picker.items.get(picker.selected)?.1.clone();
-        if id == NEW_PROVIDER_SENTINEL {
-            None
-        } else {
-            Some(id)
-        }
+        if id == NEW_PROVIDER_SENTINEL { None } else { Some(id) }
     }
 
     fn begin_profile_rename(&mut self, id: &str) {
@@ -4287,10 +4103,7 @@ impl App {
         }
         let mut input = InputBuffer::new();
         input.insert_str(id);
-        picker.prompt = Some(PickerPrompt::Rename {
-            id: id.to_owned(),
-            input,
-        });
+        picker.prompt = Some(PickerPrompt::Rename { id: id.to_owned(), input });
     }
 
     fn begin_profile_delete(&mut self, id: &str) {
@@ -4326,11 +4139,8 @@ impl App {
         if self.settings.profiles.contains_key(&to) {
             bail!("a profile named `{to}` already exists");
         }
-        let mut profile = self
-            .settings
-            .profiles
-            .remove(from)
-            .context("that profile no longer exists")?;
+        let mut profile =
+            self.settings.profiles.remove(from).context("that profile no longer exists")?;
         if profile.name == from {
             profile.name = to.clone();
         }
@@ -4367,13 +4177,8 @@ impl App {
         self.credentials.keys.remove(id);
         self.credentials.save(&self.config.paths)?;
         if self.settings.default_profile == id {
-            let next = self
-                .settings
-                .profiles
-                .keys()
-                .next()
-                .cloned()
-                .context("no remaining profile")?;
+            let next =
+                self.settings.profiles.keys().next().cloned().context("no remaining profile")?;
             self.settings.default_profile = next;
         }
         if let Some(pending) = &self.pending_provider
@@ -4403,11 +4208,7 @@ impl App {
                 .profiles
                 .iter()
                 .map(|(id, profile)| {
-                    let marker = if *id == self.settings.default_profile {
-                        "●"
-                    } else {
-                        " "
-                    };
+                    let marker = if *id == self.settings.default_profile { "●" } else { " " };
                     format!("{marker} {id}  —  {}  ·  {}", profile.name, profile.model)
                 })
                 .collect::<Vec<_>>();
@@ -4485,11 +4286,7 @@ impl App {
             ),
         };
         // Never silently replace an existing profile of the same name.
-        let mut profile_id = if preset.is_some() {
-            id.to_owned()
-        } else {
-            "custom".to_owned()
-        };
+        let mut profile_id = if preset.is_some() { id.to_owned() } else { "custom".to_owned() };
         let mut suffix = 2;
         while self.settings.profiles.contains_key(&profile_id) {
             profile_id = format!("{}-{suffix}", preset.map(|p| p.id).unwrap_or("custom"));
@@ -4587,11 +4384,7 @@ impl App {
             category,
             message: message.trim().to_owned(),
             include_diagnostics,
-            diagnostics: if include_diagnostics {
-                self.services.diagnostics()
-            } else {
-                Vec::new()
-            },
+            diagnostics: if include_diagnostics { self.services.diagnostics() } else { Vec::new() },
             session_id: self.session.as_ref().map(|session| session.id.to_string()),
             workspace: self.config.workspace_name().to_owned(),
             app_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -4602,10 +4395,7 @@ impl App {
         let sender = self.feedback_tx.clone();
         tokio::spawn(async move {
             let result = match crate::feedback::FeedbackClient::new(&endpoint) {
-                Ok(client) => client
-                    .submit(&payload)
-                    .await
-                    .map_err(|error| format!("{error:#}")),
+                Ok(client) => client.submit(&payload).await.map_err(|error| format!("{error:#}")),
                 Err(error) => Err(format!("{error:#}")),
             };
             let _ = sender.send(FeedbackResult { result });
@@ -4665,9 +4455,8 @@ impl App {
             let trace = std::fs::read(paths.traces_dir.join(format!("{}.jsonl", session.id)))
                 .unwrap_or_default();
             if let Err(error) = client.push(&session, &trace, true).await {
-                let _ = result_tx.send(RemoteResult {
-                    result: Err(format!("sync failed: {error:#}")),
-                });
+                let _ =
+                    result_tx.send(RemoteResult { result: Err(format!("sync failed: {error:#}")) });
                 return;
             }
             let result = async {
@@ -4723,9 +4512,8 @@ impl App {
                 anyhow::Ok(())
             }.await;
             if let Err(error) = result {
-                let _ = result_tx.send(RemoteResult {
-                    result: Err(format!("remote disconnected: {error:#}")),
-                });
+                let _ = result_tx
+                    .send(RemoteResult { result: Err(format!("remote disconnected: {error:#}")) });
             }
         }));
     }
@@ -4792,10 +4580,8 @@ impl App {
             match event.result {
                 Ok(receipt) => {
                     self.feedback_form = None;
-                    let reference = receipt
-                        .id
-                        .map(|id| format!(" Reference: {id}."))
-                        .unwrap_or_default();
+                    let reference =
+                        receipt.id.map(|id| format!(" Reference: {id}.")).unwrap_or_default();
                     self.push_entry(Entry::new(
                         EntryKind::System,
                         format!("Thank you — your feedback was sent.{reference}"),
@@ -4853,8 +4639,7 @@ impl App {
         self.push_entry(Entry::new(EntryKind::Assistant, content.trim().to_owned()));
         // The transcript alone dies with the terminal; the answer belongs in
         // the session too, so it survives a restart and stays in model context.
-        self.messages
-            .push(json!({"role": "assistant", "content": content.trim()}));
+        self.messages.push(json!({"role": "assistant", "content": content.trim()}));
         self.persist_session();
         self.follow = true;
     }
@@ -4876,11 +4661,7 @@ impl App {
             changed = true;
             self.refining = false;
             self.push_entry(Entry::new(
-                if event.failed {
-                    EntryKind::Error
-                } else {
-                    EntryKind::System
-                },
+                if event.failed { EntryKind::Error } else { EntryKind::System },
                 event.message,
             ));
             self.follow = true;
@@ -4952,10 +4733,7 @@ impl App {
                         if durable { "durable" } else { "this session" },
                         outcome.result.id
                     ));
-                    RefineResult {
-                        message,
-                        failed: false,
-                    }
+                    RefineResult { message, failed: false }
                 }
                 None => RefineResult {
                     message: "refine — nothing worth recording from this conversation.".to_owned(),
@@ -4996,10 +4774,7 @@ impl App {
     fn handle_ctrl_c(&mut self) {
         const DOUBLE_TAP: Duration = Duration::from_secs(2);
         let now = Instant::now();
-        if self
-            .last_ctrl_c
-            .is_some_and(|previous| now.duration_since(previous) < DOUBLE_TAP)
-        {
+        if self.last_ctrl_c.is_some_and(|previous| now.duration_since(previous) < DOUBLE_TAP) {
             self.quit = true;
             return;
         }
@@ -5050,13 +4825,8 @@ impl App {
             self.receiving_delta = false;
             // The aborted task will never send its `ToolFinished`, so settle
             // the open tool row here — otherwise it spins forever.
-            let elapsed = self
-                .tool_started
-                .map(|started| started.elapsed().as_millis() as u64);
-            if let Some(call) = self
-                .open_tool()
-                .filter(|call| call.status == ToolStatus::Running)
-            {
+            let elapsed = self.tool_started.map(|started| started.elapsed().as_millis() as u64);
+            if let Some(call) = self.open_tool().filter(|call| call.status == ToolStatus::Running) {
                 call.status = ToolStatus::Failed;
                 call.output = "interrupted".to_owned();
                 call.duration_ms = elapsed;
@@ -5125,11 +4895,8 @@ impl App {
         self.cursor = Some(index);
         self.entries_rev = self.entries_rev.wrapping_add(1);
         self.follow = true;
-        self.status = if expanded {
-            "expanded — ^O closes it".to_owned()
-        } else {
-            "collapsed".to_owned()
-        };
+        self.status =
+            if expanded { "expanded — ^O closes it".to_owned() } else { "collapsed".to_owned() };
         true
     }
 
@@ -5137,11 +4904,7 @@ impl App {
         let Some(index) = self.cursor else {
             return false;
         };
-        let Some(call) = self
-            .entries
-            .get_mut(index)
-            .and_then(|entry| entry.tool.as_mut())
-        else {
+        let Some(call) = self.entries.get_mut(index).and_then(|entry| entry.tool.as_mut()) else {
             return false;
         };
         if !call.has_more() {
@@ -5201,9 +4964,8 @@ impl App {
     fn scroll_step(&mut self) -> u16 {
         const TRACKPAD_GAP: Duration = Duration::from_millis(80);
         let now = Instant::now();
-        let rapid = self
-            .last_scroll
-            .is_some_and(|previous| now.duration_since(previous) < TRACKPAD_GAP);
+        let rapid =
+            self.last_scroll.is_some_and(|previous| now.duration_since(previous) < TRACKPAD_GAP);
         self.last_scroll = Some(now);
         if rapid { 1 } else { 3 }
     }
@@ -5371,14 +5133,10 @@ pub async fn run(
         &settings.activity.endpoint,
         &config.paths,
     );
-    let activity_session = session_id
-        .clone()
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let activity_session = session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let activity_model = config.model.clone();
     if let Some(reporter) = &reporter {
-        reporter
-            .report_start(&activity_session, &activity_model)
-            .await;
+        reporter.report_start(&activity_session, &activity_model).await;
     }
     crate::recovery::arm(config.paths.recovery_file.clone(), session_id.clone());
     enable_raw_mode()?;
@@ -5415,14 +5173,8 @@ pub async fn run(
     let mut terminal = Terminal::new(backend)?;
 
     let workspace = config.workspace.clone();
-    let mut app = App::new(
-        config,
-        settings,
-        credentials,
-        session,
-        session_store,
-        services.clone(),
-    )?;
+    let mut app =
+        App::new(config, settings, credentials, session, session_store, services.clone())?;
     if let Some(error) = theme_error {
         app.push_entry(Entry::new(
             EntryKind::Error,
@@ -5488,11 +5240,7 @@ pub async fn run(
     {
         eprintln!("Session sync is still pending; it will retry next time Abacus opens.");
     }
-    let status = if result.is_ok() {
-        "completed"
-    } else {
-        "failed"
-    };
+    let status = if result.is_ok() { "completed" } else { "failed" };
     let hook_result = tokio::time::timeout(
         Duration::from_secs(3),
         end_services.run_hooks(
@@ -5578,10 +5326,7 @@ fn install_terminal_guards() {
         // After the panic message, so the pointer to the recovered text is the
         // last thing on screen rather than buried above a backtrace.
         if let Some(path) = crate::recovery::flush() {
-            eprintln!(
-                "\nThe reply in progress was saved to {} — it is not lost.",
-                path.display()
-            );
+            eprintln!("\nThe reply in progress was saved to {} — it is not lost.", path.display());
         }
     }));
     #[cfg(unix)]
@@ -5692,18 +5437,15 @@ async fn event_loop(
                         if !form.sending {
                             form.input.insert_str(&text);
                         }
-                    } else if let Some(input) = app.picker.as_mut().and_then(|picker| match picker
-                        .prompt
-                        .as_mut()
+                    } else if let Some(input) =
+                        app.picker.as_mut().and_then(|picker| match picker.prompt.as_mut() {
+                            Some(PickerPrompt::Rename { input, .. }) => Some(input),
+                            _ => None,
+                        })
                     {
-                        Some(PickerPrompt::Rename { input, .. }) => Some(input),
-                        _ => None,
-                    }) {
                         input.insert_str(&text);
-                    } else if let Some((_, input)) = app
-                        .config_panel
-                        .as_mut()
-                        .and_then(|panel| panel.editing.as_mut())
+                    } else if let Some((_, input)) =
+                        app.config_panel.as_mut().and_then(|panel| panel.editing.as_mut())
                     {
                         input.insert_str(&text);
                     } else if app.usage_panel.is_none() && app.mode == InputMode::Insert {
@@ -5906,16 +5648,12 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 KeyCode::Backspace => question.custom.backspace(),
                 KeyCode::Delete => question.custom.delete(),
                 KeyCode::Left
-                    if key
-                        .modifiers
-                        .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) =>
+                    if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) =>
                 {
                     question.custom.move_word_backward()
                 }
                 KeyCode::Right
-                    if key
-                        .modifiers
-                        .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) =>
+                    if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) =>
                 {
                     question.custom.move_word_forward()
                 }
@@ -5935,9 +5673,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                     question.custom.delete_to_end()
                 }
                 KeyCode::Char(ch)
-                    if !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
                     question.custom.insert(ch)
                 }
@@ -6007,11 +5743,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     // and must own the keys while it is up.
     if app.picker.is_some() {
         // An inline rename / delete prompt owns the keys until it is dismissed.
-        if app
-            .picker
-            .as_ref()
-            .is_some_and(|picker| picker.prompt.is_some())
-        {
+        if app.picker.as_ref().is_some_and(|picker| picker.prompt.is_some()) {
             handle_picker_prompt(app, key);
             return;
         }
@@ -6096,11 +5828,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     }
 
     if app.config_panel.is_some() {
-        let editing = app
-            .config_panel
-            .as_ref()
-            .and_then(|panel| panel.editing.as_ref())
-            .is_some();
+        let editing = app.config_panel.as_ref().and_then(|panel| panel.editing.as_ref()).is_some();
         if editing {
             if key.code == KeyCode::Esc {
                 if let Some(panel) = &mut app.config_panel {
@@ -6109,10 +5837,8 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 app.cancel_pending_provider();
             } else if key.code == KeyCode::Enter {
                 app.commit_config_edit();
-            } else if let Some((_, input)) = app
-                .config_panel
-                .as_mut()
-                .and_then(|panel| panel.editing.as_mut())
+            } else if let Some((_, input)) =
+                app.config_panel.as_mut().and_then(|panel| panel.editing.as_mut())
             {
                 edit_buffer(input, key, false);
             }
@@ -6132,10 +5858,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 }
             }
             if activate {
-                let key = app
-                    .config_panel
-                    .as_ref()
-                    .map(|panel| CONFIG_KEYS[panel.selected]);
+                let key = app.config_panel.as_ref().map(|panel| CONFIG_KEYS[panel.selected]);
                 if let Some(key) = key {
                     if config_key_is_editable(key) {
                         app.begin_config_edit(key);
@@ -6275,17 +5998,10 @@ fn handle_click(app: &mut App, column: u16, row: u16) {
     if let Some(index) = picker {
         // A rename / delete prompt owns the overlay; list clicks must not
         // switch profiles out from under it.
-        if app
-            .picker
-            .as_ref()
-            .is_some_and(|picker| picker.prompt.is_some())
-        {
+        if app.picker.as_ref().is_some_and(|picker| picker.prompt.is_some()) {
             return;
         }
-        let already = app
-            .picker
-            .as_ref()
-            .is_some_and(|picker| picker.selected == index);
+        let already = app.picker.as_ref().is_some_and(|picker| picker.selected == index);
         if let Some(picker) = &mut app.picker {
             picker.selected = index;
         }
@@ -6295,10 +6011,7 @@ fn handle_click(app: &mut App, column: u16, row: u16) {
         return;
     }
     if let Some(index) = config {
-        let already = app
-            .config_panel
-            .as_ref()
-            .is_some_and(|panel| panel.selected == index);
+        let already = app.config_panel.as_ref().is_some_and(|panel| panel.selected == index);
         if let Some(panel) = &mut app.config_panel {
             panel.selected = index;
         }
@@ -6325,9 +6038,8 @@ fn handle_click(app: &mut App, column: u16, row: u16) {
 }
 
 fn handle_insert_key(app: &mut App, key: KeyEvent) {
-    let modified_enter = key
-        .modifiers
-        .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT);
+    let modified_enter =
+        key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT);
     // While the completion popup is up it owns the navigation keys: up/down
     // move the highlight, Enter and Tab insert it, and Esc dismisses the list
     // rather than leaving insert mode. Everything else falls through to normal
@@ -6342,18 +6054,10 @@ fn handle_insert_key(app: &mut App, key: KeyEvent) {
         }
         // Modified arrows scroll the transcript from insert mode; both Alt and
         // Shift are accepted because terminals differ in which they deliver.
-        KeyCode::Up
-            if key
-                .modifiers
-                .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
-        {
+        KeyCode::Up if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) => {
             app.scroll_up(3)
         }
-        KeyCode::Down
-            if key
-                .modifiers
-                .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
-        {
+        KeyCode::Down if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) => {
             app.scroll_down(3)
         }
         KeyCode::Up if completing => app.move_completion(-1),
@@ -6384,11 +6088,7 @@ fn handle_insert_key(app: &mut App, key: KeyEvent) {
                 app.rewind_to_previous_prompt();
             }
             _ => {
-                if app
-                    .entries
-                    .iter()
-                    .any(|entry| entry.kind == EntryKind::User)
-                {
+                if app.entries.iter().any(|entry| entry.kind == EntryKind::User) {
                     app.rewind_armed = Some(Instant::now());
                     app.status = "esc again to rewind and edit your last message".to_owned();
                 }
@@ -6411,18 +6111,10 @@ fn handle_insert_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Backspace => app.input.backspace(),
         KeyCode::Delete => app.input.delete(),
-        KeyCode::Left
-            if key
-                .modifiers
-                .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) =>
-        {
+        KeyCode::Left if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) => {
             app.input.move_word_backward()
         }
-        KeyCode::Right
-            if key
-                .modifiers
-                .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) =>
-        {
+        KeyCode::Right if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) => {
             app.input.move_word_forward()
         }
         KeyCode::Left => app.input.move_left(),
@@ -6495,9 +6187,7 @@ fn handle_insert_key(app: &mut App, key: KeyEvent) {
             app.paste_from_clipboard();
         }
         KeyCode::Char(ch)
-            if !key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
             app.input.insert(ch)
         }
@@ -6588,11 +6278,7 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
                         app.mode = InputMode::Insert;
                     }
                     _ => {
-                        if app
-                            .entries
-                            .iter()
-                            .any(|entry| entry.kind == EntryKind::User)
-                        {
+                        if app.entries.iter().any(|entry| entry.kind == EntryKind::User) {
                             app.rewind_armed = Some(Instant::now());
                             app.status =
                                 "esc again to rewind and edit your last message".to_owned();
@@ -6687,11 +6373,7 @@ fn git_branch(workspace: &std::path::Path) -> Option<String> {
         let pointer = std::fs::read_to_string(&dot_git).ok()?;
         let path = pointer.trim().strip_prefix("gitdir: ")?.to_owned();
         let path = std::path::PathBuf::from(path);
-        if path.is_absolute() {
-            path
-        } else {
-            workspace.join(path)
-        }
+        if path.is_absolute() { path } else { workspace.join(path) }
     };
     let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
     let head = head.trim();
@@ -6739,10 +6421,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
 
     let right = vec![
-        Span::styled(
-            ui::truncate(&app.config.model, 34),
-            Style::default().fg(muted()),
-        ),
+        Span::styled(ui::truncate(&app.config.model, 34), Style::default().fg(muted())),
         Span::raw("  "),
         ui::badge(mode.label(), mode_color(mode)),
     ];
@@ -6754,22 +6433,12 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let reserved = ui::spans_width(&right) as u16 + 2;
     frame.render_widget(
         Paragraph::new(Line::from(left)),
-        Rect {
-            width: row.width.saturating_sub(reserved),
-            ..row
-        },
+        Rect { width: row.width.saturating_sub(reserved), ..row },
     );
-    frame.render_widget(
-        Paragraph::new(Line::from(right)).alignment(Alignment::Right),
-        row,
-    );
+    frame.render_widget(Paragraph::new(Line::from(right)).alignment(Alignment::Right), row);
     frame.render_widget(
         Paragraph::new(ui::rule(area.width)),
-        Rect {
-            y: area.y.saturating_add(1),
-            height: 1,
-            ..area
-        },
+        Rect { y: area.y.saturating_add(1), height: 1, ..area },
     );
 }
 
@@ -6777,17 +6446,9 @@ impl App {
     /// Ensure the wrapped transcript matches `width` and the current content,
     /// re-wrapping only when the fingerprint moves.
     fn wrapped_transcript(&mut self, width: u16, spinner: &str, phase: usize) -> &ui::Transcript {
-        let key: TranscriptKey = (
-            self.entries_rev,
-            width,
-            phase,
-            self.cursor,
-            self.settings.ui.show_thinking,
-        );
-        let stale = self
-            .transcript_cache
-            .as_ref()
-            .is_none_or(|(cached, _)| *cached != key);
+        let key: TranscriptKey =
+            (self.entries_rev, width, phase, self.cursor, self.settings.ui.show_thinking);
+        let stale = self.transcript_cache.as_ref().is_none_or(|(cached, _)| *cached != key);
         if stale {
             let rendered = ui::transcript(
                 &self.entries,
@@ -6826,11 +6487,7 @@ impl App {
         } else if end >= self.scroll.saturating_add(height as u16) {
             // Anchor to the block's start when it is taller than the viewport,
             // so an expanded row opens at its header instead of its tail.
-            self.scroll = if len >= height {
-                start
-            } else {
-                end.saturating_sub(height as u16 - 1)
-            };
+            self.scroll = if len >= height { start } else { end.saturating_sub(height as u16 - 1) };
         }
         self.scroll = self.scroll.min(max_scroll);
     }
@@ -6841,10 +6498,7 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     // butts up against the input frame. That freed row is where the "you have
     // scrolled away" marker sits, so the marker never covers content.
     let full = area;
-    let area = Rect {
-        height: area.height.saturating_sub(1),
-        ..area
-    };
+    let area = Rect { height: area.height.saturating_sub(1), ..area };
     app.transcript_height = area.height;
     if app.entries.is_empty() {
         draw_welcome(frame, area, app);
@@ -6853,10 +6507,7 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     // The scrollbar gutter is reserved whether or not a scrollbar is showing.
     // Claiming it only once the content overflows would re-wrap the whole
     // transcript the moment it passed one screen, which reads as a glitch.
-    let body = Rect {
-        width: area.width.saturating_sub(SCROLLBAR_COLUMNS),
-        ..area
-    };
+    let body = Rect { width: area.width.saturating_sub(SCROLLBAR_COLUMNS), ..area };
     // A running tool animates, so the spinner phase joins the cache key; when
     // nothing is running the phase is pinned and the wrap is reused verbatim.
     let running = app
@@ -6877,10 +6528,7 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     };
 
     let height = body.height as usize;
-    let total = app
-        .wrapped_transcript(body.width.max(1), spinner, phase)
-        .lines
-        .len();
+    let total = app.wrapped_transcript(body.width.max(1), spinner, phase).lines.len();
     let max_scroll = total.saturating_sub(height).min(u16::MAX as usize) as u16;
     if app.follow {
         app.scroll = max_scroll;
@@ -6902,13 +6550,7 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         .transcript_cache
         .as_ref()
         .map(|(_, rendered)| {
-            rendered
-                .lines
-                .iter()
-                .skip(start)
-                .take(height)
-                .cloned()
-                .collect::<Vec<_>>()
+            rendered.lines.iter().skip(start).take(height).cloned().collect::<Vec<_>>()
         })
         .unwrap_or_default();
     frame.render_widget(Paragraph::new(Text::from(visible)), body);
@@ -6965,19 +6607,10 @@ fn draw_scrollbar(frame: &mut Frame<'_>, area: Rect, total: usize, position: usi
     for row in 0..track {
         let inside = row >= offset && row < offset + thumb;
         let set = ui::glyphs();
-        let (glyph, color) = if inside {
-            (set.thumb, primary())
-        } else {
-            (set.track, rail())
-        };
+        let (glyph, color) = if inside { (set.thumb, primary()) } else { (set.track, rail()) };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(glyph, Style::default().fg(color)))),
-            Rect {
-                x,
-                y: area.y + row as u16,
-                width: 1,
-                height: 1,
-            },
+            Rect { x, y: area.y + row as u16, width: 1, height: 1 },
         );
     }
 }
@@ -7046,10 +6679,7 @@ fn draw_task_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 format!(" {glyph} GOAL  "),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                ui::truncate(&goal.objective, 72),
-                Style::default().fg(text()),
-            ),
+            Span::styled(ui::truncate(&goal.objective, 72), Style::default().fg(text())),
             Span::styled("   /goal pause · edit · clear", Style::default().fg(rail())),
         ]));
     }
@@ -7060,19 +6690,14 @@ fn draw_task_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
             RalphStatus::Completed => success(),
             RalphStatus::Cancelled | RalphStatus::MaxIterations => muted(),
         };
-        let limit = state
-            .max_iterations
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "∞".to_owned());
+        let limit =
+            state.max_iterations.map(|value| value.to_string()).unwrap_or_else(|| "∞".to_owned());
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" {} LOOP  ", ui::glyphs().repeat),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!("{} / {limit}", state.iteration),
-                Style::default().fg(text()),
-            ),
+            Span::styled(format!("{} / {limit}", state.iteration), Style::default().fg(text())),
             ui::dot(),
             Span::styled(
                 format!("promise: {}", ui::truncate(&state.completion_promise, 32)),
@@ -7088,14 +6713,9 @@ fn draw_task_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
         let mut spans = vec![
             Span::styled(
                 format!(" {} TASKS  ", ui::glyphs().tasks),
-                Style::default()
-                    .fg(secondary())
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(secondary()).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!("{done}/{} ", tasks.len()),
-                Style::default().fg(text()),
-            ),
+            Span::styled(format!("{done}/{} ", tasks.len()), Style::default().fg(text())),
         ];
         spans.extend(ui::meter(percent, 10, success()));
         if let Some(next) = tasks.iter().find(|task| !task.done) {
@@ -7219,9 +6839,7 @@ fn draw_hive(frame: &mut Frame<'_>, area: Rect, app: &App) {
             ),
             Span::styled(
                 format!("{} ", worker.role),
-                Style::default()
-                    .fg(secondary())
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(secondary()).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 worker.name.clone(),
@@ -7254,10 +6872,7 @@ fn draw_hive(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ),
         Style::default().fg(rail()),
     )));
-    frame.render_widget(
-        Paragraph::new(Text::from(lines)).scroll((app.hive_scroll, 0)),
-        inner,
-    );
+    frame.render_widget(Paragraph::new(Text::from(lines)).scroll((app.hive_scroll, 0)), inner);
 }
 
 /// Slash-command and `@file` suggestions, floated above the composer with the
@@ -7320,10 +6935,7 @@ fn draw_completion_popup(frame: &mut Frame<'_>, input_area: Rect, app: &App) {
         // band instead of stopping at the end of the text.
         let used = ui::spans_width(&spans);
         if used < inner + 2 {
-            spans.push(Span::styled(
-                " ".repeat(inner + 2 - used),
-                Style::default().bg(fill),
-            ));
+            spans.push(Span::styled(" ".repeat(inner + 2 - used), Style::default().bg(fill)));
         }
         app.hits.borrow_mut().completion.push((
             Rect {
@@ -7353,12 +6965,7 @@ fn draw_completion_popup(frame: &mut Frame<'_>, input_area: Rect, app: &App) {
     };
 
     let height = lines.len() as u16 + 2;
-    let area = Rect {
-        x: input_area.x,
-        y: input_area.y.saturating_sub(height),
-        width,
-        height,
-    };
+    let area = Rect { x: input_area.x, y: input_area.y.saturating_sub(height), width, height };
     // The rows were recorded before the popup's origin was known; place them
     // now that it is.
     for (offset, (rect, _)) in app.hits.borrow_mut().completion.iter_mut().enumerate() {
@@ -7428,21 +7035,11 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             ui::glyphs().prompt,
-            Style::default()
-                .fg(frame_color)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(frame_color).add_modifier(Modifier::BOLD),
         ))),
-        Rect {
-            width: 1,
-            height: 1,
-            ..inner
-        },
+        Rect { width: 1, height: 1, ..inner },
     );
-    let text_area = Rect {
-        x: inner.x + 2,
-        width: inner.width - 2,
-        ..inner
-    };
+    let text_area = Rect { x: inner.x + 2, width: inner.width - 2, ..inner };
 
     let composed = app.input.text();
     let inner_width = text_area.width.max(1) as usize;
@@ -7456,9 +7053,8 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let selection = app.input.selection();
     let display_col = {
         let row = rows.get(cursor_row).copied().unwrap_or((0, 0));
-        let prefix: String = characters[row.0..(row.0 + cursor_col).min(characters.len())]
-            .iter()
-            .collect();
+        let prefix: String =
+            characters[row.0..(row.0 + cursor_col).min(characters.len())].iter().collect();
         UnicodeWidthStr::width(prefix.as_str())
     };
 
@@ -7489,15 +7085,11 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
         let lines: Vec<Line<'static>> = rows
             .iter()
             .map(|&(start, end)| {
-                let slice: String = characters[start..end.min(characters.len())]
-                    .iter()
-                    .collect();
+                let slice: String = characters[start..end.min(characters.len())].iter().collect();
                 match selection {
                     Some((from, to)) if from < end && to > start => Line::from(Span::styled(
                         slice,
-                        Style::default()
-                            .fg(text())
-                            .bg(crate::theme::active().selection),
+                        Style::default().fg(text()).bg(crate::theme::active().selection),
                     )),
                     _ => Line::from(Span::styled(slice, Style::default().fg(text()))),
                 }
@@ -7543,20 +7135,11 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     ui::truncate(&approval.summary, area.width.saturating_sub(46) as usize),
                     Style::default().fg(muted()),
                 ),
-                Span::styled(
-                    "  y",
-                    Style::default().fg(success()).add_modifier(Modifier::BOLD),
-                ),
+                Span::styled("  y", Style::default().fg(success()).add_modifier(Modifier::BOLD)),
                 Span::styled(" once ", Style::default().fg(muted())),
-                Span::styled(
-                    "a",
-                    Style::default().fg(primary()).add_modifier(Modifier::BOLD),
-                ),
+                Span::styled("a", Style::default().fg(primary()).add_modifier(Modifier::BOLD)),
                 Span::styled(" session ", Style::default().fg(muted())),
-                Span::styled(
-                    "n",
-                    Style::default().fg(danger()).add_modifier(Modifier::BOLD),
-                ),
+                Span::styled("n", Style::default().fg(danger()).add_modifier(Modifier::BOLD)),
                 Span::styled(" reject", Style::default().fg(muted())),
             ])),
             area,
@@ -7570,19 +7153,12 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     // next reply reports a new figure.
     let estimated = (app.ctx_chars / 4).max(1) as u64;
     let reported = app.provider.context_tokens();
-    let ctx_tokens = if reported > 0 {
-        reported.max(estimated)
-    } else {
-        estimated
-    };
+    let ctx_tokens = if reported > 0 { reported.max(estimated) } else { estimated };
     let ctx_window = app.config.model_limits.context_window.max(1) as u64;
     let percent = ((ctx_tokens * 100) / ctx_window).min(100) as u16;
     let compact_at = (app.config.model_limits.compaction_budget().compact_at_chars / 4).max(1);
-    let ctx_color = if ctx_tokens >= compact_at as u64 || percent >= 75 {
-        warning()
-    } else {
-        muted()
-    };
+    let ctx_color =
+        if ctx_tokens >= compact_at as u64 || percent >= 75 { warning() } else { muted() };
 
     // Two different quantities, so they are labelled as such. Side by side and
     // both called "tokens", the running session total reads as the size of the
@@ -7607,11 +7183,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ),
         ui::dot(),
         Span::styled(
-            format!(
-                "ctx {}/{} ",
-                ui::format_count(ctx_tokens),
-                ui::format_count(ctx_window)
-            ),
+            format!("ctx {}/{} ", ui::format_count(ctx_tokens), ui::format_count(ctx_window)),
             Style::default().fg(ctx_color),
         ),
     ];
@@ -7627,15 +7199,9 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let running = app.running.is_some();
     let mut left = if running {
-        let elapsed = app
-            .turn_started
-            .map(|started| started.elapsed())
-            .unwrap_or_default();
+        let elapsed = app.turn_started.map(|started| started.elapsed()).unwrap_or_default();
         let mut spans = vec![Span::styled(
-            format!(
-                " {} ",
-                ui::spinner_frame(elapsed, app.settings.ui.animations)
-            ),
+            format!(" {} ", ui::spinner_frame(elapsed, app.settings.ui.animations)),
             Style::default().fg(primary()).add_modifier(Modifier::BOLD),
         )];
         // Wide enough for a reasoning-derived header, which carries real
@@ -7652,10 +7218,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         if app.settings.ui.show_token_rate
             && let Some(rate) = app.token_rate()
         {
-            spans.push(Span::styled(
-                format!("  {rate:.0} tok/s"),
-                Style::default().fg(rail()),
-            ));
+            spans.push(Span::styled(format!("  {rate:.0} tok/s"), Style::default().fg(rail())));
         }
         spans
     } else {
@@ -7678,18 +7241,9 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let pairs: &[(&str, &str)] = if running {
         // Typing during a turn queues rather than being lost — worth saying,
         // since most tools silently drop input here.
-        &[
-            ("⏎", "steer"),
-            ("esc", "to interrupt"),
-            ("^C", "twice to quit"),
-        ]
+        &[("⏎", "steer"), ("esc", "to interrupt"), ("^C", "twice to quit")]
     } else if app.mode == InputMode::Normal {
-        &[
-            ("j/k", "blocks"),
-            ("o", "unfold"),
-            ("i", "insert"),
-            ("?", "help"),
-        ]
+        &[("j/k", "blocks"), ("o", "unfold"), ("i", "insert"), ("?", "help")]
     } else if app.input.is_empty() {
         &[
             ("/", "commands"),
@@ -7718,15 +7272,9 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     frame.render_widget(
         Paragraph::new(Line::from(left)),
-        Rect {
-            width: area.width.saturating_sub(right_width + 1),
-            ..area
-        },
+        Rect { width: area.width.saturating_sub(right_width + 1), ..area },
     );
-    frame.render_widget(
-        Paragraph::new(Line::from(right)).alignment(Alignment::Right),
-        area,
-    );
+    frame.render_widget(Paragraph::new(Line::from(right)).alignment(Alignment::Right), area);
     if hovering_tokens {
         draw_usage_tooltip(frame, area, arrows_x, &usage);
     }
@@ -7757,11 +7305,7 @@ fn draw_usage_tooltip(
                 format!("{} · {rate}%", ui::format_count(usage.cache_read)),
                 success(),
             ));
-            rows.push((
-                "uncached",
-                ui::format_count(usage.uncached_input()),
-                muted(),
-            ));
+            rows.push(("uncached", ui::format_count(usage.uncached_input()), muted()));
             if usage.cache_write > 0 {
                 rows.push(("written", ui::format_count(usage.cache_write), muted()));
             }
@@ -7772,28 +7316,14 @@ fn draw_usage_tooltip(
     // every earlier run of a resumed session, which is why it can dwarf them.
     rows.push(("all runs", ui::format_count(usage.total), muted()));
 
-    let label_width = rows
-        .iter()
-        .map(|(label, ..)| label.len())
-        .max()
-        .unwrap_or(0);
-    let value_width = rows
-        .iter()
-        .map(|(_, value, _)| value.chars().count())
-        .max()
-        .unwrap_or(0);
+    let label_width = rows.iter().map(|(label, ..)| label.len()).max().unwrap_or(0);
+    let value_width = rows.iter().map(|(_, value, _)| value.chars().count()).max().unwrap_or(0);
     let lines: Vec<Line<'static>> = rows
         .iter()
         .map(|(label, value, color)| {
             Line::from(vec![
-                Span::styled(
-                    format!("{label:<label_width$}  "),
-                    Style::default().fg(muted()),
-                ),
-                Span::styled(
-                    format!("{value:>value_width$}"),
-                    Style::default().fg(*color),
-                ),
+                Span::styled(format!("{label:<label_width$}  "), Style::default().fg(muted())),
+                Span::styled(format!("{value:>value_width$}"), Style::default().fg(*color)),
             ])
         })
         .collect();
@@ -7803,15 +7333,8 @@ fn draw_usage_tooltip(
     // Anchored under the arrows, then pulled left if that would overflow the
     // frame — a tooltip clipped at the edge is worse than one slightly off its
     // anchor.
-    let x = anchor
-        .min(footer.x + footer.width.saturating_sub(width))
-        .max(footer.x);
-    let area = Rect {
-        x,
-        y: footer.y.saturating_sub(height),
-        width,
-        height,
-    };
+    let x = anchor.min(footer.x + footer.width.saturating_sub(width)).max(footer.x);
+    let area = Rect { x, y: footer.y.saturating_sub(height), width, height };
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(Text::from(lines)).block(ui::overlay_block("TOKENS", rail(), None)),
@@ -7840,12 +7363,9 @@ fn draw_model_hub(frame: &mut Frame<'_>, area: Rect, app: &App) {
             ("←", "scopes"),
             ("esc", "close"),
         ],
-        (Pane::Body, _, Some(_)) => &[
-            ("↑↓", "select"),
-            ("enter", "assign"),
-            ("type", "filter"),
-            ("esc", "back"),
-        ],
+        (Pane::Body, _, Some(_)) => {
+            &[("↑↓", "select"), ("enter", "assign"), ("type", "filter"), ("esc", "back")]
+        }
         (Pane::Body, _, None) => &[
             ("↑↓", "select"),
             ("enter", "switch"),
@@ -7866,15 +7386,8 @@ fn draw_model_hub(frame: &mut Frame<'_>, area: Rect, app: &App) {
     // the column rule has to land somewhere, and it lands on the rule above
     // the hints rather than in the middle of their text.
     let inner = open_overlay(frame, popup, &title, primary(), &[]);
-    let columns = Rect {
-        height: inner.height.saturating_sub(2),
-        ..inner
-    };
-    let footer = Rect {
-        y: inner.bottom().saturating_sub(2),
-        height: 2,
-        ..inner
-    };
+    let columns = Rect { height: inner.height.saturating_sub(2), ..inner };
+    let footer = Rect { y: inner.bottom().saturating_sub(2), height: 2, ..inner };
 
     // Sidebar width is content-driven within bounds: wide enough for the
     // longest profile name and its count, never wide enough to starve the
@@ -7894,10 +7407,7 @@ fn draw_model_hub(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let narrow = split.body.width < ui::MIN_SPLIT_BODY;
 
     frame.render_widget(
-        Paragraph::new(Text::from(vec![
-            ui::rule(inner.width),
-            Line::from(ui::hints(hints)),
-        ])),
+        Paragraph::new(Text::from(vec![ui::rule(inner.width), Line::from(ui::hints(hints))])),
         footer,
     );
     if !narrow {
@@ -7949,11 +7459,7 @@ fn draw_hub_sidebar(
         if lines.len() >= area.height as usize {
             break;
         }
-        let rect = Rect {
-            y: area.y + lines.len() as u16,
-            height: 1,
-            ..area
-        };
+        let rect = Rect { y: area.y + lines.len() as u16, height: 1, ..area };
         if matches!(scope, Scope::Separator) {
             lines.push(ui::rule(area.width));
             continue;
@@ -7975,11 +7481,7 @@ fn draw_hub_sidebar(
             }
             Scope::Profile { id, name } => {
                 let catalog = app.catalogs.get(id).unwrap_or(&Catalog::Idle);
-                (
-                    name.clone(),
-                    catalog.annotation(),
-                    Some(*id == app.settings.default_profile),
-                )
+                (name.clone(), catalog.annotation(), Some(*id == app.settings.default_profile))
             }
             Scope::Separator => unreachable!("handled above"),
         };
@@ -7994,16 +7496,10 @@ fn draw_hub_sidebar(
             ui::truncate(&label, label_width),
             Style::default()
                 .fg(if selected { text() } else { muted() })
-                .add_modifier(if selected {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                }),
+                .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
         ));
         let used = ui::spans_width(&content) + 2;
-        let gap = width
-            .saturating_sub(used + annotation.chars().count())
-            .max(1);
+        let gap = width.saturating_sub(used + annotation.chars().count()).max(1);
         content.push(Span::raw(" ".repeat(gap)));
         content.push(Span::styled(annotation, Style::default().fg(rail())));
         lines.push(ui::list_row(state, width, content));
@@ -8020,18 +7516,9 @@ fn draw_hub_roles(frame: &mut Frame<'_>, area: Rect, app: &App, hub: &crate::mod
     let width = area.width as usize;
     let focused = hub.pane == Pane::Body;
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let label_width = rows
-        .iter()
-        .map(|row| row.label.chars().count())
-        .max()
-        .unwrap_or(0)
-        .max(8);
+    let label_width = rows.iter().map(|row| row.label.chars().count()).max().unwrap_or(0).max(8);
     for (index, row) in rows.iter().enumerate() {
-        let rect = Rect {
-            y: area.y + lines.len() as u16,
-            height: 1,
-            ..area
-        };
+        let rect = Rect { y: area.y + lines.len() as u16, height: 1, ..area };
         app.hits.borrow_mut().hub_body.push((rect, index));
         let selected = index == hub.selected;
         let state = app.row_state(rect, selected && focused);
@@ -8045,11 +7532,8 @@ fn draw_hub_roles(frame: &mut Frame<'_>, area: Rect, app: &App, hub: &crate::mod
         } else {
             Style::default().fg(text())
         };
-        let model = if row.inherited {
-            format!("{} (inherited)", row.model)
-        } else {
-            row.model.clone()
-        };
+        let model =
+            if row.inherited { format!("{} (inherited)", row.model) } else { row.model.clone() };
         lines.push(ui::list_row(
             state,
             width,
@@ -8058,11 +7542,7 @@ fn draw_hub_roles(frame: &mut Frame<'_>, area: Rect, app: &App, hub: &crate::mod
                     format!("{:<label_width$}  ", row.label),
                     Style::default()
                         .fg(if selected { text() } else { muted() })
-                        .add_modifier(if selected {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
+                        .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
                 ),
                 Span::styled(
                     ui::truncate(&model, width.saturating_sub(label_width + 5)),
@@ -8071,12 +7551,8 @@ fn draw_hub_roles(frame: &mut Frame<'_>, area: Rect, app: &App, hub: &crate::mod
             ],
         ));
     }
-    app.hub_rows
-        .set(area.height.saturating_sub(HUB_DETAIL_ROWS).max(1) as usize);
-    let detail = rows
-        .get(hub.selected)
-        .map(|row| row.help.to_owned())
-        .unwrap_or_default();
+    app.hub_rows.set(area.height.saturating_sub(HUB_DETAIL_ROWS).max(1) as usize);
+    let detail = rows.get(hub.selected).map(|row| row.help.to_owned()).unwrap_or_default();
     while lines.len() + HUB_DETAIL_ROWS as usize <= area.height as usize {
         lines.push(Line::default());
     }
@@ -8117,9 +7593,7 @@ fn draw_hub_models(
     ]));
     lines.push(Line::default());
 
-    let list_height = area
-        .height
-        .saturating_sub(lines.len() as u16 + HUB_DETAIL_ROWS) as usize;
+    let list_height = area.height.saturating_sub(lines.len() as u16 + HUB_DETAIL_ROWS) as usize;
     app.hub_rows.set(list_height.max(1));
     let matched = crate::model_hub::filter(catalog.cards(), &hub.search);
     let current = app
@@ -8132,16 +7606,10 @@ fn draw_hub_models(
     // Column widths are measured over the visible window alone, so scrolling
     // through a stretch of unpriced models closes the price column instead of
     // holding a gutter open for rows that are not on screen.
-    let visible: Vec<&crate::model_info::ModelCard> = matched
-        .iter()
-        .skip(hub.window)
-        .take(list_height)
-        .copied()
-        .collect();
-    let cells: Vec<Vec<String>> = visible
-        .iter()
-        .map(|card| vec![card.context_label(), card.cost_label()])
-        .collect();
+    let visible: Vec<&crate::model_info::ModelCard> =
+        matched.iter().skip(hub.window).take(list_height).copied().collect();
+    let cells: Vec<Vec<String>> =
+        visible.iter().map(|card| vec![card.context_label(), card.cost_label()]).collect();
     let widths = ui::metric_widths(cells.iter().map(Vec::as_slice), 2);
     let metrics = ui::metrics_width(&widths);
 
@@ -8165,11 +7633,7 @@ fn draw_hub_models(
     }
     for (offset, card) in visible.iter().enumerate() {
         let index = hub.window + offset;
-        let rect = Rect {
-            y: area.y + lines.len() as u16,
-            height: 1,
-            ..area
-        };
+        let rect = Rect { y: area.y + lines.len() as u16, height: 1, ..area };
         app.hits.borrow_mut().hub_body.push((rect, index));
         let selected = index == hub.selected;
         let state = app.row_state(rect, selected && focused);
@@ -8177,20 +7641,13 @@ fn draw_hub_models(
         // The supplier is a dim prefix rather than an indent level: it groups
         // a long list visually while every id still starts at the same column.
         if let Some(provider) = &card.provider {
-            content.push(Span::styled(
-                format!("{provider}/"),
-                Style::default().fg(rail()),
-            ));
+            content.push(Span::styled(format!("{provider}/"), Style::default().fg(rail())));
         }
         content.push(Span::styled(
             card.short_id().to_owned(),
             Style::default()
                 .fg(if selected { primary() } else { text() })
-                .add_modifier(if selected {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                }),
+                .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
         ));
         if card.id == current {
             content.push(Span::styled(
@@ -8210,10 +7667,7 @@ fn draw_hub_models(
     }
     lines.truncate(area.height.saturating_sub(2) as usize);
     lines.push(ui::rule(area.width));
-    lines.push(hub_detail(
-        matched.get(hub.selected).copied(),
-        width.saturating_sub(2),
-    ));
+    lines.push(hub_detail(matched.get(hub.selected).copied(), width.saturating_sub(2)));
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
@@ -8233,11 +7687,7 @@ fn hub_detail(card: Option<&crate::model_info::ModelCard>, width: usize) -> Line
     }
     let cost = card.cost_label();
     if !cost.is_empty() {
-        facts.push(if cost == "free" {
-            cost
-        } else {
-            format!("{cost} per M")
-        });
+        facts.push(if cost == "free" { cost } else { format!("{cost} per M") });
     }
     if card.reasoning {
         facts.push("reasoning".to_owned());
@@ -8287,10 +7737,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
                 ("↑ ↓", "browse prompt history, or the suggestion list"),
                 ("Ctrl+V", "paste text or an image from the clipboard"),
                 ("Ctrl+A", "select the whole draft"),
-                (
-                    "Ctrl+C",
-                    "copy the selection (or interrupt when nothing is selected)",
-                ),
+                ("Ctrl+C", "copy the selection (or interrupt when nothing is selected)"),
                 ("Ctrl+Z · Ctrl+Y", "undo and redo"),
                 ("PgUp · PgDn", "scroll the transcript a page"),
                 ("Alt/Shift+↑ ↓", "scroll the transcript a few lines"),
@@ -8301,10 +7748,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
         (
             "TRANSCRIPT (normal mode)",
             &[
-                (
-                    "F2",
-                    "release the mouse for drag-select; F2 again for the wheel and clicks",
-                ),
+                ("F2", "release the mouse for drag-select; F2 again for the wheel and clicks"),
                 ("j · k", "move between blocks"),
                 ("o · space · enter", "fold or unfold a tool result"),
                 ("h · l", "fold or unfold explicitly"),
@@ -8354,11 +7798,8 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
     )));
     // Built from the same table that drives the palette, so the two can never
     // drift apart.
-    let commands = SLASH_COMMANDS
-        .iter()
-        .map(|(command, _)| *command)
-        .collect::<Vec<_>>()
-        .join("  ");
+    let commands =
+        SLASH_COMMANDS.iter().map(|(command, _)| *command).collect::<Vec<_>>().join("  ");
     lines.extend(ui::wrap(
         &[Span::styled(commands, Style::default().fg(primary()))],
         measure,
@@ -8369,13 +7810,8 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
     // Size the frame to the content rather than to a guess, so nothing is
     // silently clipped when a section grows.
     let popup = ui::centered(width, lines.len() as u16 + 2, area);
-    let inner = open_overlay(
-        frame,
-        popup,
-        "KEYS",
-        secondary(),
-        &[("esc", "close"), ("?", "toggle")],
-    );
+    let inner =
+        open_overlay(frame, popup, "KEYS", secondary(), &[("esc", "close"), ("?", "toggle")]);
     lines.truncate(inner.height as usize);
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
@@ -8437,10 +7873,7 @@ fn usage_tabs(selected: UsageTab) -> Line<'static> {
         Span::styled(
             format!(" {label} "),
             if active {
-                Style::default()
-                    .fg(inverse())
-                    .bg(primary())
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(inverse()).bg(primary()).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(muted())
             },
@@ -8531,10 +7964,7 @@ fn usage_heatmap_lines(records: &[&SessionUsage], width: usize) -> Vec<Line<'sta
                 2 => ("■ ", secondary(), Modifier::BOLD),
                 _ => ("■ ", primary(), Modifier::BOLD),
             };
-            spans.push(Span::styled(
-                symbol,
-                Style::default().fg(color).add_modifier(modifier),
-            ));
+            spans.push(Span::styled(symbol, Style::default().fg(color).add_modifier(modifier)));
         }
         lines.push(Line::from(spans));
     }
@@ -8548,19 +7978,13 @@ fn usage_legend() -> Line<'static> {
         Span::styled("▪ ", Style::default().fg(border())),
         Span::styled("▪ ", Style::default().fg(secondary())),
         Span::styled("■ ", Style::default().fg(secondary())),
-        Span::styled(
-            "■ ",
-            Style::default().fg(primary()).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("■ ", Style::default().fg(primary()).add_modifier(Modifier::BOLD)),
         Span::styled("More", Style::default().fg(muted())),
     ])
 }
 
 fn usage_stats(records: &[&SessionUsage], today: NaiveDate) -> UsageStats {
-    let mut stats = UsageStats {
-        sessions: records.len(),
-        ..UsageStats::default()
-    };
+    let mut stats = UsageStats { sessions: records.len(), ..UsageStats::default() };
     let mut dates = HashSet::new();
     let mut daily = BTreeMap::<NaiveDate, u64>::new();
     let mut models = HashMap::<String, (usize, u64)>::new();
@@ -8580,10 +8004,8 @@ fn usage_stats(records: &[&SessionUsage], today: NaiveDate) -> UsageStats {
         .into_iter()
         .max_by_key(|(_, (sessions, tokens))| (*tokens, *sessions))
         .map(|(model, _)| model);
-    stats.most_active_day = daily
-        .into_iter()
-        .max_by_key(|(_, activity)| *activity)
-        .map(|(date, _)| date);
+    stats.most_active_day =
+        daily.into_iter().max_by_key(|(_, activity)| *activity).map(|(date, _)| date);
 
     let mut sorted_dates = dates.into_iter().collect::<Vec<_>>();
     sorted_dates.sort_unstable();
@@ -8686,10 +8108,7 @@ fn usage_stats_compact(stats: &UsageStats) -> Vec<Line<'static>> {
                 format_count(stats.total_tokens)
             ),
         ),
-        usage_stat_line(
-            "Favorite model",
-            stats.favorite_model.as_deref().unwrap_or("—"),
-        ),
+        usage_stat_line("Favorite model", stats.favorite_model.as_deref().unwrap_or("—")),
         usage_stat_line("Active days", &stats.active_days.to_string()),
     ]
 }
@@ -8697,10 +8116,7 @@ fn usage_stats_compact(stats: &UsageStats) -> Vec<Line<'static>> {
 fn usage_stat_line(label: &str, value: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!(" {label:<18}"), Style::default().fg(muted())),
-        Span::styled(
-            value.to_owned(),
-            Style::default().fg(primary()).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(value.to_owned(), Style::default().fg(primary()).add_modifier(Modifier::BOLD)),
     ])
 }
 
@@ -8724,19 +8140,11 @@ fn usage_model_lines(
     }
     let mut models = models.into_iter().collect::<Vec<_>>();
     models.sort_by_key(|(_, (sessions, tokens, _))| std::cmp::Reverse((*tokens, *sessions)));
-    let maximum = models
-        .iter()
-        .map(|(_, (_, tokens, _))| *tokens)
-        .max()
-        .unwrap_or(1)
-        .max(1);
+    let maximum = models.iter().map(|(_, (_, tokens, _))| *tokens).max().unwrap_or(1).max(1);
     let bar_width = width.saturating_sub(55).clamp(6, 28);
     let mut lines = vec![Line::from(vec![
         Span::styled("   Model", Style::default().fg(muted())),
-        Span::styled(
-            "                    Sessions   Tokens",
-            Style::default().fg(muted()),
-        ),
+        Span::styled("                    Sessions   Tokens", Style::default().fg(muted())),
     ])];
     for (model, (sessions, tokens, duration)) in models.into_iter().take(12) {
         let filled = ((tokens as u128 * bar_width as u128) / maximum as u128) as usize;
@@ -8744,30 +8152,17 @@ fn usage_model_lines(
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" {marker} "),
-                Style::default().fg(if model == current_model {
-                    primary()
-                } else {
-                    muted()
-                }),
+                Style::default().fg(if model == current_model { primary() } else { muted() }),
             ),
             Span::styled(
                 format!("{:<24}", single_line(&model, 23)),
                 Style::default().fg(text()).add_modifier(Modifier::BOLD),
             ),
             Span::styled(format!("{sessions:>8}  "), Style::default().fg(muted())),
-            Span::styled(
-                format!("{:>8}  ", format_count(tokens)),
-                Style::default().fg(primary()),
-            ),
+            Span::styled(format!("{:>8}  ", format_count(tokens)), Style::default().fg(primary())),
             Span::styled("█".repeat(filled.max(1)), Style::default().fg(secondary())),
-            Span::styled(
-                "░".repeat(bar_width - filled.max(1)),
-                Style::default().fg(border()),
-            ),
-            Span::styled(
-                format!("  {}", format_duration(duration)),
-                Style::default().fg(muted()),
-            ),
+            Span::styled("░".repeat(bar_width - filled.max(1)), Style::default().fg(border())),
+            Span::styled(format!("  {}", format_duration(duration)), Style::default().fg(muted())),
         ]));
     }
     lines
@@ -8809,17 +8204,11 @@ fn clipboard_text() -> Option<String> {
         Command::new("xclip")
             .args(["-selection", "clipboard", "-o"])
             .output()
-            .or_else(|_| {
-                Command::new("xsel")
-                    .args(["--clipboard", "--output"])
-                    .output()
-            })
+            .or_else(|_| Command::new("xsel").args(["--clipboard", "--output"]).output())
     } else if cfg!(target_os = "windows") {
         // `clip` on Windows only supports output (copy), not input. PowerShell
         // can read the clipboard; fall back to it for paste.
-        Command::new("powershell")
-            .args(["-NoProfile", "-Command", "Get-Clipboard -Raw"])
-            .output()
+        Command::new("powershell").args(["-NoProfile", "-Command", "Get-Clipboard -Raw"]).output()
     } else {
         return None;
     };
@@ -8862,19 +8251,11 @@ fn draw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
         popup,
         "CONFIGURATION",
         secondary(),
-        &[
-            ("↑↓", "move"),
-            ("enter", "edit"),
-            ("esc", "close"),
-            ("", "saved immediately"),
-        ],
+        &[("↑↓", "move"), ("enter", "edit"), ("esc", "close"), ("", "saved immediately")],
     );
     // The last two rows are a separator and the help line for the selected row.
     let help_height = 2u16.min(inner.height);
-    let list = Rect {
-        height: inner.height.saturating_sub(help_height),
-        ..inner
-    };
+    let list = Rect { height: inner.height.saturating_sub(help_height), ..inner };
 
     let width = list.width as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -8906,11 +8287,7 @@ fn draw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     format!("{:<26}", config_label(*key)),
                     Style::default()
                         .fg(if selected { text() } else { muted() })
-                        .add_modifier(if selected {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
+                        .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
                 )];
                 content.extend(config_value_spans(
                     &app.config_value(*key),
@@ -8926,12 +8303,7 @@ fn draw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .saturating_sub(visible.saturating_sub(1))
         .min(rows.len().saturating_sub(visible.min(rows.len())));
     for (offset, (index, content)) in rows.into_iter().skip(first).take(visible).enumerate() {
-        let rect = Rect {
-            x: list.x,
-            y: list.y + offset as u16,
-            width: list.width,
-            height: 1,
-        };
+        let rect = Rect { x: list.x, y: list.y + offset as u16, width: list.width, height: 1 };
         match index {
             Some(index) => {
                 app.hits.borrow_mut().config.push((rect, index));
@@ -8944,11 +8316,7 @@ fn draw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(Text::from(lines)), list);
 
     if help_height == 2 {
-        let help = Rect {
-            y: list.bottom(),
-            height: 2,
-            ..inner
-        };
+        let help = Rect { y: list.bottom(), height: 2, ..inner };
         let key = CONFIG_KEYS[panel.selected.min(CONFIG_KEYS.len() - 1)];
         frame.render_widget(
             Paragraph::new(Text::from(vec![
@@ -8987,18 +8355,11 @@ fn draw_raw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let Some(editor) = &app.raw_config else {
         return;
     };
-    let popup = ui::centered(
-        area.width.saturating_sub(6).min(112),
-        area.height.saturating_sub(4),
-        area,
-    );
+    let popup =
+        ui::centered(area.width.saturating_sub(6).min(112), area.height.saturating_sub(4), area);
     // A parse error takes over the accent so the panel itself reports that the
     // document will not save in its current state.
-    let accent = if editor.error.is_some() {
-        danger()
-    } else {
-        secondary()
-    };
+    let accent = if editor.error.is_some() { danger() } else { secondary() };
     let inner = open_overlay(
         frame,
         popup,
@@ -9022,11 +8383,7 @@ fn draw_raw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
             ])),
             Rect { height: 1, ..inner },
         );
-        body = Rect {
-            y: inner.y + 1,
-            height: inner.height.saturating_sub(1),
-            ..inner
-        };
+        body = Rect { y: inner.y + 1, height: inner.height.saturating_sub(1), ..inner };
     }
 
     let text = editor.input.text();
@@ -9034,9 +8391,7 @@ fn draw_raw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let visible = body.height.max(1) as usize;
     let scroll = row.saturating_sub(visible.saturating_sub(1));
     frame.render_widget(
-        Paragraph::new(text.as_str())
-            .scroll((scroll as u16, 0))
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(text.as_str()).scroll((scroll as u16, 0)).wrap(Wrap { trim: false }),
         body,
     );
     let visible_row = row.saturating_sub(scroll) as u16;
@@ -9106,26 +8461,12 @@ fn draw_feedback(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                if form.include_diagnostics {
-                    "[x]"
-                } else {
-                    "[ ]"
-                },
-                Style::default().fg(if form.include_diagnostics {
-                    success()
-                } else {
-                    muted()
-                }),
+                if form.include_diagnostics { "[x]" } else { "[ ]" },
+                Style::default().fg(if form.include_diagnostics { success() } else { muted() }),
             ),
-            Span::styled(
-                " Include extension diagnostics",
-                Style::default().fg(text()),
-            ),
+            Span::styled(" Include extension diagnostics", Style::default().fg(text())),
             ui::dot(),
-            Span::styled(
-                "your transcript is never included",
-                Style::default().fg(muted()),
-            ),
+            Span::styled("your transcript is never included", Style::default().fg(muted())),
         ])),
         sections[2],
     );
@@ -9240,11 +8581,7 @@ fn draw_user_question(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     ui::truncate(option, width.saturating_sub(7)),
                     Style::default()
                         .fg(if on_cursor { text() } else { muted() })
-                        .add_modifier(if on_cursor {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
+                        .add_modifier(if on_cursor { Modifier::BOLD } else { Modifier::empty() }),
                 ),
             ],
         ));
@@ -9258,10 +8595,7 @@ fn draw_user_question(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(accent))
         .padding(Padding::horizontal(1))
-        .title_top(Line::from(Span::styled(
-            " your answer ",
-            Style::default().fg(accent),
-        )));
+        .title_top(Line::from(Span::styled(" your answer ", Style::default().fg(accent))));
     let field_inner = field.inner(sections[3]);
     frame.render_widget(field, sections[3]);
 
@@ -9325,11 +8659,7 @@ fn draw_approval(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(3),
-            Constraint::Length(4),
-        ])
+        .constraints([Constraint::Length(3), Constraint::Min(3), Constraint::Length(4)])
         .split(inner);
 
     let mut header = vec![Line::from(vec![
@@ -9338,10 +8668,7 @@ fn draw_approval(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Style::default().fg(warning()).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            ui::truncate(
-                &approval.summary,
-                sections[0].width.saturating_sub(20) as usize,
-            ),
+            ui::truncate(&approval.summary, sections[0].width.saturating_sub(20) as usize),
             Style::default().fg(text()),
         ),
     ])];
@@ -9390,22 +8717,16 @@ fn draw_approval(frame: &mut Frame<'_>, area: Rect, app: &App) {
         raw_approval_text(&approval.details)
     };
     frame.render_widget(
-        Paragraph::new(body)
-            .scroll((app.approval_scroll, app.approval_horizontal))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(rail()))
-                    .title_top(Line::from(Span::styled(
-                        if approval.diff.is_some() {
-                            " changes "
-                        } else {
-                            " operation "
-                        },
-                        Style::default().fg(muted()),
-                    ))),
-            ),
+        Paragraph::new(body).scroll((app.approval_scroll, app.approval_horizontal)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(rail()))
+                .title_top(Line::from(Span::styled(
+                    if approval.diff.is_some() { " changes " } else { " operation " },
+                    Style::default().fg(muted()),
+                ))),
+        ),
         sections[1],
     );
 
@@ -9429,16 +8750,8 @@ fn draw_approval(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Paragraph::new(Text::from(vec![
             Line::from(""),
             option("y", "Yes, run it once", true),
-            option(
-                "a",
-                "Yes, and allow this for the rest of the session",
-                false,
-            ),
-            option(
-                "n",
-                "No — reject it, then tell Abacus in chat what to do instead",
-                false,
-            ),
+            option("a", "Yes, and allow this for the rest of the session", false),
+            option("n", "No — reject it, then tell Abacus in chat what to do instead", false),
         ])),
         sections[2],
     );
@@ -9454,10 +8767,7 @@ fn diff_text(diff: &DiffDocument) -> Text<'static> {
             Span::styled("  ", Style::default().bg(surface())),
             Span::styled(
                 file.display_path().to_owned(),
-                Style::default()
-                    .fg(text())
-                    .bg(surface())
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(text()).bg(surface()).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("   +{}  -{} ", file.additions, file.deletions),
@@ -9550,9 +8860,8 @@ fn draw_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
         &[("↑↓", "select"), ("enter", "open"), ("esc", "close")]
     };
     let extra = if picker.prompt.is_some() { 3 } else { 0 };
-    let height = (picker.items.len() as u16 + 2 + extra)
-        .min(area.height.saturating_sub(4))
-        .max(3 + extra);
+    let height =
+        (picker.items.len() as u16 + 2 + extra).min(area.height.saturating_sub(4)).max(3 + extra);
     let popup = ui::centered(area.width.saturating_sub(12).min(100), height, area);
     let inner = open_overlay(frame, popup, &picker.title.to_uppercase(), primary(), hints);
 
@@ -9562,19 +8871,13 @@ fn draw_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let start = picker.selected.saturating_sub(rows.saturating_sub(1));
     let mut lines = Vec::new();
     if picker.items.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  Nothing to show yet.",
-            Style::default().fg(muted()),
-        )));
+        lines
+            .push(Line::from(Span::styled("  Nothing to show yet.", Style::default().fg(muted()))));
     }
     for (index, (label, _)) in picker.items.iter().enumerate().skip(start).take(rows) {
         let selected = index == picker.selected;
-        let rect = Rect {
-            x: inner.x,
-            y: inner.y + lines.len() as u16,
-            width: inner.width,
-            height: 1,
-        };
+        let rect =
+            Rect { x: inner.x, y: inner.y + lines.len() as u16, width: inner.width, height: 1 };
         app.hits.borrow_mut().picker.push((rect, index));
         lines.push(ui::list_row(
             app.row_state(rect, selected),
@@ -9583,25 +8886,14 @@ fn draw_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 ui::truncate(label, width.saturating_sub(3)),
                 Style::default()
                     .fg(if selected { text() } else { muted() })
-                    .add_modifier(if selected {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    }),
+                    .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
             )],
         ));
     }
-    let list = Rect {
-        height: inner.height.saturating_sub(prompt_rows as u16),
-        ..inner
-    };
+    let list = Rect { height: inner.height.saturating_sub(prompt_rows as u16), ..inner };
     frame.render_widget(Paragraph::new(Text::from(lines)), list);
     if let Some(prompt) = &picker.prompt {
-        let field = Rect {
-            y: list.bottom(),
-            height: prompt_rows as u16,
-            ..inner
-        };
+        let field = Rect { y: list.bottom(), height: prompt_rows as u16, ..inner };
         match prompt {
             PickerPrompt::Rename { id, input } => {
                 frame.render_widget(
@@ -9710,15 +9002,8 @@ fn handle_model_hub_key(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char('k') | KeyCode::Char('j') if !in_body => {
-            let delta = if key.code == KeyCode::Char('k') {
-                -1
-            } else {
-                1
-            };
-            app.model_hub
-                .as_mut()
-                .expect("checked above")
-                .move_scope(delta);
+            let delta = if key.code == KeyCode::Char('k') { -1 } else { 1 };
+            app.model_hub.as_mut().expect("checked above").move_scope(delta);
             app.enter_hub_scope();
         }
         KeyCode::Enter => app.accept_model_hub(),
@@ -9749,11 +9034,8 @@ fn handle_model_hub_key(app: &mut App, key: KeyEvent) {
 impl App {
     /// Make sure the scope under the sidebar cursor has a catalog on the way.
     fn enter_hub_scope(&mut self) {
-        let profile = self
-            .model_hub
-            .as_ref()
-            .and_then(|hub| hub.scoped_profile())
-            .map(str::to_owned);
+        let profile =
+            self.model_hub.as_ref().and_then(|hub| hub.scoped_profile()).map(str::to_owned);
         if let Some(profile) = profile {
             self.fetch_catalog(&profile);
         }
@@ -9811,10 +9093,7 @@ impl App {
                 };
                 // Without a role in hand, Enter means "switch this profile's
                 // model" — which is the `default` role by another name.
-                let role = hub
-                    .assigning
-                    .clone()
-                    .unwrap_or_else(|| "default".to_owned());
+                let role = hub.assigning.clone().unwrap_or_else(|| "default".to_owned());
                 self.assign_role(&role, Some(model));
                 if let Some(hub) = self.model_hub.as_mut()
                     && let Some(assigned) = hub.assigning.take()
@@ -9858,10 +9137,8 @@ fn handle_picker_prompt(app: &mut App, key: KeyEvent) {
                 app.commit_profile_rename(&id, &to);
             }
             _ => {
-                if let Some(PickerPrompt::Rename { input, .. }) = app
-                    .picker
-                    .as_mut()
-                    .and_then(|picker| picker.prompt.as_mut())
+                if let Some(PickerPrompt::Rename { input, .. }) =
+                    app.picker.as_mut().and_then(|picker| picker.prompt.as_mut())
                 {
                     edit_buffer(input, key, false);
                 }
@@ -9989,11 +9266,7 @@ fn entries_from_messages(messages: &[Value]) -> Vec<Entry> {
         match role {
             "user" => entries.push(Entry::new(
                 EntryKind::User,
-                content
-                    .split("\n\n<attached_file path=\"")
-                    .next()
-                    .unwrap_or(content)
-                    .to_owned(),
+                content.split("\n\n<attached_file path=\"").next().unwrap_or(content).to_owned(),
             )),
             "assistant" => entries.push(Entry::new(EntryKind::Assistant, content.to_owned())),
             // A restored session has no timings — the durations were never
@@ -10002,11 +9275,7 @@ fn entries_from_messages(messages: &[Value]) -> Vec<Entry> {
             "tool" => entries.push(Entry::tool(ToolCall {
                 name: message["name"].as_str().unwrap_or("tool").to_owned(),
                 summary: String::new(),
-                status: if tool_failed(content) {
-                    ToolStatus::Failed
-                } else {
-                    ToolStatus::Ok
-                },
+                status: if tool_failed(content) { ToolStatus::Failed } else { ToolStatus::Ok },
                 output: tool_preview(content),
                 full: retain_output(content),
                 duration_ms: None,
@@ -10020,10 +9289,7 @@ fn entries_from_messages(messages: &[Value]) -> Vec<Entry> {
 
 fn validate_settings(settings: &Settings) -> Result<()> {
     if !settings.profiles.contains_key(&settings.default_profile) {
-        bail!(
-            "default profile `{}` does not exist",
-            settings.default_profile
-        );
+        bail!("default profile `{}` does not exist", settings.default_profile);
     }
     let profile = &settings.profiles[&settings.default_profile];
     if profile.model.trim().is_empty() {
@@ -10171,9 +9437,7 @@ fn edit_buffer(input: &mut InputBuffer, key: KeyEvent, multiline: bool) {
             input.delete_word_backward()
         }
         KeyCode::Char(character)
-            if !key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
             input.insert(character)
         }
@@ -10192,11 +9456,7 @@ fn slash_suggestions(input: &str) -> Vec<(&'static str, &'static str)> {
     }
     // Return every match; the popup clamps how many it renders to the space it
     // has, so a bare `/` lists all commands instead of an arbitrary first six.
-    SLASH_COMMANDS
-        .iter()
-        .copied()
-        .filter(|(command, _)| command.starts_with(query))
-        .collect()
+    SLASH_COMMANDS.iter().copied().filter(|(command, _)| command.starts_with(query)).collect()
 }
 
 /// Up to eight workspace files matching `partial` (the text after `@`), used for
@@ -10209,11 +9469,7 @@ fn file_suggestions(workspace: &std::path::Path, partial: &str) -> Vec<String> {
     let mut prefix = Vec::new();
     let mut contains = Vec::new();
     let mut scanned = 0_usize;
-    for entry in ignore::WalkBuilder::new(workspace)
-        .max_depth(Some(12))
-        .build()
-        .flatten()
-    {
+    for entry in ignore::WalkBuilder::new(workspace).max_depth(Some(12)).build().flatten() {
         if scanned >= MAX_SCANNED {
             break;
         }
@@ -10237,11 +9493,7 @@ fn file_suggestions(workspace: &std::path::Path, partial: &str) -> Vec<String> {
     }
     prefix.sort();
     contains.sort();
-    prefix
-        .into_iter()
-        .chain(contains)
-        .take(MAX_RESULTS)
-        .collect()
+    prefix.into_iter().chain(contains).take(MAX_RESULTS).collect()
 }
 
 /// What the completion popup is currently offering: the entries (value, hint)
@@ -10263,10 +9515,7 @@ fn active_completion(app: &App) -> Option<(Vec<(String, String)>, &'static str)>
         if files.is_empty() {
             return None;
         }
-        let items = files
-            .into_iter()
-            .map(|path| (format!("@{path}"), String::new()))
-            .collect();
+        let items = files.into_iter().map(|path| (format!("@{path}"), String::new())).collect();
         return Some((items, "FILES"));
     }
     None
@@ -10293,9 +9542,7 @@ impl App {
             self.completion_index = 0;
             self.completion_dismissed = false;
         }
-        let count = active_completion(self)
-            .map(|(items, _)| items.len())
-            .unwrap_or(0);
+        let count = active_completion(self).map(|(items, _)| items.len()).unwrap_or(0);
         self.completion_index = self.completion_index.min(count.saturating_sub(1));
     }
 
@@ -10369,10 +9616,7 @@ mod tests {
 
     #[test]
     fn tool_preview_is_bounded() {
-        let output = (0..20)
-            .map(|n| format!("line {n}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let output = (0..20).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
         let preview = tool_preview(&output);
         assert!(preview.lines().count() <= 9);
         assert!(preview.ends_with('…'));
@@ -10391,19 +9635,13 @@ mod tests {
         assert!(app.config.reasoning_effort.is_none());
 
         assert!(app.slash_command("/effort high"));
-        assert_eq!(
-            app.config.reasoning_effort,
-            Some(crate::config::ReasoningEffort::High)
-        );
+        assert_eq!(app.config.reasoning_effort, Some(crate::config::ReasoningEffort::High));
         assert_eq!(app.config_value(ConfigKey::Effort), "high");
         assert!(app.status.contains("high"), "{}", app.status);
 
         // Aliases resolve, and `auto` clears back to the provider default.
         assert!(app.slash_command("/effort med"));
-        assert_eq!(
-            app.config.reasoning_effort,
-            Some(crate::config::ReasoningEffort::Medium)
-        );
+        assert_eq!(app.config.reasoning_effort, Some(crate::config::ReasoningEffort::Medium));
         assert!(app.slash_command("/effort auto"));
         assert!(app.config.reasoning_effort.is_none());
         assert_eq!(app.config_value(ConfigKey::Effort), "auto");
@@ -10432,10 +9670,7 @@ mod tests {
         KEYBOARD_ENHANCED.store(true, Ordering::SeqCst);
         restore_terminal();
         assert!(!TERMINAL_CLAIMED.load(Ordering::SeqCst), "claim released");
-        assert!(
-            !KEYBOARD_ENHANCED.load(Ordering::SeqCst),
-            "flags popped once"
-        );
+        assert!(!KEYBOARD_ENHANCED.load(Ordering::SeqCst), "flags popped once");
         restore_terminal();
         assert!(!TERMINAL_CLAIMED.load(Ordering::SeqCst), "still released");
     }
@@ -10449,18 +9684,11 @@ mod tests {
         // The two must agree for every terminal width, narrow or wide.
         for frame_width in [40_u16, 80, 112, 150, 300] {
             let measured = frame_width.min(CONTENT_COLUMNS).saturating_sub(6).max(1);
-            let drawn = ui::measure(
-                Rect {
-                    x: 0,
-                    y: 0,
-                    width: frame_width,
-                    height: 10,
-                },
-                CONTENT_COLUMNS,
-            )
-            .width
-            .saturating_sub(6)
-            .max(1);
+            let drawn =
+                ui::measure(Rect { x: 0, y: 0, width: frame_width, height: 10 }, CONTENT_COLUMNS)
+                    .width
+                    .saturating_sub(6)
+                    .max(1);
             assert_eq!(
                 measured, drawn,
                 "at {frame_width} columns the composer measures {measured} but draws {drawn}"
@@ -10522,9 +9750,7 @@ mod tests {
         // Nothing pending → nothing happens.
         assert!(!app.deliver_pending_injections());
 
-        app.injections.push(crate::agent::Injection::SubagentReport(
-            "alpha: done".into(),
-        ));
+        app.injections.push(crate::agent::Injection::SubagentReport("alpha: done".into()));
         assert!(app.deliver_pending_injections(), "a turn was started");
         assert!(app.running.is_some());
         let delivered = app
@@ -10547,10 +9773,8 @@ mod tests {
         // the same endpoint with the cheaper model.
         let mut input = InputBuffer::new();
         input.insert_str("cheap/model");
-        app.config_panel = Some(ConfigPanel {
-            selected: 0,
-            editing: Some((ConfigKey::AuxModel, input)),
-        });
+        app.config_panel =
+            Some(ConfigPanel { selected: 0, editing: Some((ConfigKey::AuxModel, input)) });
         app.commit_config_edit();
         assert_eq!(app.aux_provider.model(), "cheap/model");
         assert_eq!(app.provider.model(), "test-model", "main model untouched");
@@ -10563,10 +9787,8 @@ mod tests {
         // Clearing it returns to "(same as main)".
         let mut blank = InputBuffer::new();
         blank.insert_str("  ");
-        app.config_panel = Some(ConfigPanel {
-            selected: 0,
-            editing: Some((ConfigKey::AuxModel, blank)),
-        });
+        app.config_panel =
+            Some(ConfigPanel { selected: 0, editing: Some((ConfigKey::AuxModel, blank)) });
         app.commit_config_edit();
         assert_eq!(app.aux_provider.model(), app.provider.model());
         assert_eq!(app.config_value(ConfigKey::AuxModel), "(same as main)");
@@ -10676,18 +9898,12 @@ mod tests {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
         for ch in "/help".chars() {
             let before = app.input.text();
-            handle_key(
-                &mut app,
-                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()),
-            );
+            handle_key(&mut app, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
             app.sync_completion(&before);
         }
         // Fully typed, so Enter must send rather than re-accept the suggestion.
         assert!(app.visible_completion().is_some(), "popup lists the match");
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
-        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
         assert!(app.input.is_empty(), "Enter should have submitted");
         assert!(app.show_help, "/help should have run");
     }
@@ -10697,10 +9913,7 @@ mod tests {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
         for ch in "/comp".chars() {
             let before = app.input.text();
-            handle_key(
-                &mut app,
-                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()),
-            );
+            handle_key(&mut app, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
             app.sync_completion(&before);
         }
         let before = app.input.text();
@@ -10713,10 +9926,7 @@ mod tests {
             app.visible_completion().is_none(),
             "a completed command must not keep offering itself"
         );
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
-        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
         assert!(app.input.is_empty(), "Enter should have submitted");
     }
 
@@ -10735,12 +9945,9 @@ mod tests {
     #[test]
     fn ctrl_shift_enter_forks_the_session_keeping_the_draft() {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
-        app.session_store = Some(SessionStore::new(
-            &app.config.paths,
-            app.config.workspace.clone(),
-        ));
-        app.messages
-            .push(json!({"role": "user", "content": "fix the parser"}));
+        app.session_store =
+            Some(SessionStore::new(&app.config.paths, app.config.workspace.clone()));
+        app.messages.push(json!({"role": "user", "content": "fix the parser"}));
         app.persist_session();
         let original_id = app.session.as_ref().unwrap().id;
         assert_eq!(app.session.as_ref().unwrap().title, "fix the parser");
@@ -10753,25 +9960,11 @@ mod tests {
 
         let fork = app.session.as_ref().expect("forked session");
         assert_ne!(fork.id, original_id, "a fork is a new session");
+        assert!(fork.title.starts_with("(fork)"), "the fork is marked: {}", fork.title);
+        assert!(fork.title.ends_with("fix the parser"), "the fork keeps the title: {}", fork.title);
+        assert_eq!(app.input.text(), "then write the tests", "the draft stays in the composer");
         assert!(
-            fork.title.starts_with("(fork)"),
-            "the fork is marked: {}",
-            fork.title
-        );
-        assert!(
-            fork.title.ends_with("fix the parser"),
-            "the fork keeps the title: {}",
-            fork.title
-        );
-        assert_eq!(
-            app.input.text(),
-            "then write the tests",
-            "the draft stays in the composer"
-        );
-        assert!(
-            app.messages
-                .iter()
-                .any(|message| message["content"] == "fix the parser"),
+            app.messages.iter().any(|message| message["content"] == "fix the parser"),
             "the conversation carries into the fork"
         );
         let blob = app.entries.last().expect("fork blob");
@@ -10788,12 +9981,9 @@ mod tests {
     #[test]
     fn fork_command_does_the_same_as_ctrl_shift_enter() {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
-        app.session_store = Some(SessionStore::new(
-            &app.config.paths,
-            app.config.workspace.clone(),
-        ));
-        app.messages
-            .push(json!({"role": "user", "content": "plan the refactor"}));
+        app.session_store =
+            Some(SessionStore::new(&app.config.paths, app.config.workspace.clone()));
+        app.messages.push(json!({"role": "user", "content": "plan the refactor"}));
         app.persist_session();
         let original_id = app.session.as_ref().unwrap().id;
         app.input.insert_str("/fork");
@@ -10802,11 +9992,7 @@ mod tests {
         assert!(app.input.is_empty(), "/fork consumes the command");
         let fork = app.session.as_ref().expect("forked session");
         assert_ne!(fork.id, original_id);
-        assert!(
-            fork.title.starts_with("(fork) plan the refactor"),
-            "{}",
-            fork.title
-        );
+        assert!(fork.title.starts_with("(fork) plan the refactor"), "{}", fork.title);
         let blob = app.entries.last().expect("fork blob");
         assert_eq!(blob.kind, EntryKind::System);
         assert!(blob.text.contains("forked"), "{}", blob.text);
@@ -10815,10 +10001,8 @@ mod tests {
     #[test]
     fn fork_without_a_conversation_reports_instead_of_creating() {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
-        app.session_store = Some(SessionStore::new(
-            &app.config.paths,
-            app.config.workspace.clone(),
-        ));
+        app.session_store =
+            Some(SessionStore::new(&app.config.paths, app.config.workspace.clone()));
         app.fork_session();
         assert!(app.session.is_none(), "forking must not invent a session");
         assert!(app.status.contains("fork"), "{}", app.status);
@@ -10901,19 +10085,13 @@ mod tests {
         app.settings.default_profile = "claude".into();
         app.save_and_apply_settings().unwrap();
         assert_eq!(app.config.model_limits.context_window, 1_000_000);
-        assert_eq!(
-            app.config.model_limits.configured_output_tokens,
-            Some(64_000)
-        );
+        assert_eq!(app.config.model_limits.configured_output_tokens, Some(64_000));
 
         app.settings.default_profile = "local".into();
         app.save_and_apply_settings().unwrap();
         assert_eq!(app.config.model, "codestral");
         assert_eq!(app.config.model_limits.context_window, 128_000);
-        assert_eq!(
-            app.config.model_limits.configured_output_tokens,
-            Some(8_000)
-        );
+        assert_eq!(app.config.model_limits.configured_output_tokens, Some(8_000));
     }
 
     #[test]
@@ -10924,28 +10102,19 @@ mod tests {
         app.settings.agent.max_output_tokens = Some(16_000);
         app.save_and_apply_settings().unwrap();
         assert_eq!(app.config.model_limits.context_window, 200_000);
-        assert_eq!(
-            app.config.model_limits.configured_output_tokens,
-            Some(16_000)
-        );
+        assert_eq!(app.config.model_limits.configured_output_tokens, Some(16_000));
 
         // Writing a profile override clears the leftover so a later blank
         // does not resurrect the old global value.
         let edit = |app: &mut App, key: ConfigKey, text: &str| {
             let mut input = InputBuffer::new();
             input.insert_str(text);
-            app.config_panel = Some(ConfigPanel {
-                selected: 0,
-                editing: Some((key, input)),
-            });
+            app.config_panel = Some(ConfigPanel { selected: 0, editing: Some((key, input)) });
             app.commit_config_edit();
         };
         edit(&mut app, ConfigKey::ContextWindow, "1m");
         assert_eq!(app.settings.agent.context_window, None);
-        assert_eq!(
-            app.settings.profiles["test"].context_window,
-            Some(1_000_000)
-        );
+        assert_eq!(app.settings.profiles["test"].context_window, Some(1_000_000));
         assert_eq!(app.settings.profile_limits("other"), (None, Some(16_000)));
     }
 
@@ -10953,9 +10122,7 @@ mod tests {
     fn profile_picker_renames_and_moves_the_stored_key() {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
         extra_profile(&mut app, "second", "other-model");
-        app.credentials
-            .keys
-            .insert("second".into(), "secret-key".into());
+        app.credentials.keys.insert("second".into(), "secret-key".into());
         app.open_profile_picker();
         let index = app
             .picker
@@ -10967,29 +10134,18 @@ mod tests {
             .unwrap();
         app.picker.as_mut().unwrap().selected = index;
         app.begin_profile_rename("second");
-        handle_picker_prompt(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
-        );
+        handle_picker_prompt(&mut app, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         // Replace the seeded id with the new one.
-        if let Some(PickerPrompt::Rename { input, .. }) = app
-            .picker
-            .as_mut()
-            .and_then(|picker| picker.prompt.as_mut())
+        if let Some(PickerPrompt::Rename { input, .. }) =
+            app.picker.as_mut().and_then(|picker| picker.prompt.as_mut())
         {
             input.clear();
             input.insert_str("renamed");
         }
-        handle_picker_prompt(
-            &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
-        );
+        handle_picker_prompt(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
         assert!(!app.settings.profiles.contains_key("second"));
         assert!(app.settings.profiles.contains_key("renamed"));
-        assert_eq!(
-            app.credentials.keys.get("renamed").map(String::as_str),
-            Some("secret-key")
-        );
+        assert_eq!(app.credentials.keys.get("renamed").map(String::as_str), Some("secret-key"));
         assert!(!app.credentials.keys.contains_key("second"));
     }
 
@@ -11042,20 +10198,13 @@ mod tests {
 
     #[test]
     fn profile_is_offered_by_the_command_palette() {
-        assert!(
-            SLASH_COMMANDS
-                .iter()
-                .any(|(command, _)| *command == "/profile")
-        );
+        assert!(SLASH_COMMANDS.iter().any(|(command, _)| *command == "/profile"));
     }
 
     #[test]
     fn adding_a_provider_creates_a_profile_and_asks_for_a_model() {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
-        app.config_panel = Some(ConfigPanel {
-            selected: 0,
-            editing: None,
-        });
+        app.config_panel = Some(ConfigPanel { selected: 0, editing: None });
         app.open_profile_picker();
         let index = app
             .picker
@@ -11070,11 +10219,8 @@ mod tests {
         // That row opens a second step rather than selecting anything.
         let picker = app.picker.as_ref().expect("provider picker");
         assert_eq!(picker.action, PickerAction::AddProvider);
-        let xai = picker
-            .items
-            .iter()
-            .position(|(_, value)| value == "xai")
-            .expect("xai preset offered");
+        let xai =
+            picker.items.iter().position(|(_, value)| value == "xai").expect("xai preset offered");
         app.accept_picker(Some(xai));
 
         let profile = app.settings.profiles.get("xai").expect("profile created");
@@ -11085,30 +10231,21 @@ mod tests {
         // running session stays on the old provider until one is given.
         assert_eq!(app.config.profile, "test");
         // A profile with no model cannot run, so that field opens straight away.
-        let editing = app
-            .config_panel
-            .as_ref()
-            .and_then(|panel| panel.editing.as_ref())
-            .map(|(key, _)| *key);
+        let editing =
+            app.config_panel.as_ref().and_then(|panel| panel.editing.as_ref()).map(|(key, _)| *key);
         assert_eq!(editing, Some(ConfigKey::Model));
     }
 
     #[test]
     fn abandoning_the_model_prompt_rolls_the_new_provider_back() {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
-        app.config_panel = Some(ConfigPanel {
-            selected: 0,
-            editing: None,
-        });
+        app.config_panel = Some(ConfigPanel { selected: 0, editing: None });
         app.add_provider("groq");
         assert_eq!(app.settings.default_profile, "groq");
 
         // Esc out of the model prompt.
         handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
-        assert_eq!(
-            app.settings.default_profile, "test",
-            "the previous profile should be restored"
-        );
+        assert_eq!(app.settings.default_profile, "test", "the previous profile should be restored");
         assert!(
             !app.settings.profiles.contains_key("groq"),
             "an unusable profile should not be left behind"
@@ -11118,10 +10255,7 @@ mod tests {
     #[test]
     fn a_committed_model_keeps_the_new_provider() {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
-        app.config_panel = Some(ConfigPanel {
-            selected: 0,
-            editing: None,
-        });
+        app.config_panel = Some(ConfigPanel { selected: 0, editing: None });
         app.add_provider("groq");
         if let Some(panel) = &mut app.config_panel
             && let Some((_, input)) = panel.editing.as_mut()
@@ -11158,10 +10292,7 @@ mod tests {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
         assert_eq!(app.config_value(ConfigKey::ApiKey), "not set");
 
-        app.config_panel = Some(ConfigPanel {
-            selected: 0,
-            editing: None,
-        });
+        app.config_panel = Some(ConfigPanel { selected: 0, editing: None });
         app.begin_config_edit(ConfigKey::ApiKey);
         // The editor starts empty rather than seeded with anything.
         let buffer = app
@@ -11181,10 +10312,7 @@ mod tests {
         let shown = app.config_value(ConfigKey::ApiKey);
         assert_eq!(shown, "set · stored locally");
         assert!(!shown.contains("sk-secret"), "the key must never be echoed");
-        assert_eq!(
-            app.credentials.keys.get("test").map(String::as_str),
-            Some("sk-secret-value")
-        );
+        assert_eq!(app.credentials.keys.get("test").map(String::as_str), Some("sk-secret-value"));
     }
 
     #[test]
@@ -11208,10 +10336,7 @@ mod tests {
                 roles: Default::default(),
             },
         );
-        app.config_panel = Some(ConfigPanel {
-            selected: 0,
-            editing: None,
-        });
+        app.config_panel = Some(ConfigPanel { selected: 0, editing: None });
         app.open_profile_picker();
 
         // Drawn on top: the config panel must not paint over its own child.
@@ -11220,16 +10345,10 @@ mod tests {
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let rendered = buffer_text(terminal.backend().buffer(), 96, 34);
         assert!(rendered.contains("PROFILE"), "picker should be visible");
-        assert!(
-            rendered.contains("Add a provider"),
-            "picker rows should be visible"
-        );
+        assert!(rendered.contains("Add a provider"), "picker rows should be visible");
 
         // And it owns the keys, rather than them going to the panel behind it.
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
-        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::empty()));
         assert_eq!(app.picker.as_ref().expect("picker").selected, 1);
         assert_eq!(
             app.config_panel.as_ref().expect("panel").selected,
@@ -11246,10 +10365,7 @@ mod tests {
         // Typing invalidates a shown draft immediately.
         app.draft = Some("run the tests".into());
         let before = app.input.text();
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()),
-        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()));
         app.sync_completion(&before);
         assert_eq!(app.draft, None, "a draft must not linger over typed text");
 
@@ -11325,10 +10441,7 @@ mod tests {
         // They are what the session has spent and how full the window is, so
         // the first is a direction pair and the second carries a denominator.
         assert!(rendered.contains("↑ "), "session input should be marked up");
-        assert!(
-            rendered.contains("↓ "),
-            "session output should be marked down"
-        );
+        assert!(rendered.contains("↓ "), "session output should be marked down");
         assert!(rendered.contains("ctx "), "context should be labelled");
         assert!(
             !rendered.contains("tokens  ·  ctx"),
@@ -11359,19 +10472,14 @@ mod tests {
                 break;
             }
         }
-        assert!(
-            opened,
-            "the arrows should have a hover target on the footer row"
-        );
+        assert!(opened, "the arrows should have a hover target on the footer row");
     }
 
     #[test]
     fn a_trace_opens_with_the_session_and_records_the_toggle() {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
-        app.session_store = Some(SessionStore::new(
-            &app.config.paths,
-            app.config.workspace.clone(),
-        ));
+        app.session_store =
+            Some(SessionStore::new(&app.config.paths, app.config.workspace.clone()));
         app.config.trace_enabled = true;
         assert!(app.trace.is_none(), "nothing to key on before a session");
         // A fresh screen with no prompt is not a session yet, and leaves no file.
@@ -11382,10 +10490,7 @@ mod tests {
         // persisted, and the trace opens with it.
         app.messages.push(json!({"role": "user", "content": "hi"}));
         app.persist_session();
-        let trace = app
-            .trace
-            .as_ref()
-            .expect("trace should open with the session");
+        let trace = app.trace.as_ref().expect("trace should open with the session");
         assert!(trace.path().exists());
         assert!(
             trace.path().starts_with(&app.config.paths.traces_dir),
@@ -11413,18 +10518,13 @@ mod tests {
     async fn steering_mid_stream_does_not_merge_the_user_into_the_model_block() {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
         let delta = |app: &mut App, text: &str| {
-            let _ = app
-                .event_tx
-                .send(crate::agent::AgentEvent::Delta(text.to_owned()));
+            let _ = app.event_tx.send(crate::agent::AgentEvent::Delta(text.to_owned()));
             app.drain_agent_events();
         };
 
         delta(&mut app, "the model was saying this");
         // The user steers; their message becomes its own block.
-        app.push_entry(Entry::new(
-            EntryKind::User,
-            "GLM-5.3 drops tomorrow".to_owned(),
-        ));
+        app.push_entry(Entry::new(EntryKind::User, "GLM-5.3 drops tomorrow".to_owned()));
         // The model keeps streaming.
         delta(&mut app, "and kept going afterwards");
 
@@ -11438,11 +10538,7 @@ mod tests {
             "the user's block must hold only what the user typed"
         );
         let last = app.entries.last().unwrap();
-        assert_eq!(
-            last.kind,
-            EntryKind::Assistant,
-            "a fresh block for the model"
-        );
+        assert_eq!(last.kind, EntryKind::Assistant, "a fresh block for the model");
         assert_eq!(last.text, "and kept going afterwards");
     }
 
@@ -11452,17 +10548,11 @@ mod tests {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
         app.settings.ui.show_thinking = true;
         reasoning(&mut app, "weighing the options");
-        app.push_entry(Entry::new(
-            EntryKind::System,
-            "noted — a side question".to_owned(),
-        ));
+        app.push_entry(Entry::new(EntryKind::System, "noted — a side question".to_owned()));
         reasoning(&mut app, "still weighing them");
 
-        let system = app
-            .entries
-            .iter()
-            .find(|entry| entry.kind == EntryKind::System)
-            .expect("the notice");
+        let system =
+            app.entries.iter().find(|entry| entry.kind == EntryKind::System).expect("the notice");
         assert_eq!(system.text, "noted — a side question");
         let last = app.entries.last().unwrap();
         assert_eq!(last.kind, EntryKind::Thinking);
@@ -11486,12 +10576,7 @@ mod tests {
                 expanded: false,
             })
         };
-        app.push_entry(tool(
-            "first",
-            "short",
-            "short\nand more",
-            ui::ToolStatus::Ok,
-        ));
+        app.push_entry(tool("first", "short", "short\nand more", ui::ToolStatus::Ok));
         app.push_entry(tool(
             "second",
             "building…",
@@ -11532,18 +10617,12 @@ mod tests {
             expanded: false,
         }));
         assert!(!app.toggle_latest_tool());
-        assert!(
-            app.status.contains("nothing buffered yet"),
-            "{}",
-            app.status
-        );
+        assert!(app.status.contains("nothing buffered yet"), "{}", app.status);
     }
 
     /// Push a reasoning chunk through the real event path.
     fn reasoning(app: &mut App, piece: &str) {
-        let _ = app
-            .event_tx
-            .send(crate::agent::AgentEvent::Reasoning(piece.to_owned()));
+        let _ = app.event_tx.send(crate::agent::AgentEvent::Reasoning(piece.to_owned()));
         app.drain_agent_events();
     }
 
@@ -11553,9 +10632,7 @@ mod tests {
         assert!(app.settings.ui.show_thinking, "on by default");
 
         reasoning(&mut app, "let me check the parser");
-        let _ = app
-            .event_tx
-            .send(crate::agent::AgentEvent::Delta("Here is the fix.".into()));
+        let _ = app.event_tx.send(crate::agent::AgentEvent::Delta("Here is the fix.".into()));
         app.drain_agent_events();
 
         let kinds: Vec<EntryKind> = app.entries.iter().map(|entry| entry.kind).collect();
@@ -11573,11 +10650,7 @@ mod tests {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
         app.settings.ui.show_thinking = false;
         reasoning(&mut app, "a long private deliberation");
-        assert!(
-            app.entries.is_empty(),
-            "nothing should be rendered: {:?}",
-            app.entries
-        );
+        assert!(app.entries.is_empty(), "nothing should be rendered: {:?}", app.entries);
         // It was still generated and billed, so the rate must account for it.
         assert_eq!(app.turn_output_chars, "a long private deliberation".len());
     }
@@ -11644,21 +10717,12 @@ mod tests {
             respond,
         });
         assert!(!app.overlay_hidden);
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
-        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
         assert!(app.overlay_hidden);
         // While hidden, transcript keys work instead of feeding the dialog.
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::PageUp, KeyModifiers::empty()),
-        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::PageUp, KeyModifiers::empty()));
         assert!(app.question.is_some(), "the question is parked, not lost");
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
-        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
         assert!(!app.overlay_hidden);
         // A fresh dialog always arrives visible.
         app.overlay_hidden = true;
@@ -11687,10 +10751,7 @@ mod tests {
         };
         assert!(joined(&visible).contains("step by step"));
 
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::F(3), KeyModifiers::empty()),
-        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::F(3), KeyModifiers::empty()));
         assert!(!app.settings.ui.show_thinking);
         let hidden = ui::transcript(&app.entries, 60, "•", None, false);
         assert!(!joined(&hidden).contains("step by step"));
@@ -11703,10 +10764,7 @@ mod tests {
     async fn ctrl_g_returns_to_the_live_tail() {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
         app.follow = false;
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
-        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
         assert!(app.follow);
     }
 
@@ -11716,10 +10774,7 @@ mod tests {
         let edit = |app: &mut App, key: ConfigKey, text: &str| {
             let mut input = InputBuffer::new();
             input.insert_str(text);
-            app.config_panel = Some(ConfigPanel {
-                selected: 0,
-                editing: Some((key, input)),
-            });
+            app.config_panel = Some(ConfigPanel { selected: 0, editing: Some((key, input)) });
             app.commit_config_edit();
         };
 
@@ -11727,57 +10782,36 @@ mod tests {
         // wire value in one step — this is the /config escape hatch for a
         // provider that rejects the detected max_tokens.
         edit(&mut app, ConfigKey::MaxOutput, "64k");
-        let profile = app
-            .settings
-            .profiles
-            .get(&app.settings.default_profile)
-            .expect("active profile");
+        let profile =
+            app.settings.profiles.get(&app.settings.default_profile).expect("active profile");
         assert_eq!(profile.max_output_tokens, Some(64_000));
         assert_eq!(app.settings.agent.max_output_tokens, None);
-        assert_eq!(
-            app.config.model_limits.configured_output_tokens,
-            Some(64_000)
-        );
+        assert_eq!(app.config.model_limits.configured_output_tokens, Some(64_000));
         assert!(app.status.contains("saved"), "{}", app.status);
 
         // Context window accepts m-suffixed values.
         edit(&mut app, ConfigKey::ContextWindow, "1m");
-        let profile = app
-            .settings
-            .profiles
-            .get(&app.settings.default_profile)
-            .expect("active profile");
+        let profile =
+            app.settings.profiles.get(&app.settings.default_profile).expect("active profile");
         assert_eq!(profile.context_window, Some(1_000_000));
         assert_eq!(app.config.model_limits.context_window, 1_000_000);
 
         // Blank (or "auto") clears the override and re-resolves.
         edit(&mut app, ConfigKey::MaxOutput, "");
-        let profile = app
-            .settings
-            .profiles
-            .get(&app.settings.default_profile)
-            .expect("active profile");
+        let profile =
+            app.settings.profiles.get(&app.settings.default_profile).expect("active profile");
         assert_eq!(profile.max_output_tokens, None);
         edit(&mut app, ConfigKey::ContextWindow, "auto");
-        let profile = app
-            .settings
-            .profiles
-            .get(&app.settings.default_profile)
-            .expect("active profile");
+        let profile =
+            app.settings.profiles.get(&app.settings.default_profile).expect("active profile");
         assert_eq!(profile.context_window, None);
-        assert_ne!(
-            app.config.model_limits.source,
-            crate::model_info::LimitSource::Override
-        );
+        assert_ne!(app.config.model_limits.source, crate::model_info::LimitSource::Override);
 
         // Garbage is rejected without changing anything.
         edit(&mut app, ConfigKey::MaxOutput, "lots");
         assert!(app.status.contains("configuration error"), "{}", app.status);
-        let profile = app
-            .settings
-            .profiles
-            .get(&app.settings.default_profile)
-            .expect("active profile");
+        let profile =
+            app.settings.profiles.get(&app.settings.default_profile).expect("active profile");
         assert_eq!(profile.max_output_tokens, None);
     }
 
@@ -11789,30 +10823,20 @@ mod tests {
             ("grep", "'pattern'", "src/a.rs:3: match"),
             ("read_file", "src/b.rs", "fn b() {}"),
         ] {
-            let _ = app.event_tx.send(AgentEvent::ToolStarted {
-                name: name.into(),
-                summary: summary.into(),
-            });
-            let _ = app.event_tx.send(AgentEvent::ToolFinished {
-                name: name.into(),
-                output: output.into(),
-            });
+            let _ = app
+                .event_tx
+                .send(AgentEvent::ToolStarted { name: name.into(), summary: summary.into() });
+            let _ = app
+                .event_tx
+                .send(AgentEvent::ToolFinished { name: name.into(), output: output.into() });
         }
         assert!(app.drain_agent_events());
-        let tools: Vec<_> = app
-            .entries
-            .iter()
-            .filter_map(|entry| entry.tool.as_ref())
-            .collect();
+        let tools: Vec<_> = app.entries.iter().filter_map(|entry| entry.tool.as_ref()).collect();
         assert_eq!(tools.len(), 1, "three reads collapse to one row");
         let group = tools[0];
         assert_eq!(group.name, "explored");
         assert!(group.summary.contains("read src/a.rs"), "{}", group.summary);
-        assert!(
-            group.summary.contains("grep 'pattern'"),
-            "{}",
-            group.summary
-        );
+        assert!(group.summary.contains("grep 'pattern'"), "{}", group.summary);
         // Expansion shows each call's full result, labelled.
         assert!(group.full.contains("── read_file src/a.rs ──"));
         assert!(group.full.contains("fn b() {}"));
@@ -11826,21 +10850,15 @@ mod tests {
             ("write_file", "wrote 3 lines"),
             ("read_file", "Error: missing"),
         ] {
-            let _ = app.event_tx.send(AgentEvent::ToolStarted {
-                name: name.into(),
-                summary: "x".into(),
-            });
-            let _ = app.event_tx.send(AgentEvent::ToolFinished {
-                name: name.into(),
-                output: output.into(),
-            });
+            let _ = app
+                .event_tx
+                .send(AgentEvent::ToolStarted { name: name.into(), summary: "x".into() });
+            let _ = app
+                .event_tx
+                .send(AgentEvent::ToolFinished { name: name.into(), output: output.into() });
         }
         assert!(app.drain_agent_events());
-        let tools: Vec<_> = app
-            .entries
-            .iter()
-            .filter_map(|entry| entry.tool.as_ref())
-            .collect();
+        let tools: Vec<_> = app.entries.iter().filter_map(|entry| entry.tool.as_ref()).collect();
         assert_eq!(tools.len(), 3, "a write and a failure stay individual rows");
         assert!(tools.iter().all(|call| call.name != "explored"));
     }
@@ -11869,19 +10887,14 @@ mod tests {
         assert_eq!(app.input.text(), "first question");
         assert_eq!(app.messages.len(), 1, "only the system message remains");
         assert!(
-            app.entries
-                .iter()
-                .all(|entry| entry.kind != EntryKind::User),
+            app.entries.iter().all(|entry| entry.kind != EntryKind::User),
             "the user entry was rewound"
         );
 
         // Any other key disarms: Esc, type, Esc must not rewind.
         app.input.clear();
         handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()),
-        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()));
         assert!(app.rewind_armed.is_none());
     }
 
@@ -11900,14 +10913,8 @@ mod tests {
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let rendered = buffer_text(terminal.backend().buffer(), 110, 34);
         assert!(rendered.contains("Yes, run it once"), "{rendered}");
-        assert!(
-            rendered.contains("allow this for the rest of the session"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("tell Abacus in chat what to do instead"),
-            "{rendered}"
-        );
+        assert!(rendered.contains("allow this for the rest of the session"), "{rendered}");
+        assert!(rendered.contains("tell Abacus in chat what to do instead"), "{rendered}");
     }
 
     #[test]
@@ -11920,12 +10927,7 @@ mod tests {
         let plain: Vec<String> = text
             .lines
             .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>()
-            })
+            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
             .collect();
         assert!(
             !plain.iter().any(|line| line.contains("@@")),
@@ -11941,10 +10943,7 @@ mod tests {
     #[test]
     fn shimmer_preserves_the_text_and_respects_the_animations_toggle() {
         let joined = |spans: &[ratatui::text::Span<'_>]| {
-            spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
+            spans.iter().map(|span| span.content.as_ref()).collect::<String>()
         };
         let off = ui::shimmer("thinking", Duration::from_millis(500), false);
         assert_eq!(off.len(), 1);
@@ -11999,11 +10998,7 @@ mod tests {
             reason: DoneReason::Complete,
         });
         assert!(app.drain_agent_events());
-        assert!(
-            app.entries[before..]
-                .iter()
-                .all(|entry| entry.kind != EntryKind::Rule)
-        );
+        assert!(app.entries[before..].iter().all(|entry| entry.kind != EntryKind::Rule));
     }
 
     #[test]
@@ -12118,11 +11113,7 @@ mod tests {
     /// command that exists must be discoverable.
     #[test]
     fn thinking_is_offered_by_the_command_palette() {
-        assert!(
-            SLASH_COMMANDS
-                .iter()
-                .any(|(command, _)| *command == "/thinking")
-        );
+        assert!(SLASH_COMMANDS.iter().any(|(command, _)| *command == "/thinking"));
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
         app.input.insert_str("/think");
         let (items, _) = app.visible_completion().expect("a suggestion");
@@ -12139,10 +11130,7 @@ mod tests {
 
         // Whitespace separation works too, since both read naturally.
         assert!(app.slash_command("/providers DeepInfra Novita"));
-        assert_eq!(
-            app.settings.profiles["test"].providers,
-            vec!["DeepInfra", "Novita"]
-        );
+        assert_eq!(app.settings.profiles["test"].providers, vec!["DeepInfra", "Novita"]);
 
         assert!(app.slash_command("/providers clear"));
         assert!(app.settings.profiles["test"].providers.is_empty());
@@ -12151,10 +11139,7 @@ mod tests {
     #[test]
     fn strict_and_fallback_control_whether_anything_else_may_serve() {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
-        assert!(
-            app.settings.profiles["test"].allow_fallbacks,
-            "on by default"
-        );
+        assert!(app.settings.profiles["test"].allow_fallbacks, "on by default");
         assert!(app.slash_command("/providers strict"));
         assert!(!app.settings.profiles["test"].allow_fallbacks);
         assert!(app.slash_command("/providers fallback"));
@@ -12222,10 +11207,7 @@ mod tests {
             assert!(rendered.contains("focused coding agent") || width < 72);
             assert!(rendered.contains("commands"));
 
-            app.config_panel = Some(ConfigPanel {
-                selected: 0,
-                editing: None,
-            });
+            app.config_panel = Some(ConfigPanel { selected: 0, editing: None });
             terminal.draw(|frame| draw(frame, &mut app)).unwrap();
             let rendered = buffer_text(terminal.backend().buffer(), width, height);
             assert!(rendered.contains("CONFIGURATION"));
@@ -12325,11 +11307,7 @@ mod tests {
         for _ in 0..3 {
             app.cycle_config_value(ConfigKey::SearchBackend).unwrap();
         }
-        assert_eq!(
-            app.settings.search.backend,
-            SearchBackend::Auto,
-            "the cycle wraps"
-        );
+        assert_eq!(app.settings.search.backend, SearchBackend::Auto, "the cycle wraps");
 
         // A URL is text, and reaches the resolved config the turn actually uses.
         app.begin_config_edit(ConfigKey::SearchInstanceUrl);
@@ -12361,10 +11339,7 @@ mod tests {
         // And it all survives a save/load round trip.
         app.save_and_apply_settings().unwrap();
         let saved = Settings::load(&AbacusPaths::under(directory.path().join("home"))).unwrap();
-        assert_eq!(
-            saved.search.instance_url.as_deref(),
-            Some("http://localhost:8888")
-        );
+        assert_eq!(saved.search.instance_url.as_deref(), Some("http://localhost:8888"));
         assert_eq!(saved.search.enabled, !before);
     }
 
@@ -12428,10 +11403,7 @@ mod tests {
         );
         assert!(app.running.is_some());
         app.goal_command("pause");
-        assert_eq!(
-            app.goal.snapshot().unwrap().status,
-            crate::goal::GoalStatus::Paused
-        );
+        assert_eq!(app.goal.snapshot().unwrap().status, crate::goal::GoalStatus::Paused);
         assert!(app.running.is_none());
         app.goal_command("edit Finish migration with all release checks");
         assert_eq!(
@@ -12544,10 +11516,7 @@ mod tests {
         assert!(rendered.contains("400k ctx"), "{rendered}");
         // One box: the column rule is joined into the border, not floating.
         assert!(rendered.contains('┬'), "top junction missing:\n{rendered}");
-        assert!(
-            rendered.contains('┴'),
-            "bottom junction missing:\n{rendered}"
-        );
+        assert!(rendered.contains('┴'), "bottom junction missing:\n{rendered}");
 
         // On a terminal too narrow to carry two columns the sidebar drops and
         // the list keeps the whole width, rather than squeezing to nothing.
@@ -12556,17 +11525,11 @@ mod tests {
         narrow_terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let rendered = buffer_text(narrow_terminal.backend().buffer(), 46, 18);
         assert!(rendered.contains("claude-sonnet"), "{rendered}");
-        assert!(
-            !rendered.contains('┬'),
-            "no split at this width:\n{rendered}"
-        );
+        assert!(!rendered.contains('┬'), "no split at this width:\n{rendered}");
 
         // Typing filters rather than navigating — the list is searched, not walked.
         for ch in "gpt".chars() {
-            handle_key(
-                &mut app,
-                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()),
-            );
+            handle_key(&mut app, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
         }
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let rendered = buffer_text(terminal.backend().buffer(), 110, 24);
@@ -12589,19 +11552,13 @@ mod tests {
             hub.selected = 1;
         }
         // Enter on the role opens the catalog with the role in hand…
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
-        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
         let hub = app.model_hub.as_ref().expect("hub is still open");
         assert_eq!(hub.assigning.as_deref(), Some("aux"));
         assert!(matches!(hub.current_scope(), Scope::Profile { .. }));
 
         // …and Enter on a model assigns it and comes back.
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
-        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
         let hub = app.model_hub.as_ref().expect("hub is still open");
         assert_eq!(hub.assigning, None);
         assert_eq!(*hub.current_scope(), Scope::Roles);
@@ -12613,10 +11570,7 @@ mod tests {
         assert_eq!(app.config.aux_model.as_deref(), Some("openai/gpt-5"));
 
         // Delete clears it back to inheriting.
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Delete, KeyModifiers::empty()),
-        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Delete, KeyModifiers::empty()));
         assert_eq!(app.settings.profiles["test"].role_model("aux"), None);
     }
 
@@ -12632,10 +11586,7 @@ mod tests {
             hub.scope = 2;
             hub.pane = crate::model_hub::Pane::Body;
         }
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
-        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
         assert_eq!(app.settings.profiles["test"].model, "openai/gpt-5");
         assert_eq!(app.config.model, "openai/gpt-5", "and it is applied live");
     }
@@ -12648,16 +11599,10 @@ mod tests {
         app.export_theme("mine");
         let path = app.config.paths.themes_dir.join("mine.json");
         assert!(path.exists(), "export wrote {}", path.display());
-        assert_eq!(
-            crate::theme::available(&app.config.paths.themes_dir),
-            vec!["mine"]
-        );
+        assert_eq!(crate::theme::available(&app.config.paths.themes_dir), vec!["mine"]);
 
         app.theme_command("mine");
-        assert_eq!(
-            app.settings.ui.theme,
-            crate::theme::ThemeChoice::Named("mine".to_owned())
-        );
+        assert_eq!(app.settings.ui.theme, crate::theme::ThemeChoice::Named("mine".to_owned()));
         // And the setting survives a save/load round trip as a bare string.
         let reloaded = Settings::load(&app.config.paths).expect("settings reload");
         assert_eq!(reloaded.ui.theme, app.settings.ui.theme);
@@ -12665,10 +11610,7 @@ mod tests {
         // A name that does not resolve leaves the working theme alone rather
         // than persisting a setting that fails on every later launch.
         app.theme_command("absent");
-        assert_eq!(
-            app.settings.ui.theme,
-            crate::theme::ThemeChoice::Named("mine".to_owned())
-        );
+        assert_eq!(app.settings.ui.theme, crate::theme::ThemeChoice::Named("mine".to_owned()));
 
         // A path separator in a name must not escape the themes directory.
         app.export_theme("../escaped");
@@ -12749,10 +11691,7 @@ mod tests {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
         for ch in "/mod".chars() {
             let before = app.input.text();
-            handle_key(
-                &mut app,
-                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()),
-            );
+            handle_key(&mut app, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
             app.sync_completion(&before);
         }
         let (items, _) = app.visible_completion().expect("command completion");
@@ -12761,24 +11700,14 @@ mod tests {
 
         // Down moves the highlight rather than reaching for prompt history.
         let before = app.input.text();
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
-        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::empty()));
         app.sync_completion(&before);
         assert_eq!(app.completion_index, 1);
-        assert_eq!(
-            app.input.text(),
-            "/mod",
-            "navigation must not edit the draft"
-        );
+        assert_eq!(app.input.text(), "/mod", "navigation must not edit the draft");
 
         // Enter inserts what is highlighted, not the first match.
         let before = app.input.text();
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
-        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
         app.sync_completion(&before);
         assert_eq!(app.input.text(), format!("{} ", items[1].0));
     }
@@ -12798,10 +11727,7 @@ mod tests {
 
         // Typing brings it back, at the top of the fresh list.
         let before = app.input.text();
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::empty()),
-        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Char('e'), KeyModifiers::empty()));
         app.sync_completion(&before);
         assert!(!app.completion_dismissed);
         assert_eq!(app.completion_index, 0);
@@ -12823,42 +11749,23 @@ mod tests {
     #[test]
     fn normal_mode_walks_blocks_and_unfolds_the_selected_tool() {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
-        let long = (1..=40)
-            .map(|n| format!("line {n}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        app.entries = vec![
-            Entry::new(EntryKind::User, "run the tests"),
-            tool_entry(&long),
-        ];
+        let long = (1..=40).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
+        app.entries = vec![Entry::new(EntryKind::User, "run the tests"), tool_entry(&long)];
         app.mode = InputMode::Normal;
 
         // k from nothing selects the last block, not the first.
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::empty()),
-        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::empty()));
         assert_eq!(app.cursor, Some(1));
         assert!(!app.follow, "selecting stops follow-mode");
 
-        let collapsed = ui::transcript(&app.entries, 60, "•", app.cursor, true)
-            .lines
-            .len();
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()),
-        );
+        let collapsed = ui::transcript(&app.entries, 60, "•", app.cursor, true).lines.len();
+        handle_key(&mut app, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()));
         assert!(
             app.entries[1].tool.as_ref().expect("tool").expanded,
             "o should unfold the selected tool"
         );
-        let expanded = ui::transcript(&app.entries, 60, "•", app.cursor, true)
-            .lines
-            .len();
-        assert!(
-            expanded > collapsed,
-            "unfolding must reveal rows: {collapsed} -> {expanded}"
-        );
+        let expanded = ui::transcript(&app.entries, 60, "•", app.cursor, true).lines.len();
+        assert!(expanded > collapsed, "unfolding must reveal rows: {collapsed} -> {expanded}");
 
         // The preview caps at 8 lines; the full result must survive for the
         // unfolded view.
@@ -12870,10 +11777,7 @@ mod tests {
             .collect();
         assert!(text.contains("line 40"), "full output should be reachable");
 
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()),
-        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()));
         assert!(!app.entries[1].tool.as_ref().expect("tool").expanded);
     }
 
@@ -12881,15 +11785,9 @@ mod tests {
     fn folding_is_offered_only_when_there_is_more_to_see() {
         let short = tool_entry("one line");
         let call = short.tool.as_ref().expect("tool");
-        assert!(
-            !call.has_more(),
-            "a result the preview already shows in full is not foldable"
-        );
+        assert!(!call.has_more(), "a result the preview already shows in full is not foldable");
 
-        let long = (1..=40)
-            .map(|n| format!("line {n}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let long = (1..=40).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
         assert!(tool_entry(&long).tool.as_ref().expect("tool").has_more());
     }
 
@@ -12897,8 +11795,7 @@ mod tests {
     fn a_selected_block_is_scrolled_into_view() {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
         for n in 0..40 {
-            app.entries
-                .push(Entry::new(EntryKind::User, format!("prompt {n}")));
+            app.entries.push(Entry::new(EntryKind::User, format!("prompt {n}")));
         }
         app.mode = InputMode::Normal;
         let backend = TestBackend::new(80, 24);
@@ -12908,10 +11805,7 @@ mod tests {
 
         // Walk to the very first block; the viewport has to follow it up.
         for _ in 0..60 {
-            handle_key(
-                &mut app,
-                KeyEvent::new(KeyCode::Char('k'), KeyModifiers::empty()),
-            );
+            handle_key(&mut app, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::empty()));
         }
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert_eq!(app.cursor, Some(0));
@@ -12922,10 +11816,7 @@ mod tests {
     #[test]
     fn clicking_the_transcript_selects_then_unfolds_a_tool_row() {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
-        let long = (1..=30)
-            .map(|n| format!("line {n}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let long = (1..=30).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
         app.entries = vec![Entry::new(EntryKind::User, "run it"), tool_entry(&long)];
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -12980,10 +11871,7 @@ mod tests {
     fn a_click_on_an_overlay_does_not_reach_the_transcript_beneath() {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
         app.entries = vec![Entry::new(EntryKind::User, "hello")];
-        app.config_panel = Some(ConfigPanel {
-            selected: 0,
-            editing: None,
-        });
+        app.config_panel = Some(ConfigPanel { selected: 0, editing: None });
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -13002,10 +11890,7 @@ mod tests {
             2,
             "the click belongs to the panel on top"
         );
-        assert_eq!(
-            app.cursor, None,
-            "the transcript must not have been touched"
-        );
+        assert_eq!(app.cursor, None, "the transcript must not have been touched");
     }
 
     #[tokio::test]
@@ -13019,10 +11904,7 @@ mod tests {
         // every tool result from this turn.
         handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
         assert!(app.cancel.load(Ordering::Relaxed), "stop was requested");
-        assert!(
-            app.running.is_some(),
-            "the turn should still be finishing up"
-        );
+        assert!(app.running.is_some(), "the turn should still be finishing up");
         assert!(app.status.contains("interrupting"));
     }
 
@@ -13048,12 +11930,8 @@ mod tests {
         assert!(app.turn_started.is_none());
         // The aborted task never reports back, so the row must not keep
         // spinning for the rest of the session.
-        let call = app
-            .entries
-            .iter()
-            .rev()
-            .find_map(|entry| entry.tool.as_ref())
-            .expect("tool row");
+        let call =
+            app.entries.iter().rev().find_map(|entry| entry.tool.as_ref()).expect("tool row");
         assert_eq!(call.status, ToolStatus::Failed);
         assert_eq!(call.output, "interrupted");
     }
@@ -13077,10 +11955,7 @@ mod tests {
         app.handle_ctrl_c();
         assert!(app.last_ctrl_c.is_some());
         // Any other key cancels the pending exit.
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()),
-        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()));
         assert!(app.last_ctrl_c.is_none());
         // So the next Ctrl+C starts over rather than quitting.
         app.handle_ctrl_c();
@@ -13093,18 +11968,11 @@ mod tests {
         // An empty objective only prints usage; it must not start a turn.
         app.swarm_command("   ");
         assert!(app.running.is_none());
-        assert!(
-            app.entries
-                .iter()
-                .any(|entry| entry.text.contains("Usage: /swarm"))
-        );
+        assert!(app.entries.iter().any(|entry| entry.text.contains("Usage: /swarm")));
         // A real objective is expanded into a spawn_subagents instruction that
         // still carries the user's words, and it starts a turn.
         app.swarm_command("port modules A and B independently");
-        let sent = app.messages.last().unwrap()["content"]
-            .as_str()
-            .unwrap()
-            .to_owned();
+        let sent = app.messages.last().unwrap()["content"].as_str().unwrap().to_owned();
         assert!(sent.contains("spawn_subagents"));
         assert!(sent.contains("port modules A and B independently"));
         assert!(app.running.is_some());
@@ -13138,19 +12006,12 @@ mod tests {
         for _ in 0..200 {
             sleep(Duration::from_millis(10)).await;
             app.drain_agent_events();
-            if app
-                .ralph_loop
-                .as_ref()
-                .is_some_and(|state| state.status == RalphStatus::Completed)
-            {
+            if app.ralph_loop.as_ref().is_some_and(|state| state.status == RalphStatus::Completed) {
                 break;
             }
         }
         assert_eq!(app.ralph_loop.as_ref().unwrap().iteration, 2);
-        assert_eq!(
-            app.ralph_loop.as_ref().unwrap().status,
-            RalphStatus::Completed
-        );
+        assert_eq!(app.ralph_loop.as_ref().unwrap().status, RalphStatus::Completed);
         let requests = server.await.unwrap();
         for (index, request) in requests.iter().enumerate() {
             let body = request.split("\r\n\r\n").nth(1).unwrap();
@@ -13185,9 +12046,7 @@ mod tests {
         assert!(app.drain_agent_events(), "the watchdog must mark changed");
         assert!(app.running.is_none(), "running must be released");
         assert!(
-            app.entries
-                .last()
-                .is_some_and(|entry| { entry.text.contains("ended unexpectedly") })
+            app.entries.last().is_some_and(|entry| { entry.text.contains("ended unexpectedly") })
         );
     }
 
@@ -13197,10 +12056,7 @@ mod tests {
         std::fs::create_dir(&workspace).unwrap();
         let workspace = workspace.canonicalize().unwrap();
         let paths = AbacusPaths::under(directory.path().join("home"));
-        let mut settings = Settings {
-            default_profile: "test".into(),
-            ..Settings::default()
-        };
+        let mut settings = Settings { default_profile: "test".into(), ..Settings::default() };
         settings.profiles.insert(
             "test".into(),
             ProviderProfile {

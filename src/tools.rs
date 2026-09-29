@@ -66,10 +66,7 @@ impl ToolCall {
     pub fn summary(&self) -> String {
         let args: Value = serde_json::from_str(&self.arguments).unwrap_or(Value::Null);
         match self.name.as_str() {
-            "run_command" => args["command"]
-                .as_str()
-                .unwrap_or("shell command")
-                .to_owned(),
+            "run_command" => args["command"].as_str().unwrap_or("shell command").to_owned(),
             "edit_file" | "write_file" | "read_file" | "delete_file" | "append_file"
             | "git_show" | "git_blame" => {
                 args["path"].as_str().unwrap_or("unknown path").to_owned()
@@ -101,15 +98,13 @@ impl ToolCall {
                 let preview: String = message.chars().take(60).collect();
                 format!("commit: {preview}")
             }
-            "git_restore" => format!(
-                "restore {} path(s)",
-                args["paths"].as_array().map(Vec::len).unwrap_or(0)
-            ),
+            "git_restore" => {
+                format!("restore {} path(s)", args["paths"].as_array().map(Vec::len).unwrap_or(0))
+            }
             "git_checkout" => args["branch"].as_str().unwrap_or("branch").to_owned(),
-            "read_files" => format!(
-                "{} file(s)",
-                args["paths"].as_array().map(Vec::len).unwrap_or(0)
-            ),
+            "read_files" => {
+                format!("{} file(s)", args["paths"].as_array().map(Vec::len).unwrap_or(0))
+            }
             "tool_search" => args["query"].as_str().unwrap_or("all tools").to_owned(),
             _ => self.arguments.clone(),
         }
@@ -295,10 +290,7 @@ impl ToolExecutor {
         let lines: Vec<_> = content.lines().collect();
 
         if offset > lines.len().max(1) {
-            bail!(
-                "offset {offset} is beyond the end of the file ({} lines)",
-                lines.len()
-            );
+            bail!("offset {offset} is beyond the end of the file ({} lines)", lines.len());
         }
 
         let selected = lines
@@ -345,23 +337,12 @@ impl ToolExecutor {
                 entries.push("… output capped at 500 entries".to_owned());
                 break;
             }
-            let relative = entry
-                .path()
-                .strip_prefix(&self.root)
-                .unwrap_or(entry.path());
-            let suffix = if entry.file_type().is_some_and(|kind| kind.is_dir()) {
-                "/"
-            } else {
-                ""
-            };
+            let relative = entry.path().strip_prefix(&self.root).unwrap_or(entry.path());
+            let suffix = if entry.file_type().is_some_and(|kind| kind.is_dir()) { "/" } else { "" };
             entries.push(format!("{}{suffix}", relative.display()));
         }
 
-        if entries.is_empty() {
-            Ok("(empty directory)".to_owned())
-        } else {
-            Ok(entries.join("\n"))
-        }
+        if entries.is_empty() { Ok("(empty directory)".to_owned()) } else { Ok(entries.join("\n")) }
     }
 
     fn grep(&self, arguments: &str) -> Result<String> {
@@ -381,11 +362,8 @@ impl ToolExecutor {
         }
 
         let args: Args = parse_args(arguments)?;
-        let expression = if args.case_sensitive {
-            args.query.clone()
-        } else {
-            format!("(?i:{})", args.query)
-        };
+        let expression =
+            if args.case_sensitive { args.query.clone() } else { format!("(?i:{})", args.query) };
         let regex = Regex::new(&expression).context("invalid regular expression")?;
         let globs = build_globs(&args.glob)?;
         let base = self.resolve_for_read(&args.path)?;
@@ -405,10 +383,7 @@ impl ToolExecutor {
             if !entry.file_type().is_some_and(|kind| kind.is_file()) {
                 continue;
             }
-            let relative = entry
-                .path()
-                .strip_prefix(&self.root)
-                .unwrap_or(entry.path());
+            let relative = entry.path().strip_prefix(&self.root).unwrap_or(entry.path());
             if let Some(globs) = &globs
                 && !globs.is_match(relative)
             {
@@ -478,11 +453,7 @@ impl ToolExecutor {
             }
         }
 
-        if matches.is_empty() {
-            Ok("No matches.".to_owned())
-        } else {
-            Ok(matches.join("\n"))
-        }
+        if matches.is_empty() { Ok("No matches.".to_owned()) } else { Ok(matches.join("\n")) }
     }
 
     fn glob(&self, arguments: &str) -> Result<String> {
@@ -496,9 +467,7 @@ impl ToolExecutor {
         }
 
         let args: Args = parse_args(arguments)?;
-        let matcher = Glob::new(&args.pattern)
-            .context("invalid glob pattern")?
-            .compile_matcher();
+        let matcher = Glob::new(&args.pattern).context("invalid glob pattern")?.compile_matcher();
         let base = self.resolve_for_read(&args.path)?;
         let max_results = args.max_results.clamp(1, 5_000);
         let mut results = Vec::new();
@@ -510,16 +479,10 @@ impl ToolExecutor {
             .build()
             .filter_map(Result::ok)
         {
-            let relative = entry
-                .path()
-                .strip_prefix(&self.root)
-                .unwrap_or(entry.path());
+            let relative = entry.path().strip_prefix(&self.root).unwrap_or(entry.path());
             if matcher.is_match(relative) {
-                let suffix = if entry.file_type().is_some_and(|kind| kind.is_dir()) {
-                    "/"
-                } else {
-                    ""
-                };
+                let suffix =
+                    if entry.file_type().is_some_and(|kind| kind.is_dir()) { "/" } else { "" };
                 results.push(format!("{}{suffix}", relative.display()));
                 if results.len() >= max_results {
                     results.push(format!("… output capped at {max_results} paths"));
@@ -552,10 +515,7 @@ impl ToolExecutor {
             .map(|(name, description)| format!("{name}: {description}"))
             .collect::<Vec<_>>();
         if matches.is_empty() {
-            Ok(format!(
-                "No tools match {:?}. Search with a broader capability word.",
-                args.query
-            ))
+            Ok(format!("No tools match {:?}. Search with a broader capability word.", args.query))
         } else {
             Ok(matches.join("\n"))
         }
@@ -577,11 +537,7 @@ impl ToolExecutor {
         }
         let args: Args = parse_args(arguments)?;
         self.web
-            .search_and_extract(
-                &args.query,
-                args.max_results.unwrap_or(5),
-                args.extract.as_deref(),
-            )
+            .search_and_extract(&args.query, args.max_results.unwrap_or(5), args.extract.as_deref())
             .await
     }
 
@@ -600,13 +556,7 @@ impl ToolExecutor {
             bail!("web tools are disabled; set `[search] enabled = true`");
         }
         let args: Args = parse_args(arguments)?;
-        self.web
-            .read_page(
-                &args.url,
-                args.max_chars.unwrap_or(0),
-                args.extract.as_deref(),
-            )
-            .await
+        self.web.read_page(&args.url, args.max_chars.unwrap_or(0), args.extract.as_deref()).await
     }
 
     fn edit_file(&self, arguments: &str) -> Result<String> {
@@ -622,19 +572,13 @@ impl ToolExecutor {
             }
             let count = content.matches(&edit.old_text).count();
             if count != 1 {
-                bail!(
-                    "edit {} old_text must match exactly once; found {count} matches",
-                    index + 1
-                );
+                bail!("edit {} old_text must match exactly once; found {count} matches", index + 1);
             }
             content = content.replacen(&edit.old_text, &edit.new_text, 1);
         }
         write_text_atomic(&path, &content)
             .with_context(|| format!("could not write {raw_path}"))?;
-        Ok(format!(
-            "Applied {} edit(s) to {raw_path}.",
-            operations.len()
-        ))
+        Ok(format!("Applied {} edit(s) to {raw_path}.", operations.len()))
     }
 
     fn write_file(&self, arguments: &str) -> Result<String> {
@@ -779,10 +723,7 @@ impl ToolExecutor {
         for (index, edit) in operations.iter().enumerate() {
             let count = updated.matches(&edit.old_text).count();
             if count != 1 {
-                bail!(
-                    "edit {} old_text must match exactly once; found {count} matches",
-                    index + 1
-                );
+                bail!("edit {} old_text must match exactly once; found {count} matches", index + 1);
             }
             updated = updated.replacen(&edit.old_text, &edit.new_text, 1);
         }
@@ -798,11 +739,7 @@ impl ToolExecutor {
         let args: Args = parse_args(arguments)?;
         let path = self.resolve_for_write(&args.path)?;
         guard_secret(&path)?;
-        let old = if path.exists() {
-            fs::read_to_string(path)?
-        } else {
-            String::new()
-        };
+        let old = if path.exists() { fs::read_to_string(path)? } else { String::new() };
         Ok(unified_diff(&args.path, &old, &args.content))
     }
 
@@ -860,11 +797,7 @@ impl ToolExecutor {
         if path.is_dir() && !args.recursive {
             bail!("directory deletion requires recursive=true");
         }
-        Ok(format!(
-            "Delete {}{}",
-            args.path,
-            if path.is_dir() { " recursively" } else { "" }
-        ))
+        Ok(format!("Delete {}{}", args.path, if path.is_dir() { " recursively" } else { "" }))
     }
 
     fn preview_git_commit(&self, arguments: &str) -> Result<String> {
@@ -883,11 +816,8 @@ impl ToolExecutor {
             let path = self.resolve_for_write(raw)?;
             guard_secret(&path)?;
         }
-        let paths = if args.paths.is_empty() {
-            "staged changes".to_owned()
-        } else {
-            args.paths.join(" ")
-        };
+        let paths =
+            if args.paths.is_empty() { "staged changes".to_owned() } else { args.paths.join(" ") };
         Ok(format!("git commit -m {:?} -- {paths}", message))
     }
 
@@ -907,11 +837,7 @@ impl ToolExecutor {
             guard_secret(&path)?;
         }
         let target = if args.staged_only { "index" } else { "HEAD" };
-        Ok(format!(
-            "git restore → {} ({})",
-            target,
-            args.paths.join(" ")
-        ))
+        Ok(format!("git restore → {} ({})", target, args.paths.join(" ")))
     }
 
     async fn git_diff(&self, arguments: &str) -> Result<String> {
@@ -953,24 +879,14 @@ impl ToolExecutor {
         if let Some(path) = args.path {
             command.arg(path);
         }
-        let output = timeout(
-            Duration::from_secs(30),
-            command.current_dir(&self.root).output(),
-        )
-        .await
-        .map_err(|_| anyhow!("git diff timed out"))??;
+        let output = timeout(Duration::from_secs(30), command.current_dir(&self.root).output())
+            .await
+            .map_err(|_| anyhow!("git diff timed out"))??;
         if !output.status.success() {
-            bail!(
-                "git diff failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            bail!("git diff failed: {}", String::from_utf8_lossy(&output.stderr));
         }
         let output = String::from_utf8_lossy(&output.stdout).into_owned();
-        if output.is_empty() {
-            Ok("No diff.".to_owned())
-        } else {
-            Ok(output)
-        }
+        if output.is_empty() { Ok("No diff.".to_owned()) } else { Ok(output) }
     }
 
     async fn git_status(&self) -> Result<String> {
@@ -984,17 +900,10 @@ impl ToolExecutor {
         .await
         .map_err(|_| anyhow!("git status timed out"))??;
         if !output.status.success() {
-            bail!(
-                "git status failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            bail!("git status failed: {}", String::from_utf8_lossy(&output.stderr));
         }
         let value = String::from_utf8_lossy(&output.stdout).into_owned();
-        Ok(if value.trim().is_empty() {
-            "Working tree clean.".to_owned()
-        } else {
-            value
-        })
+        Ok(if value.trim().is_empty() { "Working tree clean.".to_owned() } else { value })
     }
 
     async fn git_log(&self, arguments: &str) -> Result<String> {
@@ -1019,12 +928,9 @@ impl ToolExecutor {
         if let Some(path) = args.path {
             command.args(["--", &path]);
         }
-        let output = timeout(
-            Duration::from_secs(30),
-            command.current_dir(&self.root).output(),
-        )
-        .await
-        .map_err(|_| anyhow!("git log timed out"))??;
+        let output = timeout(Duration::from_secs(30), command.current_dir(&self.root).output())
+            .await
+            .map_err(|_| anyhow!("git log timed out"))??;
         if !output.status.success() {
             let error = String::from_utf8_lossy(&output.stderr);
             if error.contains("does not have any commits")
@@ -1035,11 +941,7 @@ impl ToolExecutor {
             bail!("git log failed: {error}");
         }
         let value = String::from_utf8_lossy(&output.stdout).into_owned();
-        Ok(if value.trim().is_empty() {
-            "No commits.".to_owned()
-        } else {
-            value
-        })
+        Ok(if value.trim().is_empty() { "No commits.".to_owned() } else { value })
     }
 
     async fn git_commit(&self, arguments: &str) -> Result<String> {
@@ -1072,28 +974,19 @@ impl ToolExecutor {
             for raw in &args.paths {
                 add.arg(raw);
             }
-            let output = timeout(
-                Duration::from_secs(30),
-                add.current_dir(&self.root).output(),
-            )
-            .await
-            .map_err(|_| anyhow!("git add timed out"))??;
+            let output = timeout(Duration::from_secs(30), add.current_dir(&self.root).output())
+                .await
+                .map_err(|_| anyhow!("git add timed out"))??;
             if !output.status.success() {
-                bail!(
-                    "git add failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
+                bail!("git add failed: {}", String::from_utf8_lossy(&output.stderr));
             }
         }
 
         let mut commit = Command::new("git");
         commit.args(["commit", "-m", message, "--"]);
-        let output = timeout(
-            Duration::from_secs(30),
-            commit.current_dir(&self.root).output(),
-        )
-        .await
-        .map_err(|_| anyhow!("git commit timed out"))??;
+        let output = timeout(Duration::from_secs(30), commit.current_dir(&self.root).output())
+            .await
+            .map_err(|_| anyhow!("git commit timed out"))??;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.contains("nothing to commit") {
@@ -1138,17 +1031,11 @@ impl ToolExecutor {
         for raw in &args.paths {
             command.arg(raw);
         }
-        let output = timeout(
-            Duration::from_secs(30),
-            command.current_dir(&self.root).output(),
-        )
-        .await
-        .map_err(|_| anyhow!("git restore timed out"))??;
+        let output = timeout(Duration::from_secs(30), command.current_dir(&self.root).output())
+            .await
+            .map_err(|_| anyhow!("git restore timed out"))??;
         if !output.status.success() {
-            bail!(
-                "git restore failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            bail!("git restore failed: {}", String::from_utf8_lossy(&output.stderr));
         }
         Ok(format!(
             "Restored {} path(s) to {}.",
@@ -1171,18 +1058,12 @@ impl ToolExecutor {
         let object = format!("{revision}:{}", args.path);
         let output = timeout(
             Duration::from_secs(30),
-            Command::new("git")
-                .args(["show", &object])
-                .current_dir(&self.root)
-                .output(),
+            Command::new("git").args(["show", &object]).current_dir(&self.root).output(),
         )
         .await
         .map_err(|_| anyhow!("git show timed out"))??;
         if !output.status.success() {
-            bail!(
-                "git show failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            bail!("git show failed: {}", String::from_utf8_lossy(&output.stderr));
         }
         let content = String::from_utf8_lossy(&output.stdout);
         let lines: Vec<&str> = content.lines().collect();
@@ -1193,11 +1074,7 @@ impl ToolExecutor {
             .map(|(index, line)| format!("{:>5} | {line}", index + 1))
             .collect::<Vec<_>>()
             .join("\n");
-        Ok(format!(
-            ">>> {revision}:{} ({} lines)\n{numbered}",
-            args.path,
-            lines.len()
-        ))
+        Ok(format!(">>> {revision}:{} ({} lines)\n{numbered}", args.path, lines.len()))
     }
 
     async fn git_blame(&self, arguments: &str) -> Result<String> {
@@ -1221,17 +1098,10 @@ impl ToolExecutor {
         .await
         .map_err(|_| anyhow!("git blame timed out"))??;
         if !output.status.success() {
-            bail!(
-                "git blame failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            bail!("git blame failed: {}", String::from_utf8_lossy(&output.stderr));
         }
         let value = String::from_utf8_lossy(&output.stdout).into_owned();
-        Ok(if value.trim().is_empty() {
-            "No blame output.".to_owned()
-        } else {
-            value
-        })
+        Ok(if value.trim().is_empty() { "No blame output.".to_owned() } else { value })
     }
 
     async fn git_checkout(&self, arguments: &str) -> Result<String> {
@@ -1249,25 +1119,15 @@ impl ToolExecutor {
             command.arg("-b");
         }
         command.arg(&branch);
-        let output = timeout(
-            Duration::from_secs(30),
-            command.current_dir(&self.root).output(),
-        )
-        .await
-        .map_err(|_| anyhow!("git checkout timed out"))??;
+        let output = timeout(Duration::from_secs(30), command.current_dir(&self.root).output())
+            .await
+            .map_err(|_| anyhow!("git checkout timed out"))??;
         if !output.status.success() {
-            bail!(
-                "git checkout failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            bail!("git checkout failed: {}", String::from_utf8_lossy(&output.stderr));
         }
         Ok(format!(
             "{} branch {branch}.",
-            if args.create {
-                "Created and switched to"
-            } else {
-                "Switched to"
-            }
+            if args.create { "Created and switched to" } else { "Switched to" }
         ))
     }
 
@@ -1367,14 +1227,10 @@ impl ToolExecutor {
         };
         let stdout = finish_reader(stdout_task).await?;
         let stderr = finish_reader(stderr_task).await?;
-        let code = status
-            .code()
-            .map_or("signal".to_owned(), |code| code.to_string());
+        let code = status.code().map_or("signal".to_owned(), |code| code.to_string());
         let stdout = String::from_utf8_lossy(&stdout);
         let stderr = String::from_utf8_lossy(&stderr);
-        Ok(format!(
-            "exit: {code}\nstdout:\n{stdout}\nstderr:\n{stderr}"
-        ))
+        Ok(format!("exit: {code}\nstdout:\n{stdout}\nstderr:\n{stderr}"))
     }
 
     /// Resolve a path for *reading*. Unlike the write resolvers this may leave
@@ -1384,22 +1240,13 @@ impl ToolExecutor {
     /// expensive way, through an interpreter.
     fn resolve_for_read(&self, raw: &str) -> Result<PathBuf> {
         let path = Path::new(raw);
-        let joined = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.root.join(path)
-        };
-        let canonical = joined
-            .canonicalize()
-            .with_context(|| format!("path does not exist: {raw}"))?;
+        let joined = if path.is_absolute() { path.to_path_buf() } else { self.root.join(path) };
+        let canonical =
+            joined.canonicalize().with_context(|| format!("path does not exist: {raw}"))?;
         if canonical.starts_with(&self.root) {
             return Ok(canonical);
         }
-        if self
-            .outside_reads
-            .read()
-            .is_ok_and(|approved| approved.contains(&canonical))
-        {
+        if self.outside_reads.read().is_ok_and(|approved| approved.contains(&canonical)) {
             return Ok(canonical);
         }
         bail!(
@@ -1410,9 +1257,8 @@ impl ToolExecutor {
 
     fn resolve_existing(&self, raw: &str) -> Result<PathBuf> {
         let joined = workspace_join(&self.root, raw)?;
-        let canonical = joined
-            .canonicalize()
-            .with_context(|| format!("path does not exist: {raw}"))?;
+        let canonical =
+            joined.canonicalize().with_context(|| format!("path does not exist: {raw}"))?;
         ensure_inside(&self.root, &canonical)?;
         Ok(canonical)
     }
@@ -1794,10 +1640,7 @@ fn workspace_join(root: &Path, raw: &str) -> Result<PathBuf> {
         bail!("absolute paths are not allowed: {raw}");
     }
     if path.components().any(|part| {
-        matches!(
-            part,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
+        matches!(part, Component::ParentDir | Component::RootDir | Component::Prefix(_))
     }) {
         bail!("parent path traversal is not allowed: {raw}");
     }
@@ -1819,10 +1662,7 @@ fn skip_vcs_dir(entry: &ignore::DirEntry) -> bool {
     if entry.depth() == 0 {
         return true;
     }
-    !matches!(
-        entry.file_name().to_str(),
-        Some(".git" | ".hg" | ".svn" | ".jj")
-    )
+    !matches!(entry.file_name().to_str(), Some(".git" | ".hg" | ".svn" | ".jj"))
 }
 
 /// The read-side guard. Templates pass, production files never do, and a real
@@ -1836,10 +1676,7 @@ fn guard_secret_read(path: &Path, approved: &OutsideReads) -> Result<()> {
             bail!("access to production environment files is blocked")
         }
         crate::safety::Verdict::Unclear => {
-            if approved
-                .read()
-                .is_ok_and(|approved| approved.contains(path))
-            {
+            if approved.read().is_ok_and(|approved| approved.contains(path)) {
                 Ok(())
             } else {
                 bail!("access to this environment file was not approved")
@@ -1957,9 +1794,7 @@ fn validate_patch(root: &Path, patch: &str) -> Result<()> {
 
     let mut paths = 0;
     for line in patch.lines() {
-        let raw = line
-            .strip_prefix("--- ")
-            .or_else(|| line.strip_prefix("+++ "));
+        let raw = line.strip_prefix("--- ").or_else(|| line.strip_prefix("+++ "));
         let Some(raw) = raw else { continue };
         let raw = raw.split('\t').next().unwrap_or(raw).trim();
         if raw == "/dev/null" {
@@ -1968,10 +1803,7 @@ fn validate_patch(root: &Path, patch: &str) -> Result<()> {
         if raw.starts_with('"') {
             bail!("quoted patch paths are not supported; use workspace-relative UTF-8 paths");
         }
-        let relative = raw
-            .strip_prefix("a/")
-            .or_else(|| raw.strip_prefix("b/"))
-            .unwrap_or(raw);
+        let relative = raw.strip_prefix("a/").or_else(|| raw.strip_prefix("b/")).unwrap_or(raw);
         let joined = workspace_join(root, relative)?;
         guard_secret(&joined)?;
         if joined.exists() {
@@ -2026,10 +1858,7 @@ async fn run_git_apply(root: &Path, patch: &str, check: bool) -> Result<()> {
         .await
         .map_err(|_| anyhow!("git apply timed out"))??;
     if !output.status.success() {
-        bail!(
-            "git apply failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        bail!("git apply failed: {}", String::from_utf8_lossy(&output.stderr));
     }
     Ok(())
 }
@@ -2051,43 +1880,22 @@ fn tool_catalog() -> Vec<(&'static str, &'static str)> {
         ("glob", "find paths by wildcard pattern"),
         ("grep", "regex content search with optional file globs"),
         ("read_file", "read a bounded line range with line numbers"),
-        (
-            "read_files",
-            "read up to 20 files in one call with line numbers",
-        ),
-        (
-            "edit_file",
-            "replace one exact occurrence in an existing file",
-        ),
+        ("read_files", "read up to 20 files in one call with line numbers"),
+        ("edit_file", "replace one exact occurrence in an existing file"),
         ("write_file", "create or fully replace a text file"),
-        (
-            "apply_patch",
-            "apply a precise unified diff across workspace files",
-        ),
+        ("apply_patch", "apply a precise unified diff across workspace files"),
         ("delete_file", "delete a file or recursive directory"),
         ("move_file", "move or rename a workspace path"),
         ("create_directory", "create a directory and missing parents"),
-        (
-            "git_diff",
-            "inspect working-tree, staged, or commit-range repository changes",
-        ),
+        ("git_diff", "inspect working-tree, staged, or commit-range repository changes"),
         ("git_status", "inspect branch, changes, and untracked files"),
         ("git_log", "inspect recent repository history"),
-        (
-            "git_commit",
-            "stage optional paths and create a local commit",
-        ),
-        (
-            "git_restore",
-            "restore workspace paths to HEAD, discarding changes",
-        ),
+        ("git_commit", "stage optional paths and create a local commit"),
+        ("git_restore", "restore workspace paths to HEAD, discarding changes"),
         ("git_show", "show a file's contents at a past revision"),
         ("git_blame", "show per-line authorship for a file"),
         ("git_checkout", "create or switch to a git branch"),
-        (
-            "append_file",
-            "append text to a file, creating it if missing",
-        ),
+        ("append_file", "append text to a file, creating it if missing"),
         ("run_command", "run project commands with a timeout"),
         ("web_search", "search the web for current information"),
         ("read_page", "fetch and read the text of a web page"),
@@ -2228,10 +2036,7 @@ mod tests {
         };
         let output = tools.execute(&call).await;
         assert!(output.contains("real.txt"), "should match real files");
-        assert!(
-            !output.contains(".git"),
-            "must not descend into .git: {output}"
-        );
+        assert!(!output.contains(".git"), "must not descend into .git: {output}");
     }
 
     #[tokio::test]
@@ -2253,18 +2058,12 @@ mod tests {
 
         // Nothing approved yet: the read is refused, and says why.
         let refused = tools.execute(&call).await;
-        assert!(
-            refused.contains("outside the workspace"),
-            "unapproved: {refused}"
-        );
+        assert!(refused.contains("outside the workspace"), "unapproved: {refused}");
         assert!(!refused.contains("outside content"), "no content leaked");
 
         // The safety layer clears it, and the same call now works — this is
         // the seam that stops the model shelling out to read the file instead.
-        approved
-            .write()
-            .unwrap()
-            .insert(secret.canonicalize().unwrap());
+        approved.write().unwrap().insert(secret.canonicalize().unwrap());
         let allowed = tools.execute(&call).await;
         assert!(allowed.contains("outside content"), "approved: {allowed}");
     }
@@ -2280,18 +2079,12 @@ mod tests {
         let workspace = workspace.canonicalize().unwrap();
 
         let approved = OutsideReads::default();
-        approved
-            .write()
-            .unwrap()
-            .insert(target.canonicalize().unwrap());
+        approved.write().unwrap().insert(target.canonicalize().unwrap());
         let tools = ToolExecutor::new(workspace).with_outside_reads(approved);
         let call = ToolCall {
             id: "1".into(),
             name: "write_file".into(),
-            arguments: format!(
-                r#"{{"path":"{}","content":"overwritten"}}"#,
-                target.display()
-            ),
+            arguments: format!(r#"{{"path":"{}","content":"overwritten"}}"#, target.display()),
         };
         let result = tools.execute(&call).await;
         assert!(
@@ -2308,13 +2101,7 @@ mod tests {
         let dir = tempdir().unwrap();
         // Every one of these was refused by the old rule, which allowed only
         // the exact name `.env.example` — the strictness testers hit.
-        for name in [
-            ".env.example",
-            ".env.sample",
-            ".env.template",
-            ".env.dist",
-            ".env.defaults",
-        ] {
+        for name in [".env.example", ".env.sample", ".env.template", ".env.dist", ".env.defaults"] {
             fs::write(dir.path().join(name), format!("TOKEN= # {name}")).unwrap();
         }
         fs::write(dir.path().join(".env"), "TOKEN=live-value").unwrap();
@@ -2329,13 +2116,7 @@ mod tests {
             arguments: format!(r#"{{"path":"{path}"}}"#),
         };
 
-        for name in [
-            ".env.example",
-            ".env.sample",
-            ".env.template",
-            ".env.dist",
-            ".env.defaults",
-        ] {
+        for name in [".env.example", ".env.sample", ".env.template", ".env.dist", ".env.defaults"] {
             let output = tools.execute(&read(name)).await;
             assert!(output.contains("TOKEN="), "{name} should read: {output}");
         }
@@ -2344,10 +2125,7 @@ mod tests {
         let pending = tools.execute(&read(".env")).await;
         assert!(pending.contains("not approved"), "{pending}");
         assert!(!pending.contains("live-value"), "no contents leaked");
-        approved
-            .write()
-            .unwrap()
-            .insert(dir.path().canonicalize().unwrap().join(".env"));
+        approved.write().unwrap().insert(dir.path().canonicalize().unwrap().join(".env"));
         assert!(tools.execute(&read(".env")).await.contains("live-value"));
 
         // Production is the one case still refused whatever anyone decides.
@@ -2502,12 +2280,7 @@ mod tests {
             name: "move_file".into(),
             arguments: r#"{"source":"old.txt","destination":"../escaped.txt"}"#.into(),
         };
-        assert!(
-            tools
-                .execute(&outside)
-                .await
-                .contains("parent path traversal")
-        );
+        assert!(tools.execute(&outside).await.contains("parent path traversal"));
         assert!(dir.path().join("old.txt").exists());
     }
 
@@ -2524,16 +2297,9 @@ mod tests {
         );
         fs::write(dir.path().join("untracked.txt"), "hello\n").unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
-        let status = ToolCall {
-            id: "status".into(),
-            name: "git_status".into(),
-            arguments: "{}".into(),
-        };
-        let log = ToolCall {
-            id: "log".into(),
-            name: "git_log".into(),
-            arguments: "{}".into(),
-        };
+        let status =
+            ToolCall { id: "status".into(), name: "git_status".into(), arguments: "{}".into() };
+        let log = ToolCall { id: "log".into(), name: "git_log".into(), arguments: "{}".into() };
         assert!(tools.execute(&status).await.contains("untracked.txt"));
         assert!(tools.execute(&log).await.contains("No commits."));
     }
@@ -2587,11 +2353,7 @@ mod tests {
             arguments: r#"{"message":"initial","paths":["file.txt"]}"#.into(),
         };
         assert!(tools.execute(&call).await.starts_with("Committed."));
-        let log = ToolCall {
-            id: "log".into(),
-            name: "git_log".into(),
-            arguments: "{}".into(),
-        };
+        let log = ToolCall { id: "log".into(), name: "git_log".into(), arguments: "{}".into() };
         assert!(tools.execute(&log).await.contains("initial"));
     }
 
@@ -2625,28 +2387,18 @@ mod tests {
         };
         tools.execute(&commit).await;
         fs::write(dir.path().join("file.txt"), "mutated\n").unwrap();
-        assert_eq!(
-            fs::read_to_string(dir.path().join("file.txt")).unwrap(),
-            "mutated\n"
-        );
+        assert_eq!(fs::read_to_string(dir.path().join("file.txt")).unwrap(), "mutated\n");
         let restore = ToolCall {
             id: "restore".into(),
             name: "git_restore".into(),
             arguments: r#"{"paths":["file.txt"]}"#.into(),
         };
         assert!(tools.execute(&restore).await.contains("HEAD"));
-        assert_eq!(
-            fs::read_to_string(dir.path().join("file.txt")).unwrap(),
-            "original\n"
-        );
+        assert_eq!(fs::read_to_string(dir.path().join("file.txt")).unwrap(), "original\n");
     }
 
     fn init_repo(dir: &std::path::Path) {
-        StdCommand::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(dir)
-            .status()
-            .unwrap();
+        StdCommand::new("git").args(["init", "--quiet"]).current_dir(dir).status().unwrap();
         StdCommand::new("git")
             .args(["config", "user.email", "agent@abacus.test"])
             .current_dir(dir)
@@ -2708,11 +2460,7 @@ mod tests {
         // A clean working tree: the default diff is empty, but the range diff
         // between the two commits must surface the added line.
         let working = tools
-            .execute(&ToolCall {
-                id: "d0".into(),
-                name: "git_diff".into(),
-                arguments: "{}".into(),
-            })
+            .execute(&ToolCall { id: "d0".into(), name: "git_diff".into(), arguments: "{}".into() })
             .await;
         assert_eq!(working, "No diff.");
         let range = tools
@@ -2807,10 +2555,7 @@ mod tests {
             arguments: r#"{"path":"log.txt","content":"line two"}"#.into(),
         };
         tools.execute(&second).await;
-        assert_eq!(
-            fs::read_to_string(dir.path().join("log.txt")).unwrap(),
-            "line one\nline two"
-        );
+        assert_eq!(fs::read_to_string(dir.path().join("log.txt")).unwrap(), "line one\nline two");
         assert!(tools.approval_details(&second).contains("line two"));
     }
 
@@ -2823,24 +2568,15 @@ mod tests {
             name: "git_commit".into(),
             arguments: r#"{"message":"   "}"#.into(),
         };
-        assert!(
-            tools
-                .approval_details(&call)
-                .contains("commit message cannot be empty")
-        );
+        assert!(tools.approval_details(&call).contains("commit message cannot be empty"));
     }
 
     #[test]
     fn tool_specs_are_unique_and_cover_mutations() {
         let specs = tool_specs();
-        let names = specs
-            .iter()
-            .filter_map(|spec| spec["function"]["name"].as_str())
-            .collect::<Vec<_>>();
-        let unique = names
-            .iter()
-            .copied()
-            .collect::<std::collections::HashSet<_>>();
+        let names =
+            specs.iter().filter_map(|spec| spec["function"]["name"].as_str()).collect::<Vec<_>>();
+        let unique = names.iter().copied().collect::<std::collections::HashSet<_>>();
         assert_eq!(names.len(), unique.len());
         for name in [
             "apply_patch",
@@ -2878,9 +2614,6 @@ mod tests {
         assert!(tools.approval_details(&call).contains("symlink"));
         assert_eq!(tools.execute(&call).await, "Deleted link.txt.");
         assert!(!dir.path().join("link.txt").exists());
-        assert_eq!(
-            fs::read_to_string(dir.path().join("target.txt")).unwrap(),
-            "keep\n"
-        );
+        assert_eq!(fs::read_to_string(dir.path().join("target.txt")).unwrap(), "keep\n");
     }
 }

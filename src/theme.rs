@@ -264,25 +264,13 @@ impl Theme {
     /// depending on which side of the contrast the text sits on.
     fn map_roles(self, mode: ThemeMode) -> Theme {
         let dark = mode == ThemeMode::Dark;
-        let accent = if dark {
-            Color::LightMagenta
-        } else {
-            Color::Magenta
-        };
+        let accent = if dark { Color::LightMagenta } else { Color::Magenta };
         let second = if dark { Color::LightRed } else { Color::Red };
         Theme {
             primary: accent,
             secondary: second,
-            success: if dark {
-                Color::LightGreen
-            } else {
-                Color::Green
-            },
-            warning: if dark {
-                Color::LightYellow
-            } else {
-                Color::Yellow
-            },
+            success: if dark { Color::LightGreen } else { Color::Green },
+            warning: if dark { Color::LightYellow } else { Color::Yellow },
             danger: if dark { Color::LightRed } else { Color::Red },
             muted: if dark { Color::Gray } else { Color::DarkGray },
             border: if dark { Color::DarkGray } else { Color::Gray },
@@ -293,11 +281,7 @@ impl Theme {
             text: if dark { Color::White } else { Color::Black },
             inverse: if dark { Color::Black } else { Color::White },
             code_bg: Color::Reset,
-            add_fg: if dark {
-                Color::LightGreen
-            } else {
-                Color::Green
-            },
+            add_fg: if dark { Color::LightGreen } else { Color::Green },
             add_bg: Color::Reset,
             del_fg: if dark { Color::LightRed } else { Color::Red },
             del_bg: Color::Reset,
@@ -448,10 +432,7 @@ impl ThemeFile {
         }
         if visited.iter().any(|seen| seen == text) {
             visited.push(text.to_owned());
-            return Err(format!(
-                "circular colour reference: {}",
-                visited.join(" → ")
-            ));
+            return Err(format!("circular colour reference: {}", visited.join(" → ")));
         }
         let Some(next) = self.vars.get(text) else {
             return Err(format!("no `{text}` in this theme's vars"));
@@ -535,8 +516,7 @@ pub fn load(themes_dir: &std::path::Path, name: &str, depth: ColorDepth) -> Resu
         .map_err(|error| format!("could not read {}: {error}", path.display()))?;
     let file: ThemeFile =
         serde_json::from_str(&content).map_err(|error| format!("{}: {error}", path.display()))?;
-    file.to_theme(depth)
-        .map_err(|error| format!("{}: {error}", path.display()))
+    file.to_theme(depth).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 /// The palette a choice selects, and what went wrong if anything did.
@@ -549,10 +529,7 @@ pub fn resolve(choice: &ThemeChoice, themes_dir: &std::path::Path) -> (Theme, Op
     match choice {
         ThemeChoice::Named(name) => match load(themes_dir, name, depth) {
             Ok(theme) => (theme, None),
-            Err(error) => (
-                Theme::for_mode_at(ThemeChoice::Auto.resolve(), depth),
-                Some(error),
-            ),
+            Err(error) => (Theme::for_mode_at(ThemeChoice::Auto.resolve(), depth), Some(error)),
         },
         other => (Theme::for_mode_at(other.resolve(), depth), None),
     }
@@ -681,11 +658,7 @@ fn mode_from_colorfgbg() -> Option<ThemeMode> {
     let value = std::env::var("COLORFGBG").ok()?;
     let background = value.split(';').next_back()?.trim();
     let index: u8 = background.parse().ok()?;
-    Some(if index == 7 || index >= 9 {
-        ThemeMode::Light
-    } else {
-        ThemeMode::Dark
-    })
+    Some(if index == 7 || index >= 9 { ThemeMode::Light } else { ThemeMode::Dark })
 }
 
 #[cfg(target_os = "macos")]
@@ -699,10 +672,7 @@ fn mode_from_macos_appearance() -> Option<ThemeMode> {
     if !output.status.success() {
         return Some(ThemeMode::Light);
     }
-    if String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .eq_ignore_ascii_case("dark")
-    {
+    if String::from_utf8_lossy(&output.stdout).trim().eq_ignore_ascii_case("dark") {
         Some(ThemeMode::Dark)
     } else {
         Some(ThemeMode::Light)
@@ -749,23 +719,11 @@ mod tests {
         // Collapsing the palette is only useful if the roles that carry meaning
         // survive as different indices.
         let theme = Theme::for_mode_at(ThemeMode::Dark, ColorDepth::Ansi256);
-        for role in [
-            theme.primary,
-            theme.success,
-            theme.warning,
-            theme.danger,
-            theme.text,
-        ] {
+        for role in [theme.primary, theme.success, theme.warning, theme.danger, theme.text] {
             assert!(matches!(role, Color::Indexed(_)), "{role:?} not quantized");
         }
-        let distinct = [
-            theme.primary,
-            theme.success,
-            theme.warning,
-            theme.danger,
-            theme.muted,
-            theme.text,
-        ];
+        let distinct =
+            [theme.primary, theme.success, theme.warning, theme.danger, theme.muted, theme.text];
         for (index, first) in distinct.iter().enumerate() {
             for second in &distinct[index + 1..] {
                 assert_ne!(first, second, "roles collapsed onto the same index");
@@ -840,10 +798,7 @@ mod tests {
         unsafe {
             std::env::remove_var("NO_COLOR");
         }
-        assert_ne!(
-            Theme::for_mode_at(ThemeMode::Dark, ColorDepth::TrueColor).text,
-            Color::Reset
-        );
+        assert_ne!(Theme::for_mode_at(ThemeMode::Dark, ColorDepth::TrueColor).text, Color::Reset);
     }
 
     fn theme_file(json: &str) -> ThemeFile {
@@ -879,27 +834,14 @@ mod tests {
         assert!(error.contains("circular"), "{error}");
 
         let missing = theme_file(r##"{ "colors": { "primary": "nope" } }"##);
-        assert!(
-            missing
-                .to_theme(ColorDepth::TrueColor)
-                .unwrap_err()
-                .contains("vars")
-        );
+        assert!(missing.to_theme(ColorDepth::TrueColor).unwrap_err().contains("vars"));
 
         let unknown = theme_file(r##"{ "colors": { "primry": "#ffffff" } }"##);
         let error = unknown.to_theme(ColorDepth::TrueColor).unwrap_err();
-        assert!(
-            error.contains("primry") && error.contains("primary"),
-            "{error}"
-        );
+        assert!(error.contains("primry") && error.contains("primary"), "{error}");
 
         let bad_hex = theme_file(r##"{ "colors": { "primary": "#gg00zz" } }"##);
-        assert!(
-            bad_hex
-                .to_theme(ColorDepth::TrueColor)
-                .unwrap_err()
-                .contains("#rrggbb")
-        );
+        assert!(bad_hex.to_theme(ColorDepth::TrueColor).unwrap_err().contains("#rrggbb"));
     }
 
     #[test]
@@ -907,18 +849,9 @@ mod tests {
         let file = theme_file(r##"{ "colors": { "primary": "#b66bff" } }"##);
         // Truecolor keeps it; 256 quantizes it; sixteen falls back to the role
         // mapping, which cannot honour an arbitrary colour at all.
-        assert!(matches!(
-            file.to_theme(ColorDepth::TrueColor).unwrap().primary,
-            Color::Rgb(..)
-        ));
-        assert!(matches!(
-            file.to_theme(ColorDepth::Ansi256).unwrap().primary,
-            Color::Indexed(_)
-        ));
-        assert_eq!(
-            file.to_theme(ColorDepth::Ansi16).unwrap().primary,
-            Color::LightMagenta
-        );
+        assert!(matches!(file.to_theme(ColorDepth::TrueColor).unwrap().primary, Color::Rgb(..)));
+        assert!(matches!(file.to_theme(ColorDepth::Ansi256).unwrap().primary, Color::Indexed(_)));
+        assert_eq!(file.to_theme(ColorDepth::Ansi16).unwrap().primary, Color::LightMagenta);
         assert!(file.to_theme(ColorDepth::None).unwrap().plain);
     }
 
@@ -965,11 +898,8 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("abacus-theme-{}", std::process::id()));
         std::fs::create_dir_all(&directory).expect("temp dir");
         std::fs::write(directory.join("broken.json"), "{ not json").expect("write");
-        std::fs::write(
-            directory.join("good.json"),
-            r##"{ "colors": { "primary": "#123456" } }"##,
-        )
-        .expect("write");
+        std::fs::write(directory.join("good.json"), r##"{ "colors": { "primary": "#123456" } }"##)
+            .expect("write");
 
         assert_eq!(available(&directory), vec!["broken", "good"]);
         let (_, error) = resolve(&ThemeChoice::Named("broken".to_owned()), &directory);

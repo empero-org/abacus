@@ -89,35 +89,19 @@ impl SyncClient {
     }
 
     async fn account(&self) -> Result<Account> {
-        decode(
-            self.request(reqwest::Method::GET, "/v1/auth/me")
-                .send()
-                .await?,
-        )
-        .await
+        decode(self.request(reqwest::Method::GET, "/v1/auth/me").send().await?).await
     }
 
     pub(crate) async fn sessions(&self) -> Result<Vec<RemoteSession>> {
-        let response: SessionList = decode(
-            self.request(reqwest::Method::GET, "/v1/sync/sessions")
-                .send()
-                .await?,
-        )
-        .await?;
+        let response: SessionList =
+            decode(self.request(reqwest::Method::GET, "/v1/sync/sessions").send().await?).await?;
         Ok(response.items)
     }
 
     async fn revision(&self, id: &str) -> Result<Option<u64>> {
-        let response = self
-            .request(reqwest::Method::GET, "/v1/sync/sessions")
-            .send()
-            .await?;
+        let response = self.request(reqwest::Method::GET, "/v1/sync/sessions").send().await?;
         let sessions: SessionList = decode(response).await?;
-        Ok(sessions
-            .items
-            .into_iter()
-            .find(|item| item.id == id)
-            .map(|item| item.revision))
+        Ok(sessions.items.into_iter().find(|item| item.id == id).map(|item| item.revision))
     }
 
     pub async fn push(&self, session: &Session, trace: &[u8], force: bool) -> Result<u64> {
@@ -145,10 +129,8 @@ impl SyncClient {
             "trace_sha256": digest,
             "device_id": device_id(),
         });
-        let mut request = self.request(
-            reqwest::Method::PUT,
-            &format!("/v1/sync/sessions/{}", session.id),
-        );
+        let mut request =
+            self.request(reqwest::Method::PUT, &format!("/v1/sync/sessions/{}", session.id));
         request = if let Some(revision) = revision {
             request.header(header::IF_MATCH, format!("\"{revision}\""))
         } else {
@@ -229,17 +211,12 @@ async fn device_login_flow(server: &str) -> Result<LoginResponse> {
 }
 
 fn anonymous_client() -> Result<Client> {
-    Ok(Client::builder()
-        .user_agent(concat!("abacus-agent/", env!("CARGO_PKG_VERSION")))
-        .build()?)
+    Ok(Client::builder().user_agent(concat!("abacus-agent/", env!("CARGO_PKG_VERSION"))).build()?)
 }
 
 async fn decode<T: for<'de> Deserialize<'de>>(response: reqwest::Response) -> Result<T> {
     let status = response.status();
-    if response
-        .headers()
-        .get("Abacus-Protocol")
-        .and_then(|value| value.to_str().ok())
+    if response.headers().get("Abacus-Protocol").and_then(|value| value.to_str().ok())
         != Some(PROTOCOL)
     {
         bail!("sync server did not confirm Abacus protocol version {PROTOCOL}");
@@ -259,12 +236,7 @@ pub async fn handle(
 ) -> Result<()> {
     let mut credentials = Credentials::load(paths)?;
     match action {
-        SyncCommand::Login {
-            server,
-            email,
-            password,
-            password_login,
-        } => {
+        SyncCommand::Login { server, email, password, password_login } => {
             let server = server.trim_end_matches('/').to_owned();
             let login = if password_login || password.is_some() {
                 password_login_flow(&server, email, password).await?
@@ -322,10 +294,7 @@ pub async fn handle(
                 let trace_path = paths.traces_dir.join(format!("{}.jsonl", session.id));
                 let trace = std::fs::read(&trace_path).unwrap_or_default();
                 let revision = client.push(&session, &trace, force).await?;
-                println!(
-                    "Synced {} ({}) at revision {revision}",
-                    session.title, session.id
-                );
+                println!("Synced {} ({}) at revision {revision}", session.title, session.id);
             }
         }
         SyncCommand::Pull { session, force } => {
@@ -333,12 +302,7 @@ pub async fn handle(
             let ids = if let Some(id) = session {
                 vec![id]
             } else {
-                client
-                    .sessions()
-                    .await?
-                    .into_iter()
-                    .map(|item| item.id)
-                    .collect()
+                client.sessions().await?.into_iter().map(|item| item.id).collect()
             };
             for id in ids {
                 let (session, trace) = client.pull(&id).await?;
@@ -351,10 +315,8 @@ pub async fn handle(
 }
 
 fn configured(credentials: &Credentials) -> Result<SyncClient> {
-    let credentials = credentials
-        .sync
-        .as_ref()
-        .context("sync is not configured; run `abacus sync login`")?;
+    let credentials =
+        credentials.sync.as_ref().context("sync is not configured; run `abacus sync login`")?;
     SyncClient::new(credentials)
 }
 
@@ -443,11 +405,7 @@ async fn push_all_updated_local_inner(paths: &AbacusPaths, force: bool) -> Resul
             }
             let trace = std::fs::read(paths.traces_dir.join(format!("{}.jsonl", session.id)))
                 .unwrap_or_default();
-            let revision = client
-                .revision(&session.id.to_string())
-                .await
-                .ok()
-                .flatten();
+            let revision = client.revision(&session.id.to_string()).await.ok().flatten();
             let result = if force {
                 client.push(&session, &trace, true).await
             } else {
@@ -520,35 +478,21 @@ pub fn is_placeholder(session: &Session) -> bool {
     // transcript always opens with the system prompt, so "empty" means no user
     // message has ever been added.
     session.title == "New session"
-        && !session
-            .messages
-            .iter()
-            .any(|message| message["role"] == "user")
+        && !session.messages.iter().any(|message| message["role"] == "user")
 }
 
 async fn push_one(client: &SyncClient, paths: &AbacusPaths, session: &Session) -> Result<u64> {
     if is_placeholder(session) {
-        return Ok(
-            match client
-                .revision(&session.id.to_string())
-                .await
-                .ok()
-                .flatten()
-            {
-                Some(revision) => revision,
-                None => 0,
-            },
-        );
+        return Ok(match client.revision(&session.id.to_string()).await.ok().flatten() {
+            Some(revision) => revision,
+            None => 0,
+        });
     }
     let trace =
         std::fs::read(paths.traces_dir.join(format!("{}.jsonl", session.id))).unwrap_or_default();
     // Read immediately before the conditional write. A concurrent writer still
     // produces a conflict; automatic sync never retries by overwriting it.
-    let revision = client
-        .revision(&session.id.to_string())
-        .await
-        .ok()
-        .flatten();
+    let revision = client.revision(&session.id.to_string()).await.ok().flatten();
     client.push_at_revision(session, &trace, revision).await
 }
 
@@ -590,10 +534,7 @@ struct TicketResponse {
 impl SyncClient {
     pub async fn enable_remote(&self, session_id: &str) -> Result<String> {
         let response = self
-            .request(
-                reqwest::Method::POST,
-                &format!("/v1/remote/sessions/{session_id}/enable"),
-            )
+            .request(reqwest::Method::POST, &format!("/v1/remote/sessions/{session_id}/enable"))
             .send()
             .await?;
         let _: serde_json::Value = decode(response).await?;
@@ -614,10 +555,7 @@ impl SyncClient {
 
     pub async fn disable_remote(&self, session_id: &str) -> Result<()> {
         let response = self
-            .request(
-                reqwest::Method::POST,
-                &format!("/v1/remote/sessions/{session_id}/disable"),
-            )
+            .request(reqwest::Method::POST, &format!("/v1/remote/sessions/{session_id}/disable"))
             .send()
             .await?;
         let _: serde_json::Value = decode(response).await?;
@@ -637,19 +575,13 @@ struct GetResponse {
 impl SyncClient {
     async fn pull(&self, session_id: &str) -> Result<(Session, Vec<u8>)> {
         let document: GetResponse = decode(
-            self.request(
-                reqwest::Method::GET,
-                &format!("/v1/sync/sessions/{session_id}"),
-            )
-            .send()
-            .await?,
+            self.request(reqwest::Method::GET, &format!("/v1/sync/sessions/{session_id}"))
+                .send()
+                .await?,
         )
         .await?;
         let response = self
-            .request(
-                reqwest::Method::GET,
-                &format!("/v1/sync/sessions/{session_id}/trace"),
-            )
+            .request(reqwest::Method::GET, &format!("/v1/sync/sessions/{session_id}/trace"))
             .send()
             .await?;
         let status = response.status();
@@ -661,10 +593,7 @@ impl SyncClient {
 
     async fn delete_session(&self, session_id: &str, revision: u64) -> Result<()> {
         let response = self
-            .request(
-                reqwest::Method::DELETE,
-                &format!("/v1/sync/sessions/{session_id}"),
-            )
+            .request(reqwest::Method::DELETE, &format!("/v1/sync/sessions/{session_id}"))
             .header(header::IF_MATCH, format!("\"{revision}\""))
             .send()
             .await?;

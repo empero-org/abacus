@@ -97,10 +97,8 @@ pub async fn check_against(
         latest
     };
 
-    Ok(is_newer(&latest, current).then(|| Available {
-        version: latest,
-        current: current.to_owned(),
-    }))
+    Ok(is_newer(&latest, current)
+        .then(|| Available { version: latest, current: current.to_owned() }))
 }
 
 async fn newest_tag(tags_url: &str) -> Result<String> {
@@ -242,14 +240,7 @@ mod tests {
 
     #[test]
     fn the_message_names_both_versions() {
-        let message = Available {
-            version: "v0.7.0".into(),
-            current: "0.6.0".into(),
-        }
-        .message();
-        assert!(
-            message.contains("v0.7.0") && message.contains("0.6.0"),
-            "{message}"
-        );
+        let message = Available { version: "v0.7.0".into(), current: "0.6.0".into() }.message();
+        assert!(message.contains("v0.7.0") && message.contains("0.6.0"), "{message}");
     }
 }

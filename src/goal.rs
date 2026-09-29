@@ -56,10 +56,7 @@ impl GoalState {
     }
 
     pub fn set(&self, goal: Option<Goal>) -> Result<()> {
-        *self
-            .0
-            .write()
-            .map_err(|_| anyhow::anyhow!("goal lock poisoned"))? = goal;
+        *self.0.write().map_err(|_| anyhow::anyhow!("goal lock poisoned"))? = goal;
         Ok(())
     }
 
@@ -71,10 +68,7 @@ impl GoalState {
 
     pub fn edit(&self, objective: &str) -> Result<Goal> {
         let objective = validate_objective(objective)?;
-        let mut state = self
-            .0
-            .write()
-            .map_err(|_| anyhow::anyhow!("goal lock poisoned"))?;
+        let mut state = self.0.write().map_err(|_| anyhow::anyhow!("goal lock poisoned"))?;
         let goal = state.as_mut().context("no goal is set")?;
         goal.objective = objective;
         goal.updated_at = Utc::now();
@@ -90,10 +84,7 @@ impl GoalState {
     }
 
     fn transition(&self, from: GoalStatus, to: GoalStatus) -> Result<Goal> {
-        let mut state = self
-            .0
-            .write()
-            .map_err(|_| anyhow::anyhow!("goal lock poisoned"))?;
+        let mut state = self.0.write().map_err(|_| anyhow::anyhow!("goal lock poisoned"))?;
         let goal = state.as_mut().context("no goal is set")?;
         if goal.status != from {
             bail!("goal is {:?}, not {:?}", goal.status, from);
@@ -104,15 +95,11 @@ impl GoalState {
     }
 
     pub fn is_active(&self) -> bool {
-        self.snapshot()
-            .is_some_and(|goal| goal.status == GoalStatus::Active)
+        self.snapshot().is_some_and(|goal| goal.status == GoalStatus::Active)
     }
 
     pub fn increment_iteration(&self) -> Result<u32> {
-        let mut state = self
-            .0
-            .write()
-            .map_err(|_| anyhow::anyhow!("goal lock poisoned"))?;
+        let mut state = self.0.write().map_err(|_| anyhow::anyhow!("goal lock poisoned"))?;
         let goal = state.as_mut().context("no active goal")?;
         if goal.status != GoalStatus::Active {
             bail!("goal is not active");
@@ -190,10 +177,7 @@ impl GoalState {
             "cancelled" => GoalStatus::Cancelled,
             _ => bail!("invalid goal status"),
         };
-        let mut state = self
-            .0
-            .write()
-            .map_err(|_| anyhow::anyhow!("goal lock poisoned"))?;
+        let mut state = self.0.write().map_err(|_| anyhow::anyhow!("goal lock poisoned"))?;
         let goal = state.as_mut().context("no goal is active")?;
         goal.status = status;
         goal.note = args.note.map(|note| note.chars().take(4_000).collect());
@@ -229,12 +213,8 @@ mod tests {
         let state = GoalState::default();
         state.create("Ship the parser").unwrap();
         state.increment_iteration().unwrap();
-        let output = state
-            .execute(
-                "goal_update",
-                r#"{"status":"complete","note":"tests passed"}"#,
-            )
-            .unwrap();
+        let output =
+            state.execute("goal_update", r#"{"status":"complete","note":"tests passed"}"#).unwrap();
         assert!(output.contains("Complete"));
         let goal = state.snapshot().unwrap();
         assert_eq!(goal.iterations, 1);

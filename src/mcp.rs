@@ -221,15 +221,9 @@ impl McpManager {
         let result = async {
             let arguments: Value =
                 serde_json::from_str(arguments).context("invalid MCP arguments")?;
-            let client = self
-                .servers
-                .get(&tool.server)
-                .context("MCP server is not connected")?;
+            let client = self.servers.get(&tool.server).context("MCP server is not connected")?;
             let result = client
-                .request(
-                    "tools/call",
-                    json!({"name":tool.original_name,"arguments":arguments}),
-                )
+                .request("tools/call", json!({"name":tool.original_name,"arguments":arguments}))
                 .await?;
             format_tool_result(&result)
         }
@@ -269,9 +263,7 @@ impl McpClient {
                 "MCP server negotiated unsupported protocol {negotiated}; Abacus requires {MCP_PROTOCOL_VERSION}"
             );
         }
-        client
-            .notify("notifications/initialized", json!({}))
-            .await?;
+        client.notify("notifications/initialized", json!({})).await?;
         Ok(client)
     }
 
@@ -293,32 +285,19 @@ impl McpClient {
         let mut cursor = None;
         let mut output = Vec::new();
         loop {
-            let params = cursor
-                .as_ref()
-                .map(|cursor| json!({"cursor":cursor}))
-                .unwrap_or_else(|| json!({}));
+            let params =
+                cursor.as_ref().map(|cursor| json!({"cursor":cursor})).unwrap_or_else(|| json!({}));
             let result = self.request("tools/list", params).await?;
-            let listed = result["tools"]
-                .as_array()
-                .context("MCP tools/list response omitted tools")?;
+            let listed =
+                result["tools"].as_array().context("MCP tools/list response omitted tools")?;
             for tool in listed {
-                let name = tool["name"]
-                    .as_str()
-                    .context("MCP tool omitted name")?
-                    .to_owned();
-                let description = tool["description"]
-                    .as_str()
-                    .unwrap_or("MCP tool")
-                    .to_owned();
+                let name = tool["name"].as_str().context("MCP tool omitted name")?.to_owned();
+                let description = tool["description"].as_str().unwrap_or("MCP tool").to_owned();
                 let input_schema = tool
                     .get("inputSchema")
                     .cloned()
                     .unwrap_or_else(|| json!({"type":"object","properties":{}}));
-                output.push(ListedTool {
-                    name,
-                    description,
-                    input_schema,
-                });
+                output.push(ListedTool { name, description, input_schema });
             }
             cursor = result["nextCursor"].as_str().map(str::to_owned);
             if cursor.is_none() {
@@ -403,8 +382,7 @@ impl StdioClient {
     }
 
     async fn notify(&self, method: &str, params: Value) -> Result<()> {
-        self.write(&json!({"jsonrpc":"2.0","method":method,"params":params}))
-            .await
+        self.write(&json!({"jsonrpc":"2.0","method":method,"params":params})).await
     }
 
     async fn write(&self, message: &Value) -> Result<()> {
@@ -479,19 +457,14 @@ impl HttpClient {
         let response = timeout(self.timeout, request.send())
             .await
             .map_err(|_| anyhow!("HTTP MCP request timed out"))??;
-        if let Some(session) = response
-            .headers()
-            .get("mcp-session-id")
-            .and_then(|value| value.to_str().ok())
+        if let Some(session) =
+            response.headers().get("mcp-session-id").and_then(|value| value.to_str().ok())
         {
             *self.session_id.lock().await = Some(session.to_owned());
         }
         let status = response.status();
         if !status.is_success() {
-            bail!(
-                "HTTP MCP returned {status}: {}",
-                response.text().await.unwrap_or_default()
-            );
+            bail!("HTTP MCP returned {status}: {}", response.text().await.unwrap_or_default());
         }
         if status.as_u16() == 202 {
             return Ok(Value::Null);
@@ -553,13 +526,7 @@ fn namespaced(server: &str, tool: &str) -> String {
 fn sanitize(value: &str) -> String {
     value
         .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
-                ch
-            } else {
-                '_'
-            }
-        })
+        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' { ch } else { '_' })
         .collect()
 }
 
@@ -569,14 +536,10 @@ fn format_tool_result(result: &Value) -> Result<String> {
         for block in content {
             match block["type"].as_str().unwrap_or_default() {
                 "text" => parts.push(block["text"].as_str().unwrap_or_default().to_owned()),
-                "image" => parts.push(format!(
-                    "[image: {}]",
-                    block["mimeType"].as_str().unwrap_or("unknown")
-                )),
-                "audio" => parts.push(format!(
-                    "[audio: {}]",
-                    block["mimeType"].as_str().unwrap_or("unknown")
-                )),
+                "image" => parts
+                    .push(format!("[image: {}]", block["mimeType"].as_str().unwrap_or("unknown"))),
+                "audio" => parts
+                    .push(format!("[audio: {}]", block["mimeType"].as_str().unwrap_or("unknown"))),
                 _ => parts.push(serde_json::to_string_pretty(block)?),
             }
         }
@@ -601,10 +564,7 @@ mod tests {
 
     #[test]
     fn namespaces_tool_names() {
-        assert_eq!(
-            namespaced("git hub", "search/code"),
-            "mcp__git_hub__search_code"
-        );
+        assert_eq!(namespaced("git hub", "search/code"), "mcp__git_hub__search_code");
     }
 
     #[test]

@@ -78,30 +78,12 @@ pub struct Marks {
 }
 
 pub fn marks() -> &'static Marks {
-    const RICH: Marks = Marks {
-        pass: "✓",
-        fail: "✗",
-        warn: "!",
-        rule: "─",
-        bullet: "•",
-        arrow: "›",
-    };
-    const PLAIN: Marks = Marks {
-        pass: "+",
-        fail: "x",
-        warn: "!",
-        rule: "-",
-        bullet: "*",
-        arrow: ">",
-    };
+    const RICH: Marks =
+        Marks { pass: "✓", fail: "✗", warn: "!", rule: "─", bullet: "•", arrow: "›" };
+    const PLAIN: Marks =
+        Marks { pass: "+", fail: "x", warn: "!", rule: "-", bullet: "*", arrow: ">" };
     static ACTIVE: OnceLock<&Marks> = OnceLock::new();
-    ACTIVE.get_or_init(|| {
-        if crate::ui::glyphs().wordmark.is_some() {
-            &RICH
-        } else {
-            &PLAIN
-        }
-    })
+    ACTIVE.get_or_init(|| if crate::ui::glyphs().wordmark.is_some() { &RICH } else { &PLAIN })
 }
 
 /// The product banner, printed once at the top of a wizard run.
@@ -114,11 +96,7 @@ pub fn banner(subtitle: &str) {
 /// A numbered step header: `2/3  Connect and choose a model`.
 pub fn step(index: usize, total: usize, title: &str) {
     println!();
-    println!(
-        "  {}  {}",
-        accent(&bold(&format!("{index}/{total}"))),
-        bold(title)
-    );
+    println!("  {}  {}", accent(&bold(&format!("{index}/{total}"))), bold(title));
 }
 
 /// A muted note under a heading or prompt.
@@ -138,11 +116,7 @@ pub fn field(label: &str, value: &str) {
 
 /// `n thing` / `n things`, for summary lines.
 pub fn count(n: usize, singular: &str) -> String {
-    if n == 1 {
-        format!("{n} {singular}")
-    } else {
-        format!("{n} {singular}s")
-    }
+    if n == 1 { format!("{n} {singular}") } else { format!("{n} {singular}s") }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,11 +139,7 @@ impl Health {
 
 /// A diagnostic row: glyph, aligned label, then the finding.
 pub fn check(health: Health, label: &str, detail: &str) {
-    println!(
-        "  {} {}  {detail}",
-        health.glyph(),
-        dim(&format!("{label:<11}"))
-    );
+    println!("  {} {}  {detail}", health.glyph(), dim(&format!("{label:<11}")));
 }
 
 /// A section heading inside `doctor`.
@@ -191,11 +161,9 @@ pub fn pad(value: &str, width: usize) -> String {
 /// Read a line, showing `default` in the prompt when there is one.
 pub fn prompt(label: &str, default: Option<&str>) -> anyhow::Result<String> {
     let rendered = match default {
-        Some(default) => format!(
-            "  {} {label} {}: ",
-            accent(marks().arrow),
-            dim(&format!("[{default}]"))
-        ),
+        Some(default) => {
+            format!("  {} {label} {}: ", accent(marks().arrow), dim(&format!("[{default}]")))
+        }
         None => format!("  {} {label}: ", accent(marks().arrow)),
     };
     print!("{rendered}");
@@ -203,11 +171,7 @@ pub fn prompt(label: &str, default: Option<&str>) -> anyhow::Result<String> {
     let mut value = String::new();
     std::io::stdin().read_line(&mut value)?;
     let value = value.trim();
-    Ok(if value.is_empty() {
-        default.unwrap_or_default().to_owned()
-    } else {
-        value.to_owned()
-    })
+    Ok(if value.is_empty() { default.unwrap_or_default().to_owned() } else { value.to_owned() })
 }
 
 /// Read a number in `min..=max`, re-asking until it is one.
@@ -216,10 +180,7 @@ pub fn prompt_index(label: &str, min: usize, max: usize) -> anyhow::Result<usize
         let raw = prompt(label, None)?;
         match raw.trim().parse::<usize>() {
             Ok(value) if (min..=max).contains(&value) => return Ok(value),
-            _ => println!(
-                "      {}",
-                err(&format!("Enter a number from {min} to {max}."))
-            ),
+            _ => println!("      {}", err(&format!("Enter a number from {min} to {max}."))),
         }
     }
 }

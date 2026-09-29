@@ -134,11 +134,7 @@ pub struct Summariser<'a> {
 impl<'a> Summariser<'a> {
     /// An out-of-context summariser: a fresh prompt, no cache to reuse.
     pub fn detached(provider: &'a Provider) -> Self {
-        Self {
-            provider,
-            in_context: false,
-            tools: &[],
-        }
+        Self { provider, in_context: false, tools: &[] }
     }
 }
 
@@ -279,9 +275,7 @@ fn under_pressure(messages: &[Value], state: &CompactionState, budget: &Compacti
 
 /// Index of the most recent `user` message, if any.
 fn last_user_index(messages: &[Value]) -> Option<usize> {
-    messages
-        .iter()
-        .rposition(|message| message["role"] == "user")
+    messages.iter().rposition(|message| message["role"] == "user")
 }
 
 /// True while the only real user prompt is the opening one (the pair
@@ -330,9 +324,7 @@ fn microcompact(messages: &mut [Value], budget: &CompactionBudget) {
         .enumerate()
         .filter(|(_, message)| {
             message["role"] == "tool"
-                && message["name"]
-                    .as_str()
-                    .is_some_and(|name| COMPACTABLE_TOOLS.contains(&name))
+                && message["name"].as_str().is_some_and(|name| COMPACTABLE_TOOLS.contains(&name))
         })
         .map(|(index, _)| index)
         .collect();
@@ -361,10 +353,7 @@ fn microcompact(messages: &mut [Value], budget: &CompactionBudget) {
         if content.starts_with(SENTINEL_PREFIX) {
             continue;
         }
-        let name = messages[index]["name"]
-            .as_str()
-            .unwrap_or("tool")
-            .to_owned();
+        let name = messages[index]["name"].as_str().unwrap_or("tool").to_owned();
         let subject = call_subject(messages, index);
         messages[index]["content"] = json!(shrink_tool_result(&name, &subject, content));
     }
@@ -395,11 +384,7 @@ fn call_subject(messages: &[Value], result: usize) -> String {
         match &parsed[key] {
             Value::String(value) => return truncate_subject(value),
             Value::Array(values) => {
-                let joined = values
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let joined = values.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ");
                 if !joined.is_empty() {
                     return truncate_subject(&joined);
                 }
@@ -493,10 +478,8 @@ async fn summarize_in_context(
     cancel: &AtomicBool,
 ) -> Result<String, String> {
     let mut directive = String::from(IN_CONTEXT_PROMPT);
-    if let Some(prior) = state
-        .running_summary
-        .as_deref()
-        .filter(|summary| !summary.trim().is_empty())
+    if let Some(prior) =
+        state.running_summary.as_deref().filter(|summary| !summary.trim().is_empty())
     {
         directive.push_str(&format!(
             "\n\nEarlier conversation was already compacted into this summary. Fold everything \
@@ -515,10 +498,7 @@ async fn summarize_in_context(
 
     let (delta_tx, mut delta_rx) = mpsc::unbounded_channel::<crate::provider::Chunk>();
     let drain = tokio::spawn(async move { while delta_rx.recv().await.is_some() {} });
-    let result = summariser
-        .provider
-        .complete(&messages, summariser.tools, delta_tx, cancel)
-        .await;
+    let result = summariser.provider.complete(&messages, summariser.tools, delta_tx, cancel).await;
     let _ = drain.await;
 
     let completion = result.map_err(|error| format!("{error:#}"))?;
@@ -545,10 +525,7 @@ async fn summarize_range(
     cancel: &AtomicBool,
 ) -> Result<String, String> {
     let prompt = json!({"role":"system","content": SUMMARY_PROMPT});
-    let prior = state
-        .running_summary
-        .as_deref()
-        .filter(|s| !s.trim().is_empty());
+    let prior = state.running_summary.as_deref().filter(|s| !s.trim().is_empty());
     // Past its budget the summary has to be condensed rather than extended.
     // Extending unconditionally is what let it grow until it alone kept the
     // context over threshold, firing a summariser call every single turn.
@@ -617,12 +594,8 @@ async fn summarize_range(
 /// Return a copy of `range` with the given percentage of tool-result bodies
 /// blanked from the middle outward (symmetric, Goose-style).
 fn strip_tool_bodies(range: &[Value], strip_percent: u32) -> Vec<Value> {
-    let tool_indices: Vec<usize> = range
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| m["role"] == "tool")
-        .map(|(i, _)| i)
-        .collect();
+    let tool_indices: Vec<usize> =
+        range.iter().enumerate().filter(|(_, m)| m["role"] == "tool").map(|(i, _)| i).collect();
     let mut out: Vec<Value> = range.to_vec();
     if tool_indices.is_empty() || strip_percent == 0 {
         return out;
@@ -773,9 +746,9 @@ mod tests {
             microcompact(&mut messages, &CompactionBudget::default());
         }
         assert!(
-            !messages.iter().any(|m| m["content"]
-                .as_str()
-                .is_some_and(|c| c.starts_with(SENTINEL_PREFIX))),
+            !messages
+                .iter()
+                .any(|m| m["content"].as_str().is_some_and(|c| c.starts_with(SENTINEL_PREFIX))),
             "tool results must survive on a small context"
         );
     }
@@ -797,19 +770,13 @@ mod tests {
             messages.push(json!({"role":"tool","tool_call_id":format!("c{i}"),"name":"read_file","content":"x".repeat(200)}));
         }
         assert!(should_microcompact(&messages, &budget));
-        assert!(!under_pressure(
-            &messages,
-            &CompactionState::default(),
-            &budget
-        ));
+        assert!(!under_pressure(&messages, &CompactionState::default(), &budget));
         microcompact(&mut messages, &CompactionBudget::default());
         let live = messages
             .iter()
             .filter(|m| {
                 m["role"] == "tool"
-                    && m["content"]
-                        .as_str()
-                        .is_some_and(|c| !c.starts_with(SENTINEL_PREFIX))
+                    && m["content"].as_str().is_some_and(|c| !c.starts_with(SENTINEL_PREFIX))
             })
             .count();
         assert_eq!(live, KEEP_RECENT_TOOL_RESULTS);
@@ -831,9 +798,7 @@ mod tests {
             .filter(|m| {
                 m["role"] == "tool"
                     && m["name"] == "read_file"
-                    && m["content"]
-                        .as_str()
-                        .is_some_and(|c| !c.starts_with(SENTINEL_PREFIX))
+                    && m["content"].as_str().is_some_and(|c| !c.starts_with(SENTINEL_PREFIX))
             })
             .count();
         assert_eq!(live, KEEP_RECENT_TOOL_RESULTS);
@@ -856,9 +821,7 @@ mod tests {
             .iter()
             .filter(|m| {
                 m["role"] == "tool"
-                    && m["content"]
-                        .as_str()
-                        .is_some_and(|c| c.starts_with("edited"))
+                    && m["content"].as_str().is_some_and(|c| c.starts_with("edited"))
             })
             .count();
         assert_eq!(edited, 20);
@@ -871,15 +834,9 @@ mod tests {
         let content = "    1 | fn parse() {\n    2 |     todo!()\n";
         let shrunk = shrink_tool_result("read_file", "src/parser.rs", content);
         assert!(shrunk.starts_with(SENTINEL_PREFIX));
-        assert!(
-            shrunk.contains("src/parser.rs"),
-            "the path must survive: {shrunk}"
-        );
+        assert!(shrunk.contains("src/parser.rs"), "the path must survive: {shrunk}");
         assert!(shrunk.contains("read_file"), "the tool must survive");
-        assert!(
-            shrunk.len() < content.len() + 120,
-            "the placeholder must stay small"
-        );
+        assert!(shrunk.len() < content.len() + 120, "the placeholder must stay small");
     }
 
     /// A single `read_file` result is line-numbered content with no path in it,
@@ -953,11 +910,7 @@ mod tests {
         let live: usize = messages
             .iter()
             .filter(|m| m["role"] == "tool")
-            .filter(|m| {
-                m["content"]
-                    .as_str()
-                    .is_some_and(|c| !c.starts_with(SENTINEL_PREFIX))
-            })
+            .filter(|m| m["content"].as_str().is_some_and(|c| !c.starts_with(SENTINEL_PREFIX)))
             .map(message_chars_one)
             .sum();
         assert!(
@@ -973,10 +926,7 @@ mod tests {
     /// turn, growing it further.
     #[test]
     fn an_oversized_summary_is_cut_back() {
-        let long = (0..400)
-            .map(|n| format!("fact {n}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let long = (0..400).map(|n| format!("fact {n}")).collect::<Vec<_>>().join("\n");
         let bounded = bound_summary(long.clone(), 500);
         assert!(bounded.len() <= 500 + 80, "got {} chars", bounded.len());
         assert!(bounded.contains("truncated"), "the loss is stated");
@@ -1030,10 +980,7 @@ mod tests {
         let head_end = first_legal_cut_at_or_after(&messages, KEEP_FIRST);
         let cut = find_tail_cut(&messages, 0, head_end)
             .min(last_user_index(&messages).unwrap_or(messages.len()));
-        assert_eq!(
-            cut, 3,
-            "current user turn must survive a zero recent budget"
-        );
+        assert_eq!(cut, 3, "current user turn must survive a zero recent budget");
         assert!(cut > head_end);
     }
 
@@ -1071,10 +1018,8 @@ mod tests {
             .map(|i| json!({"role":"tool","tool_call_id":format!("t{i}"),"name":"read_file","content":format!("body{i}")}))
             .collect();
         let stripped = strip_tool_bodies(&range, 40); // 2 of 5 removed
-        let omitted = stripped
-            .iter()
-            .filter(|m| m["content"].as_str() == Some(TOOL_BODY_OMITTED))
-            .count();
+        let omitted =
+            stripped.iter().filter(|m| m["content"].as_str() == Some(TOOL_BODY_OMITTED)).count();
         assert_eq!(omitted, 2);
         // Middle-out: index 2 (center) must be among the removed.
         assert_eq!(stripped[2]["content"].as_str(), Some(TOOL_BODY_OMITTED));

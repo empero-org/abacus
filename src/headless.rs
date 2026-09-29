@@ -30,10 +30,7 @@ pub async fn run(
     loop_config: Option<RalphLoop>,
     reporter: Option<ActivityReporter>,
 ) -> Result<()> {
-    let initial_tokens = session
-        .as_ref()
-        .map(|session| session.tokens_used)
-        .unwrap_or(0);
+    let initial_tokens = session.as_ref().map(|session| session.tokens_used).unwrap_or(0);
     let provider = Provider::with_tokens(
         &config,
         Arc::new(crate::provider::TokenLedger::new(initial_tokens)),
@@ -47,9 +44,7 @@ pub async fn run(
         )
         .await?;
     let started = Instant::now();
-    let activity_session = session_id
-        .clone()
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let activity_session = session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     // Migration from the pre-harness stores runs once, here. Keyed by the
     // session id so promotion counts distinct sessions rather than distinct
     // processes.
@@ -73,9 +68,7 @@ pub async fn run(
         session = Some(updated);
     }
     if let Some(reporter) = &reporter {
-        reporter
-            .report_start(&activity_session, &config.model)
-            .await;
+        reporter.report_start(&activity_session, &config.model).await;
     }
     // Keep long-running headless sessions (e.g. loops) visible with live tokens,
     // and let them drop off "active" if the process is killed.
@@ -89,25 +82,17 @@ pub async fn run(
             ticker.tick().await;
             loop {
                 ticker.tick().await;
-                reporter
-                    .report_heartbeat(&session, provider.tokens_used())
-                    .await;
+                reporter.report_heartbeat(&session, provider.tokens_used()).await;
             }
         })
     });
     let (events, mut receiver) = mpsc::unbounded_channel();
     let allow = Arc::new(AtomicBool::new(config.yes));
     let goal = GoalState::new(session.as_ref().and_then(|session| session.goal.clone()));
-    let tasks = TaskList::new(
-        session
-            .as_ref()
-            .map(|session| session.tasks.clone())
-            .unwrap_or_default(),
-    );
-    let compaction = session
-        .as_ref()
-        .and_then(|session| session.compaction.clone())
-        .unwrap_or_default();
+    let tasks =
+        TaskList::new(session.as_ref().map(|session| session.tasks.clone()).unwrap_or_default());
+    let compaction =
+        session.as_ref().and_then(|session| session.compaction.clone()).unwrap_or_default();
 
     let mut ralph = loop_config;
     let mut text = String::new();
@@ -122,11 +107,7 @@ pub async fn run(
         && session.is_none()
         && let Some(store) = &store
     {
-        match store.create(
-            config.profile.clone(),
-            config.model.clone(),
-            final_messages.clone(),
-        ) {
+        match store.create(config.profile.clone(), config.model.clone(), final_messages.clone()) {
             Ok(created) => session = Some(created),
             Err(error) => eprintln!("warning: could not create session — {error:#}"),
         }
@@ -394,11 +375,7 @@ pub async fn run(
     }
     if let Some(reporter) = &reporter {
         reporter
-            .report_end(
-                &activity_session,
-                provider.tokens_used(),
-                started.elapsed().as_secs(),
-            )
+            .report_end(&activity_session, provider.tokens_used(), started.elapsed().as_secs())
             .await;
     }
     if format == OutputFormat::Plain && !text.ends_with('\n') {
@@ -469,11 +446,7 @@ fn persist_session(
     let mut session_value = if let Some(session_value) = session.take() {
         session_value
     } else {
-        store.create(
-            run.profile.to_owned(),
-            run.model.to_owned(),
-            run.messages.clone(),
-        )?
+        store.create(run.profile.to_owned(), run.model.to_owned(), run.messages.clone())?
     };
     session_value.update_messages(run.messages);
     session_value.intent = run.intent;

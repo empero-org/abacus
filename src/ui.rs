@@ -278,11 +278,7 @@ impl GlyphChoice {
                 let bare = std::env::var("TERM")
                     .map(|term| matches!(term.trim(), "dumb" | "linux"))
                     .unwrap_or(false);
-                if bare {
-                    &Glyphs::ASCII
-                } else {
-                    &Glyphs::UNICODE
-                }
+                if bare { &Glyphs::ASCII } else { &Glyphs::UNICODE }
             }
         }
     }
@@ -341,10 +337,7 @@ pub fn glyphs() -> &'static Glyphs {
 pub fn shimmer(text: &str, elapsed: std::time::Duration, animated: bool) -> Vec<Span<'static>> {
     let palette = theme::active();
     if !animated || text.is_empty() {
-        return vec![Span::styled(
-            text.to_owned(),
-            Style::default().fg(palette.text),
-        )];
+        return vec![Span::styled(text.to_owned(), Style::default().fg(palette.text))];
     }
     const PERIOD_MS: u128 = 2_000;
     const HALF_WIDTH: f64 = 5.0;
@@ -373,9 +366,9 @@ pub fn shimmer(text: &str, elapsed: std::time::Duration, animated: bool) -> Vec<
                     };
                     Style::default().fg(Color::Rgb(mix(br, tr), mix(bg, tg), mix(bb, tb)))
                 }
-                None if intensity < 0.33 => Style::default()
-                    .fg(palette.muted)
-                    .add_modifier(Modifier::DIM),
+                None if intensity < 0.33 => {
+                    Style::default().fg(palette.muted).add_modifier(Modifier::DIM)
+                }
                 None => Style::default().fg(palette.text),
             };
             if intensity > 0.85 {
@@ -441,19 +434,13 @@ pub fn fill_style(fill: Color) -> Style {
     if palette.plain {
         return Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD);
     }
-    Style::default()
-        .fg(palette.inverse)
-        .bg(fill)
-        .add_modifier(Modifier::BOLD)
+    Style::default().fg(palette.inverse).bg(fill).add_modifier(Modifier::BOLD)
 }
 
 /// The `·` used to separate inline metadata. Dim enough to group without
 /// competing with the values on either side.
 pub fn dot() -> Span<'static> {
-    Span::styled(
-        format!("  {}  ", glyphs().separator),
-        Style::default().fg(rail()),
-    )
+    Span::styled(format!("  {}  ", glyphs().separator), Style::default().fg(rail()))
 }
 
 /// Spell a key name for the active preset.
@@ -494,10 +481,7 @@ pub fn hints(pairs: &[(&str, &str)]) -> Vec<Span<'static>> {
             key_label(key),
             Style::default().fg(primary()).add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(
-            format!(" {label}"),
-            Style::default().fg(muted()),
-        ));
+        spans.push(Span::styled(format!(" {label}"), Style::default().fg(muted())));
     }
     spans
 }
@@ -505,10 +489,7 @@ pub fn hints(pairs: &[(&str, &str)]) -> Vec<Span<'static>> {
 /// A horizontal hairline in the rail colour, used to separate the header and
 /// footer from the transcript without boxing anything in.
 pub fn rule(width: u16) -> Line<'static> {
-    Line::from(Span::styled(
-        glyphs().rule.repeat(width as usize),
-        Style::default().fg(rail()),
-    ))
+    Line::from(Span::styled(glyphs().rule.repeat(width as usize), Style::default().fg(rail())))
 }
 
 /// A segmented capacity meter, e.g. `▰▰▰▱▱▱▱▱`. Filled cells take `color`,
@@ -518,10 +499,7 @@ pub fn meter(percent: u16, cells: usize, color: Color) -> Vec<Span<'static>> {
     let filled = ((percent as usize * cells) / 100).min(cells);
     vec![
         Span::styled(set.meter_full.repeat(filled), Style::default().fg(color)),
-        Span::styled(
-            set.meter_empty.repeat(cells - filled),
-            Style::default().fg(rail()),
-        ),
+        Span::styled(set.meter_empty.repeat(cells - filled), Style::default().fg(rail())),
     ]
 }
 
@@ -560,12 +538,7 @@ pub fn format_elapsed(ms: u64) -> String {
         format!("{}m {:02}s", total / 60, total % 60)
     } else {
         let total = ms / 1_000;
-        format!(
-            "{}h {:02}m {:02}s",
-            total / 3600,
-            (total % 3600) / 60,
-            total % 60
-        )
+        format!("{}h {:02}m {:02}s", total / 3600, (total % 3600) / 60, total % 60)
     }
 }
 
@@ -598,11 +571,7 @@ pub fn overlay_block(title: &str, accent: Color, footer: Option<Line<'static>>) 
         .border_style(Style::default().fg(palette.border))
         .style(Style::default().bg(palette.overlay))
         .padding(Padding::horizontal(1))
-        .title_top(Line::from(vec![
-            Span::raw(" "),
-            badge(title, accent),
-            Span::raw(" "),
-        ]));
+        .title_top(Line::from(vec![Span::raw(" "), badge(title, accent), Span::raw(" ")]));
     if let Some(footer) = footer {
         block = block.title_bottom(footer);
     }
@@ -654,11 +623,7 @@ pub fn measure(area: Rect, max: u16) -> Rect {
     if area.width <= max {
         return area;
     }
-    Rect {
-        x: area.x + (area.width - max) / 2,
-        width: max,
-        ..area
-    }
+    Rect { x: area.x + (area.width - max) / 2, width: max, ..area }
 }
 
 // ---------------------------------------------------------------------------
@@ -682,10 +647,7 @@ pub struct RowState {
 
 impl RowState {
     pub fn selected(selected: bool) -> Self {
-        Self {
-            selected,
-            hovered: false,
-        }
+        Self { selected, hovered: false }
     }
 }
 
@@ -696,21 +658,10 @@ impl RowState {
 /// or not the cursor is present.
 pub fn list_row(state: RowState, width: usize, content: Vec<Span<'static>>) -> Line<'static> {
     let palette = theme::active();
-    let fill = if state.hovered {
-        palette.selection
-    } else {
-        palette.overlay
-    };
+    let fill = if state.hovered { palette.selection } else { palette.overlay };
     let mut spans = vec![Span::styled(
-        if state.selected {
-            format!("{} ", glyphs().cursor)
-        } else {
-            "  ".to_owned()
-        },
-        Style::default()
-            .fg(primary())
-            .bg(fill)
-            .add_modifier(Modifier::BOLD),
+        if state.selected { format!("{} ", glyphs().cursor) } else { "  ".to_owned() },
+        Style::default().fg(primary()).bg(fill).add_modifier(Modifier::BOLD),
     )];
     for span in content {
         let mut style = span.style.bg(fill);
@@ -723,10 +674,7 @@ pub fn list_row(state: RowState, width: usize, content: Vec<Span<'static>>) -> L
     }
     let used = spans_width(&spans);
     if used < width {
-        spans.push(Span::styled(
-            " ".repeat(width - used),
-            Style::default().bg(fill),
-        ));
+        spans.push(Span::styled(" ".repeat(width - used), Style::default().bg(fill)));
     }
     Line::from(spans)
 }
@@ -761,16 +709,9 @@ pub fn split(inner: Rect, sidebar_width: u16) -> Split {
     let divider_x = inner.x + sidebar_width + 1;
     let body_x = divider_x + 2;
     Split {
-        sidebar: Rect {
-            width: sidebar_width,
-            ..inner
-        },
+        sidebar: Rect { width: sidebar_width, ..inner },
         divider_x,
-        body: Rect {
-            x: body_x,
-            width: inner.right().saturating_sub(body_x),
-            ..inner
-        },
+        body: Rect { x: body_x, width: inner.right().saturating_sub(body_x), ..inner },
     }
 }
 
@@ -891,10 +832,7 @@ pub fn facts(items: &[String]) -> Line<'static> {
     let mut spans = Vec::new();
     for item in items.iter().filter(|item| !item.trim().is_empty()) {
         if !spans.is_empty() {
-            spans.push(Span::styled(
-                format!(" {separator} "),
-                Style::default().fg(rail()),
-            ));
+            spans.push(Span::styled(format!(" {separator} "), Style::default().fg(rail())));
         }
         spans.push(Span::styled(item.clone(), Style::default().fg(muted())));
     }
@@ -917,10 +855,7 @@ pub fn state_mark(on: bool) -> Span<'static> {
 
 /// Total display width of a run of spans.
 pub fn spans_width(spans: &[Span<'_>]) -> usize {
-    spans
-        .iter()
-        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
-        .sum()
+    spans.iter().map(|span| UnicodeWidthStr::width(span.content.as_ref())).sum()
 }
 
 /// Word-wrap `spans` to `width` columns, prefixing the first produced row with
@@ -971,10 +906,7 @@ pub fn wrap(
                 }
                 _ => rows.push(std::mem::take(&mut row)),
             }
-            row_width = row
-                .iter()
-                .map(|(ch, _)| UnicodeWidthChar::width(*ch).unwrap_or(0))
-                .sum();
+            row_width = row.iter().map(|(ch, _)| UnicodeWidthChar::width(*ch).unwrap_or(0)).sum();
             last_space = None;
         }
         if ch == ' ' {
@@ -988,11 +920,8 @@ pub fn wrap(
     rows.into_iter()
         .enumerate()
         .map(|(index, cells)| {
-            let mut line: Vec<Span<'static>> = if index == 0 {
-                first.to_vec()
-            } else {
-                cont.to_vec()
-            };
+            let mut line: Vec<Span<'static>> =
+                if index == 0 { first.to_vec() } else { cont.to_vec() };
             // Regroup consecutive cells that share a style back into spans, so
             // the buffer sees a handful of runs instead of one span per char.
             let mut current = String::new();
@@ -1093,19 +1022,11 @@ pub struct Entry {
 
 impl Entry {
     pub fn new(kind: EntryKind, text: impl Into<String>) -> Self {
-        Self {
-            kind,
-            text: text.into(),
-            tool: None,
-        }
+        Self { kind, text: text.into(), tool: None }
     }
 
     pub fn tool(call: ToolCall) -> Self {
-        Self {
-            kind: EntryKind::Tool,
-            text: String::new(),
-            tool: Some(call),
-        }
+        Self { kind: EntryKind::Tool, text: String::new(), tool: Some(call) }
     }
 }
 
@@ -1193,10 +1114,7 @@ fn user_block(body: &str, width: usize) -> Vec<Line<'static>> {
     )];
     let mut lines = Vec::new();
     for paragraph in body.split('\n') {
-        let spans = vec![Span::styled(
-            paragraph.to_owned(),
-            Style::default().fg(text_color()),
-        )];
+        let spans = vec![Span::styled(paragraph.to_owned(), Style::default().fg(text_color()))];
         lines.extend(wrap(&spans, width, &bar, &bar));
     }
     // The prompt renders as a card: a quiet tint band behind the whole block,
@@ -1210,19 +1128,13 @@ fn user_block(body: &str, width: usize) -> Vec<Line<'static>> {
     let pad_row = || Line::from(Span::styled(" ".repeat(width), Style::default().bg(tint)));
     let mut card = vec![pad_row()];
     for mut line in lines {
-        let used: usize = line
-            .spans
-            .iter()
-            .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
-            .sum();
+        let used: usize =
+            line.spans.iter().map(|span| UnicodeWidthStr::width(span.content.as_ref())).sum();
         for span in &mut line.spans {
             span.style = span.style.bg(tint);
         }
         if used < width {
-            line.spans.push(Span::styled(
-                " ".repeat(width - used),
-                Style::default().bg(tint),
-            ));
+            line.spans.push(Span::styled(" ".repeat(width - used), Style::default().bg(tint)));
         }
         card.push(line);
     }
@@ -1235,22 +1147,15 @@ fn user_block(body: &str, width: usize) -> Vec<Line<'static>> {
 /// and must not compete with it.
 fn thinking_block(body: &str, width: usize) -> Vec<Line<'static>> {
     let quiet = rail();
-    let marker = vec![Span::styled(
-        format!("{} ", glyphs().quote_rail),
-        Style::default().fg(quiet),
-    )];
+    let marker =
+        vec![Span::styled(format!("{} ", glyphs().quote_rail), Style::default().fg(quiet))];
     let style = Style::default().fg(quiet).add_modifier(Modifier::ITALIC);
     let mut lines = Vec::new();
     for paragraph in body.split('\n') {
         if paragraph.trim().is_empty() {
             continue;
         }
-        lines.extend(wrap(
-            &[Span::styled(paragraph.to_owned(), style)],
-            width,
-            &marker,
-            &marker,
-        ));
+        lines.extend(wrap(&[Span::styled(paragraph.to_owned(), style)], width, &marker, &marker));
     }
     lines
 }
@@ -1315,14 +1220,7 @@ fn tool_block(call: &ToolCall, width: usize, spinner: &str, selected: bool) -> V
     };
     // Say that there is more to see, and which way the row is currently folded.
     if call.has_more() {
-        right = format!(
-            "{} {right}",
-            if call.expanded {
-                set.fold_open
-            } else {
-                set.fold_closed
-            }
-        );
+        right = format!("{} {right}", if call.expanded { set.fold_open } else { set.fold_closed });
     }
 
     // Budget the row: the glyph, name, and duration are fixed; whatever is left
@@ -1341,11 +1239,7 @@ fn tool_block(call: &ToolCall, width: usize, spinner: &str, selected: bool) -> V
 
     // The selected row is tinted end to end so the cursor is unmistakable even
     // when the transcript is a dense run of tool calls.
-    let fill = if selected {
-        theme::active().selection
-    } else {
-        Color::Reset
-    };
+    let fill = if selected { theme::active().selection } else { Color::Reset };
     let tint = |style: Style| {
         if selected { style.bg(fill) } else { style }
     };
@@ -1358,11 +1252,7 @@ fn tool_block(call: &ToolCall, width: usize, spinner: &str, selected: bool) -> V
         ),
         Span::styled(
             call.name.clone(),
-            tint(
-                Style::default()
-                    .fg(text_color())
-                    .add_modifier(Modifier::BOLD),
-            ),
+            tint(Style::default().fg(text_color()).add_modifier(Modifier::BOLD)),
         ),
     ];
     if !summary.is_empty() {
@@ -1380,11 +1270,7 @@ fn tool_block(call: &ToolCall, width: usize, spinner: &str, selected: bool) -> V
     } else {
         Style::default().fg(muted())
     };
-    let body = if call.expanded {
-        &call.full
-    } else {
-        &call.output
-    };
+    let body = if call.expanded { &call.full } else { &call.output };
     let indent = GUTTER + 2;
     let measure = width.saturating_sub(indent);
     for raw in body.lines() {
@@ -1433,10 +1319,7 @@ fn rule_line(label: &str, width: usize) -> Line<'static> {
 fn notice_block(body: &str, width: usize, color: Color, glyph: &str) -> Vec<Line<'static>> {
     let first = vec![
         Span::raw(" ".repeat(GUTTER)),
-        Span::styled(
-            format!("{glyph} "),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(format!("{glyph} "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
     ];
     let cont = vec![Span::raw(" ".repeat(GUTTER + 2))];
     let spans = vec![Span::styled(body.to_owned(), Style::default().fg(color))];
@@ -1461,9 +1344,7 @@ pub struct Welcome<'a> {
 /// Half-block wordmark. Falls back to plain text when the terminal is too
 /// narrow for the 22-column art.
 fn wordmark(width: usize) -> Vec<Line<'static>> {
-    let style = Style::default()
-        .fg(secondary())
-        .add_modifier(Modifier::BOLD);
+    let style = Style::default().fg(secondary()).add_modifier(Modifier::BOLD);
     let plain = || vec![Line::from(Span::styled("ABACUS", style))];
     let Some(rows) = glyphs().wordmark else {
         return plain();
@@ -1471,9 +1352,7 @@ fn wordmark(width: usize) -> Vec<Line<'static>> {
     if width < UnicodeWidthStr::width(rows[0]) + 4 {
         return plain();
     }
-    rows.into_iter()
-        .map(|row| Line::from(Span::styled(row, style)))
-        .collect()
+    rows.into_iter().map(|row| Line::from(Span::styled(row, style))).collect()
 }
 
 /// A `label   value` row for the splash screen's facts block, with the labels
@@ -1497,11 +1376,7 @@ pub fn welcome(info: &Welcome<'_>, width: usize) -> Vec<Line<'static>> {
     lines.push(Line::from(""));
 
     let workspace = match info.branch {
-        Some(branch) => format!(
-            "{}  {} {branch}",
-            truncate(info.workspace, 44),
-            glyphs().branch
-        ),
+        Some(branch) => format!("{}  {} {branch}", truncate(info.workspace, 44), glyphs().branch),
         None => truncate(info.workspace, 52),
     };
     lines.push(fact("workspace", workspace, text_color()));
@@ -1512,21 +1387,9 @@ pub fn welcome(info: &Welcome<'_>, width: usize) -> Vec<Line<'static>> {
     if info.tips {
         lines.push(Line::from(""));
         for (key, label, color) in [
-            (
-                "Build",
-                "Describe a change; Abacus inspects, edits, verifies.",
-                success(),
-            ),
-            (
-                "Plan",
-                "AUTO picks the workflow — shift+tab pins a mode.",
-                warning(),
-            ),
-            (
-                "Goal",
-                "/goal sets a persistent definition of done.",
-                primary(),
-            ),
+            ("Build", "Describe a change; Abacus inspects, edits, verifies.", success()),
+            ("Plan", "AUTO picks the workflow — shift+tab pins a mode.", warning()),
+            ("Goal", "/goal sets a persistent definition of done.", primary()),
             ("Loop", "/loop runs promise-driven iteration.", secondary()),
         ] {
             lines.push(Line::from(vec![
@@ -1555,10 +1418,7 @@ mod tests {
     static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn plain(line: &Line<'_>) -> String {
-        line.spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect()
+        line.spans.iter().map(|span| span.content.as_ref()).collect()
     }
 
     #[test]
@@ -1571,17 +1431,9 @@ mod tests {
         let lines = user_block("hello there", 40);
         assert!(lines.len() >= 3, "padding row above and below the text");
         for line in &lines {
-            let width: usize = line
-                .spans
-                .iter()
-                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
-                .sum();
-            assert_eq!(
-                width,
-                40,
-                "every row pads to the measure: {:?}",
-                plain(line)
-            );
+            let width: usize =
+                line.spans.iter().map(|span| UnicodeWidthStr::width(span.content.as_ref())).sum();
+            assert_eq!(width, 40, "every row pads to the measure: {:?}", plain(line));
             assert!(
                 line.spans.iter().all(|span| span.style.bg == Some(tint)),
                 "every span carries the tint"
@@ -1601,11 +1453,8 @@ mod tests {
             assert!(plain(line).starts_with("▌ "), "{:?}", plain(line));
             assert!(spans_width(&line.spans) <= 14, "{:?}", plain(line));
         }
-        let joined: String = lines
-            .iter()
-            .map(|line| plain(line).replace("▌ ", ""))
-            .collect::<Vec<_>>()
-            .join(" ");
+        let joined: String =
+            lines.iter().map(|line| plain(line).replace("▌ ", "")).collect::<Vec<_>>().join(" ");
         assert_eq!(joined, "alpha beta gamma delta");
     }
 
@@ -1643,11 +1492,7 @@ mod tests {
         ];
         let text = transcript(&entries, 40, "⠋", None, true);
         for line in &text.lines {
-            assert!(
-                spans_width(&line.spans) <= 40,
-                "line overflows: {:?}",
-                plain(line)
-            );
+            assert!(spans_width(&line.spans) <= 40, "line overflows: {:?}", plain(line));
         }
     }
 
@@ -1733,32 +1578,21 @@ mod tests {
     fn fit_pads_and_truncates_to_exactly_the_measure() {
         let spans = vec![Span::raw("abc"), Span::raw("def")];
         for width in [0, 1, 3, 6, 9] {
-            assert_eq!(
-                spans_width(&fit(spans.clone(), width)),
-                width,
-                "fit to {width} columns"
-            );
+            assert_eq!(spans_width(&fit(spans.clone(), width)), width, "fit to {width} columns");
         }
         let cut = fit(spans.clone(), 4);
         let joined: String = cut.iter().map(|span| span.content.as_ref()).collect();
         assert_eq!(joined, "abc…");
         // Styles survive a cut that lands mid-run.
-        let styled = vec![
-            Span::styled("abcdef", Style::default().fg(Color::Red)),
-            Span::raw("ghi"),
-        ];
+        let styled =
+            vec![Span::styled("abcdef", Style::default().fg(Color::Red)), Span::raw("ghi")];
         let cut = fit(styled, 4);
         assert_eq!(cut[0].style.fg, Some(Color::Red));
     }
 
     #[test]
     fn split_leaves_a_divider_column_between_the_panes() {
-        let inner = Rect {
-            x: 10,
-            y: 4,
-            width: 80,
-            height: 20,
-        };
+        let inner = Rect { x: 10, y: 4, width: 80, height: 20 };
         let panes = split(inner, 20);
         assert_eq!(panes.sidebar.x, 10);
         assert_eq!(panes.sidebar.width, 20);
@@ -1773,19 +1607,14 @@ mod tests {
 
     #[test]
     fn metric_columns_collapse_one_at_a_time() {
-        let rows = [
-            vec!["200k ctx".to_owned(), String::new()],
-            vec!["1m ctx".to_owned(), String::new()],
-        ];
+        let rows =
+            [vec!["200k ctx".to_owned(), String::new()], vec!["1m ctx".to_owned(), String::new()]];
         let widths = metric_widths(rows.iter().map(Vec::as_slice), 2);
         assert_eq!(widths, vec![8, 0], "the empty column collapses to nothing");
         assert_eq!(metrics_width(&widths), 8, "and takes its gap with it");
         let cells = metric_cells(&rows[1], &widths);
         let joined: String = cells.iter().map(|span| span.content.as_ref()).collect();
-        assert_eq!(
-            joined, "  1m ctx",
-            "values are right-aligned under the widest"
-        );
+        assert_eq!(joined, "  1m ctx", "values are right-aligned under the widest");
     }
 
     #[test]
@@ -1843,11 +1672,7 @@ mod tests {
             ("tee_up", nerd.tee_up),
         ];
         for (name, glyph) in glyphs {
-            assert_eq!(
-                UnicodeWidthStr::width(glyph),
-                1,
-                "{name} ({glyph:?}) is not one cell"
-            );
+            assert_eq!(UnicodeWidthStr::width(glyph), 1, "{name} ({glyph:?}) is not one cell");
         }
         for frame in nerd.spinner {
             assert_eq!(UnicodeWidthStr::width(frame), 1);

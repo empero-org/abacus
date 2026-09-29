@@ -101,10 +101,7 @@ impl ActivityReporter {
     }
 
     async fn post(&self, path: &str, body: Value) {
-        let mut request = self
-            .client
-            .post(format!("{}/{path}", self.base))
-            .json(&body);
+        let mut request = self.client.post(format!("{}/{path}", self.base)).json(&body);
         if let Some(token) = &self.ingest_token {
             request = request.header("x-abacus-token", token);
         }

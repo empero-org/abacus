@@ -195,10 +195,7 @@ fn make_call(name: &str, arguments: &str) -> Option<ParsedToolCall> {
     if name.is_empty() {
         return None;
     }
-    Some(ParsedToolCall {
-        name: name.to_owned(),
-        arguments: finalize_arguments(arguments)?,
-    })
+    Some(ParsedToolCall { name: name.to_owned(), arguments: finalize_arguments(arguments)? })
 }
 
 fn parse_json_call(body: &str, args_key: &str) -> Option<ParsedToolCall> {
@@ -208,10 +205,7 @@ fn parse_json_call(body: &str, args_key: &str) -> Option<ParsedToolCall> {
     if !args.is_object() {
         return None;
     }
-    Some(ParsedToolCall {
-        name,
-        arguments: serde_json::to_string(&args).ok()?,
-    })
+    Some(ParsedToolCall { name, arguments: serde_json::to_string(&args).ok()? })
 }
 
 /// Repeatedly extract `<opener>...<closer>` blocks, apply `extract` to each
@@ -282,17 +276,11 @@ const DEEPSEEK_CALL_END: &str = "<\u{ff5c}tool\u{2581}call\u{2581}end\u{ff5c}>";
 fn hermes_call(body: &str) -> Option<ParsedToolCall> {
     let value: Value = serde_json::from_str(body.trim()).ok()?;
     let name = value.get("name")?.as_str()?.to_owned();
-    let args = value
-        .get("arguments")
-        .or_else(|| value.get("parameters"))?
-        .clone();
+    let args = value.get("arguments").or_else(|| value.get("parameters"))?.clone();
     if !args.is_object() {
         return None;
     }
-    Some(ParsedToolCall {
-        name,
-        arguments: serde_json::to_string(&args).ok()?,
-    })
+    Some(ParsedToolCall { name, arguments: serde_json::to_string(&args).ok()? })
 }
 
 fn parse_hermes(raw: &str) -> (String, Vec<ParsedToolCall>) {
@@ -381,17 +369,11 @@ fn parse_json_call_array(payload: &str) -> (Vec<ParsedToolCall>, usize) {
         .into_iter()
         .filter_map(|item| {
             let name = item.get("name")?.as_str()?.to_owned();
-            let args = item
-                .get("arguments")
-                .or_else(|| item.get("parameters"))?
-                .clone();
+            let args = item.get("arguments").or_else(|| item.get("parameters"))?.clone();
             if !args.is_object() {
                 return None;
             }
-            Some(ParsedToolCall {
-                name,
-                arguments: serde_json::to_string(&args).ok()?,
-            })
+            Some(ParsedToolCall { name, arguments: serde_json::to_string(&args).ok()? })
         })
         .collect::<Vec<_>>();
     (calls, consumed)
@@ -408,11 +390,7 @@ fn parse_qwen(raw: &str) -> (String, Vec<ParsedToolCall>) {
         return (clean, calls);
     }
     let calls = parse_all_function_blocks(raw);
-    if calls.is_empty() {
-        (raw.to_owned(), Vec::new())
-    } else {
-        (String::new(), calls)
-    }
+    if calls.is_empty() { (raw.to_owned(), Vec::new()) } else { (String::new(), calls) }
 }
 
 fn parse_all_function_blocks(body: &str) -> Vec<ParsedToolCall> {
@@ -446,10 +424,7 @@ fn parse_all_function_blocks(body: &str) -> Vec<ParsedToolCall> {
             p = &after_key[pend + PARAM_CLOSE.len()..];
         }
         if let Ok(arguments) = serde_json::to_string(&Value::Object(args)) {
-            calls.push(ParsedToolCall {
-                name: name.to_owned(),
-                arguments,
-            });
+            calls.push(ParsedToolCall { name: name.to_owned(), arguments });
         }
         rest = &after_name[func_close + FUNC_CLOSE.len()..];
     }
@@ -639,17 +614,11 @@ fn json_calls_from_text(text: &str) -> Vec<ParsedToolCall> {
             .iter()
             .filter_map(|item| {
                 let name = item.get("name")?.as_str()?.to_owned();
-                let args = item
-                    .get("arguments")
-                    .or_else(|| item.get("parameters"))?
-                    .clone();
+                let args = item.get("arguments").or_else(|| item.get("parameters"))?.clone();
                 if !args.is_object() {
                     return None;
                 }
-                Some(ParsedToolCall {
-                    name,
-                    arguments: serde_json::to_string(&args).ok()?,
-                })
+                Some(ParsedToolCall { name, arguments: serde_json::to_string(&args).ok()? })
             })
             .collect();
     }
@@ -658,10 +627,7 @@ fn json_calls_from_text(text: &str) -> Vec<ParsedToolCall> {
         && args.is_object()
         && let Ok(arguments) = serde_json::to_string(args)
     {
-        return vec![ParsedToolCall {
-            name: name.to_owned(),
-            arguments,
-        }];
+        return vec![ParsedToolCall { name: name.to_owned(), arguments }];
     }
     Vec::new()
 }
@@ -671,10 +637,7 @@ mod tests {
     use super::*;
 
     fn call(name: &str, args: &str) -> ParsedToolCall {
-        ParsedToolCall {
-            name: name.to_owned(),
-            arguments: args.to_owned(),
-        }
+        ParsedToolCall { name: name.to_owned(), arguments: args.to_owned() }
     }
 
     fn hermes_call(name: &str, args_key: &str, args: &str) -> String {
@@ -800,10 +763,7 @@ mod tests {
         let (clean, calls) = parse(ToolFormat::Glm, &raw);
         assert_eq!(
             calls,
-            vec![
-                call("read_file", r#"{"path":"a.rs"}"#),
-                call("grep", r#"{"query":"todo"}"#),
-            ]
+            vec![call("read_file", r#"{"path":"a.rs"}"#), call("grep", r#"{"query":"todo"}"#),]
         );
         assert_eq!(clean, "");
     }

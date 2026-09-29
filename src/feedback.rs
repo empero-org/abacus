@@ -70,10 +70,7 @@ impl FeedbackClient {
             bail!("feedback service returned {status}: {detail}");
         }
         if body.trim().is_empty() {
-            return Ok(FeedbackReceipt {
-                id: None,
-                message: None,
-            });
+            return Ok(FeedbackReceipt { id: None, message: None });
         }
         serde_json::from_str(&body).context("feedback service returned invalid JSON")
     }

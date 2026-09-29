@@ -7,11 +7,11 @@ use std::sync::Arc;
 use abacus_agent::{
     activity::ActivityReporter,
     agent::initial_messages,
+    app_server,
     config::{
         AbacusPaths, Cli, Command, Config, Credentials, PluginsCommand, Settings, SkillsCommand,
         workspace_from_cli,
     },
-    app_server,
     context::expand_file_references,
     cron,
     extensions::PluginRegistry,
@@ -33,12 +33,7 @@ async fn main() -> Result<()> {
         return setup::run(&paths, *force).await;
     }
     if let Some(Command::Completions { shell }) = &cli.command {
-        clap_complete::generate(
-            *shell,
-            &mut Cli::command(),
-            "abacus",
-            &mut std::io::stdout(),
-        );
+        clap_complete::generate(*shell, &mut Cli::command(), "abacus", &mut std::io::stdout());
         return Ok(());
     }
 
@@ -66,37 +61,26 @@ async fn main() -> Result<()> {
             Some(Command::Untrust) => {
                 settings.trust.set(&workspace, false);
                 settings.save(&paths)?;
-                println!(
-                    "Revoked project extension trust for {}",
-                    workspace.display()
-                );
+                println!("Revoked project extension trust for {}", workspace.display());
             }
-            Some(Command::Plugins {
-                action: Some(PluginsCommand::Install { path, force }),
-            }) => {
+            Some(Command::Plugins { action: Some(PluginsCommand::Install { path, force }) }) => {
                 let plugin = PluginRegistry::install(path, &paths, *force)?;
                 settings.plugins.disabled.remove(&plugin.name);
                 settings.save(&paths)?;
                 println!("Installed {} {}", plugin.name, plugin.version);
             }
-            Some(Command::Plugins {
-                action: Some(PluginsCommand::Remove { name }),
-            }) => {
+            Some(Command::Plugins { action: Some(PluginsCommand::Remove { name }) }) => {
                 PluginRegistry::remove(name, &paths)?;
                 settings.plugins.disabled.remove(name);
                 settings.save(&paths)?;
                 println!("Removed {name}");
             }
-            Some(Command::Plugins {
-                action: Some(PluginsCommand::Enable { name }),
-            }) => {
+            Some(Command::Plugins { action: Some(PluginsCommand::Enable { name }) }) => {
                 settings.plugins.disabled.remove(name);
                 settings.save(&paths)?;
                 println!("Enabled {name}");
             }
-            Some(Command::Plugins {
-                action: Some(PluginsCommand::Disable { name }),
-            }) => {
+            Some(Command::Plugins { action: Some(PluginsCommand::Disable { name }) }) => {
                 settings.plugins.disabled.insert(name.clone());
                 settings.save(&paths)?;
                 println!("Disabled {name}");
@@ -176,9 +160,7 @@ async fn main() -> Result<()> {
     if let Some(Command::Pull { destination, all }) = &cli.command {
         // `abacus pull all` reads as a word, not a path. A directory genuinely
         // named `all` is still reachable as `--all ./all` or `./all`.
-        let keyword = destination
-            .as_deref()
-            .is_some_and(|path| path.as_os_str() == "all");
+        let keyword = destination.as_deref().is_some_and(|path| path.as_os_str() == "all");
         let destination = if keyword {
             PathBuf::from(".")
         } else {
@@ -214,23 +196,11 @@ async fn main() -> Result<()> {
     let mut config = Config::resolve(&cli, &settings, &credentials, paths.clone())?;
 
     match cli.command {
-        Some(Command::Eval {
-            tasks,
-            repeat,
-            state,
-            model,
-            json,
-        }) => {
+        Some(Command::Eval { tasks, repeat, state, model, json }) => {
             return abacus_agent::eval::run(
                 config,
                 settings,
-                abacus_agent::eval::EvalOptions {
-                    filter: tasks,
-                    repeat,
-                    state,
-                    model,
-                    json,
-                },
+                abacus_agent::eval::EvalOptions { filter: tasks, repeat, state, model, json },
             )
             .await;
         }
@@ -259,11 +229,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             let pinned = &config.routing.order;
-            let width = endpoints
-                .iter()
-                .map(|endpoint| endpoint.name.len())
-                .max()
-                .unwrap_or(16);
+            let width = endpoints.iter().map(|endpoint| endpoint.name.len()).max().unwrap_or(16);
             for endpoint in &endpoints {
                 // Mark what the active profile already pins, so the list doubles
                 // as a view of the current routing.
@@ -294,11 +260,7 @@ async fn main() -> Result<()> {
                 console::note(&format!(
                     "Pinned: {}  ·  fallbacks {}",
                     pinned.join(", "),
-                    if config.routing.allow_fallbacks {
-                        "allowed"
-                    } else {
-                        "off"
-                    }
+                    if config.routing.allow_fallbacks { "allowed" } else { "off" }
                 ));
             }
             console::blank();
@@ -412,15 +374,8 @@ async fn main() -> Result<()> {
         .await;
     }
 
-    tui::run(
-        config,
-        settings,
-        credentials,
-        session,
-        (!cli.no_session).then_some(store),
-        services,
-    )
-    .await
+    tui::run(config, settings, credentials, session, (!cli.no_session).then_some(store), services)
+        .await
 }
 
 fn print_session_list(store: &SessionStore) -> Result<()> {
@@ -433,10 +388,7 @@ fn print_session_list(store: &SessionStore) -> Result<()> {
         println!(
             "{}  {}  {:>3} messages  {}",
             &session.id.to_string()[..8],
-            session
-                .updated_at
-                .with_timezone(&chrono::Local)
-                .format("%Y-%m-%d %H:%M"),
+            session.updated_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M"),
             session.message_count,
             session.title
         );
@@ -456,11 +408,7 @@ fn pull_traces(paths: &AbacusPaths, destination: &Path, all: bool) -> Result<()>
     use abacus_agent::sft::Pulled;
 
     let mut pulled = abacus_agent::sft::pull(&paths.traces_dir, destination)?;
-    console::banner(if all {
-        "training traces · all sessions"
-    } else {
-        "training traces"
-    });
+    console::banner(if all { "training traces · all sessions" } else { "training traces" });
     console::blank();
     console::field("from", &paths.traces_dir.display().to_string());
     if all {
@@ -473,10 +421,8 @@ fn pull_traces(paths: &AbacusPaths, destination: &Path, all: bool) -> Result<()>
     if all {
         // A live capture is strictly richer than a reconstruction, so sessions
         // that already have one are left alone.
-        let captured = pulled
-            .iter()
-            .map(|entry| entry.name.clone())
-            .collect::<std::collections::HashSet<_>>();
+        let captured =
+            pulled.iter().map(|entry| entry.name.clone()).collect::<std::collections::HashSet<_>>();
         let from_sessions =
             abacus_agent::sft::pull_sessions(&paths.sessions_dir, destination, &captured)?;
         // Counts what was actually written, so a repeat run does not claim to
@@ -499,11 +445,7 @@ fn pull_traces(paths: &AbacusPaths, destination: &Path, all: bool) -> Result<()>
         return Ok(());
     }
 
-    let width = pulled
-        .iter()
-        .map(|entry| entry.name.len())
-        .max()
-        .unwrap_or(20);
+    let width = pulled.iter().map(|entry| entry.name.len()).max().unwrap_or(20);
     let mut records = 0usize;
     let mut copied = 0usize;
     for entry in &pulled {
@@ -527,20 +469,13 @@ fn pull_traces(paths: &AbacusPaths, destination: &Path, all: bool) -> Result<()>
                 _ => console::warn(console::marks().warn),
             },
             console::pad(&entry.name, width),
-            console::dim(&format!(
-                "{:>6} records{:>10}",
-                entry.records,
-                human_bytes(entry.bytes)
-            )),
+            console::dim(&format!("{:>6} records{:>10}", entry.records, human_bytes(entry.bytes))),
             console::dim(note),
         );
     }
 
     console::blank();
-    println!(
-        "  {}",
-        console::dim(&console::marks().rule.repeat(console::WIDTH))
-    );
+    println!("  {}", console::dim(&console::marks().rule.repeat(console::WIDTH)));
     println!(
         "  {} {} from {} · originals left in place",
         console::ok(console::marks().pass),
@@ -606,11 +541,7 @@ async fn doctor(config: &Config, settings: &Settings) -> Result<()> {
                 abacus_agent::theme::ColorDepth::Ansi256 => "256",
                 abacus_agent::theme::ColorDepth::TrueColor => "true",
             },
-            if abacus_agent::ui::glyphs().wordmark.is_some() {
-                "unicode"
-            } else {
-                "ascii"
-            }
+            if abacus_agent::ui::glyphs().wordmark.is_some() { "unicode" } else { "ascii" }
         ),
     );
 
@@ -624,10 +555,7 @@ async fn doctor(config: &Config, settings: &Settings) -> Result<()> {
     console::field("protocol", &format!("{:?}", config.protocol));
     // A scripted endpoint with an auth block carries its own token — resolve
     // it to report health rather than flagging the absent standard credential.
-    let scripted_auth = config
-        .endpoint
-        .as_ref()
-        .map(|endpoint| endpoint.auth_header());
+    let scripted_auth = config.endpoint.as_ref().map(|endpoint| endpoint.auth_header());
     match (&config.api_key, scripted_auth) {
         (_, Some(Ok(Some(_)))) => record(Health::Pass, "credential", "scripted endpoint auth"),
         (_, Some(Ok(None))) if config.endpoint.is_some() => {
@@ -662,17 +590,9 @@ async fn doctor(config: &Config, settings: &Settings) -> Result<()> {
         Ok(models) => record(
             Health::Warn,
             "reachable",
-            &format!(
-                "{} models, but {} is not among them",
-                models.len(),
-                config.model
-            ),
+            &format!("{} models, but {} is not among them", models.len(), config.model),
         ),
-        Err(error) => record(
-            Health::Fail,
-            "reachable",
-            &one_line(&format!("{error:#}"), 160),
-        ),
+        Err(error) => record(Health::Fail, "reachable", &one_line(&format!("{error:#}"), 160)),
     }
 
     // Show the context budget a real run would use. Doctor is a diagnostic
@@ -718,25 +638,15 @@ async fn doctor(config: &Config, settings: &Settings) -> Result<()> {
 
     console::section("Local state");
     if config.paths.config_file.exists() {
-        record(
-            Health::Pass,
-            "settings",
-            &config.paths.config_file.display().to_string(),
-        );
+        record(Health::Pass, "settings", &config.paths.config_file.display().to_string());
     } else {
-        record(
-            Health::Warn,
-            "settings",
-            "not written yet — run `abacus setup`",
-        );
+        record(Health::Warn, "settings", "not written yet — run `abacus setup`");
     }
     let store = SessionStore::new(&config.paths, config.workspace.clone());
     match store.list().context("could not inspect sessions") {
-        Ok(sessions) => record(
-            Health::Pass,
-            "sessions",
-            &format!("{} for this workspace", sessions.len()),
-        ),
+        Ok(sessions) => {
+            record(Health::Pass, "sessions", &format!("{} for this workspace", sessions.len()))
+        }
         Err(error) => record(Health::Fail, "sessions", &format!("{error:#}")),
     }
     if config.trace_enabled {
@@ -779,10 +689,7 @@ async fn doctor(config: &Config, settings: &Settings) -> Result<()> {
     #[cfg(unix)]
     if config.paths.credentials_file.exists() {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&config.paths.credentials_file)?
-            .permissions()
-            .mode()
-            & 0o777;
+        let mode = std::fs::metadata(&config.paths.credentials_file)?.permissions().mode() & 0o777;
         if mode & 0o077 == 0 {
             record(Health::Pass, "key perms", &format!("{mode:o}"));
         } else {
@@ -795,10 +702,7 @@ async fn doctor(config: &Config, settings: &Settings) -> Result<()> {
     }
 
     console::blank();
-    println!(
-        "  {}",
-        console::dim(&console::marks().rule.repeat(console::WIDTH))
-    );
+    println!("  {}", console::dim(&console::marks().rule.repeat(console::WIDTH)));
     let summary = match (failures, warnings) {
         (0, 0) => console::ok(&format!("{} All checks passed", console::marks().pass)),
         (0, warnings) => console::warn(&format!(
@@ -815,11 +719,7 @@ async fn doctor(config: &Config, settings: &Settings) -> Result<()> {
     println!("  {summary}");
     console::blank();
 
-    if failures == 0 {
-        Ok(())
-    } else {
-        anyhow::bail!("doctor found one or more problems")
-    }
+    if failures == 0 { Ok(()) } else { anyhow::bail!("doctor found one or more problems") }
 }
 
 /// Collapse a multi-line error into something that fits on a diagnostic row.

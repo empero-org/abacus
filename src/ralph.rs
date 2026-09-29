@@ -53,10 +53,8 @@ impl RalphLoop {
                 }
                 "--completion-promise" => {
                     index += 1;
-                    completion_promise = tokens
-                        .get(index)
-                        .context("--completion-promise requires text")?
-                        .clone();
+                    completion_promise =
+                        tokens.get(index).context("--completion-promise requires text")?.clone();
                 }
                 option if option.starts_with("--") => bail!("unknown loop option `{option}`"),
                 value => prompt_parts.push(value.to_owned()),
@@ -103,10 +101,7 @@ impl RalphLoop {
         if self.status != RalphStatus::Active {
             bail!("loop is not active");
         }
-        if self
-            .max_iterations
-            .is_some_and(|limit| self.iteration >= limit)
-        {
+        if self.max_iterations.is_some_and(|limit| self.iteration >= limit) {
             self.status = RalphStatus::MaxIterations;
             self.updated_at = Utc::now();
             bail!("maximum iterations reached");
@@ -124,9 +119,7 @@ impl RalphLoop {
             return true;
         }
         if self.status == RalphStatus::Active
-            && self
-                .max_iterations
-                .is_some_and(|limit| self.iteration >= limit)
+            && self.max_iterations.is_some_and(|limit| self.iteration >= limit)
         {
             self.status = RalphStatus::MaxIterations;
             self.updated_at = Utc::now();

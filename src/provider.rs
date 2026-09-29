@@ -195,9 +195,7 @@ impl Provider {
             stream_gate: config.one_stream.then(|| Arc::new(Semaphore::new(1))),
             prefers_leading_system: Arc::new(AtomicBool::new(false)),
             caches_prompt: Arc::new(AtomicBool::new(config.prompt_cache)),
-            cache_log: Some(Arc::new(CacheLog::open(
-                config.paths.root.join(CACHE_LOG_FILE),
-            ))),
+            cache_log: Some(Arc::new(CacheLog::open(config.paths.root.join(CACHE_LOG_FILE)))),
         })
     }
 
@@ -333,12 +331,10 @@ impl Provider {
                 self.complete_chat(messages, tools, deltas, cancel).await
             }
             ProviderProtocol::Responses => {
-                self.complete_responses(messages, tools, deltas, cancel)
-                    .await
+                self.complete_responses(messages, tools, deltas, cancel).await
             }
             ProviderProtocol::Anthropic => {
-                self.complete_anthropic(messages, tools, deltas, cancel)
-                    .await
+                self.complete_anthropic(messages, tools, deltas, cancel).await
             }
         }
     }
@@ -402,8 +398,7 @@ impl Provider {
             // than guess from the model name — the list keeps growing — take the
             // rejection as the signal, remember it, and retry once.
             Err(error) if is_max_tokens_rejection(&error) => {
-                self.prefers_max_completion_tokens
-                    .store(true, Ordering::Relaxed);
+                self.prefers_max_completion_tokens.store(true, Ordering::Relaxed);
                 body.as_object_mut().map(|body| body.remove("max_tokens"));
                 if let Some(max_tokens) = self.effective_output_tokens() {
                     body["max_completion_tokens"] = json!(max_tokens);
@@ -625,14 +620,7 @@ impl Provider {
                 capture_usage(&data, &mut reported_usage, parse_responses_usage);
             }
         }
-        self.record_tokens(
-            reported_usage,
-            messages,
-            tools.len(),
-            None,
-            &content,
-            &calls,
-        );
+        self.record_tokens(reported_usage, messages, tools.len(), None, &content, &calls);
         finish_completion(content, reasoning, calls, cancelled, false)
     }
 
@@ -643,10 +631,8 @@ impl Provider {
         deltas: mpsc::UnboundedSender<Chunk>,
         cancel: &AtomicBool,
     ) -> Result<Completion> {
-        let system_prefix = self
-            .scripted
-            .as_ref()
-            .and_then(|scripted| scripted.system_prefix.as_deref());
+        let system_prefix =
+            self.scripted.as_ref().and_then(|scripted| scripted.system_prefix.as_deref());
         let cache = self.caches_prompt.load(Ordering::Relaxed);
         let (system, converted) =
             anthropic_messages(&self.sanitized_messages(messages), system_prefix, cache);
@@ -687,8 +673,7 @@ impl Provider {
             // once, so a new model is a single wasted call rather than a dead
             // turn for the rest of the session.
             Err(error) if is_manual_thinking_rejection(&error) => {
-                self.prefers_adaptive_thinking
-                    .store(true, Ordering::Relaxed);
+                self.prefers_adaptive_thinking.store(true, Ordering::Relaxed);
                 if let Some(effort) = self.reasoning_effort {
                     self.apply_anthropic_thinking(&mut body, effort);
                     self.apply_scripted_body(&mut body);
@@ -790,14 +775,7 @@ impl Provider {
                 &mut truncated,
             )?;
         }
-        self.record_tokens(
-            reported_usage,
-            messages,
-            tools.len(),
-            None,
-            &content,
-            &calls,
-        );
+        self.record_tokens(reported_usage, messages, tools.len(), None, &content, &calls);
         finish_completion(content, reasoning, calls, cancelled, truncated)
     }
 
@@ -1002,10 +980,8 @@ fn apply_chat_delta(
 
     // Providers put the model's private reasoning in a sibling field. It is
     // deliberately not forwarded to the transcript — only recorded.
-    if let Some(piece) = delta
-        .get("reasoning_content")
-        .or_else(|| delta.get("reasoning"))
-        .and_then(Value::as_str)
+    if let Some(piece) =
+        delta.get("reasoning_content").or_else(|| delta.get("reasoning")).and_then(Value::as_str)
     {
         reasoning.push_str(piece);
         let _ = deltas.send(Chunk::Reasoning(piece.to_owned()));
@@ -1055,9 +1031,8 @@ fn apply_chat_delta(
             }
             // Arguments are the one field genuinely streamed in fragments, so
             // they always accumulate.
-            if let Some(arguments) = tool_delta
-                .pointer("/function/arguments")
-                .and_then(Value::as_str)
+            if let Some(arguments) =
+                tool_delta.pointer("/function/arguments").and_then(Value::as_str)
             {
                 call.arguments.push_str(arguments);
             }
@@ -1150,9 +1125,7 @@ fn is_legacy_thinking_model(model: &str) -> bool {
     ];
     // A 4.6-or-later marker wins outright: `claude-opus-4-6` contains
     // `opus-4`, but it is emphatically not legacy.
-    const MODERN: [&str; 8] = [
-        "-4-6", "-4-7", "-4-8", "-4-9", "-4.6", "-4.7", "-4.8", "-4.9",
-    ];
+    const MODERN: [&str; 8] = ["-4-6", "-4-7", "-4-8", "-4-9", "-4.6", "-4.7", "-4.8", "-4.9"];
     if MODERN.iter().any(|marker| name.contains(marker)) {
         return false;
     }
@@ -1298,11 +1271,7 @@ fn apply_responses_event(
         "response.function_call_arguments.delta" => {
             let index = value["output_index"].as_u64().unwrap_or(0) as usize;
             if let Some(arguments) = value["delta"].as_str() {
-                calls
-                    .entry(index)
-                    .or_default()
-                    .arguments
-                    .push_str(arguments);
+                calls.entry(index).or_default().arguments.push_str(arguments);
             }
         }
         _ => {}
@@ -1391,10 +1360,7 @@ impl TokenLedger {
     /// breakdown starts empty: older sessions recorded only the total, and
     /// inventing a split for it would be worse than showing this run's.
     pub fn new(total: u64) -> Self {
-        Self {
-            total: AtomicU64::new(total),
-            ..Self::default()
-        }
+        Self { total: AtomicU64::new(total), ..Self::default() }
     }
 
     pub fn total(&self) -> u64 {
@@ -1427,20 +1393,16 @@ impl TokenLedger {
         self.add_total(usage.total);
         self.input.fetch_add(usage.input, Ordering::Relaxed);
         self.output.fetch_add(usage.output, Ordering::Relaxed);
-        self.cache_read
-            .fetch_add(usage.cache_read, Ordering::Relaxed);
-        self.cache_write
-            .fetch_add(usage.cache_write, Ordering::Relaxed);
+        self.cache_read.fetch_add(usage.cache_read, Ordering::Relaxed);
+        self.cache_write.fetch_add(usage.cache_write, Ordering::Relaxed);
     }
 
     fn record(&self, usage: &Usage) {
         self.add_total(usage.total);
         self.input.fetch_add(usage.prompt, Ordering::Relaxed);
         self.output.fetch_add(usage.completion, Ordering::Relaxed);
-        self.cache_read
-            .fetch_add(usage.cache_read, Ordering::Relaxed);
-        self.cache_write
-            .fetch_add(usage.cache_write, Ordering::Relaxed);
+        self.cache_read.fetch_add(usage.cache_read, Ordering::Relaxed);
+        self.cache_write.fetch_add(usage.cache_write, Ordering::Relaxed);
     }
 }
 
@@ -1509,10 +1471,7 @@ impl CacheLog {
         if std::fs::metadata(&path).is_ok_and(|meta| meta.len() > CACHE_LOG_ROTATE_BYTES) {
             let _ = std::fs::rename(&path, path.with_extension("jsonl.1"));
         }
-        Self {
-            path,
-            prefixes: std::sync::Mutex::default(),
-        }
+        Self { path, prefixes: std::sync::Mutex::default() }
     }
 
     /// Identify a conversation the way OpenRouter's sticky routing does: by the
@@ -1590,10 +1549,7 @@ impl CacheLog {
             "stable_pct": (prompt_chars > 0).then(|| stable_chars * 100 / prompt_chars),
         });
         // Telemetry must never fail a request, so write errors are dropped.
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&self.path)
         {
             let _ = writeln!(file, "{line}");
         }
@@ -1605,9 +1561,7 @@ fn parse_chat_usage(value: &Value) -> Option<Usage> {
 }
 
 fn parse_responses_usage(value: &Value) -> Option<Usage> {
-    let usage = value
-        .pointer("/response/usage")
-        .or_else(|| value.get("usage"))?;
+    let usage = value.pointer("/response/usage").or_else(|| value.get("usage"))?;
     usage_total(usage)
 }
 
@@ -1628,11 +1582,7 @@ fn usage_total(usage: &Value) -> Option<Usage> {
     let cache_read = usage
         .get("cache_read_input_tokens")
         .and_then(Value::as_u64)
-        .or_else(|| {
-            usage
-                .pointer("/prompt_tokens_details/cached_tokens")
-                .and_then(Value::as_u64)
-        })
+        .or_else(|| usage.pointer("/prompt_tokens_details/cached_tokens").and_then(Value::as_u64))
         .or_else(|| usage.get("prompt_cache_hit_tokens").and_then(Value::as_u64))
         .unwrap_or(0);
     let cache_write = field("cache_creation_input_tokens");
@@ -1654,13 +1604,7 @@ fn usage_total(usage: &Value) -> Option<Usage> {
     if total == 0 && prompt == 0 {
         return None;
     }
-    Some(Usage {
-        total,
-        prompt,
-        completion,
-        cache_read,
-        cache_write,
-    })
+    Some(Usage { total, prompt, completion, cache_read, cache_write })
 }
 
 /// Rough fallback (~4 chars/token) for providers that never report usage, so
@@ -1691,12 +1635,7 @@ fn estimate_usage(
         }
     }
     let prompt = (chars / 4) as u64;
-    Usage {
-        total: prompt + completion,
-        prompt,
-        completion,
-        ..Usage::default()
-    }
+    Usage { total: prompt + completion, prompt, completion, ..Usage::default() }
 }
 
 fn responses_input(messages: &[Value]) -> Vec<Value> {
@@ -2004,16 +1943,9 @@ fn apply_anthropic_event(
             }
             // The final usage carries output_tokens; fold it onto the input
             // and cache counts captured at message_start.
-            if let Some(output) = value
-                .pointer("/usage/output_tokens")
-                .and_then(Value::as_u64)
-            {
+            if let Some(output) = value.pointer("/usage/output_tokens").and_then(Value::as_u64) {
                 let start = usage.unwrap_or_default();
-                *usage = Some(Usage {
-                    total: start.prompt + output,
-                    completion: output,
-                    ..start
-                });
+                *usage = Some(Usage { total: start.prompt + output, completion: output, ..start });
             }
         }
         "error" => bail!("provider stream error: {}", value["error"]),
@@ -2046,11 +1978,7 @@ fn finish_completion(
                 && (call.arguments.is_empty()
                     || serde_json::from_str::<serde::de::IgnoredAny>(&call.arguments).is_ok())
         })
-        .map(|call| ToolCall {
-            id: call.id,
-            name: call.name,
-            arguments: call.arguments,
-        })
+        .map(|call| ToolCall { id: call.id, name: call.name, arguments: call.arguments })
         .collect::<Vec<_>>();
     // Only a completion that is *entirely* rubble is worth failing on: nothing
     // usable came back and something was clearly malformed.
@@ -2063,13 +1991,7 @@ fn finish_completion(
     // fault. Return an empty Completion so the agent's loop can end the turn
     // cleanly instead of firing a misleading "verify model tool-calling
     // compatibility" error that kills the session.
-    Ok(Completion {
-        content,
-        reasoning,
-        tool_calls,
-        cancelled,
-        truncated,
-    })
+    Ok(Completion { content, reasoning, tool_calls, cancelled, truncated })
 }
 
 #[derive(Debug, Default)]
@@ -2090,10 +2012,7 @@ impl SseDecoder {
     fn lines(&mut self, flush: bool) -> Result<Vec<String>> {
         let mut output = Vec::new();
         let mut consumed = 0;
-        while let Some(relative) = self.buffer[consumed..]
-            .iter()
-            .position(|&byte| byte == b'\n')
-        {
+        while let Some(relative) = self.buffer[consumed..].iter().position(|&byte| byte == b'\n') {
             let end = consumed + relative;
             decode_sse_line(&self.buffer[consumed..end], &mut output)?;
             consumed = end + 1;
@@ -2161,10 +2080,7 @@ mod tests {
         assert_eq!(tool_use["type"], "tool_use");
         assert_eq!(tool_use["id"], "call_1");
         assert_eq!(tool_use["name"], "read_file");
-        assert_eq!(
-            tool_use["input"]["path"], "a.rs",
-            "arguments parsed to an object"
-        );
+        assert_eq!(tool_use["input"]["path"], "a.rs", "arguments parsed to an object");
 
         assert_eq!(messages[2]["role"], "user");
         let result = &messages[2]["content"][0];
@@ -2195,10 +2111,7 @@ mod tests {
         let converted = anthropic_tools(&tools);
         assert_eq!(converted[0]["name"], "grep");
         assert!(converted[0].get("input_schema").is_some());
-        assert!(
-            converted[0].get("parameters").is_none(),
-            "renamed, not duplicated"
-        );
+        assert!(converted[0].get("parameters").is_none(), "renamed, not duplicated");
 
         // A vision part becomes an Anthropic base64 image block.
         let content = json!([
@@ -2340,20 +2253,11 @@ mod tests {
         }
 
         // OpenRouter is sent the same id as its `session_id`, and nobody else is.
-        assert!(
-            provider_for("https://openrouter.ai/api/v1")
-                .openrouter_session()
-                .is_some()
-        );
-        assert_eq!(
-            provider_for("https://api.openai.com/v1").openrouter_session(),
-            None
-        );
+        assert!(provider_for("https://openrouter.ai/api/v1").openrouter_session().is_some());
+        assert_eq!(provider_for("https://api.openai.com/v1").openrouter_session(), None);
 
         let mut provider = provider_for("https://opencode.ai/zen/go/v1");
-        let session = provider
-            .opencode_session()
-            .expect("gateway needs a session");
+        let session = provider.opencode_session().expect("gateway needs a session");
         assert!(!session.is_empty());
         assert_eq!(
             provider.with_model("aux").opencode_session(),
@@ -2369,10 +2273,7 @@ mod tests {
         assert_eq!(rebuilt.opencode_session(), Some(session));
 
         // Every other endpoint is left alone.
-        assert_eq!(
-            provider_for("https://api.openai.com/v1").opencode_session(),
-            None
-        );
+        assert_eq!(provider_for("https://api.openai.com/v1").opencode_session(), None);
 
         // A scripted endpoint that sets the header itself stays authoritative,
         // so the request carries one value rather than two.
@@ -2444,14 +2345,8 @@ mod tests {
         let legacy = provider_for("claude-opus-4-5");
         let mut body = json!({"max_tokens": 32_000});
         legacy.apply_anthropic_thinking(&mut body, crate::config::ReasoningEffort::Medium);
-        assert_eq!(
-            body["thinking"],
-            json!({"type": "enabled", "budget_tokens": 16_384})
-        );
-        assert!(
-            body.get("output_config").is_none(),
-            "a legacy model does not know output_config"
-        );
+        assert_eq!(body["thinking"], json!({"type": "enabled", "budget_tokens": 16_384}));
+        assert!(body.get("output_config").is_none(), "a legacy model does not know output_config");
 
         // A budget at or above max_tokens raises the cap so the answer has room.
         let mut body = json!({"max_tokens": 4_096});
@@ -2459,9 +2354,7 @@ mod tests {
         assert_eq!(body["max_tokens"], json!(4_096 + ANTHROPIC_ANSWER_HEADROOM));
 
         // Once a rejection teaches us, even a legacy-looking model goes adaptive.
-        legacy
-            .prefers_adaptive_thinking
-            .store(true, Ordering::Relaxed);
+        legacy.prefers_adaptive_thinking.store(true, Ordering::Relaxed);
         let mut body = json!({"max_tokens": 32_000});
         legacy.apply_anthropic_thinking(&mut body, crate::config::ReasoningEffort::High);
         assert_eq!(body["thinking"], json!({"type": "adaptive"}));
@@ -2676,11 +2569,7 @@ mod tests {
         let mut reasoning = String::new();
         let mut calls = BTreeMap::new();
         let mut text = TextStream::default();
-        for piece in [
-            "Let me read it.",
-            "\n<\x74ool_call>",
-            r#"{"name":"read_file"}"#,
-        ] {
+        for piece in ["Let me read it.", "\n<\x74ool_call>", r#"{"name":"read_file"}"#] {
             let payload = json!({"choices":[{"delta":{"content": piece}}]}).to_string();
             apply_chat_delta(
                 &payload,
@@ -2760,35 +2649,19 @@ mod tests {
         let chat = json!({"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 5}});
         assert_eq!(
             parse_chat_usage(&chat),
-            Some(Usage {
-                total: 15,
-                prompt: 10,
-                completion: 5,
-                ..Usage::default()
-            })
+            Some(Usage { total: 15, prompt: 10, completion: 5, ..Usage::default() })
         );
         // A total with no breakdown still gives a usable session count, and the
         // context gauge simply keeps its previous value.
         let chat_total = json!({"usage": {"total_tokens": 99}});
-        assert_eq!(
-            parse_chat_usage(&chat_total),
-            Some(Usage {
-                total: 99,
-                ..Usage::default()
-            })
-        );
+        assert_eq!(parse_chat_usage(&chat_total), Some(Usage { total: 99, ..Usage::default() }));
         let responses = json!({
             "type": "response.completed",
             "response": {"usage": {"input_tokens": 20, "output_tokens": 7, "total_tokens": 27}}
         });
         assert_eq!(
             parse_responses_usage(&responses),
-            Some(Usage {
-                total: 27,
-                prompt: 20,
-                completion: 7,
-                ..Usage::default()
-            })
+            Some(Usage { total: 27, prompt: 20, completion: 7, ..Usage::default() })
         );
     }
 
@@ -2800,10 +2673,7 @@ mod tests {
             "prompt_tokens_details": {"cached_tokens": 900}
         }});
         let usage = parse_chat_usage(&openai).unwrap();
-        assert_eq!(
-            (usage.prompt, usage.cache_read, usage.uncached()),
-            (1_000, 900, 100)
-        );
+        assert_eq!((usage.prompt, usage.cache_read, usage.uncached()), (1_000, 900, 100));
 
         // DeepSeek: a flat hit/miss pair, hits again a subset of the prompt.
         let deepseek = json!({"usage": {
@@ -2823,11 +2693,7 @@ mod tests {
         assert_eq!(usage.prompt, 40_000);
         assert_eq!(usage.cache_read, 38_000);
         assert_eq!(usage.cache_write, 1_800);
-        assert_eq!(
-            usage.uncached(),
-            2_000,
-            "read plus written is what was paid for"
-        );
+        assert_eq!(usage.uncached(), 2_000, "read plus written is what was paid for");
         assert_eq!(usage.total, 40_050);
     }
 
@@ -2851,12 +2717,7 @@ mod tests {
         // An endpoint that reports no cache figures at all says nothing rather
         // than claiming a 0% hit rate.
         let silent = TokenLedger::default();
-        silent.record(&Usage {
-            total: 300,
-            prompt: 200,
-            completion: 100,
-            ..Usage::default()
-        });
+        silent.record(&Usage { total: 300, prompt: 200, completion: 100, ..Usage::default() });
         assert_eq!(silent.snapshot().cache_rate(), None);
 
         // A worker's ledger folds in whole.
@@ -2867,25 +2728,14 @@ mod tests {
     #[test]
     fn capture_usage_ignores_deltas_then_captures_final_chunk() {
         let mut usage = None;
-        capture_usage(
-            r#"{"choices":[{"delta":{"content":"hi"}}]}"#,
-            &mut usage,
-            parse_chat_usage,
-        );
+        capture_usage(r#"{"choices":[{"delta":{"content":"hi"}}]}"#, &mut usage, parse_chat_usage);
         assert_eq!(usage, None);
         capture_usage(
             r#"{"choices":[],"usage":{"total_tokens":42,"prompt_tokens":30}}"#,
             &mut usage,
             parse_chat_usage,
         );
-        assert_eq!(
-            usage,
-            Some(Usage {
-                total: 42,
-                prompt: 30,
-                ..Usage::default()
-            })
-        );
+        assert_eq!(usage, Some(Usage { total: 42, prompt: 30, ..Usage::default() }));
     }
 
     #[test]
@@ -2908,15 +2758,9 @@ mod tests {
         let last = messages.last().unwrap();
         assert_eq!(last["role"], "user");
         let blocks = last["content"].as_array().unwrap();
-        assert_eq!(
-            blocks[0]["text"], block,
-            "already tagged, so not wrapped twice"
-        );
+        assert_eq!(blocks[0]["text"], block, "already tagged, so not wrapped twice");
         let note = blocks[1]["text"].as_str().unwrap();
-        assert!(
-            note.starts_with("<session_context>"),
-            "an untagged note is tagged: {note}"
-        );
+        assert!(note.starts_with("<session_context>"), "an untagged note is tagged: {note}");
 
         // The history is append-only, so the whole request is the next one's
         // prefix and the breakpoint goes at its very end.
@@ -2962,24 +2806,15 @@ mod tests {
             r#"{"id":"gen-1","provider":"Novita","choices":[{"delta":{"content":"b"}}]}"#,
             &mut upstream,
         );
-        assert_eq!(
-            upstream.as_deref(),
-            Some("DeepInfra"),
-            "one request, one upstream"
-        );
+        assert_eq!(upstream.as_deref(), Some("DeepInfra"), "one request, one upstream");
     }
 
     #[test]
     fn the_cache_log_tells_a_stable_prefix_from_a_rewritten_one() {
         let directory = tempfile::tempdir().unwrap();
         let log = CacheLog::open(directory.path().join(CACHE_LOG_FILE));
-        let usage = Usage {
-            total: 110,
-            prompt: 100,
-            completion: 10,
-            cache_read: 60,
-            cache_write: 0,
-        };
+        let usage =
+            Usage { total: 110, prompt: 100, completion: 10, cache_read: 60, cache_write: 0 };
         let request = |messages: &[Value]| {
             log.request(RequestRecord {
                 model: "m",
@@ -2998,18 +2833,9 @@ mod tests {
         request(&[system.clone(), user.clone(), tail("mode: plan")]);
         // The history grew and the volatile tail changed: everything before
         // the tail is a reusable prefix.
-        request(&[
-            system.clone(),
-            user.clone(),
-            assistant.clone(),
-            tail("mode: build"),
-        ]);
+        request(&[system.clone(), user.clone(), assistant.clone(), tail("mode: build")]);
         // A rewritten system prompt is a different conversation altogether.
-        request(&[
-            tail("You are Abacus. goal: x"),
-            user.clone(),
-            tail("mode: build"),
-        ]);
+        request(&[tail("You are Abacus. goal: x"), user.clone(), tail("mode: build")]);
 
         let lines: Vec<Value> = std::fs::read_to_string(directory.path().join(CACHE_LOG_FILE))
             .unwrap()
@@ -3017,10 +2843,7 @@ mod tests {
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
         assert_eq!(lines.len(), 3);
-        assert_eq!(
-            lines[0]["stable_chars"], 0,
-            "nothing to compare the first with"
-        );
+        assert_eq!(lines[0]["stable_chars"], 0, "nothing to compare the first with");
         let shared = (system.to_string().len() + user.to_string().len()) as u64;
         assert_eq!(lines[1]["stable_chars"], shared);
         assert_eq!(lines[1]["conversation"], lines[0]["conversation"]);

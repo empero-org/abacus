@@ -91,10 +91,7 @@ fn arboard_image() -> Result<Option<ClipboardImage>> {
 fn command_image() -> Option<ClipboardImage> {
     let candidates: [(&str, &[&str]); 2] = [
         ("wl-paste", &["-t", "image/png"]),
-        (
-            "xclip",
-            &["-selection", "clipboard", "-t", "image/png", "-o"],
-        ),
+        ("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"]),
     ];
     for (program, args) in candidates {
         let Ok(output) = Command::new(program).args(args).output() else {
@@ -104,11 +101,7 @@ fn command_image() -> Option<ClipboardImage> {
             continue;
         }
         let (width, height) = png_size(&output.stdout).unwrap_or((0, 0));
-        return Some(ClipboardImage {
-            png: output.stdout,
-            width,
-            height,
-        });
+        return Some(ClipboardImage { png: output.stdout, width, height });
     }
     None
 }
@@ -141,10 +134,7 @@ fn png_size(png: &[u8]) -> Option<(usize, usize)> {
 /// any in-memory state.
 pub fn save_attachment(directory: &Path, image: &ClipboardImage) -> Result<(String, PathBuf)> {
     std::fs::create_dir_all(directory).context("create attachments directory")?;
-    let name = format!(
-        "img-{}.png",
-        &uuid::Uuid::new_v4().simple().to_string()[..8]
-    );
+    let name = format!("img-{}.png", &uuid::Uuid::new_v4().simple().to_string()[..8]);
     let path = directory.join(&name);
     std::fs::write(&path, &image.png).context("write attachment")?;
     Ok((format!("[image:{name}]"), path))
@@ -164,18 +154,12 @@ mod tests {
     #[test]
     fn save_attachment_writes_the_token_named_file() {
         let dir = tempfile::tempdir().unwrap();
-        let image = ClipboardImage {
-            png: encode_png(&[0_u8; 4], 1, 1).unwrap(),
-            width: 1,
-            height: 1,
-        };
+        let image =
+            ClipboardImage { png: encode_png(&[0_u8; 4], 1, 1).unwrap(), width: 1, height: 1 };
         let (token, path) = save_attachment(dir.path(), &image).unwrap();
         assert!(token.starts_with("[image:img-") && token.ends_with(".png]"));
         assert!(path.exists());
-        let name = token
-            .strip_prefix("[image:")
-            .and_then(|t| t.strip_suffix(']'))
-            .unwrap();
+        let name = token.strip_prefix("[image:").and_then(|t| t.strip_suffix(']')).unwrap();
         assert_eq!(path.file_name().unwrap().to_str().unwrap(), name);
     }
 
@@ -187,11 +171,7 @@ mod tests {
         let rgba = vec![128_u8; 4 * 2 * 2];
         let mut clipboard = arboard::Clipboard::new().unwrap();
         clipboard
-            .set_image(arboard::ImageData {
-                width: 2,
-                height: 2,
-                bytes: rgba.into(),
-            })
+            .set_image(arboard::ImageData { width: 2, height: 2, bytes: rgba.into() })
             .unwrap();
         let image = read_image().unwrap().expect("an image was just set");
         assert_eq!((image.width, image.height), (2, 2));

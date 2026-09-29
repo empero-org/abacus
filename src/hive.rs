@@ -88,11 +88,7 @@ impl SubagentBoard {
     /// remain replaces them, so the strip always shows the current swarm.
     pub fn begin(&self, name: &str, role: &str, tokens: Arc<crate::provider::TokenLedger>) -> u64 {
         let mut inner = self.inner.write().expect("board lock");
-        if inner
-            .workers
-            .iter()
-            .all(|worker| worker.state != WorkerState::Running)
-        {
+        if inner.workers.iter().all(|worker| worker.state != WorkerState::Running) {
             inner.workers.clear();
         }
         inner.next_id += 1;
@@ -132,11 +128,7 @@ impl SubagentBoard {
     pub fn finish(&self, id: u64, ok: bool) {
         let mut inner = self.inner.write().expect("board lock");
         if let Some(worker) = inner.workers.iter_mut().find(|worker| worker.id == id) {
-            worker.state = if ok {
-                WorkerState::Done
-            } else {
-                WorkerState::Failed
-            };
+            worker.state = if ok { WorkerState::Done } else { WorkerState::Failed };
             inner.version = inner.version.wrapping_add(1);
         }
     }
@@ -260,10 +252,7 @@ impl WorkerRegistry {
     /// Known worker names with their state, for error messages and listings.
     pub fn roster(&self) -> Vec<(String, bool)> {
         let inner = self.inner.read().expect("worker registry lock");
-        inner
-            .iter()
-            .map(|(name, entry)| (name.clone(), entry.running))
-            .collect()
+        inner.iter().map(|(name, entry)| (name.clone(), entry.running)).collect()
     }
 }
 
@@ -454,21 +443,11 @@ mod tests {
     /// half of every worker it started was failing — and asked for more.
     #[test]
     fn a_workspace_where_most_workers_fail_is_not_promoted() {
-        let losing = HiveStats {
-            runs: 12,
-            clean_runs: 3,
-            workers: 30,
-            worker_failures: 16,
-        };
+        let losing = HiveStats { runs: 12, clean_runs: 3, workers: 30, worker_failures: 16 };
         assert_eq!(losing.tier(), HiveTier::Probing, "53% of workers failed");
 
         // The same clean-run count with workers that mostly succeed does earn it.
-        let winning = HiveStats {
-            runs: 12,
-            clean_runs: 3,
-            workers: 30,
-            worker_failures: 4,
-        };
+        let winning = HiveStats { runs: 12, clean_runs: 3, workers: 30, worker_failures: 4 };
         assert_eq!(winning.tier(), HiveTier::Swarm);
     }
 
@@ -476,12 +455,7 @@ mod tests {
     /// not pin a workspace to probing forever.
     #[test]
     fn a_thin_record_is_not_judged_on_its_failure_rate() {
-        let thin = HiveStats {
-            runs: 3,
-            clean_runs: 3,
-            workers: 4,
-            worker_failures: 2,
-        };
+        let thin = HiveStats { runs: 3, clean_runs: 3, workers: 4, worker_failures: 2 };
         assert_eq!(thin.tier(), HiveTier::Swarm, "too few workers to demote on");
     }
 
@@ -490,10 +464,7 @@ mod tests {
     #[test]
     fn guidance_names_the_workers_already_in_flight() {
         let hive = HiveHandle::default();
-        assert!(
-            !hive.guidance().contains("ALREADY RUNNING"),
-            "nothing running, nothing to say"
-        );
+        assert!(!hive.guidance().contains("ALREADY RUNNING"), "nothing running, nothing to say");
 
         let tokens = Arc::new(crate::provider::TokenLedger::default());
         let id = hive.board.begin("recon", "scout", tokens.clone());
@@ -569,19 +540,14 @@ mod tests {
         // Running: a message steers the live worker.
         match registry.channel("recon") {
             Some(WorkerChannel::Live(live)) => {
-                live.push(crate::agent::Injection::UserMessage(
-                    "also check tests".into(),
-                ));
+                live.push(crate::agent::Injection::UserMessage("also check tests".into()));
             }
             other => panic!("expected a live channel, got {}", other.is_some()),
         }
         assert_eq!(queue.drain().len(), 1, "the worker's own turn receives it");
 
         // Finished: the channel switches to its conversation.
-        registry.close(
-            "recon",
-            vec![serde_json::json!({"role":"assistant","content":"found it"})],
-        );
+        registry.close("recon", vec![serde_json::json!({"role":"assistant","content":"found it"})]);
         match registry.channel("recon") {
             Some(WorkerChannel::Finished(transcript)) => {
                 assert_eq!(transcript.len(), 1, "context is kept for a follow-up");
@@ -603,9 +569,7 @@ mod tests {
         assert_eq!(roster.len(), RESUMABLE_WORKERS, "retention is bounded");
         assert!(registry.channel("w0").is_none(), "oldest evicted first");
         assert!(
-            registry
-                .channel(&format!("w{}", RESUMABLE_WORKERS + 2))
-                .is_some(),
+            registry.channel(&format!("w{}", RESUMABLE_WORKERS + 2)).is_some(),
             "newest retained"
         );
     }
@@ -620,10 +584,7 @@ mod tests {
             registry.close(&name, vec![serde_json::json!({"role":"assistant"})]);
         }
         assert!(
-            matches!(
-                registry.channel("long-runner"),
-                Some(WorkerChannel::Live(_))
-            ),
+            matches!(registry.channel("long-runner"), Some(WorkerChannel::Live(_))),
             "eviction only takes finished workers"
         );
     }
@@ -632,16 +593,8 @@ mod tests {
     fn board_tracks_workers_and_clusters_at_scale() {
         let board = SubagentBoard::default();
         assert_eq!(board.strip_rows(), 0);
-        let a = board.begin(
-            "alpha",
-            "scout",
-            Arc::new(crate::provider::TokenLedger::default()),
-        );
-        let b = board.begin(
-            "beta",
-            "drone",
-            Arc::new(crate::provider::TokenLedger::default()),
-        );
+        let a = board.begin("alpha", "scout", Arc::new(crate::provider::TokenLedger::default()));
+        let b = board.begin("beta", "drone", Arc::new(crate::provider::TokenLedger::default()));
         assert_eq!(board.strip_rows(), 2, "small swarms list individually");
         board.activity(a, "running tests\npass 3 of 9");
         assert_eq!(board.snapshot()[0].activity, "pass 3 of 9");

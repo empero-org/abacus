@@ -90,10 +90,19 @@ fn item_type(tool: &str) -> &'static str {
 /// A frame arriving from the front end.
 #[derive(Debug)]
 enum Incoming {
-    Request { id: Value, method: String, params: Value },
+    Request {
+        id: Value,
+        method: String,
+        params: Value,
+    },
     /// The client answering a request *we* sent — an approval or a question.
-    Response { id: Value, result: Value },
-    Notification { method: String },
+    Response {
+        id: Value,
+        result: Value,
+    },
+    Notification {
+        method: String,
+    },
 }
 
 /// Everything one served thread needs. Rebuilt whenever the front end starts
@@ -138,7 +147,8 @@ impl ThreadState {
         let trace = config
             .trace_enabled
             .then(|| {
-                crate::sft::TraceWriter::open(&config.paths.traces_dir, &session.id.to_string()).ok()
+                crate::sft::TraceWriter::open(&config.paths.traces_dir, &session.id.to_string())
+                    .ok()
             })
             .flatten();
         Self {
@@ -304,17 +314,10 @@ fn parse(line: &str) -> Result<Incoming> {
             result: value.get("result").cloned().unwrap_or(Value::Null),
         });
     }
-    let method = value["method"]
-        .as_str()
-        .ok_or_else(|| anyhow!("frame has no method"))?
-        .to_owned();
+    let method = value["method"].as_str().ok_or_else(|| anyhow!("frame has no method"))?.to_owned();
     let params = value.get("params").cloned().unwrap_or(Value::Null);
     match value.get("id") {
-        Some(id) if !id.is_null() => Ok(Incoming::Request {
-            id: id.clone(),
-            method,
-            params,
-        }),
+        Some(id) if !id.is_null() => Ok(Incoming::Request { id: id.clone(), method, params }),
         _ => Ok(Incoming::Notification { method }),
     }
 }
@@ -401,9 +404,7 @@ impl App {
             }
             "thread/resume" | "thread/read" => {
                 self.require_idle()?;
-                let id = params["threadId"]
-                    .as_str()
-                    .ok_or_else(|| anyhow!("threadId required"))?;
+                let id = params["threadId"].as_str().ok_or_else(|| anyhow!("threadId required"))?;
                 let store = self.store.as_ref().ok_or_else(|| anyhow!("sessions off"))?;
                 let session = store.load(id)?;
                 self.tokens.store_total(session.tokens_used);
@@ -430,9 +431,7 @@ impl App {
                 // at the next tool boundary instead of after everything it has
                 // already planned. `turn/steer` is the explicit spelling of it.
                 if self.turn_id.is_some() {
-                    self.thread
-                        .injections
-                        .push(crate::agent::Injection::UserMessage(text));
+                    self.thread.injections.push(crate::agent::Injection::UserMessage(text));
                     return Ok(json!({"steered": true, "turnId": self.turn_id()}));
                 }
                 if method == "turn/steer" {
@@ -583,11 +582,13 @@ impl App {
                 let effort = match value {
                     Value::Null => None,
                     Value::String(ref text) if text.is_empty() || text == "auto" => None,
-                    Value::String(ref text) => Some(
-                        crate::config::ReasoningEffort::parse(text).ok_or_else(|| {
-                            anyhow!("effort must be minimal, low, medium, high, xhigh, max, or auto")
-                        })?,
-                    ),
+                    Value::String(ref text) => {
+                        Some(crate::config::ReasoningEffort::parse(text).ok_or_else(|| {
+                            anyhow!(
+                                "effort must be minimal, low, medium, high, xhigh, max, or auto"
+                            )
+                        })?)
+                    }
                     _ => return Err(anyhow!("effort must be a string or null")),
                 };
                 self.config.reasoning_effort = effort;
@@ -600,9 +601,7 @@ impl App {
                     _ => AgentMode::Auto,
                 };
             }
-            "autoApprove" => self
-                .allow
-                .store(value.as_bool().unwrap_or(false), Ordering::Relaxed),
+            "autoApprove" => self.allow.store(value.as_bool().unwrap_or(false), Ordering::Relaxed),
             other => return Err(anyhow!("`{other}` is not a writable key")),
         }
         Ok(json!({
@@ -666,18 +665,13 @@ impl App {
     }
 
     fn start_turn(&mut self, text: String, events: &mpsc::UnboundedSender<AgentEvent>) {
-        self.thread
-            .messages
-            .push(json!({"role": "user", "content": text.clone()}));
+        self.thread.messages.push(json!({"role": "user", "content": text.clone()}));
         let turn = self.next("turn");
         self.turn_id = Some(turn.clone());
         self.cancel = Arc::new(AtomicBool::new(false));
 
         let item_id = self.next("item");
-        notify(
-            "turn/started",
-            json!({"threadId": self.thread_id(), "turnId": turn}),
-        );
+        notify("turn/started", json!({"threadId": self.thread_id(), "turnId": turn}));
         // The user's own message is an item too, so a client that replays
         // `item/*` alone reconstructs the whole transcript.
         notify(
@@ -749,14 +743,8 @@ impl App {
                 "item": {"id": id, "type": kind, "text": ""},
             }),
         );
-        self.open_items.insert(
-            kind.to_owned(),
-            OpenItem {
-                id: id.clone(),
-                kind,
-                summary: String::new(),
-            },
-        );
+        self.open_items
+            .insert(kind.to_owned(), OpenItem { id: id.clone(), kind, summary: String::new() });
         id
     }
 
@@ -833,14 +821,7 @@ impl App {
                         },
                     }),
                 );
-                self.open_items.insert(
-                    name,
-                    OpenItem {
-                        id,
-                        kind,
-                        summary,
-                    },
-                );
+                self.open_items.insert(name, OpenItem { id, kind, summary });
             }
             AgentEvent::ToolFinished { name, output } => {
                 let Some(open) = self.open_items.remove(&name) else {
@@ -869,10 +850,9 @@ impl App {
                 }),
             ),
             AgentEvent::Notice(text) => notify("warning", json!({"message": text})),
-            AgentEvent::TraceFailed { error } => notify(
-                "warning",
-                json!({"message": format!("training trace off — {error}")}),
-            ),
+            AgentEvent::TraceFailed { error } => {
+                notify("warning", json!({"message": format!("training trace off — {error}")}))
+            }
             AgentEvent::Approval(request) => {
                 let id = self.next("srv");
                 // The approval lands *before* the call starts, so open the item
@@ -967,11 +947,8 @@ impl App {
     /// deltas renders.
     fn flush_streaming(&mut self) {
         for kind in ["agentMessage", "reasoning"] {
-            let text = self
-                .open_items
-                .get(kind)
-                .map(|open| open.summary.clone())
-                .unwrap_or_default();
+            let text =
+                self.open_items.get(kind).map(|open| open.summary.clone()).unwrap_or_default();
             self.close_streaming(kind, &text);
         }
     }
@@ -1041,10 +1018,8 @@ impl App {
             else {
                 return;
             };
-            let files: Vec<Value> = String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .filter_map(parse_numstat)
-                .collect();
+            let files: Vec<Value> =
+                String::from_utf8_lossy(&output.stdout).lines().filter_map(parse_numstat).collect();
             if files.is_empty() {
                 return;
             }
@@ -1078,10 +1053,7 @@ impl App {
             let selected = result["selected"]
                 .as_array()
                 .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(|value| value.as_str().map(str::to_owned))
-                        .collect()
+                    values.iter().filter_map(|value| value.as_str().map(str::to_owned)).collect()
                 })
                 .unwrap_or_default();
             let _ = responder.send(UserAnswer {
@@ -1169,22 +1141,15 @@ fn turn_input(params: &Value) -> Result<String> {
         return non_empty(text);
     }
     if let Some(items) = params["input"].as_array() {
-        let text = items
-            .iter()
-            .filter_map(|item| item["text"].as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text =
+            items.iter().filter_map(|item| item["text"].as_str()).collect::<Vec<_>>().join("\n");
         return non_empty(&text);
     }
     Err(anyhow!("turn input required"))
 }
 
 fn non_empty(text: &str) -> Result<String> {
-    if text.trim().is_empty() {
-        Err(anyhow!("turn input is empty"))
-    } else {
-        Ok(text.to_owned())
-    }
+    if text.trim().is_empty() { Err(anyhow!("turn input is empty")) } else { Ok(text.to_owned()) }
 }
 
 /// The token ledger as a client sees it. `cacheRate` is omitted rather than
@@ -1246,8 +1211,8 @@ mod tests {
         let notification = parse(r#"{"jsonrpc":"2.0","method":"shutdown"}"#).unwrap();
         assert!(matches!(notification, Incoming::Notification { .. }));
         // A reply to a server-initiated request carries a result, not a method.
-        let response = parse(r#"{"jsonrpc":"2.0","id":"srv_1","result":{"decision":"accept"}}"#)
-            .unwrap();
+        let response =
+            parse(r#"{"jsonrpc":"2.0","id":"srv_1","result":{"decision":"accept"}}"#).unwrap();
         match response {
             Incoming::Response { id, result } => {
                 assert_eq!(id, json!("srv_1"));
@@ -1276,10 +1241,7 @@ mod tests {
             json!({"role": "assistant", "content": "on it"}),
             json!({"role": "tool", "name": "run_command", "content": "ok"}),
         ]);
-        let types: Vec<&str> = items
-            .iter()
-            .map(|item| item["type"].as_str().unwrap())
-            .collect();
+        let types: Vec<&str> = items.iter().map(|item| item["type"].as_str().unwrap()).collect();
         assert_eq!(types, ["userMessage", "agentMessage", "commandExecution"]);
     }
 

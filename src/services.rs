@@ -141,10 +141,7 @@ impl AgentServices {
     /// else's to manage and stay read-only.
     pub fn authorable_skill_roots(&self) -> Option<(PathBuf, PathBuf)> {
         let paths = self.skill_discovery.paths.as_ref()?;
-        Some((
-            self.workspace.join(".abacus/skills"),
-            paths.root.join("skills"),
-        ))
+        Some((self.workspace.join(".abacus/skills"), paths.root.join("skills")))
     }
 
     pub fn project_trusted(&self) -> bool {
@@ -164,11 +161,7 @@ impl AgentServices {
 
     pub fn prompt_context(&self) -> String {
         let mut sections = Vec::new();
-        let skills = self
-            .skills
-            .read()
-            .expect("skill registry lock")
-            .prompt_index();
+        let skills = self.skills.read().expect("skill registry lock").prompt_index();
         if !skills.is_empty() {
             sections.push(skills);
         }
@@ -186,10 +179,7 @@ impl AgentServices {
                 .plugins
                 .list()
                 .map(|plugin| {
-                    format!(
-                        "- {} {}: {}",
-                        plugin.name, plugin.version, plugin.description
-                    )
+                    format!("- {} {}: {}", plugin.name, plugin.version, plugin.description)
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -199,9 +189,7 @@ impl AgentServices {
     }
 
     pub fn needs_approval(&self, call: &ToolCall) -> bool {
-        self.mcp
-            .needs_approval(&call.name)
-            .unwrap_or_else(|| call.needs_approval())
+        self.mcp.needs_approval(&call.name).unwrap_or_else(|| call.needs_approval())
     }
 
     pub fn approval_details(&self, call: &ToolCall) -> Option<String> {
@@ -212,11 +200,8 @@ impl AgentServices {
         if let Some(result) = self.execute_authoring(&call.name, &call.arguments) {
             return Some(result);
         }
-        if let Some(result) = self
-            .skills
-            .read()
-            .expect("skill registry lock")
-            .execute(&call.name, &call.arguments)
+        if let Some(result) =
+            self.skills.read().expect("skill registry lock").execute(&call.name, &call.arguments)
         {
             return Some(result);
         }
@@ -232,10 +217,9 @@ impl AgentServices {
         let result = match tool {
             "skill_create" => self.create_skill(arguments),
             "skill_update" => self.update_skill(arguments),
-            "skill_reload" => Ok(format!(
-                "Reloaded skills — {} now registered.",
-                self.reload_skills()
-            )),
+            "skill_reload" => {
+                Ok(format!("Reloaded skills — {} now registered.", self.reload_skills()))
+            }
             _ => return None,
         };
         Some(result.unwrap_or_else(|error| format!("Error: {error:#}")))
@@ -334,22 +318,13 @@ impl AgentServices {
             &args.instructions,
         )?;
         self.reload_skills();
-        Ok(format!(
-            "Updated skill `{}` at {}.",
-            args.name,
-            path.display()
-        ))
+        Ok(format!("Updated skill `{}` at {}.", args.name, path.display()))
     }
 
     pub fn search_catalog(&self, query: &str) -> String {
         let query = query.to_ascii_lowercase();
         let mut output = Vec::new();
-        for skill in self
-            .skills
-            .read()
-            .expect("skill registry lock")
-            .search(&query)
-        {
+        for skill in self.skills.read().expect("skill registry lock").search(&query) {
             output.push(format!("skill/{}: {}", skill.name, skill.description));
         }
         for tool in self.mcp.tools() {
@@ -405,14 +380,10 @@ impl AgentServices {
             let output = timeout(duration, child.wait_with_output())
                 .await
                 .map_err(|_| anyhow::anyhow!("{event} hook from {} timed out", plugin.name))??;
-            let stdout: String = String::from_utf8_lossy(&output.stdout)
-                .chars()
-                .take(16_000)
-                .collect();
-            let stderr: String = String::from_utf8_lossy(&output.stderr)
-                .chars()
-                .take(16_000)
-                .collect();
+            let stdout: String =
+                String::from_utf8_lossy(&output.stdout).chars().take(16_000).collect();
+            let stderr: String =
+                String::from_utf8_lossy(&output.stderr).chars().take(16_000).collect();
             if !output.status.success() {
                 bail!(
                     "{event} hook from {} rejected the operation: {}",
@@ -428,12 +399,8 @@ impl AgentServices {
     }
 
     pub fn diagnostics(&self) -> Vec<String> {
-        let mut diagnostics = self
-            .skills
-            .read()
-            .expect("skill registry lock")
-            .diagnostics()
-            .to_vec();
+        let mut diagnostics =
+            self.skills.read().expect("skill registry lock").diagnostics().to_vec();
         diagnostics.extend(self.plugins.diagnostics().iter().cloned());
         diagnostics.extend(self.mcp.diagnostics().iter().cloned());
         diagnostics
@@ -443,23 +410,13 @@ impl AgentServices {
 fn resolve_paths(paths: &[PathBuf], base: &Path) -> Vec<PathBuf> {
     paths
         .iter()
-        .map(|path| {
-            if path.is_absolute() {
-                path.clone()
-            } else {
-                base.join(path)
-            }
-        })
+        .map(|path| if path.is_absolute() { path.clone() } else { base.join(path) })
         .collect()
 }
 
 fn resolve_hook_command(root: &Path, command: &str) -> Result<PathBuf> {
     let path = Path::new(command);
-    let path = if path.is_absolute() {
-        path.to_owned()
-    } else {
-        root.join(path)
-    };
+    let path = if path.is_absolute() { path.to_owned() } else { root.join(path) };
     let canonical = path
         .canonicalize()
         .with_context(|| format!("hook command does not exist: {}", path.display()))?;
@@ -492,18 +449,13 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         let paths = AbacusPaths::under(directory.join("home"));
         std::fs::create_dir_all(&paths.root).unwrap();
-        let services = AgentServices::discover(&workspace, &paths, &Settings::default())
-            .await
-            .unwrap();
+        let services =
+            AgentServices::discover(&workspace, &paths, &Settings::default()).await.unwrap();
         (services, workspace)
     }
 
     fn call(name: &str, arguments: Value) -> ToolCall {
-        ToolCall {
-            id: "1".to_owned(),
-            name: name.to_owned(),
-            arguments: arguments.to_string(),
-        }
+        ToolCall { id: "1".to_owned(), name: name.to_owned(), arguments: arguments.to_string() }
     }
 
     /// The loop Phase 2 exists to close: write a skill, register it, invoke it,
@@ -524,22 +476,15 @@ mod tests {
             ))
             .await
             .expect("skill_create is dispatched");
+        assert!(created.contains("Created skill `release-audit`"), "{created}");
         assert!(
-            created.contains("Created skill `release-audit`"),
-            "{created}"
-        );
-        assert!(
-            workspace
-                .join(".abacus/skills/release-audit/SKILL.md")
-                .is_file(),
+            workspace.join(".abacus/skills/release-audit/SKILL.md").is_file(),
             "project scope writes into the workspace"
         );
 
         // Registered in the same session — no reload call, no restart.
-        let loaded = services
-            .execute(&call("skill_load", json!({"name": "release-audit"})))
-            .await
-            .unwrap();
+        let loaded =
+            services.execute(&call("skill_load", json!({"name": "release-audit"}))).await.unwrap();
         assert!(loaded.contains("Check the changelog"), "{loaded}");
         assert!(services.prompt_context().contains("release-audit"));
         assert!(
@@ -567,12 +512,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert!(
-            directory
-                .path()
-                .join("home/skills/commit-style/SKILL.md")
-                .is_file()
-        );
+        assert!(directory.path().join("home/skills/commit-style/SKILL.md").is_file());
         assert!(!workspace.join(".abacus/skills/commit-style").exists());
     }
 
@@ -588,21 +528,12 @@ mod tests {
             .await
             .unwrap();
         let updated = services
-            .execute(&call(
-                "skill_update",
-                json!({"name":"mine","instructions":"v2 body"}),
-            ))
+            .execute(&call("skill_update", json!({"name":"mine","instructions":"v2 body"})))
             .await
             .unwrap();
         assert!(updated.contains("Updated skill `mine`"), "{updated}");
-        let loaded = services
-            .execute(&call("skill_load", json!({"name":"mine"})))
-            .await
-            .unwrap();
-        assert!(
-            loaded.contains("v2 body") && !loaded.contains("v1 body"),
-            "{loaded}"
-        );
+        let loaded = services.execute(&call("skill_load", json!({"name":"mine"}))).await.unwrap();
+        assert!(loaded.contains("v2 body") && !loaded.contains("v1 body"), "{loaded}");
         // The description survives an update that omits it.
         assert!(services.prompt_context().contains("mine: d"));
 
@@ -617,18 +548,13 @@ mod tests {
         .unwrap();
         services.reload_skills();
         let refused = services
-            .execute(&call(
-                "skill_update",
-                json!({"name":"borrowed","instructions":"hijacked"}),
-            ))
+            .execute(&call("skill_update", json!({"name":"borrowed","instructions":"hijacked"})))
             .await
             .unwrap();
         assert!(refused.starts_with("Error:"), "{refused}");
         assert!(refused.contains("not one Abacus manages"), "{refused}");
         assert!(
-            std::fs::read_to_string(foreign.join("SKILL.md"))
-                .unwrap()
-                .contains("body"),
+            std::fs::read_to_string(foreign.join("SKILL.md")).unwrap().contains("body"),
             "the foreign skill is untouched"
         );
     }
@@ -669,10 +595,7 @@ mod tests {
             json!({"name":"ok","description":"d","instructions":"   "}),
             json!({"name":"ok","description":"line\nbreak","instructions":"b"}),
         ] {
-            let reply = services
-                .execute(&call("skill_create", arguments.clone()))
-                .await
-                .unwrap();
+            let reply = services.execute(&call("skill_create", arguments.clone())).await.unwrap();
             assert!(reply.starts_with("Error:"), "{arguments} accepted: {reply}");
         }
     }
@@ -694,11 +617,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert!(
-            services
-                .prompt_context()
-                .contains("note: use this when tests fail")
-        );
+        assert!(services.prompt_context().contains("note: use this when tests fail"));
     }
 
     #[tokio::test]
@@ -753,9 +672,8 @@ command = "hook.sh"
         permissions.set_mode(0o700);
         std::fs::set_permissions(&hook, permissions).unwrap();
 
-        let services = AgentServices::discover(&workspace, &paths, &Settings::default())
-            .await
-            .unwrap();
+        let services =
+            AgentServices::discover(&workspace, &paths, &Settings::default()).await.unwrap();
         let output = services
             .run_hooks("session_start", Some("session-1"), &json!({"ready":true}))
             .await

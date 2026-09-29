@@ -76,11 +76,8 @@ impl SkillRegistry {
     }
 
     pub fn search(&self, query: &str) -> Vec<&Skill> {
-        let words = query
-            .to_ascii_lowercase()
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
+        let words =
+            query.to_ascii_lowercase().split_whitespace().map(str::to_owned).collect::<Vec<_>>();
         let mut matches = self
             .skills
             .values()
@@ -90,18 +87,12 @@ impl SkillRegistry {
                     skill.name.to_ascii_lowercase(),
                     skill.description.to_ascii_lowercase()
                 );
-                let score = words
-                    .iter()
-                    .filter(|word| haystack.contains(word.as_str()))
-                    .count();
+                let score = words.iter().filter(|word| haystack.contains(word.as_str())).count();
                 (words.is_empty() || score > 0).then_some((score, skill))
             })
             .collect::<Vec<_>>();
         matches.sort_by(|left, right| {
-            right
-                .0
-                .cmp(&left.0)
-                .then_with(|| left.1.name.cmp(&right.1.name))
+            right.0.cmp(&left.0).then_with(|| left.1.name.cmp(&right.1.name))
         });
         matches.into_iter().map(|(_, skill)| skill).collect()
     }
@@ -218,10 +209,8 @@ impl SkillRegistry {
     }
 
     pub fn invocation(&self, name: &str, user_text: &str) -> Result<String> {
-        let skill = self
-            .skills
-            .get(name)
-            .with_context(|| format!("skill `{name}` is not installed"))?;
+        let skill =
+            self.skills.get(name).with_context(|| format!("skill `{name}` is not installed"))?;
         Ok(format!(
             "The user explicitly invoked the `{}` skill. Follow these instructions for this request:\n\n<skill name=\"{}\" root=\"{}\">\n{}\n</skill>\n\nUser request: {}",
             skill.name,
@@ -239,16 +228,14 @@ impl SkillRegistry {
         let canonical_root = match root.canonicalize() {
             Ok(root) => root,
             Err(error) => {
-                self.diagnostics
-                    .push(format!("{}: {error}", root.display()));
+                self.diagnostics.push(format!("{}: {error}", root.display()));
                 return;
             }
         };
         let entries = match fs::read_dir(&canonical_root) {
             Ok(entries) => entries,
             Err(error) => {
-                self.diagnostics
-                    .push(format!("{}: {error}", canonical_root.display()));
+                self.diagnostics.push(format!("{}: {error}", canonical_root.display()));
                 return;
             }
         };
@@ -264,9 +251,7 @@ impl SkillRegistry {
                 Ok(skill) => {
                     self.skills.insert(skill.name.clone(), skill);
                 }
-                Err(error) => self
-                    .diagnostics
-                    .push(format!("{}: {error:#}", candidate.display())),
+                Err(error) => self.diagnostics.push(format!("{}: {error:#}", candidate.display())),
             }
         }
     }
@@ -348,15 +333,9 @@ fn load_skill(root: &Path, source: &str) -> Result<Skill> {
     let (frontmatter, instructions) = split_frontmatter(&content)?;
     let metadata: Frontmatter = serde_yaml::from_str(frontmatter).context("invalid frontmatter")?;
     validate_name(&metadata.name)?;
-    let directory = root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
+    let directory = root.file_name().and_then(|name| name.to_str()).unwrap_or_default();
     if directory != metadata.name {
-        bail!(
-            "skill name `{}` must match directory `{directory}`",
-            metadata.name
-        );
+        bail!("skill name `{}` must match directory `{directory}`", metadata.name);
     }
     if metadata.description.trim().is_empty() || metadata.description.len() > 1_024 {
         bail!("skill description must contain 1-1024 bytes");
@@ -377,9 +356,8 @@ fn split_frontmatter(content: &str) -> Result<(&str, &str)> {
         .strip_prefix("---\n")
         .or_else(|| content.strip_prefix("---\r\n"))
         .context("SKILL.md must begin with YAML frontmatter")?;
-    let Some((frontmatter, body)) = content
-        .split_once("\n---\n")
-        .or_else(|| content.split_once("\r\n---\r\n"))
+    let Some((frontmatter, body)) =
+        content.split_once("\n---\n").or_else(|| content.split_once("\r\n---\r\n"))
     else {
         bail!("SKILL.md frontmatter is not terminated with ---");
     };
@@ -391,9 +369,7 @@ fn validate_name(name: &str) -> Result<()> {
         || name.len() > 64
         || name.starts_with('-')
         || name.ends_with('-')
-        || !name
-            .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        || !name.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
     {
         bail!("skill name must use 1-64 lowercase letters, digits, or hyphens");
     }
@@ -428,10 +404,7 @@ pub fn write_skill(
         "---\nname: {name}\ndescription: {}\n---\n\n{instructions}\n",
         // A description is a YAML scalar; quoting keeps a colon or a leading
         // special character from silently changing the parse.
-        serde_yaml::to_string(&description)
-            .unwrap_or_default()
-            .trim()
-            .to_owned()
+        serde_yaml::to_string(&description).unwrap_or_default().trim().to_owned()
     );
     if content.len() as u64 > MAX_SKILL_BYTES {
         bail!("skill exceeds the 1 MB limit");
@@ -476,15 +449,10 @@ mod tests {
         let registry = SkillRegistry::discover(&home, dir.path(), &[], &[]);
         assert!(registry.prompt_index().contains("Reviews code carefully"));
         assert!(!registry.prompt_index().contains("Always inspect"));
-        let loaded = registry
-            .execute("skill_load", r#"{"name":"review-helper"}"#)
-            .unwrap();
+        let loaded = registry.execute("skill_load", r#"{"name":"review-helper"}"#).unwrap();
         assert!(loaded.contains("Always inspect the diff"));
         let resource = registry
-            .execute(
-                "skill_read",
-                r#"{"name":"review-helper","path":"references/checks.md"}"#,
-            )
+            .execute("skill_read", r#"{"name":"review-helper","path":"references/checks.md"}"#)
             .unwrap();
         assert_eq!(resource, "Check errors.");
     }

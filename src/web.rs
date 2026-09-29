@@ -120,9 +120,7 @@ impl SearchSettings {
     /// env vars so the tests cannot race each other — they share one process.
     pub fn resolve_with(&self, lookup: impl Fn(&str) -> Option<String>) -> WebConfig {
         let read = |name: &str| {
-            lookup(name)
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty())
+            lookup(name).map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
         };
         // `Auto` prefers a backend that can actually answer: a self-hosted
         // SearXNG first, then a keyed API, then the shared instance if it was
@@ -269,11 +267,8 @@ impl WebConfig {
                 (text.len() > 200).then_some(text)
             }
         });
-        let texts: Vec<String> = futures_util::future::join_all(pages)
-            .await
-            .into_iter()
-            .flatten()
-            .collect();
+        let texts: Vec<String> =
+            futures_util::future::join_all(pages).await.into_iter().flatten().collect();
         if texts.is_empty() {
             return None;
         }
@@ -349,9 +344,7 @@ impl WebConfig {
             rendered.push_str(&format!(
                 "\n[the configured {} backend did not answer, so these came from {}: {}]\n",
                 self.backend.label(),
-                answered_by
-                    .map(SearchBackend::label)
-                    .unwrap_or("a fallback"),
+                answered_by.map(SearchBackend::label).unwrap_or("a fallback"),
                 failures.join("; ")
             ));
         }
@@ -436,11 +429,8 @@ impl WebConfig {
 
     async fn fetch_page(&self, url: &str, max_chars: usize) -> Result<String> {
         let url = validate_public_url(url)?;
-        let max_chars = if max_chars == 0 {
-            MAX_PAGE_CHARS
-        } else {
-            max_chars.clamp(1_000, 200_000)
-        };
+        let max_chars =
+            if max_chars == 0 { MAX_PAGE_CHARS } else { max_chars.clamp(1_000, 200_000) };
         let client = self.client()?;
         let response = send_with_retry(
             client
@@ -460,10 +450,8 @@ impl WebConfig {
             .and_then(|value| value.to_str().ok())
             .unwrap_or("")
             .to_ascii_lowercase();
-        let body = response
-            .text()
-            .await
-            .map_err(|error| anyhow!("could not read body: {error}"))?;
+        let body =
+            response.text().await.map_err(|error| anyhow!("could not read body: {error}"))?;
         let text = if content_type.contains("html") || looks_like_html(&body) {
             html_to_text(&body)
         } else {
@@ -508,10 +496,7 @@ async fn extract_from(
     ];
     let (deltas, _sink) = tokio::sync::mpsc::unbounded_channel();
     let never = std::sync::atomic::AtomicBool::new(false);
-    let completion = provider
-        .complete(&conversation, &[], deltas, &never)
-        .await
-        .ok()?;
+    let completion = provider.complete(&conversation, &[], deltas, &never).await.ok()?;
     let answer = completion.content.trim();
     (!answer.is_empty()).then(|| answer.to_owned())
 }
@@ -608,12 +593,7 @@ struct SearchResult {
 fn render_results(query: &str, results: &[SearchResult]) -> String {
     let mut out = format!("Search results for {query:?}:\n");
     for (index, result) in results.iter().enumerate() {
-        out.push_str(&format!(
-            "\n{}. {}\n   {}\n",
-            index + 1,
-            result.title,
-            result.url
-        ));
+        out.push_str(&format!("\n{}. {}\n   {}\n", index + 1, result.title, result.url));
         if !result.snippet.is_empty() {
             out.push_str(&format!("   {}\n", result.snippet));
         }
@@ -665,11 +645,7 @@ async fn searxng_search(
         .into_iter()
         .filter(|entry| !entry.url.trim().is_empty())
         .take(max_results)
-        .map(|entry| SearchResult {
-            title: entry.title,
-            url: entry.url,
-            snippet: entry.content,
-        })
+        .map(|entry| SearchResult { title: entry.title, url: entry.url, snippet: entry.content })
         .collect())
 }
 
@@ -700,10 +676,8 @@ async fn bing_search(
     )
     .await
     .map_err(|error| anyhow!("Bing request failed: {error}"))?;
-    let body = response
-        .text()
-        .await
-        .map_err(|error| anyhow!("could not read Bing response: {error}"))?;
+    let body =
+        response.text().await.map_err(|error| anyhow!("could not read Bing response: {error}"))?;
     Ok(parse_bing_html(&body, max_results))
 }
 
@@ -737,11 +711,7 @@ fn parse_bing_html(html: &str, max_results: usize) -> Vec<SearchResult> {
             .captures(&capture[0])
             .map(|text| html_to_text(&text[1]).trim().to_owned())
             .unwrap_or_default();
-        results.push(SearchResult {
-            title,
-            url,
-            snippet,
-        });
+        results.push(SearchResult { title, url, snippet });
     }
     results
 }
@@ -764,9 +734,7 @@ fn bing_result_url(href: &str) -> Option<String> {
     if padded.len() % 4 == 1 {
         return None;
     }
-    let decoded = base64::engine::general_purpose::STANDARD_NO_PAD
-        .decode(padded)
-        .ok()?;
+    let decoded = base64::engine::general_purpose::STANDARD_NO_PAD.decode(padded).ok()?;
     let decoded = String::from_utf8(decoded).ok()?;
     decoded.starts_with("http").then_some(decoded)
 }
@@ -788,10 +756,8 @@ async fn brave_search(
     )
     .await
     .map_err(|error| anyhow!("Brave request failed: {error}"))?;
-    let value: Value = response
-        .json()
-        .await
-        .map_err(|error| anyhow!("invalid Brave response: {error}"))?;
+    let value: Value =
+        response.json().await.map_err(|error| anyhow!("invalid Brave response: {error}"))?;
     let mut results = Vec::new();
     if let Some(items) = value["web"]["results"].as_array() {
         for item in items.iter().take(max_results) {
@@ -801,11 +767,7 @@ async fn brave_search(
                 continue;
             }
             let snippet = html_to_text(item["description"].as_str().unwrap_or_default());
-            results.push(SearchResult {
-                title,
-                url,
-                snippet,
-            });
+            results.push(SearchResult { title, url, snippet });
         }
     }
     Ok(results)
@@ -821,10 +783,8 @@ fn validate_public_url(raw: &str) -> Result<reqwest::Url> {
     if !matches!(url.scheme(), "http" | "https") {
         bail!("only http/https URLs are allowed");
     }
-    let host = url
-        .host_str()
-        .ok_or_else(|| anyhow!("URL has no host: {raw}"))?
-        .to_ascii_lowercase();
+    let host =
+        url.host_str().ok_or_else(|| anyhow!("URL has no host: {raw}"))?.to_ascii_lowercase();
     let blocked_name = host == "localhost"
         || host.ends_with(".localhost")
         || host.ends_with(".local")
@@ -976,23 +936,12 @@ mod tests {
         // A single scrape with no fallback was the flakiness: one bot wall and
         // the search was over.
         let searxng = config(SearchBackend::Searxng, Some("http://localhost:8888"), None);
-        assert_eq!(
-            searxng.chain(),
-            vec![SearchBackend::Searxng, SearchBackend::Bing]
-        );
+        assert_eq!(searxng.chain(), vec![SearchBackend::Searxng, SearchBackend::Bing]);
 
-        let both = config(
-            SearchBackend::Brave,
-            Some("http://localhost:8888"),
-            Some("k"),
-        );
+        let both = config(SearchBackend::Brave, Some("http://localhost:8888"), Some("k"));
         assert_eq!(
             both.chain(),
-            vec![
-                SearchBackend::Brave,
-                SearchBackend::Searxng,
-                SearchBackend::Bing
-            ]
+            vec![SearchBackend::Brave, SearchBackend::Searxng, SearchBackend::Bing]
         );
     }
 
@@ -1009,10 +958,7 @@ mod tests {
     #[test]
     fn the_configured_engine_is_never_duplicated_in_the_chain() {
         let brave = config(SearchBackend::Brave, None, Some("k"));
-        assert_eq!(
-            brave.chain(),
-            vec![SearchBackend::Brave, SearchBackend::Bing]
-        );
+        assert_eq!(brave.chain(), vec![SearchBackend::Brave, SearchBackend::Bing]);
     }
 
     #[test]
@@ -1120,9 +1066,7 @@ mod tests {
     async fn a_failed_extraction_returns_nothing_rather_than_guessing() {
         let provider = test_provider("http://127.0.0.1:9/v1");
         assert!(
-            extract_from(&provider, "anything", "some page text")
-                .await
-                .is_none(),
+            extract_from(&provider, "anything", "some page text").await.is_none(),
             "no answer beats an invented one; the caller keeps the page"
         );
     }
@@ -1183,10 +1127,7 @@ mod tests {
         assert_eq!(blank.backend, SearchBackend::Bing);
 
         // The shared instance is used only when asked for.
-        let opted_in = SearchSettings {
-            use_shared_instance: true,
-            ..SearchSettings::default()
-        };
+        let opted_in = SearchSettings { use_shared_instance: true, ..SearchSettings::default() };
         let resolved = opted_in.resolve_with(|_| None);
         assert_eq!(resolved.backend, SearchBackend::Searxng);
         assert_eq!(resolved.instance_url.as_deref(), Some(SHARED_SEARXNG));
@@ -1207,30 +1148,19 @@ mod tests {
         let resolved = settings.resolve_with(|_| Some("bk-1".into()));
         assert_eq!(resolved.backend, SearchBackend::Searxng);
         // The trailing slash is trimmed so `{base}/search` is not `//search`.
-        assert_eq!(
-            resolved.instance_url.as_deref(),
-            Some("http://localhost:8888")
-        );
+        assert_eq!(resolved.instance_url.as_deref(), Some("http://localhost:8888"));
 
         // A blank URL is not a configuration.
-        let blank = SearchSettings {
-            instance_url: Some("   ".into()),
-            ..SearchSettings::default()
-        };
+        let blank =
+            SearchSettings { instance_url: Some("   ".into()), ..SearchSettings::default() };
         assert_eq!(blank.resolve_with(|_| None).backend, SearchBackend::Bing);
     }
 
     /// An explicitly chosen backend is never second-guessed.
     #[test]
     fn an_explicit_backend_is_honoured_even_when_a_key_exists() {
-        let settings = SearchSettings {
-            backend: SearchBackend::Bing,
-            ..SearchSettings::default()
-        };
-        assert_eq!(
-            settings.resolve_with(|_| Some("bk-1".into())).backend,
-            SearchBackend::Bing
-        );
+        let settings = SearchSettings { backend: SearchBackend::Bing, ..SearchSettings::default() };
+        assert_eq!(settings.resolve_with(|_| Some("bk-1".into())).backend, SearchBackend::Bing);
 
         // A named variable under Auto is an explicit choice too.
         let named = SearchSettings {

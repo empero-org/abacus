@@ -159,10 +159,7 @@ impl InjectionQueue {
 
     /// Take everything pending, leaving the queue empty.
     pub fn drain(&self) -> Vec<Injection> {
-        self.0
-            .lock()
-            .map(|mut queue| std::mem::take(&mut *queue))
-            .unwrap_or_default()
+        self.0.lock().map(|mut queue| std::mem::take(&mut *queue)).unwrap_or_default()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -321,22 +318,14 @@ async fn run_turn_inner(
     // Which model judges: the auxiliary one by default, the main one when the
     // profile asks for it — the decision gates what the agent may do, so it is
     // worth being able to put the better model on it.
-    let safety_model = if options.safety_uses_main {
-        provider.clone()
-    } else {
-        aux.clone()
-    };
+    let safety_model = if options.safety_uses_main { provider.clone() } else { aux.clone() };
     let mut active_mode = options.mode;
     // Capture once per session. Later turns reuse the snapshot; only imminent
     // rolling compaction refreshes it before verbatim evidence is erased.
     let mut intent_capture: Option<tokio::task::JoinHandle<Option<String>>> =
         (options.session_id.is_some() && options.tether.intent().is_none()).then(|| {
-            let (aux, snapshot, previous, cancel) = (
-                aux.clone(),
-                messages.clone(),
-                options.tether.intent(),
-                options.cancel.clone(),
-            );
+            let (aux, snapshot, previous, cancel) =
+                (aux.clone(), messages.clone(), options.tether.intent(), options.cancel.clone());
             tokio::spawn(async move {
                 crate::tether::capture_intent(&aux, &snapshot, previous.as_deref(), &cancel).await
             })
@@ -370,13 +359,7 @@ async fn run_turn_inner(
             )
         {
             rethought = true;
-            run_refine(
-                &reflector(&aux, &provider, &specs),
-                &messages,
-                &options,
-                &events,
-            )
-            .await;
+            run_refine(&reflector(&aux, &provider, &specs), &messages, &options, &events).await;
             // Refresh the tether snapshot while the evidence is still
             // verbatim — this is the one point mid-turn where history is about
             // to be replaced by a summary. The snapshot is owned, so it can
@@ -433,12 +416,7 @@ async fn run_turn_inner(
         let mut provider_messages = messages.clone();
         let completion = loop {
             let completion = match provider
-                .complete(
-                    &provider_messages,
-                    &specs,
-                    delta_tx.clone(),
-                    &options.cancel,
-                )
+                .complete(&provider_messages, &specs, delta_tx.clone(), &options.cancel)
                 .await
             {
                 Ok(completion) => completion,
@@ -449,10 +427,8 @@ async fn run_turn_inner(
                     drop(delta_tx);
                     let _ = forward.await;
                     abort_capture(intent_capture.take());
-                    let _ = events.send(AgentEvent::Failed {
-                        error: format!("{error:#}"),
-                        messages,
-                    });
+                    let _ =
+                        events.send(AgentEvent::Failed { error: format!("{error:#}"), messages });
                     return;
                 }
             };
@@ -469,10 +445,8 @@ async fn run_turn_inner(
                     drop(delta_tx);
                     let _ = forward.await;
                     abort_capture(intent_capture.take());
-                    let _ = events.send(AgentEvent::Done {
-                        messages,
-                        reason: DoneReason::Complete,
-                    });
+                    let _ =
+                        events.send(AgentEvent::Done { messages, reason: DoneReason::Complete });
                     return;
                 }
                 // Brief backoff before retrying so the provider has a moment
@@ -507,9 +481,7 @@ async fn run_turn_inner(
                 cancelled: completion.cancelled,
             })
         {
-            let _ = events.send(AgentEvent::TraceFailed {
-                error: format!("{error:#}"),
-            });
+            let _ = events.send(AgentEvent::TraceFailed { error: format!("{error:#}") });
         }
 
         if completion.truncated {
@@ -562,10 +534,7 @@ async fn run_turn_inner(
         // got through, so it is kept in history before the turn reports back.
         if completion.cancelled || options.cancel.load(Ordering::Relaxed) {
             abort_capture(intent_capture.take());
-            let _ = events.send(AgentEvent::Done {
-                messages,
-                reason: DoneReason::Interrupted,
-            });
+            let _ = events.send(AgentEvent::Done { messages, reason: DoneReason::Interrupted });
             return;
         }
         if completion.tool_calls.is_empty() {
@@ -583,13 +552,7 @@ async fn run_turn_inner(
                 && !rethought
                 && tool_calls_executed >= crate::refine::LONG_TURN_TOOL_CALLS
             {
-                run_refine(
-                    &reflector(&aux, &provider, &specs),
-                    &messages,
-                    &options,
-                    &events,
-                )
-                .await;
+                run_refine(&reflector(&aux, &provider, &specs), &messages, &options, &events).await;
             }
             // Collect the intent snapshot started when the turn began. It has
             // had the whole turn to finish, so this is a formality — the
@@ -600,10 +563,7 @@ async fn run_turn_inner(
                 options.tether.set_intent(intent.clone());
                 let _ = events.send(AgentEvent::Notice(format!("tethered — {intent}")));
             }
-            let _ = events.send(AgentEvent::Done {
-                messages,
-                reason: DoneReason::Complete,
-            });
+            let _ = events.send(AgentEvent::Done { messages, reason: DoneReason::Complete });
             return;
         }
 
@@ -622,10 +582,8 @@ async fn run_turn_inner(
                         // Choosing a mode unprompted is the habit worth
                         // reinforcing; it pays down earlier slips.
                         options.modes.record_switch();
-                        let _ = events.send(AgentEvent::ModeChanged {
-                            mode,
-                            reason: reason.clone(),
-                        });
+                        let _ =
+                            events.send(AgentEvent::ModeChanged { mode, reason: reason.clone() });
                         format!("Mode set to {}. Reason: {reason}", mode.label())
                     }
                     Err(error) => format!("Error: {error:#}"),
@@ -977,10 +935,8 @@ async fn run_turn_inner(
                 output = options.handles.bind(&source, output).summary();
             }
             tool_calls_executed += 1;
-            let _ = events.send(AgentEvent::ToolFinished {
-                name: call.name.clone(),
-                output: output.clone(),
-            });
+            let _ = events
+                .send(AgentEvent::ToolFinished { name: call.name.clone(), output: output.clone() });
             messages.push(json!({
                 "role": "tool",
                 "tool_call_id": call.id,
@@ -989,10 +945,7 @@ async fn run_turn_inner(
             }));
         }
         if interrupted {
-            let _ = events.send(AgentEvent::Done {
-                messages,
-                reason: DoneReason::Interrupted,
-            });
+            let _ = events.send(AgentEvent::Done { messages, reason: DoneReason::Interrupted });
             return;
         }
         // Everything that arrived while those tools ran lands here, before the
@@ -1011,18 +964,9 @@ async fn run_turn_inner(
     // A limit-length turn is by definition long, so it earns the reflection
     // pass on the way out.
     if !options.token_compression && !rethought {
-        run_refine(
-            &reflector(&aux, &provider, &specs),
-            &messages,
-            &options,
-            &events,
-        )
-        .await;
+        run_refine(&reflector(&aux, &provider, &specs), &messages, &options, &events).await;
     }
-    let _ = events.send(AgentEvent::Done {
-        messages,
-        reason: DoneReason::StepLimit,
-    });
+    let _ = events.send(AgentEvent::Done { messages, reason: DoneReason::StepLimit });
 }
 
 pub fn compact_messages(messages: &[Value], max_chars: usize) -> Vec<Value> {
@@ -1123,11 +1067,7 @@ fn arg_preview(args: &str, name: &str) -> String {
         "git_commit" => "message",
         _ => return String::new(),
     };
-    if let Some(s) = value[key].as_str() {
-        single_line_trim(s, 60)
-    } else {
-        String::new()
-    }
+    if let Some(s) = value[key].as_str() { single_line_trim(s, 60) } else { String::new() }
 }
 
 fn single_line_trim(text: &str, limit: usize) -> String {
@@ -1173,12 +1113,8 @@ async fn request_approval(
     allow_mutations: &Arc<AtomicBool>,
 ) -> bool {
     let (respond, receive) = oneshot::channel();
-    let request = ApprovalRequest {
-        tool: call.name.clone(),
-        summary: call.summary(),
-        details,
-        respond,
-    };
+    let request =
+        ApprovalRequest { tool: call.name.clone(), summary: call.summary(), details, respond };
     if events.send(AgentEvent::Approval(request)).is_err() {
         return false;
     }
@@ -1251,9 +1187,7 @@ async fn request_user_question(
         });
     }
 
-    receive
-        .await
-        .context("user question was cancelled before answer")
+    receive.await.context("user question was cancelled before answer")
 }
 
 /// Whether a tool mutates the workspace and therefore needs a yes.
@@ -1343,24 +1277,14 @@ pub async fn draft_reply(provider: &Provider, messages: &[Value]) -> Option<Stri
         return None;
     }
     // The tail carries the conclusion, which is what a follow-up responds to.
-    let tail: String = last
-        .chars()
-        .rev()
-        .take(1_200)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
+    let tail: String = last.chars().rev().take(1_200).collect::<String>().chars().rev().collect();
     let request = vec![
         json!({"role": "system", "content": PROMPT}),
         json!({"role": "user", "content": format!("Assistant's last reply:\n{tail}")}),
     ];
     let (deltas, _sink) = mpsc::unbounded_channel();
     let never = AtomicBool::new(false);
-    let completion = provider
-        .complete(&request, &[], deltas, &never)
-        .await
-        .ok()?;
+    let completion = provider.complete(&request, &[], deltas, &never).await.ok()?;
     let draft = completion
         .content
         .trim()
@@ -1379,11 +1303,7 @@ pub async fn draft_reply(provider: &Provider, messages: &[Value]) -> Option<Stri
 /// An assistant message built from a completion, for the refine pass's own
 /// private conversation.
 pub fn assistant_reflection_message(completion: &crate::provider::Completion) -> Value {
-    assistant_message(
-        &completion.content,
-        &completion.reasoning,
-        &completion.tool_calls,
-    )
+    assistant_message(&completion.content, &completion.reasoning, &completion.tool_calls)
 }
 
 fn assistant_message(content: &str, reasoning: &str, calls: &[ToolCall]) -> Value {
@@ -1445,10 +1365,7 @@ fn set_auto_mode(
     arguments: &str,
 ) -> Result<(AgentMode, String), anyhow::Error> {
     if configured != AgentMode::Auto {
-        anyhow::bail!(
-            "mode is pinned to {}; AUTO is not active",
-            configured.label()
-        );
+        anyhow::bail!("mode is pinned to {}; AUTO is not active", configured.label());
     }
     let value: Value = serde_json::from_str(arguments)?;
     let mode = match value["mode"].as_str() {
@@ -1496,17 +1413,10 @@ fn context_layers(options: &TurnOptions, active_mode: AgentMode) -> Vec<(&'stati
         ("extensions", options.services.prompt_context()),
         ("summary", options.compaction.prompt_context()),
         ("memory", options.harness.prompt_context()),
-        (
-            "correction",
-            options.tether.correction_layer().unwrap_or_default(),
-        ),
+        ("correction", options.tether.correction_layer().unwrap_or_default()),
         (
             "delegation",
-            if options.allow_subagents {
-                options.hive.guidance()
-            } else {
-                String::new()
-            },
+            if options.allow_subagents { options.hive.guidance() } else { String::new() },
         ),
         ("goal", options.goal.prompt_context()),
         ("tasks", options.tasks.prompt_context()),
@@ -1785,11 +1695,7 @@ mod tests {
 
         // Exactly one system message, and it is first -- what strict Qwen3.5
         // templates require.
-        assert_eq!(
-            merged.len(),
-            3,
-            "3 system messages collapse to 1, + user + assistant"
-        );
+        assert_eq!(merged.len(), 3, "3 system messages collapse to 1, + user + assistant");
         assert_eq!(merged[0]["role"], "system");
         assert_eq!(merged[0]["content"], "base\n\ngoal\n\nmode");
         assert!(
@@ -1809,19 +1715,14 @@ mod tests {
             json!({"role":"user","content":"hey"}),
         ]);
         assert_eq!(merged.len(), 2);
-        assert_eq!(
-            merged[0]["content"],
-            "base\n\n3 older messages were omitted"
-        );
+        assert_eq!(merged[0]["content"], "base\n\n3 older messages were omitted");
         assert_eq!(merged[1]["role"], "user");
     }
 
     #[test]
     fn leaves_an_already_valid_message_list_untouched() {
-        let messages = vec![
-            json!({"role":"system","content":"base"}),
-            json!({"role":"user","content":"hey"}),
-        ];
+        let messages =
+            vec![json!({"role":"system","content":"base"}), json!({"role":"user","content":"hey"})];
         assert_eq!(merge_system_messages(messages.clone()), messages);
     }
 
@@ -1835,10 +1736,7 @@ mod tests {
 
         let drained = queue.drain();
         assert_eq!(drained.len(), 2);
-        assert!(
-            queue.is_empty(),
-            "draining takes the items — a second turn must not replay them"
-        );
+        assert!(queue.is_empty(), "draining takes the items — a second turn must not replay them");
         assert!(queue.drain().is_empty());
         assert!(matches!(drained[0], Injection::UserMessage(_)));
         assert!(matches!(drained[1], Injection::SubagentReport(_)));
@@ -1849,9 +1747,7 @@ mod tests {
         let (events, mut receiver) = mpsc::unbounded_channel();
         let queue = InjectionQueue::default();
         queue.push(Injection::UserMessage("stop and do X instead".into()));
-        queue.push(Injection::SubagentReport(
-            "worker alpha: done, 3 files".into(),
-        ));
+        queue.push(Injection::SubagentReport("worker alpha: done, 3 files".into()));
         let options = test_turn_options(queue);
         let mut messages = vec![json!({"role":"user","content":"original ask"})];
 
@@ -1863,10 +1759,7 @@ mod tests {
         assert_eq!(messages[1]["content"], "stop and do X instead");
         // A worker report is labelled as the delivery it is.
         let report = messages[2]["content"].as_str().unwrap();
-        assert!(
-            report.starts_with("[background subagent finished]"),
-            "{report}"
-        );
+        assert!(report.starts_with("[background subagent finished]"), "{report}");
         assert!(report.contains("worker alpha: done, 3 files"));
         // Both are surfaced to the user as notices.
         let mut notices = Vec::new();
@@ -1883,9 +1776,7 @@ mod tests {
     fn a_side_note_is_delivered_as_context_not_as_an_instruction() {
         let (events, mut receiver) = mpsc::unbounded_channel();
         let queue = InjectionQueue::default();
-        queue.push(Injection::SideNote(
-            "does this handle windows paths?".into(),
-        ));
+        queue.push(Injection::SideNote("does this handle windows paths?".into()));
         let options = test_turn_options(queue);
         let mut messages = vec![json!({"role":"user","content":"refactor the parser"})];
 
@@ -1897,10 +1788,7 @@ mod tests {
         // The framing is what separates a nudge from a new task.
         assert!(delivered.contains("not an instruction"), "{delivered}");
         assert!(delivered.contains("Do not change course"), "{delivered}");
-        assert!(
-            delivered.contains("finish the work already in progress"),
-            "{delivered}"
-        );
+        assert!(delivered.contains("finish the work already in progress"), "{delivered}");
         // And the user sees it was noted.
         let notice = std::iter::from_fn(|| receiver.try_recv().ok())
             .find_map(|event| match event {
@@ -1966,21 +1854,11 @@ mod tests {
         let opening = history.clone();
 
         sync_session_context(&mut history, &options, AgentMode::Build);
-        assert_eq!(
-            &history[..3],
-            &opening[..],
-            "history before it is untouched"
-        );
+        assert_eq!(&history[..3], &opening[..], "history before it is untouched");
         let first = appended(&history, 3);
+        assert!(first.iter().all(|block| block.starts_with(SESSION_CONTEXT_TAG)));
         assert!(
-            first
-                .iter()
-                .all(|block| block.starts_with(SESSION_CONTEXT_TAG))
-        );
-        assert!(
-            first
-                .iter()
-                .any(|block| block.contains("layer=\"mode\"") && block.contains("BUILD")),
+            first.iter().any(|block| block.contains("layer=\"mode\"") && block.contains("BUILD")),
             "{first:?}"
         );
 
@@ -1994,10 +1872,7 @@ mod tests {
 
         // Goal and mode change: only those two layers are re-sent, after
         // everything the provider has already seen.
-        options
-            .goal
-            .set(Some(crate::goal::Goal::new("ship the parser fix").unwrap()))
-            .unwrap();
+        options.goal.set(Some(crate::goal::Goal::new("ship the parser fix").unwrap())).unwrap();
         sync_session_context(&mut history, &options, AgentMode::Plan);
         assert_eq!(&history[..settled.len()], &settled[..], "never rewritten");
         let changed = appended(&history, settled.len());
@@ -2009,9 +1884,7 @@ mod tests {
                     && block.contains("ship the parser fix"))
         );
         assert!(
-            changed
-                .iter()
-                .any(|block| block.contains("layer=\"mode\"") && block.contains("PLAN"))
+            changed.iter().any(|block| block.contains("layer=\"mode\"") && block.contains("PLAN"))
         );
     }
 
@@ -2022,10 +1895,7 @@ mod tests {
             json!({"role": "system", "content": "base prompt"}),
             json!({"role": "user", "content": "fix the parser"}),
         ];
-        options
-            .goal
-            .set(Some(crate::goal::Goal::new("ship the parser fix").unwrap()))
-            .unwrap();
+        options.goal.set(Some(crate::goal::Goal::new("ship the parser fix").unwrap())).unwrap();
         sync_session_context(&mut history, &options, AgentMode::Build);
         let before = history.len();
 
@@ -2089,11 +1959,7 @@ mod tests {
         ];
         let compacted = compact_messages(&messages, 120);
         assert_eq!(compacted[0]["content"], "rules");
-        assert!(
-            compacted
-                .iter()
-                .any(|message| message["content"] == "recent")
-        );
+        assert!(compacted.iter().any(|message| message["content"] == "recent"));
         assert!(compacted.len() < messages.len() + 1);
     }
 
@@ -2118,10 +1984,7 @@ mod tests {
             })
             .expect("compaction note present");
         let content = note["content"].as_str().unwrap();
-        assert!(
-            content.contains("edit_file(src/main.rs)"),
-            "note was: {content}"
-        );
+        assert!(content.contains("edit_file(src/main.rs)"), "note was: {content}");
         assert!(content.contains("final") || compacted.iter().any(|m| m["content"] == "final"));
     }
 
@@ -2139,23 +2002,15 @@ mod tests {
         assert!(reason.starts_with("The user"));
 
         assert!(
-            set_auto_mode(
-                AgentMode::Plan,
-                &mut active,
-                r#"{"mode":"build","reason":"override"}"#,
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("pinned")
+            set_auto_mode(AgentMode::Plan, &mut active, r#"{"mode":"build","reason":"override"}"#,)
+                .unwrap_err()
+                .to_string()
+                .contains("pinned")
         );
     }
 
     fn call(name: &str) -> ToolCall {
-        ToolCall {
-            id: "1".into(),
-            name: name.into(),
-            arguments: "{}".into(),
-        }
+        ToolCall { id: "1".into(), name: name.into(), arguments: "{}".into() }
     }
 
     /// The rule this encodes: PLAN and AUTO stop the agent changing things,
@@ -2227,12 +2082,7 @@ mod tests {
     /// $h1 to $h2 hands the model a handle to a handle with no way back.
     #[test]
     fn handle_tool_results_are_exempt_from_binding() {
-        for name in [
-            "handle_slice",
-            "handle_grep",
-            "handle_recurse",
-            "handle_info",
-        ] {
+        for name in ["handle_slice", "handle_grep", "handle_recurse", "handle_info"] {
             assert!(name.starts_with("handle_"));
         }
         // The read-only classification has to agree: inspecting a bound
@@ -2308,10 +2158,7 @@ mod tests {
             "git_restore",
             "git_checkout",
         ] {
-            assert!(
-                !is_read_only(&call(name)),
-                "{name} must not be treated as read-only"
-            );
+            assert!(!is_read_only(&call(name)), "{name} must not be treated as read-only");
         }
     }
 }

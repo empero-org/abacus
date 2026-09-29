@@ -98,9 +98,7 @@ impl ProviderProfile {
     /// Clearing `default` is meaningless — it is the root of every fallback
     /// chain — so it is ignored rather than emptying the profile's model.
     pub fn set_role_model(&mut self, id: &str, model: Option<String>) {
-        let model = model
-            .map(|model| model.trim().to_owned())
-            .filter(|model| !model.is_empty());
+        let model = model.map(|model| model.trim().to_owned()).filter(|model| !model.is_empty());
         match (id, model) {
             ("default", Some(model)) => self.model = model,
             ("default", None) => {}
@@ -121,10 +119,7 @@ impl ProviderProfile {
         let mut inherited = false;
         loop {
             if let Some(model) = self.role_model(current.id) {
-                return Some(Resolved {
-                    model: model.to_owned(),
-                    inherited,
-                });
+                return Some(Resolved { model: model.to_owned(), inherited });
             }
             current = role(current.fallback?)?;
             inherited = true;
@@ -134,10 +129,7 @@ impl ProviderProfile {
     /// How many roles carry an explicit assignment, over how many exist — the
     /// `2/4` annotation beside the roles entry in the model hub.
     pub fn assigned_roles(&self) -> (usize, usize) {
-        let assigned = ROLES
-            .iter()
-            .filter(|role| self.role_model(role.id).is_some())
-            .count();
+        let assigned = ROLES.iter().filter(|role| self.role_model(role.id).is_some()).count();
         (assigned, ROLES.len())
     }
 }
@@ -176,14 +168,8 @@ mod tests {
         profile.set_role_model("aux", Some("small/model".to_owned()));
         profile.set_role_model("subagent", Some("mid/model".to_owned()));
         assert_eq!(profile.aux_model.as_deref(), Some("small/model"));
-        assert_eq!(
-            profile.roles.get("subagent").map(String::as_str),
-            Some("mid/model")
-        );
-        assert!(
-            !profile.roles.contains_key("aux"),
-            "aux is not duplicated into the map"
-        );
+        assert_eq!(profile.roles.get("subagent").map(String::as_str), Some("mid/model"));
+        assert!(!profile.roles.contains_key("aux"), "aux is not duplicated into the map");
         assert_eq!(profile.resolve_role("aux").unwrap().model, "small/model");
         assert!(!profile.resolve_role("subagent").unwrap().inherited);
         assert_eq!(profile.assigned_roles(), (3, ROLES.len()));

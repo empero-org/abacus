@@ -167,12 +167,7 @@ impl HandleStore {
 
     pub fn get(&self, id: &str) -> Option<Handle> {
         let id = id.trim().trim_start_matches('$');
-        self.inner
-            .read()
-            .expect("handle lock")
-            .handles
-            .get(id)
-            .cloned()
+        self.inner.read().expect("handle lock").handles.get(id).cloned()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -317,11 +312,7 @@ impl HandleStore {
         let lines: Vec<&str> = handle.content.lines().collect();
         let start = args.start_line.unwrap_or(1).max(1);
         if start > lines.len() {
-            bail!(
-                "start_line {start} is past the end of ${} ({} lines)",
-                handle.id,
-                lines.len()
-            );
+            bail!("start_line {start} is past the end of ${} ({} lines)", handle.id, lines.len());
         }
         let end = args.end_line.unwrap_or(lines.len()).min(lines.len());
         if end < start {
@@ -377,10 +368,7 @@ impl HandleStore {
             }
         }
         if out.is_empty() {
-            return Ok(format!(
-                "No matches for `{}` in ${}.",
-                args.pattern, handle.id
-            ));
+            return Ok(format!("No matches for `{}` in ${}.", args.pattern, handle.id));
         }
         let total = if matches > MAX_GREP_MATCHES {
             format!("{MAX_GREP_MATCHES}+ matches (truncated)")
@@ -404,10 +392,7 @@ impl HandleStore {
         }
         let chunks = chunks.clamp(1, MAX_CHUNKS).min(lines.len());
         let per = lines.len().div_ceil(chunks);
-        lines
-            .chunks(per)
-            .map(|group| clip(&group.join("\n"), MAX_CHUNK_CHARS))
-            .collect()
+        lines.chunks(per).map(|group| clip(&group.join("\n"), MAX_CHUNK_CHARS)).collect()
     }
 
     fn spend(&self, calls: usize) -> Result<()> {
@@ -473,19 +458,14 @@ async fn recurse_inner(
         concurrency: Option<usize>,
     }
     let args: Args = serde_json::from_str(arguments).context("invalid handle_recurse arguments")?;
-    let handle = store
-        .get(&args.id)
-        .with_context(|| format!("no bound payload `{}`", args.id))?;
+    let handle = store.get(&args.id).with_context(|| format!("no bound payload `{}`", args.id))?;
 
     let pieces = store.split(&handle, args.chunks.unwrap_or(DEFAULT_CHUNKS));
     if pieces.is_empty() {
         bail!("${} is empty", handle.id);
     }
     store.spend(pieces.len())?;
-    let concurrency = args
-        .concurrency
-        .unwrap_or(DEFAULT_CONCURRENCY)
-        .clamp(1, MAX_CONCURRENCY);
+    let concurrency = args.concurrency.unwrap_or(DEFAULT_CONCURRENCY).clamp(1, MAX_CONCURRENCY);
 
     let system = match &args.schema {
         Some(schema) => format!(
@@ -552,10 +532,7 @@ async fn recurse_inner(
                     // Not retried: a whole extra pass over every bad chunk is
                     // the proliferation this design is built to avoid. The
                     // model can re-ask a narrower question instead.
-                    rows.push((
-                        index,
-                        format!("chunk {}: unusable answer — {error:#}", index + 1),
-                    ));
+                    rows.push((index, format!("chunk {}: unusable answer — {error:#}", index + 1)));
                 }
             }
             continue;
@@ -572,25 +549,16 @@ async fn recurse_inner(
     if args.schema.is_some() {
         let mut report =
             serde_json::to_string_pretty(&structured).unwrap_or_else(|_| "[]".to_owned());
-        let problems: Vec<String> = rows
-            .into_iter()
-            .map(|(_, row)| row)
-            .filter(|row| !row.is_empty())
-            .collect();
+        let problems: Vec<String> =
+            rows.into_iter().map(|(_, row)| row).filter(|row| !row.is_empty()).collect();
         if !problems.is_empty() {
-            report.push_str(&format!(
-                "\n\n{failed} chunk(s) unusable:\n{}",
-                problems.join("\n")
-            ));
+            report.push_str(&format!("\n\n{failed} chunk(s) unusable:\n{}", problems.join("\n")));
         }
         return Ok(report);
     }
 
-    let body: Vec<String> = rows
-        .into_iter()
-        .map(|(_, row)| row)
-        .filter(|row| !row.is_empty())
-        .collect();
+    let body: Vec<String> =
+        rows.into_iter().map(|(_, row)| row).filter(|row| !row.is_empty()).collect();
     // A silent nothing is a real answer and must be distinguishable from a
     // fan-out that failed.
     let header = format!(
@@ -645,30 +613,18 @@ mod tests {
     fn slice_returns_a_numbered_window_and_rejects_a_bad_range() {
         let (store, _) = store_with(&log(100));
         let output = store
-            .execute(
-                "handle_slice",
-                &json!({"id":"h1","start_line":3,"end_line":5}).to_string(),
-            )
+            .execute("handle_slice", &json!({"id":"h1","start_line":3,"end_line":5}).to_string())
             .unwrap();
         assert!(output.contains("line 3:"), "{output}");
-        assert!(
-            output.contains("     5\t"),
-            "line numbers are shown: {output}"
-        );
+        assert!(output.contains("     5\t"), "line numbers are shown: {output}");
         assert!(!output.contains("line 6:"), "{output}");
 
         let past_end = store
-            .execute(
-                "handle_slice",
-                &json!({"id":"h1","start_line":500}).to_string(),
-            )
+            .execute("handle_slice", &json!({"id":"h1","start_line":500}).to_string())
             .unwrap();
         assert!(past_end.starts_with("Error:"), "{past_end}");
         let backwards = store
-            .execute(
-                "handle_slice",
-                &json!({"id":"h1","start_line":9,"end_line":2}).to_string(),
-            )
+            .execute("handle_slice", &json!({"id":"h1","start_line":9,"end_line":2}).to_string())
             .unwrap();
         assert!(backwards.starts_with("Error:"), "{backwards}");
     }
@@ -680,37 +636,24 @@ mod tests {
         let (store, _) = store_with(&content);
 
         let hit = store
-            .execute(
-                "handle_grep",
-                &json!({"id":"h1","pattern":"DATABASE_URL"}).to_string(),
-            )
+            .execute("handle_grep", &json!({"id":"h1","pattern":"DATABASE_URL"}).to_string())
             .unwrap();
         assert!(hit.contains("1 match(es)"), "{hit}");
         assert!(hit.contains("DATABASE_URL must be set"), "{hit}");
 
-        let miss = store
-            .execute(
-                "handle_grep",
-                &json!({"id":"h1","pattern":"zzz"}).to_string(),
-            )
-            .unwrap();
+        let miss =
+            store.execute("handle_grep", &json!({"id":"h1","pattern":"zzz"}).to_string()).unwrap();
         assert!(miss.starts_with("No matches"), "{miss}");
 
-        let bad = store
-            .execute("handle_grep", &json!({"id":"h1","pattern":"["}).to_string())
-            .unwrap();
-        assert!(
-            bad.starts_with("Error:"),
-            "an invalid regex reports itself: {bad}"
-        );
+        let bad =
+            store.execute("handle_grep", &json!({"id":"h1","pattern":"["}).to_string()).unwrap();
+        assert!(bad.starts_with("Error:"), "an invalid regex reports itself: {bad}");
     }
 
     #[test]
     fn a_missing_handle_says_how_to_find_the_right_one() {
         let (store, _) = store_with("x");
-        let output = store
-            .execute("handle_info", &json!({"id":"nope"}).to_string())
-            .unwrap();
+        let output = store.execute("handle_info", &json!({"id":"nope"}).to_string()).unwrap();
         assert!(output.contains("handle_list"), "{output}");
     }
 
@@ -720,10 +663,7 @@ mod tests {
         let pieces = store.split(&handle, 7);
         assert!(pieces.len() <= 7);
         for piece in &pieces {
-            assert!(
-                piece.starts_with("line "),
-                "chunks start mid-line: {piece:?}"
-            );
+            assert!(piece.starts_with("line "), "chunks start mid-line: {piece:?}");
         }
         // Nothing is dropped between chunks.
         let rejoined = pieces.join("\n");
@@ -791,10 +731,7 @@ mod tests {
         assert!(listing.contains("notes.md"), "{listing}");
 
         assert!(
-            HandleStore::default()
-                .execute("handle_list", "{}")
-                .unwrap()
-                .contains("No payloads")
+            HandleStore::default().execute("handle_list", "{}").unwrap().contains("No payloads")
         );
     }
 

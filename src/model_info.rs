@@ -80,11 +80,7 @@ impl ModelLimits {
     ) -> Self {
         let (mut context, mut output, mut source) = match known_limits(model) {
             Some((context, output)) => (context, output, LimitSource::Heuristic),
-            None => (
-                DEFAULT_CONTEXT_WINDOW,
-                DEFAULT_MAX_OUTPUT_TOKENS,
-                LimitSource::Default,
-            ),
+            None => (DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, LimitSource::Default),
         };
         let mut configured = None;
         if let Some(value) = context_override {
@@ -186,10 +182,8 @@ impl CompactionBudget {
 /// user prompt, so every later request replayed the opening turn.
 fn usable_input_tokens(limits: ModelLimits) -> usize {
     let reserved_output = reserved_output_tokens(limits);
-    let usable = limits
-        .context_window
-        .saturating_sub(reserved_output)
-        .saturating_sub(RESERVED_TOKENS);
+    let usable =
+        limits.context_window.saturating_sub(reserved_output).saturating_sub(RESERVED_TOKENS);
     let floor = min_usable_input_tokens(limits.context_window);
     usable.max(floor)
 }
@@ -309,9 +303,7 @@ pub async fn detect_limits(
         .user_agent(concat!("abacus-agent/", env!("CARGO_PKG_VERSION")))
         .build()
         .ok()?;
-    let mut request = client
-        .get(models_url)
-        .header(header::ACCEPT, "application/json");
+    let mut request = client.get(models_url).header(header::ACCEPT, "application/json");
     if let Some(key) = api_key {
         request = request.bearer_auth(key);
     }
@@ -334,22 +326,13 @@ fn extract_limits_from_models(value: &Value, model: &str) -> Option<(usize, Opti
     let target = model.to_ascii_lowercase();
     let entry = data
         .iter()
-        .find(|item| {
-            item["id"]
-                .as_str()
-                .is_some_and(|id| id.eq_ignore_ascii_case(model))
-        })
+        .find(|item| item["id"].as_str().is_some_and(|id| id.eq_ignore_ascii_case(model)))
         .or_else(|| {
             data.iter().find(|item| {
-                item["id"]
-                    .as_str()
-                    .is_some_and(|id| id.to_ascii_lowercase().ends_with(&target))
+                item["id"].as_str().is_some_and(|id| id.to_ascii_lowercase().ends_with(&target))
             })
         })?;
-    let context = read_usize(
-        entry,
-        &["context_length", "max_context_length", "context_window"],
-    )?;
+    let context = read_usize(entry, &["context_length", "max_context_length", "context_window"])?;
     let output = read_usize(entry, &["max_completion_tokens", "max_output_tokens"]).or_else(|| {
         entry
             .get("top_provider")
@@ -436,9 +419,7 @@ impl ModelCard {
                 .find_map(|key| pricing.get(*key).and_then(f64_from_value))
                 .map(|per_token| per_token * 1_000_000.0)
         };
-        let modalities = entry
-            .pointer("/architecture/input_modalities")
-            .and_then(Value::as_array);
+        let modalities = entry.pointer("/architecture/input_modalities").and_then(Value::as_array);
         Some(ModelCard {
             provider,
             name: entry["name"].as_str().map(str::to_owned),
@@ -460,16 +441,11 @@ impl ModelCard {
             output_cost: cost(&["completion", "output"]),
             vision: modalities
                 .is_some_and(|list| list.iter().any(|value| value.as_str() == Some("image"))),
-            reasoning: entry["supported_parameters"]
-                .as_array()
-                .is_some_and(|list| {
-                    list.iter().any(|value| {
-                        matches!(
-                            value.as_str(),
-                            Some("reasoning") | Some("include_reasoning")
-                        )
-                    })
-                }),
+            reasoning: entry["supported_parameters"].as_array().is_some_and(|list| {
+                list.iter().any(|value| {
+                    matches!(value.as_str(), Some("reasoning") | Some("include_reasoning"))
+                })
+            }),
             id,
         })
     }
@@ -481,11 +457,8 @@ pub fn parse_model_cards(value: &Value) -> Vec<ModelCard> {
         .as_array()
         .or_else(|| value["models"].as_array())
         .or_else(|| value.as_array());
-    let mut cards: Vec<ModelCard> = data
-        .into_iter()
-        .flatten()
-        .filter_map(ModelCard::from_entry)
-        .collect();
+    let mut cards: Vec<ModelCard> =
+        data.into_iter().flatten().filter_map(ModelCard::from_entry).collect();
     cards.sort_by_key(|card| card.id.to_ascii_lowercase());
     cards.dedup_by(|a, b| a.id == b.id);
     cards
@@ -529,22 +502,17 @@ fn trim_zeros_str(text: &str) -> String {
 }
 
 fn f64_from_value(value: &Value) -> Option<f64> {
-    value
-        .as_f64()
-        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+    value.as_f64().or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
 }
 
 fn read_usize(value: &Value, keys: &[&str]) -> Option<usize> {
-    keys.iter()
-        .find_map(|key| value.get(*key).and_then(usize_from_value))
+    keys.iter().find_map(|key| value.get(*key).and_then(usize_from_value))
 }
 
 /// Read a usize from a JSON value that is either a number or a `k`/`m`-suffixed
 /// numeric string (some servers expose `context_length` as `"128000"`).
 fn usize_from_value(v: &Value) -> Option<usize> {
-    v.as_u64()
-        .map(|n| n as usize)
-        .or_else(|| v.as_str().and_then(|s| parse_tokens(s).ok()))
+    v.as_u64().map(|n| n as usize).or_else(|| v.as_str().and_then(|s| parse_tokens(s).ok()))
 }
 
 /// Parse a token count from a CLI/settings string, tolerating `k`/`m` suffixes
@@ -660,10 +628,7 @@ mod tests {
         }
         .compaction_budget();
         assert!(small.compact_at_chars < large.compact_at_chars);
-        assert!(
-            large.compact_at_chars > 3_000_000,
-            "1M window should compact late"
-        );
+        assert!(large.compact_at_chars > 3_000_000, "1M window should compact late");
         // recent window must be smaller than the trigger.
         assert!(small.recent_budget_chars < small.compact_at_chars);
     }
@@ -885,11 +850,7 @@ mod tests {
         assert_eq!(card(0.15, 0.6).cost_label(), "$0.15/0.6");
         assert_eq!(card(150.0, 3.5).cost_label(), "$150/3.5");
         assert_eq!(
-            ModelCard {
-                context_length: Some(1_000_000),
-                ..ModelCard::default()
-            }
-            .context_label(),
+            ModelCard { context_length: Some(1_000_000), ..ModelCard::default() }.context_label(),
             "1m ctx"
         );
     }

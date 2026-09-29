@@ -216,10 +216,7 @@ pub fn role_rows(settings: &Settings, profile_id: &str) -> Vec<RoleRow> {
                 id: role.id,
                 label: role.label,
                 help: role.help,
-                model: resolved
-                    .as_ref()
-                    .map(|resolved| resolved.model.clone())
-                    .unwrap_or_default(),
+                model: resolved.as_ref().map(|resolved| resolved.model.clone()).unwrap_or_default(),
                 inherited: resolved.is_none_or(|resolved| resolved.inherited),
             }
         })
@@ -281,10 +278,7 @@ mod tests {
     }
 
     fn card(id: &str) -> ModelCard {
-        ModelCard {
-            id: id.to_owned(),
-            ..ModelCard::default()
-        }
+        ModelCard { id: id.to_owned(), ..ModelCard::default() }
     }
 
     #[test]
@@ -345,11 +339,7 @@ mod tests {
         // A subsequence typed from memory still lands.
         assert_eq!(filter(&cards, "clsonnet").len(), 1);
         assert!(filter(&cards, "zzz").is_empty());
-        assert_eq!(
-            filter(&cards, "  ").len(),
-            3,
-            "an empty query filters nothing"
-        );
+        assert_eq!(filter(&cards, "  ").len(), 3, "an empty query filters nothing");
         // `gpt` is a tight run in one id and scattered across the whole of the
         // other; the tight one ranks first.
         let scattered = vec![card("google/pathways-turbo"), card("openai/gpt-5")];

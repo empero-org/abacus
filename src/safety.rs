@@ -283,11 +283,7 @@ pub fn command_verdict(command: &str) -> Verdict {
             Verdict::Unclear => every_segment_inspects = false,
         }
     }
-    if saw_segment && every_segment_inspects {
-        Verdict::Allow
-    } else {
-        Verdict::Unclear
-    }
+    if saw_segment && every_segment_inspects { Verdict::Allow } else { Verdict::Unclear }
 }
 
 /// `>` writes, `>>` appends, `2>&1` duplicates, `>/dev/null` discards.
@@ -337,14 +333,11 @@ fn strip_descriptor_dups(lowered: &str) -> String {
 
 /// Commands that run another command. The wrapper is harmless; whatever it
 /// wraps is the thing to judge, which is how `xargs rm` slipped through.
-const WRAPPERS: &[&str] = &[
-    "xargs", "nice", "ionice", "timeout", "nohup", "time", "stdbuf", "watch", "env", "setsid",
-];
+const WRAPPERS: &[&str] =
+    &["xargs", "nice", "ionice", "timeout", "nohup", "time", "stdbuf", "watch", "env", "setsid"];
 
 fn segment_verdict(segment: &str) -> Verdict {
-    let mut words = segment
-        .split_whitespace()
-        .filter(|word| !word.contains('='));
+    let mut words = segment.split_whitespace().filter(|word| !word.contains('='));
     let Some(verb) = words.next() else {
         return Verdict::Allow;
     };
@@ -381,23 +374,11 @@ fn segment_verdict(segment: &str) -> Verdict {
         return Verdict::Deny;
     }
     if verb == "git" {
-        let subcommand = rest
-            .iter()
-            .find(|word| !word.starts_with('-'))
-            .copied()
-            .unwrap_or("");
-        return if DESTRUCTIVE_GIT.contains(&subcommand) {
-            Verdict::Deny
-        } else {
-            Verdict::Allow
-        };
+        let subcommand = rest.iter().find(|word| !word.starts_with('-')).copied().unwrap_or("");
+        return if DESTRUCTIVE_GIT.contains(&subcommand) { Verdict::Deny } else { Verdict::Allow };
     }
     if PACKAGE_MANAGERS.contains(&verb) {
-        let subcommand = rest
-            .iter()
-            .find(|word| !word.starts_with('-'))
-            .copied()
-            .unwrap_or("");
+        let subcommand = rest.iter().find(|word| !word.starts_with('-')).copied().unwrap_or("");
         // `cargo build` writes only into target/, which is what a planning
         // mode wants; `cargo install` changes the machine.
         return if PACKAGE_READ_SUBCOMMANDS.contains(&subcommand) {
@@ -441,27 +422,16 @@ const SECRET_SUFFIXES: &[&str] = &[".pem", ".key", ".p12", ".pfx", "id_rsa", "id
 /// Classify reading a path that lies outside the workspace.
 pub fn read_path_verdict(path: &Path) -> Verdict {
     let text = path.to_string_lossy().to_ascii_lowercase();
-    if SECRET_PATH_MARKERS
-        .iter()
-        .any(|marker| text.contains(marker))
+    if SECRET_PATH_MARKERS.iter().any(|marker| text.contains(marker))
         || SECRET_SUFFIXES.iter().any(|suffix| text.ends_with(suffix))
     {
         return Verdict::Deny;
     }
     // Ordinary system and library locations are reference material, and an
     // agent reading them is the normal case rather than the suspicious one.
-    const OBVIOUSLY_PUBLIC: &[&str] = &[
-        "/usr/",
-        "/lib/",
-        "/opt/",
-        "/etc/os-release",
-        "/proc/cpuinfo",
-        "/proc/meminfo",
-    ];
-    if OBVIOUSLY_PUBLIC
-        .iter()
-        .any(|prefix| text.starts_with(prefix))
-    {
+    const OBVIOUSLY_PUBLIC: &[&str] =
+        &["/usr/", "/lib/", "/opt/", "/etc/os-release", "/proc/cpuinfo", "/proc/meminfo"];
+    if OBVIOUSLY_PUBLIC.iter().any(|prefix| text.starts_with(prefix)) {
         return Verdict::Allow;
     }
     // Source and documentation read as project material wherever they live — a
@@ -499,19 +469,9 @@ pub fn env_file_verdict(path: &Path) -> Verdict {
             continue;
         }
         // Committed templates hold placeholders by convention.
-        const TEMPLATE_SUFFIXES: &[&str] = &[
-            ".example",
-            ".sample",
-            ".template",
-            ".dist",
-            ".defaults",
-            ".schema",
-            ".tpl",
-        ];
-        if TEMPLATE_SUFFIXES
-            .iter()
-            .any(|suffix| name.ends_with(suffix))
-        {
+        const TEMPLATE_SUFFIXES: &[&str] =
+            &[".example", ".sample", ".template", ".dist", ".defaults", ".schema", ".tpl"];
+        if TEMPLATE_SUFFIXES.iter().any(|suffix| name.ends_with(suffix)) {
             continue;
         }
         // A deployment's real environment is the one case still refused
@@ -544,12 +504,7 @@ pub fn read_paths(name: &str, arguments: &str) -> Vec<String> {
         "list_files" | "grep" | "glob" => one("path"),
         "read_files" => args["paths"]
             .as_array()
-            .map(|paths| {
-                paths
-                    .iter()
-                    .filter_map(|path| path.as_str().map(str::to_owned))
-                    .collect()
-            })
+            .map(|paths| paths.iter().filter_map(|path| path.as_str().map(str::to_owned)).collect())
             .unwrap_or_default(),
         _ => Vec::new(),
     }
@@ -608,13 +563,7 @@ pub async fn command_is_safe(provider: &Provider, cache: &SafetyCache, command: 
     if let Some(known) = cache.get(&key) {
         return known;
     }
-    let allowed = ask(
-        provider,
-        COMMAND_PROMPT,
-        &format!("Command:\n{command}"),
-        "INSPECT",
-    )
-    .await;
+    let allowed = ask(provider, COMMAND_PROMPT, &format!("Command:\n{command}"), "INSPECT").await;
     cache.put(key, allowed);
     allowed
 }
@@ -793,11 +742,7 @@ mod tests {
             "/home/op/other/service-account.yaml",
             "/home/op/.config/app/state",
         ] {
-            assert_eq!(
-                read_path_verdict(Path::new(judged)),
-                Verdict::Unclear,
-                "{judged}"
-            );
+            assert_eq!(read_path_verdict(Path::new(judged)), Verdict::Unclear, "{judged}");
         }
     }
 
@@ -813,26 +758,14 @@ mod tests {
             ".env.defaults",
             "config/.env.tpl",
         ] {
-            assert_eq!(
-                env_file_verdict(Path::new(template)),
-                Verdict::Allow,
-                "{template}"
-            );
+            assert_eq!(env_file_verdict(Path::new(template)), Verdict::Allow, "{template}");
         }
-        for live in [
-            ".env.production",
-            ".env.prod.local",
-            "deploy/.env.production",
-        ] {
+        for live in [".env.production", ".env.prod.local", "deploy/.env.production"] {
             assert_eq!(env_file_verdict(Path::new(live)), Verdict::Deny, "{live}");
         }
         // A real local file is judged rather than banned outright.
         for judged in [".env", ".env.local", ".env.test"] {
-            assert_eq!(
-                env_file_verdict(Path::new(judged)),
-                Verdict::Unclear,
-                "{judged}"
-            );
+            assert_eq!(env_file_verdict(Path::new(judged)), Verdict::Unclear, "{judged}");
         }
         // A path with no environment file in it is not this check's business.
         assert_eq!(env_file_verdict(Path::new("src/main.rs")), Verdict::Allow);

@@ -40,11 +40,7 @@ fn check(value: &Value, schema: &Value, path: &str) -> Result<()> {
     if let Some(allowed) = schema.get("enum").and_then(Value::as_array)
         && !allowed.contains(value)
     {
-        bail!(
-            "{path}: {} is not one of {}",
-            value,
-            Value::Array(allowed.clone())
-        );
+        bail!("{path}: {} is not one of {}", value, Value::Array(allowed.clone()));
     }
 
     if let Some(object) = value.as_object() {
@@ -142,21 +138,15 @@ mod tests {
 
     #[test]
     fn a_missing_required_property_names_itself() {
-        let error = validate(&json!({"verdict": "pass"}), &findings_schema())
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("missing required property `findings`"),
-            "{error}"
-        );
+        let error =
+            validate(&json!({"verdict": "pass"}), &findings_schema()).unwrap_err().to_string();
+        assert!(error.contains("missing required property `findings`"), "{error}");
     }
 
     #[test]
     fn a_wrong_type_names_the_path_so_the_worker_can_fix_it() {
         let value = json!({"verdict": "pass", "findings": "not an array"});
-        let error = validate(&value, &findings_schema())
-            .unwrap_err()
-            .to_string();
+        let error = validate(&value, &findings_schema()).unwrap_err().to_string();
         assert!(error.contains("$.findings"), "{error}");
         assert!(error.contains("expected array, found string"), "{error}");
     }
@@ -167,9 +157,7 @@ mod tests {
             "verdict": "pass",
             "findings": [{"file": "a.rs"}, {"line": 4}]
         });
-        let error = validate(&value, &findings_schema())
-            .unwrap_err()
-            .to_string();
+        let error = validate(&value, &findings_schema()).unwrap_err().to_string();
         assert!(error.contains("$.findings[1]"), "{error}");
         assert!(error.contains("`file`"), "{error}");
     }
@@ -177,9 +165,7 @@ mod tests {
     #[test]
     fn an_enum_rejects_an_unlisted_value() {
         let value = json!({"verdict": "maybe", "findings": []});
-        let error = validate(&value, &findings_schema())
-            .unwrap_err()
-            .to_string();
+        let error = validate(&value, &findings_schema()).unwrap_err().to_string();
         assert!(error.contains("not one of"), "{error}");
     }
 

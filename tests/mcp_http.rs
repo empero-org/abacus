@@ -16,18 +16,11 @@ async fn negotiates_lists_and_calls_streamable_http_mcp() {
         for index in 0..4 {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request = read_request(&mut stream).await;
-            let header_end = request
-                .windows(4)
-                .position(|part| part == b"\r\n\r\n")
-                .unwrap();
+            let header_end = request.windows(4).position(|part| part == b"\r\n\r\n").unwrap();
             let headers = String::from_utf8_lossy(&request[..header_end]);
             let body: Value = serde_json::from_slice(&request[header_end + 4..]).unwrap();
             if index > 0 {
-                assert!(
-                    headers
-                        .to_ascii_lowercase()
-                        .contains("mcp-session-id: test-session")
-                );
+                assert!(headers.to_ascii_lowercase().contains("mcp-session-id: test-session"));
             }
             let (status, response, session) = match body["method"].as_str().unwrap() {
                 "initialize" => (
@@ -60,11 +53,7 @@ async fn negotiates_lists_and_calls_streamable_http_mcp() {
                 ),
                 other => panic!("unexpected method {other}"),
             };
-            let session_header = if session {
-                "mcp-session-id: test-session\r\n"
-            } else {
-                ""
-            };
+            let session_header = if session { "mcp-session-id: test-session\r\n" } else { "" };
             let response = format!(
                 "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n{session_header}content-length: {}\r\nconnection: close\r\n\r\n{}",
                 response.len(),
@@ -85,18 +74,11 @@ async fn negotiates_lists_and_calls_streamable_http_mcp() {
     );
     let workspace = tempdir().unwrap();
     let manager = McpManager::connect(&configs, workspace.path()).await;
-    assert!(
-        manager.diagnostics().is_empty(),
-        "{:?}",
-        manager.diagnostics()
-    );
+    assert!(manager.diagnostics().is_empty(), "{:?}", manager.diagnostics());
     let tool = manager.tools().next().unwrap();
     assert_eq!(tool.exposed_name, "mcp__docs__echo");
     assert_eq!(manager.needs_approval(&tool.exposed_name), Some(true));
-    let result = manager
-        .execute(&tool.exposed_name, r#"{"text":"hello mcp"}"#)
-        .await
-        .unwrap();
+    let result = manager.execute(&tool.exposed_name, r#"{"text":"hello mcp"}"#).await.unwrap();
     assert_eq!(result, "hello mcp");
     server.await.unwrap();
 }
@@ -109,9 +91,7 @@ async fn read_request(stream: &mut TcpStream) -> Vec<u8> {
         let read = stream.read(&mut buffer[used..]).await.unwrap();
         used += read;
         if expected.is_none()
-            && let Some(header_end) = buffer[..used]
-                .windows(4)
-                .position(|part| part == b"\r\n\r\n")
+            && let Some(header_end) = buffer[..used].windows(4).position(|part| part == b"\r\n\r\n")
         {
             let headers = String::from_utf8_lossy(&buffer[..header_end]);
             let length = headers

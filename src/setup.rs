@@ -141,16 +141,8 @@ pub fn key_in_env(preset: &Preset) -> bool {
 /// the hint and key columns line up regardless of name length.
 fn print_presets() {
     let marks = console::marks();
-    let name_width = PRESETS
-        .iter()
-        .map(|preset| preset.name.len())
-        .max()
-        .unwrap_or(10);
-    let hint_width = PRESETS
-        .iter()
-        .map(|preset| preset.hint.len())
-        .max()
-        .unwrap_or(20);
+    let name_width = PRESETS.iter().map(|preset| preset.name.len()).max().unwrap_or(10);
+    let hint_width = PRESETS.iter().map(|preset| preset.hint.len()).max().unwrap_or(20);
     for (index, preset) in PRESETS.iter().enumerate() {
         // A key already in the environment is the single most useful thing to
         // know here — it decides whether the next step will just work.
@@ -262,11 +254,7 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
             (
                 {
                     let slug = slug(&name);
-                    if slug.is_empty() {
-                        "custom".to_owned()
-                    } else {
-                        slug
-                    }
+                    if slug.is_empty() { "custom".to_owned() } else { slug }
                 },
                 name,
                 base,
@@ -307,18 +295,13 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
         ))?;
         if !pasted.trim().is_empty() {
             key = Some(pasted.trim().to_owned());
-            credentials
-                .keys
-                .insert(profile_id.clone(), pasted.trim().to_owned());
+            credentials.keys.insert(profile_id.clone(), pasted.trim().to_owned());
         }
     }
 
     // ---- 2/3 model --------------------------------------------------------
     console::step(2, 3, "Connect and choose a model");
-    print!(
-        "       {}",
-        console::dim("Reaching the provider and discovering models… ")
-    );
+    print!("       {}", console::dim("Reaching the provider and discovering models… "));
     io::stdout().flush()?;
     let discovered = discover_models(&base_url, key.as_deref()).await;
     let model = match discovered {
@@ -369,19 +352,12 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
         "Allow file edits and commands without asking each time?",
         settings.ui.permission_mode == PermissionMode::AlwaysApprove,
     )?;
-    settings.ui.permission_mode = if approve_automatically {
-        PermissionMode::AlwaysApprove
-    } else {
-        PermissionMode::Ask
-    };
-    settings.ui.vim_mode = console::confirm(
-        "Enable Vim keybindings in the composer?",
-        settings.ui.vim_mode,
-    )?;
-    settings.ui.show_tooltips = console::confirm(
-        "Show quick-start guidance on new sessions?",
-        settings.ui.show_tooltips,
-    )?;
+    settings.ui.permission_mode =
+        if approve_automatically { PermissionMode::AlwaysApprove } else { PermissionMode::Ask };
+    settings.ui.vim_mode =
+        console::confirm("Enable Vim keybindings in the composer?", settings.ui.vim_mode)?;
+    settings.ui.show_tooltips =
+        console::confirm("Show quick-start guidance on new sessions?", settings.ui.show_tooltips)?;
     settings.search.enabled = console::confirm(
         "Enable web search (web_search / read_page tools)?",
         settings.search.enabled,
@@ -389,14 +365,8 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
     if settings.search.enabled {
         console::blank();
         for (index, (name, requirement)) in [
-            (
-                "Automatic",
-                "picks the best of the below that is configured",
-            ),
-            (
-                "SearXNG",
-                "no key — your own instance, the best option here",
-            ),
+            ("Automatic", "picks the best of the below that is configured"),
+            ("SearXNG", "no key — your own instance, the best option here"),
             ("Brave", "needs BRAVE_API_KEY — full web search"),
             ("Bing", "no key — public page, best effort"),
             (
@@ -423,9 +393,7 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
         };
         // Option 5 is `auto` with the shared instance permitted, not a
         // backend of its own — a key the operator adds later still wins.
-        let choice = console::prompt("Search backend", Some(default))?
-            .trim()
-            .to_owned();
+        let choice = console::prompt("Search backend", Some(default))?.trim().to_owned();
         settings.search.use_shared_instance = choice == "5";
         let (backend, env_var) = match choice.as_str() {
             "2" => (SearchBackend::Searxng, None),
@@ -456,9 +424,7 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
         }
         settings.search.backend = backend;
         if let Some(env_var) = env_var
-            && std::env::var(env_var)
-                .map(|value| value.trim().is_empty())
-                .unwrap_or(true)
+            && std::env::var(env_var).map(|value| value.trim().is_empty()).unwrap_or(true)
         {
             println!(
                 "      {}",
@@ -477,15 +443,8 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
 
     // ---- summary ----------------------------------------------------------
     console::blank();
-    println!(
-        "  {}",
-        console::dim(&console::marks().rule.repeat(console::WIDTH))
-    );
-    println!(
-        "  {} {}",
-        console::ok(console::marks().pass),
-        console::bold("Ready")
-    );
+    println!("  {}", console::dim(&console::marks().rule.repeat(console::WIDTH)));
+    println!("  {} {}", console::ok(console::marks().pass), console::bold("Ready"));
     console::blank();
     console::field("profile", &profile_id);
     console::field("model", &model);
@@ -502,16 +461,8 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
     );
     console::field("settings", &paths.config_file.display().to_string());
     console::blank();
-    println!(
-        "  {}  {}",
-        console::dim("start"),
-        console::accent("cd your-project && abacus")
-    );
-    println!(
-        "  {}  {}",
-        console::dim("check"),
-        console::accent("abacus doctor")
-    );
+    println!("  {}  {}", console::dim("start"), console::accent("cd your-project && abacus"));
+    println!("  {}  {}", console::dim("check"), console::accent("abacus doctor"));
     console::blank();
     Ok(())
 }
@@ -559,10 +510,7 @@ pub async fn discover_endpoints(
         let detail = response.text().await.unwrap_or_default();
         bail!("provider returned {status}: {}", one_line(&detail, 240));
     }
-    let value: Value = response
-        .json()
-        .await
-        .context("provider returned invalid JSON")?;
+    let value: Value = response.json().await.context("provider returned invalid JSON")?;
     Ok(value["data"]["endpoints"]
         .as_array()
         .into_iter()
@@ -572,10 +520,7 @@ pub async fn discover_endpoints(
                 name: endpoint["provider_name"].as_str()?.to_owned(),
                 tag: endpoint["tag"].as_str().unwrap_or_default().to_owned(),
                 context_length: endpoint["context_length"].as_u64().unwrap_or(0),
-                quantization: endpoint["quantization"]
-                    .as_str()
-                    .unwrap_or("unknown")
-                    .to_owned(),
+                quantization: endpoint["quantization"].as_str().unwrap_or("unknown").to_owned(),
             })
         })
         .collect())
@@ -608,10 +553,7 @@ pub async fn discover_model_cards(
         let detail = response.text().await.unwrap_or_default();
         bail!("provider returned {status}: {}", one_line(&detail, 240));
     }
-    let value: Value = response
-        .json()
-        .await
-        .context("provider returned invalid JSON")?;
+    let value: Value = response.json().await.context("provider returned invalid JSON")?;
     Ok(crate::model_info::parse_model_cards(&value))
 }
 
@@ -632,14 +574,8 @@ pub async fn discover_models(base_url: &str, api_key: Option<&str>) -> Result<Ve
         let detail = response.text().await.unwrap_or_default();
         bail!("provider returned {status}: {}", one_line(&detail, 240));
     }
-    let value: Value = response
-        .json()
-        .await
-        .context("provider returned invalid JSON")?;
-    Ok(crate::model_info::parse_model_cards(&value)
-        .into_iter()
-        .map(|card| card.id)
-        .collect())
+    let value: Value = response.json().await.context("provider returned invalid JSON")?;
+    Ok(crate::model_info::parse_model_cards(&value).into_iter().map(|card| card.id).collect())
 }
 
 /// Present the discovered models. A provider can list hundreds, so the list is
@@ -653,9 +589,7 @@ fn choose_model(models: &[String], preferred: &str) -> Result<String> {
             .iter()
             .filter(|model| {
                 filter.is_empty()
-                    || model
-                        .to_ascii_lowercase()
-                        .contains(&filter.to_ascii_lowercase())
+                    || model.to_ascii_lowercase().contains(&filter.to_ascii_lowercase())
             })
             .collect::<Vec<_>>();
         console::blank();
@@ -663,16 +597,9 @@ fn choose_model(models: &[String], preferred: &str) -> Result<String> {
             println!("      {}", console::warn("Nothing matches that filter."));
         }
         for (index, model) in matched.iter().take(PAGE).enumerate() {
-            let marker = if *model == preferred {
-                console::ok(" (current)")
-            } else {
-                String::new()
-            };
-            println!(
-                "    {}  {}{marker}",
-                console::accent(&format!("{:>2}", index + 1)),
-                model
-            );
+            let marker =
+                if *model == preferred { console::ok(" (current)") } else { String::new() };
+            println!("    {}  {}{marker}", console::accent(&format!("{:>2}", index + 1)), model);
         }
         let hidden = matched.len().saturating_sub(PAGE);
         if hidden > 0 {
@@ -705,14 +632,8 @@ fn choose_model(models: &[String], preferred: &str) -> Result<String> {
 /// away everything already chosen, which is a harsh penalty for pressing enter.
 fn prompt_model(fallback: &str) -> Result<String> {
     loop {
-        let model = console::prompt(
-            "Model ID",
-            if fallback.is_empty() {
-                None
-            } else {
-                Some(fallback)
-            },
-        )?;
+        let model =
+            console::prompt("Model ID", if fallback.is_empty() { None } else { Some(fallback) })?;
         if !model.trim().is_empty() {
             return Ok(model.trim().to_owned());
         }
@@ -726,13 +647,7 @@ fn prompt_model(fallback: &str) -> Result<String> {
 fn slug(value: &str) -> String {
     let value = value
         .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { '-' })
         .collect::<String>();
     value.trim_matches('-').to_owned()
 }
@@ -759,10 +674,7 @@ mod tests {
         );
         // A local address defaults to http — https on localhost is the rarer
         // case and produces a confusing TLS error rather than a clear one.
-        assert_eq!(
-            normalise_base_url("localhost:11434/v1").unwrap(),
-            "http://localhost:11434/v1"
-        );
+        assert_eq!(normalise_base_url("localhost:11434/v1").unwrap(), "http://localhost:11434/v1");
         assert_eq!(
             normalise_base_url("http://127.0.0.1:8000/v1").unwrap(),
             "http://127.0.0.1:8000/v1"

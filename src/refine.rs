@@ -167,11 +167,7 @@ pub struct Reflector<'a> {
 impl<'a> Reflector<'a> {
     /// A reflector that builds its own prompt, with no cache to reuse.
     pub fn detached(provider: &'a Provider) -> Self {
-        Self {
-            provider,
-            in_context: false,
-            tools: &[],
-        }
+        Self { provider, in_context: false, tools: &[] }
     }
 
     /// Ask for one JSON answer, in the live context when that is possible.
@@ -219,15 +215,8 @@ pub async fn should_refine(
             trajectory(messages, REVIEW_TRAJECTORY_CHARS)
         )
     };
-    let reply = reflector
-        .ask(
-            REVIEW_PROMPT,
-            IN_CONTEXT_REVIEW_PROMPT,
-            &detail,
-            messages,
-            cancel,
-        )
-        .await?;
+    let reply =
+        reflector.ask(REVIEW_PROMPT, IN_CONTEXT_REVIEW_PROMPT, &detail, messages, cancel).await?;
     let value = extract_json(&reply).ok()?;
     Some((
         value.get("should_refine").and_then(Value::as_bool) == Some(true),
@@ -272,15 +261,8 @@ pub async fn run(
         "\n\nReturn only the JSON object. If nothing is justified, return an empty edits array.",
     );
 
-    let reply = reflector
-        .ask(
-            PLAN_PROMPT,
-            IN_CONTEXT_PLAN_PROMPT,
-            &detail,
-            messages,
-            cancel,
-        )
-        .await?;
+    let reply =
+        reflector.ask(PLAN_PROMPT, IN_CONTEXT_PLAN_PROMPT, &detail, messages, cancel).await?;
     let (proposal, drafts) = parse_reply(&reply).ok()?;
 
     // Papercuts go through the ordinary tool path, so they inherit its
@@ -323,10 +305,7 @@ async fn complete(
 ) -> Option<String> {
     // Deltas are discarded: a refinement is bookkeeping, not output.
     let (deltas, _sink) = mpsc::unbounded_channel();
-    let completion = provider
-        .complete(messages, tools, deltas, cancel)
-        .await
-        .ok()?;
+    let completion = provider.complete(messages, tools, deltas, cancel).await.ok()?;
     if completion.cancelled || completion.content.trim().is_empty() {
         return None;
     }
@@ -349,10 +328,8 @@ fn trajectory(messages: &[Value], budget: usize) -> String {
                     lines.push(format!("{role}: {}", content.trim()));
                 }
                 if let Some(calls) = message["tool_calls"].as_array() {
-                    let names: Vec<&str> = calls
-                        .iter()
-                        .filter_map(|call| call["function"]["name"].as_str())
-                        .collect();
+                    let names: Vec<&str> =
+                        calls.iter().filter_map(|call| call["function"]["name"].as_str()).collect();
                     if !names.is_empty() {
                         lines.push(format!("assistant ran: {}", names.join(", ")));
                     }

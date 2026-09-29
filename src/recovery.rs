@@ -62,11 +62,7 @@ pub fn set_session(session: Option<String>) {
 pub fn peek_session(file: &Path) -> Option<String> {
     let content = std::fs::read_to_string(file).ok()?;
     let line = content.lines().find(|line| line.starts_with("Session: "))?;
-    let id = line
-        .strip_prefix("Session: `")?
-        .strip_suffix('`')?
-        .trim()
-        .to_owned();
+    let id = line.strip_prefix("Session: `")?.strip_suffix('`')?.trim().to_owned();
     (!id.is_empty()).then_some(id)
 }
 
@@ -87,11 +83,7 @@ fn append(delta: &str, thinking: bool) {
     if partial.file.is_none() {
         return;
     }
-    let target = if thinking {
-        &mut partial.thinking
-    } else {
-        &mut partial.answer
-    };
+    let target = if thinking { &mut partial.thinking } else { &mut partial.answer };
     if target.len() < MAX_CHARS {
         target.push_str(delta);
     }
@@ -134,9 +126,7 @@ fn render(partial: &Partial) -> String {
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
     ));
     if let Some(session) = &partial.session {
-        out.push_str(&format!(
-            "\nSession: `{session}` — resume with `abacus --resume`.\n"
-        ));
+        out.push_str(&format!("\nSession: `{session}` — resume with `abacus --resume`.\n"));
     }
     if !partial.thinking.trim().is_empty() {
         out.push_str("\n## Reasoning\n\n");
@@ -170,11 +160,7 @@ mod tests {
 
     fn reset(file: Option<PathBuf>) {
         if let Ok(mut partial) = slot().lock() {
-            *partial = Partial {
-                file,
-                session: Some("s-1".into()),
-                ..Partial::default()
-            };
+            *partial = Partial { file, session: Some("s-1".into()), ..Partial::default() };
         }
     }
 

@@ -305,11 +305,7 @@ impl InputBuffer {
 
     pub fn selected_text(&self) -> Option<String> {
         let (start, end) = self.selection?;
-        Some(
-            self.chars[start..end.min(self.chars.len())]
-                .iter()
-                .collect(),
-        )
+        Some(self.chars[start..end.min(self.chars.len())].iter().collect())
     }
 
     /// Restore the buffer to before the last edit. Runs of typed characters
@@ -318,8 +314,7 @@ impl InputBuffer {
         let Some((chars, cursor)) = self.undo_stack.pop() else {
             return false;
         };
-        self.redo_stack
-            .push((std::mem::take(&mut self.chars), self.cursor));
+        self.redo_stack.push((std::mem::take(&mut self.chars), self.cursor));
         self.chars = chars;
         self.cursor = cursor.min(self.chars.len());
         self.selection = None;
@@ -331,8 +326,7 @@ impl InputBuffer {
         let Some((chars, cursor)) = self.redo_stack.pop() else {
             return false;
         };
-        self.undo_stack
-            .push((std::mem::take(&mut self.chars), self.cursor));
+        self.undo_stack.push((std::mem::take(&mut self.chars), self.cursor));
         self.chars = chars;
         self.cursor = cursor.min(self.chars.len());
         self.selection = None;
@@ -386,14 +380,9 @@ mod tests {
         let rows = buffer.wrapped_rows(10);
         assert!(rows.len() >= 3, "{rows:?}");
         assert_eq!(buffer.wrapped_line_count(10), rows.len());
-        let text: Vec<String> = rows
-            .iter()
-            .map(|&(start, end)| buffer.chars[start..end].iter().collect())
-            .collect();
-        assert!(
-            text.iter().all(|row| row.len() <= 10),
-            "no row exceeds the width: {text:?}"
-        );
+        let text: Vec<String> =
+            rows.iter().map(|&(start, end)| buffer.chars[start..end].iter().collect()).collect();
+        assert!(text.iter().all(|row| row.len() <= 10), "no row exceeds the width: {text:?}");
         assert!(text[0].starts_with("the"), "{text:?}");
 
         // The cursor at the very end sits on the last row.
@@ -458,10 +447,7 @@ mod tests {
         buffer.select_all();
         assert_eq!(buffer.selected_text().as_deref(), Some("copy me"));
         buffer.insert('!');
-        assert!(
-            buffer.selection().is_none(),
-            "typing dismisses the selection"
-        );
+        assert!(buffer.selection().is_none(), "typing dismisses the selection");
     }
 
     #[test]
@@ -473,10 +459,7 @@ mod tests {
         assert!(!buffer.move_up_wrapped(5) || buffer.wrapped_cursor(5).0 == 0);
         while buffer.move_up_wrapped(5) {}
         assert_eq!(buffer.wrapped_cursor(5).0, 0);
-        assert!(
-            !buffer.move_up_wrapped(5),
-            "edge reached — caller uses history"
-        );
+        assert!(!buffer.move_up_wrapped(5), "edge reached — caller uses history");
         assert!(buffer.move_down_wrapped(5));
     }
 

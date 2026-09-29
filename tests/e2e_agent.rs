@@ -144,14 +144,9 @@ async fn streamed_agent_searches_workspace_and_finishes() {
     assert!(searched);
     assert!(completed.iter().any(|message| {
         message["role"] == "tool"
-            && message["content"]
-                .as_str()
-                .is_some_and(|content| content.contains("main.rs:1"))
+            && message["content"].as_str().is_some_and(|content| content.contains("main.rs:1"))
     }));
-    assert_eq!(
-        completed.last().unwrap()["content"],
-        "Found the reference in main.rs."
-    );
+    assert_eq!(completed.last().unwrap()["content"], "Found the reference in main.rs.");
 }
 
 #[tokio::test]
@@ -266,10 +261,7 @@ async fn a_cancelled_turn_keeps_the_work_it_already_did() {
             // Cancel the moment the first tool has run, mimicking a user
             // pressing esc partway through.
             AgentEvent::ToolFinished { .. } => cancel.store(true, Ordering::Relaxed),
-            AgentEvent::Done {
-                messages,
-                reason: why,
-            } => {
+            AgentEvent::Done { messages, reason: why } => {
                 completed = Some(messages);
                 reason = Some(why);
                 break;
@@ -360,10 +352,7 @@ async fn responses_protocol_uses_responses_endpoint_and_stream_format() {
         .await
         .unwrap();
     assert_eq!(completion.content, "ready");
-    assert_eq!(
-        rx.try_recv().unwrap(),
-        abacus_agent::provider::Chunk::Text("ready".to_owned())
-    );
+    assert_eq!(rx.try_recv().unwrap(), abacus_agent::provider::Chunk::Text("ready".to_owned()));
     server.await.unwrap();
 }
 
@@ -480,10 +469,7 @@ async fn edit_requires_reviewable_approval_before_atomic_write() {
     agent.await.unwrap();
     server.await.unwrap();
     assert!(approved);
-    assert_eq!(
-        std::fs::read_to_string(workspace.join("value.txt")).unwrap(),
-        "new\n"
-    );
+    assert_eq!(std::fs::read_to_string(workspace.join("value.txt")).unwrap(), "new\n");
 }
 
 #[tokio::test]
@@ -574,10 +560,7 @@ async fn text_emitted_tool_calls_are_parsed_when_native_calls_absent() {
             }
             AgentEvent::ToolFinished { name, output } => {
                 assert_eq!(name, "read_file");
-                assert!(
-                    output.contains("hello"),
-                    "tool output should contain file content"
-                );
+                assert!(output.contains("hello"), "tool output should contain file content");
                 saw_result = true;
             }
             AgentEvent::Done { .. } => break,
@@ -587,10 +570,7 @@ async fn text_emitted_tool_calls_are_parsed_when_native_calls_absent() {
     }
     agent.await.unwrap();
     server.await.unwrap();
-    assert!(
-        saw_read,
-        "text-emitted read_file call must be parsed and dispatched"
-    );
+    assert!(saw_read, "text-emitted read_file call must be parsed and dispatched");
     assert!(saw_result, "read_file must return the file contents");
 }
 
@@ -678,10 +658,7 @@ async fn auto_mode_blocks_mutation_until_model_selects_build() {
     agent.await.unwrap();
     server.await.unwrap();
     assert!(blocked);
-    assert_eq!(
-        std::fs::read_to_string(workspace.join("value.txt")).unwrap(),
-        "old\n"
-    );
+    assert_eq!(std::fs::read_to_string(workspace.join("value.txt")).unwrap(), "old\n");
 }
 
 #[tokio::test]
@@ -765,10 +742,7 @@ async fn auto_mode_selection_enables_later_tool_in_same_completion() {
     agent.await.unwrap();
     server.await.unwrap();
     assert!(selected_build);
-    assert_eq!(
-        std::fs::read_to_string(workspace.join("value.txt")).unwrap(),
-        "new\n"
-    );
+    assert_eq!(std::fs::read_to_string(workspace.join("value.txt")).unwrap(), "new\n");
 }
 
 /// Phrases that identify a compaction request. A summariser that is the
@@ -911,38 +885,28 @@ async fn rolling_summary_compaction_fires_on_large_context() {
 
     let completed = completed.expect("agent should complete");
     // The rolling-summary LLM call fired.
-    assert!(
-        saw_summary.load(Ordering::Relaxed),
-        "compaction summarization call was not made"
-    );
+    assert!(saw_summary.load(Ordering::Relaxed), "compaction summarization call was not made");
     // With no compaction model assigned the summariser is the conversation's
     // own model, so the summary is asked for inside the live context — the
     // request whose prefix the provider already has cached — rather than
     // under a freshly built prompt that shares none of it.
-    assert!(
-        summarised_in_context.load(Ordering::Relaxed),
-        "summary was not requested in-context"
-    );
+    assert!(summarised_in_context.load(Ordering::Relaxed), "summary was not requested in-context");
     // The LLM path was taken (not the drop-only fallback, which would inject an
     // "older conversation messages were omitted" system note).
     assert!(
-        !completed.iter().any(|m| m["content"]
-            .as_str()
-            .is_some_and(|c| c.contains("were omitted"))),
+        !completed
+            .iter()
+            .any(|m| m["content"].as_str().is_some_and(|c| c.contains("were omitted"))),
         "fallback drop-only path was used instead of LLM summarization"
     );
     // The compacted middle (the 420k blob) is gone from the live history.
     assert!(
-        !completed
-            .iter()
-            .any(|m| m["content"].as_str().is_some_and(|c| c.contains("BIGBLOB"))),
+        !completed.iter().any(|m| m["content"].as_str().is_some_and(|c| c.contains("BIGBLOB"))),
         "compacted middle was not dropped"
     );
     // The verbatim recent tail survives.
     assert!(
-        completed
-            .iter()
-            .any(|m| m["content"].as_str() == Some("working on it")),
+        completed.iter().any(|m| m["content"].as_str() == Some("working on it")),
         "recent tail was not preserved"
     );
     assert_eq!(completed.last().unwrap()["content"], "all done");
@@ -1045,10 +1009,7 @@ async fn intent_snapshot_runs_beside_the_turn_not_after_it() {
          (intent at {intent_at}ms, answer finished at {answer_at}ms)"
     );
     assert_eq!(tether.intent().as_deref(), Some("Ship the importer fix."));
-    assert!(
-        tethered.is_some(),
-        "the user is told what the session is tethered to"
-    );
+    assert!(tethered.is_some(), "the user is told what the session is tethered to");
 }
 
 /// Refinement is two calls, not one: a cheap gate decides whether the turn
@@ -1126,10 +1087,7 @@ async fn a_refusing_review_gate_skips_the_planning_call() {
     let agent = tokio::spawn(run_turn(
         provider,
         messages,
-        TurnOptions {
-            harness: harness.clone(),
-            ..base_options(&workspace)
-        },
+        TurnOptions { harness: harness.clone(), ..base_options(&workspace) },
         events,
     ));
     while let Some(event) = receiver.recv().await {
@@ -1142,20 +1100,13 @@ async fn a_refusing_review_gate_skips_the_planning_call() {
     agent.await.unwrap();
     server.await.unwrap();
 
-    assert_eq!(
-        gates.load(Ordering::Relaxed),
-        1,
-        "the gate is consulted once"
-    );
+    assert_eq!(gates.load(Ordering::Relaxed), 1, "the gate is consulted once");
     assert_eq!(
         plans.load(Ordering::Relaxed),
         0,
         "a refused gate must not pay for the planning call"
     );
-    assert!(
-        harness.snapshot().is_empty(),
-        "nothing is written when the gate refuses"
-    );
+    assert!(harness.snapshot().is_empty(), "nothing is written when the gate refuses");
 }
 
 /// The Grok example is a copy-paste starting point, so it is worth proving it
@@ -1202,10 +1153,7 @@ async fn shipped_grok_example_sends_a_bearer_key_to_an_openai_shaped_endpoint() 
             "https://api.x.ai/v1/chat/completions",
             &format!("http://{address}/v1/chat/completions"),
         )
-        .replace(
-            "  env: XAI_API_KEY",
-            &format!("  file: {}", key_file.display()),
-        );
+        .replace("  env: XAI_API_KEY", &format!("  file: {}", key_file.display()));
     let endpoints = directory.path().join("endpoints");
     std::fs::create_dir(&endpoints).unwrap();
     std::fs::write(endpoints.join("grok.yaml"), adapted).unwrap();
@@ -1214,10 +1162,7 @@ async fn shipped_grok_example_sends_a_bearer_key_to_an_openai_shaped_endpoint() 
     let endpoint = abacus_agent::endpoint::ScriptedEndpoint::resolve("grok", &endpoints).unwrap();
     // What `Config::resolve` does when the profile leaves its model blank: the
     // endpoint supplies it. Taken from the file so a bad slug fails here.
-    config.model = endpoint
-        .model
-        .clone()
-        .expect("the example declares a model");
+    config.model = endpoint.model.clone().expect("the example declares a model");
     config.endpoint = Some(endpoint);
     let provider = Provider::new(&config).unwrap();
 
@@ -1240,26 +1185,15 @@ async fn shipped_grok_example_sends_a_bearer_key_to_an_openai_shaped_endpoint() 
 
     let request = captured.lock().unwrap().clone();
     let (headers, body) = request.split_once("\r\n\r\n").expect("a request body");
+    assert!(headers.contains("POST /v1/chat/completions"), "the url is used verbatim: {headers}");
     assert!(
-        headers.contains("POST /v1/chat/completions"),
-        "the url is used verbatim: {headers}"
-    );
-    assert!(
-        headers
-            .to_ascii_lowercase()
-            .contains("authorization: bearer xai-test-key-123"),
+        headers.to_ascii_lowercase().contains("authorization: bearer xai-test-key-123"),
         "the key goes out as a bearer: {headers}"
     );
     // OpenAI-shaped, not Anthropic: messages at the top level, no anthropic-version.
     let body: serde_json::Value = serde_json::from_str(body).expect("json body");
-    assert_eq!(
-        body["model"], "grok-4.5",
-        "the model comes from the endpoint"
-    );
-    assert!(
-        body["messages"].is_array(),
-        "chat-completions shape: {body}"
-    );
+    assert_eq!(body["model"], "grok-4.5", "the model comes from the endpoint");
+    assert!(body["messages"].is_array(), "chat-completions shape: {body}");
     assert!(
         !headers.to_ascii_lowercase().contains("anthropic-version"),
         "no anthropic headers on an OpenAI endpoint: {headers}"
@@ -1347,10 +1281,7 @@ async fn a_later_turn_refreshes_a_stale_intent_snapshot() {
     server.await.unwrap();
 
     let request = intent_request.lock().unwrap().clone();
-    assert!(
-        !request.is_empty(),
-        "a later turn still snapshots the intent"
-    );
+    assert!(!request.is_empty(), "a later turn still snapshots the intent");
     assert!(
         request.contains("Previous intent snapshot"),
         "the refresh updates rather than starting over: {request}"
@@ -1453,10 +1384,7 @@ async fn plan_mode_runs_inspection_without_a_classifier_call() {
         !output.contains("User rejected"),
         "inspection must not wait on an approval nobody can give: {output}"
     );
-    assert!(
-        output.contains("needle"),
-        "the command actually ran: {output}"
-    );
+    assert!(output.contains("needle"), "the command actually ran: {output}");
     assert_eq!(
         connections.load(Ordering::Relaxed),
         2,
@@ -1522,10 +1450,7 @@ async fn an_outside_read_is_cleared_but_a_credential_is_not() {
     let agent = tokio::spawn(run_turn(
         provider,
         messages,
-        TurnOptions {
-            mode: AgentMode::Plan,
-            ..base_options(&workspace)
-        },
+        TurnOptions { mode: AgentMode::Plan, ..base_options(&workspace) },
         events,
     ));
 
@@ -1552,11 +1477,7 @@ async fn an_outside_read_is_cleared_but_a_credential_is_not() {
         "the key must never be returned: {}",
         outputs[1]
     );
-    assert!(
-        outputs[1].contains("private data"),
-        "and it says why: {}",
-        outputs[1]
-    );
+    assert!(outputs[1].contains("private data"), "and it says why: {}", outputs[1]);
 }
 
 /// The inspection skip is scoped to PLAN. BUILD can mutate, so its approval
@@ -1625,14 +1546,8 @@ async fn build_mode_still_asks_before_running_a_command() {
     agent.await.unwrap();
     server.await.unwrap();
 
-    assert!(
-        asked,
-        "BUILD must still request approval for a shell command"
-    );
-    assert!(
-        !output.contains("the needle is here"),
-        "and must not run it unapproved: {output}"
-    );
+    assert!(asked, "BUILD must still request approval for a shell command");
+    assert!(!output.contains("the needle is here"), "and must not run it unapproved: {output}");
 }
 
 /// Defaults for tests that only care about one or two options.
@@ -1647,9 +1562,8 @@ async fn an_oversized_tool_result_is_bound_instead_of_flooding_the_context() {
     let workspace = workspace.canonicalize().unwrap();
     // read_file returns at most 400 lines by default, so the lines have to be
     // long enough that a bounded read still clears the bind threshold.
-    let huge: String = (0..4_000)
-        .map(|index| format!("line {index}: {}\n", "filler ".repeat(40)))
-        .collect();
+    let huge: String =
+        (0..4_000).map(|index| format!("line {index}: {}\n", "filler ".repeat(40))).collect();
     std::fs::write(workspace.join("big.log"), &huge).unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1691,10 +1605,7 @@ async fn an_oversized_tool_result_is_bound_instead_of_flooding_the_context() {
     let agent = tokio::spawn(run_turn(
         provider,
         messages,
-        TurnOptions {
-            handles: handles.clone(),
-            ..base_options(&workspace)
-        },
+        TurnOptions { handles: handles.clone(), ..base_options(&workspace) },
         events,
     ));
     let mut final_messages = Vec::new();
@@ -1721,11 +1632,7 @@ async fn an_oversized_tool_result_is_bound_instead_of_flooding_the_context() {
     assert!(tool_result.contains("read_file"), "the source is named");
     // The payload itself never entered the conversation.
     assert!(!tool_result.contains("filler filler"), "{tool_result}");
-    assert!(
-        tool_result.len() < 1_000,
-        "the stand-in is small: {}",
-        tool_result.len()
-    );
+    assert!(tool_result.len() < 1_000, "the stand-in is small: {}", tool_result.len());
     // And it is still reachable in full.
     let bound = handles.get("h1").expect("content is retained");
     assert!(bound.content.contains("filler filler"));
@@ -1807,9 +1714,7 @@ async fn read_request(stream: &mut TcpStream) -> Vec<u8> {
         let read = stream.read(&mut buffer[used..]).await.unwrap();
         used += read;
         if expected.is_none()
-            && let Some(header_end) = buffer[..used]
-                .windows(4)
-                .position(|part| part == b"\r\n\r\n")
+            && let Some(header_end) = buffer[..used].windows(4).position(|part| part == b"\r\n\r\n")
         {
             let headers = String::from_utf8_lossy(&buffer[..header_end]);
             let length = headers

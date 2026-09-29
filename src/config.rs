@@ -26,9 +26,7 @@ fn parse_agent_mode(input: &str) -> Result<crate::agent::AgentMode, String> {
         "auto" => Ok(crate::agent::AgentMode::Auto),
         "plan" => Ok(crate::agent::AgentMode::Plan),
         "build" => Ok(crate::agent::AgentMode::Build),
-        other => Err(format!(
-            "unknown mode `{other}` (expected auto, plan, or build)"
-        )),
+        other => Err(format!("unknown mode `{other}` (expected auto, plan, or build)")),
     }
 }
 
@@ -41,11 +39,7 @@ fn parse_tool_format(input: &str) -> Result<ToolFormat, String> {
 }
 
 #[derive(Debug, Clone, Parser)]
-#[command(
-    name = "abacus",
-    version,
-    about = "A fast, focused terminal coding agent"
-)]
+#[command(name = "abacus", version, about = "A fast, focused terminal coding agent")]
 pub struct Cli {
     /// Project directory (defaults to the current directory)
     #[arg(value_name = "PATH")]
@@ -417,10 +411,7 @@ impl Config {
         paths: AbacusPaths,
     ) -> Result<Self> {
         let workspace = resolve_workspace(cli.path.as_deref())?;
-        let profile_name = cli
-            .profile
-            .clone()
-            .unwrap_or_else(|| settings.default_profile.clone());
+        let profile_name = cli.profile.clone().unwrap_or_else(|| settings.default_profile.clone());
         let profile = settings.profiles.get(&profile_name);
 
         let scripted_model = profile
@@ -484,30 +475,17 @@ impl Config {
             ModelLimits::resolve_from_name(&model, context_override, output_override);
         let tool_format = cli
             .tool_format
-            .or_else(|| {
-                settings
-                    .agent
-                    .tool_format
-                    .as_deref()
-                    .and_then(ToolFormat::parse)
-            })
+            .or_else(|| settings.agent.tool_format.as_deref().and_then(ToolFormat::parse))
             .unwrap_or_default();
 
         Ok(Self {
             workspace,
-            profile: if profile.is_some() {
-                profile_name
-            } else {
-                "cli".to_owned()
-            },
+            profile: if profile.is_some() { profile_name } else { "cli".to_owned() },
             model,
             base_url: base_url.trim_end_matches('/').to_owned(),
             protocol,
             api_key,
-            max_steps: cli
-                .max_steps
-                .unwrap_or(settings.agent.max_steps)
-                .clamp(1, 128),
+            max_steps: cli.max_steps.unwrap_or(settings.agent.max_steps).clamp(1, 128),
             tool_output_limit: settings.agent.tool_output_limit.clamp(2_000, 200_000),
             yes: cli.yes || settings.ui.permission_mode == PermissionMode::AlwaysApprove,
             no_session: cli.no_session,
@@ -516,9 +494,7 @@ impl Config {
             mode: cli.mode,
             trace_enabled: settings.trace.enabled,
             routing: Routing {
-                order: profile
-                    .map(|profile| profile.providers.clone())
-                    .unwrap_or_default(),
+                order: profile.map(|profile| profile.providers.clone()).unwrap_or_default(),
                 allow_fallbacks: profile.is_none_or(|profile| profile.allow_fallbacks),
             },
             web_search: settings.search.resolve(),
@@ -566,10 +542,7 @@ impl Config {
     }
 
     pub fn workspace_name(&self) -> &str {
-        self.workspace
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("workspace")
+        self.workspace.file_name().and_then(|name| name.to_str()).unwrap_or("workspace")
     }
 }
 
@@ -701,12 +674,8 @@ impl Settings {
     pub fn profile_limits(&self, profile_name: &str) -> (Option<usize>, Option<usize>) {
         let profile = self.profiles.get(profile_name);
         (
-            profile
-                .and_then(|profile| profile.context_window)
-                .or(self.agent.context_window),
-            profile
-                .and_then(|profile| profile.max_output_tokens)
-                .or(self.agent.max_output_tokens),
+            profile.and_then(|profile| profile.context_window).or(self.agent.context_window),
+            profile.and_then(|profile| profile.max_output_tokens).or(self.agent.max_output_tokens),
         )
     }
 }
@@ -1081,10 +1050,7 @@ pub struct ActivitySettings {
 
 impl Default for ActivitySettings {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            endpoint: crate::activity::DEFAULT_ACTIVITY_ENDPOINT.to_owned(),
-        }
+        Self { enabled: true, endpoint: crate::activity::DEFAULT_ACTIVITY_ENDPOINT.to_owned() }
     }
 }
 
@@ -1204,13 +1170,9 @@ fn resolve_workspace(path: Option<&Path>) -> Result<PathBuf> {
         None => std::env::current_dir().context("could not determine current directory")?,
     };
     if !path.is_dir() {
-        bail!(
-            "workspace does not exist or is not a directory: {}",
-            path.display()
-        );
+        bail!("workspace does not exist or is not a directory: {}", path.display());
     }
-    path.canonicalize()
-        .with_context(|| format!("could not resolve workspace: {}", path.display()))
+    path.canonicalize().with_context(|| format!("could not resolve workspace: {}", path.display()))
 }
 
 pub fn workspace_from_cli(cli: &Cli) -> Result<PathBuf> {
@@ -1222,9 +1184,7 @@ pub fn atomic_write(path: &Path, content: &[u8], private: bool) -> Result<()> {
     fs::create_dir_all(parent)?;
     let temp = parent.join(format!(
         ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("abacus"),
+        path.file_name().and_then(|name| name.to_str()).unwrap_or("abacus"),
         std::process::id()
     ));
     let mut file = File::create(&temp)
@@ -1267,14 +1227,8 @@ mod tests {
         // The two Anthropic-only rungs above `high`. `max` is now its own
         // level, not an alias for `high` — it means unconstrained spend.
         assert_eq!(ReasoningEffort::parse("max"), Some(ReasoningEffort::Max));
-        assert_eq!(
-            ReasoningEffort::parse("xhigh"),
-            Some(ReasoningEffort::XHigh)
-        );
-        assert_eq!(
-            ReasoningEffort::parse("x-high"),
-            Some(ReasoningEffort::XHigh)
-        );
+        assert_eq!(ReasoningEffort::parse("xhigh"), Some(ReasoningEffort::XHigh));
+        assert_eq!(ReasoningEffort::parse("x-high"), Some(ReasoningEffort::XHigh));
 
         // Anthropic takes a budget, and minimal means "do not enable thinking".
         assert_eq!(ReasoningEffort::Minimal.thinking_budget(), None);
@@ -1306,15 +1260,10 @@ mod tests {
     fn routing_becomes_a_provider_object_only_when_pinned() {
         let none = Routing::default();
         assert!(!none.is_pinned());
-        assert!(
-            none.body().is_none(),
-            "an unpinned request carries no field"
-        );
+        assert!(none.body().is_none(), "an unpinned request carries no field");
 
-        let pinned = Routing {
-            order: vec!["Together".into(), "Anthropic".into()],
-            allow_fallbacks: false,
-        };
+        let pinned =
+            Routing { order: vec!["Together".into(), "Anthropic".into()], allow_fallbacks: false };
         let body = pinned.body().expect("a provider object");
         assert_eq!(body["order"][0], "Together");
         assert_eq!(body["order"][1], "Anthropic");
@@ -1323,14 +1272,8 @@ mod tests {
 
     #[test]
     fn an_order_can_be_written_with_commas_or_spaces() {
-        assert_eq!(
-            Routing::parse_order("Together, Anthropic"),
-            vec!["Together", "Anthropic"]
-        );
-        assert_eq!(
-            Routing::parse_order("  DeepInfra   Novita  "),
-            vec!["DeepInfra", "Novita"]
-        );
+        assert_eq!(Routing::parse_order("Together, Anthropic"), vec!["Together", "Anthropic"]);
+        assert_eq!(Routing::parse_order("  DeepInfra   Novita  "), vec!["DeepInfra", "Novita"]);
         assert_eq!(Routing::parse_order("Z.AI"), vec!["Z.AI"]);
         assert!(Routing::parse_order("  ,, ").is_empty());
     }
@@ -1361,11 +1304,7 @@ mod tests {
             },
         );
         settings.profiles.get_mut("local").unwrap().context_window = Some(1_000_000);
-        settings
-            .profiles
-            .get_mut("local")
-            .unwrap()
-            .max_output_tokens = Some(64_000);
+        settings.profiles.get_mut("local").unwrap().max_output_tokens = Some(64_000);
         settings.default_profile = "local".into();
         settings.agent.token_compression = true;
         settings.agent.one_stream = true;
@@ -1422,14 +1361,8 @@ mod tests {
                 roles: Default::default(),
             },
         );
-        assert_eq!(
-            settings.profile_limits("claude"),
-            (Some(1_000_000), Some(64_000))
-        );
-        assert_eq!(
-            settings.profile_limits("local"),
-            (Some(128_000), Some(8_000))
-        );
+        assert_eq!(settings.profile_limits("claude"), (Some(1_000_000), Some(64_000)));
+        assert_eq!(settings.profile_limits("local"), (Some(128_000), Some(8_000)));
     }
 
     #[test]
@@ -1447,10 +1380,7 @@ mod tests {
         let workspace = dir.path().join("workspace");
         fs::create_dir(&workspace).unwrap();
         let paths = AbacusPaths::under(dir.path().join("home"));
-        let mut settings = Settings {
-            default_profile: "claude".into(),
-            ..Settings::default()
-        };
+        let mut settings = Settings { default_profile: "claude".into(), ..Settings::default() };
         settings.agent.context_window = Some(128_000);
         settings.agent.max_output_tokens = Some(8_000);
         settings.profiles.insert(
@@ -1499,10 +1429,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(from_profile.model_limits.context_window, 1_000_000);
-        assert_eq!(
-            from_profile.model_limits.configured_output_tokens,
-            Some(64_000)
-        );
+        assert_eq!(from_profile.model_limits.configured_output_tokens, Some(64_000));
 
         let from_agent = Config::resolve(
             &Cli::parse_from(["abacus", "--profile", "local", workspace.to_str().unwrap()]),
@@ -1512,10 +1439,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(from_agent.model_limits.context_window, 128_000);
-        assert_eq!(
-            from_agent.model_limits.configured_output_tokens,
-            Some(8_000)
-        );
+        assert_eq!(from_agent.model_limits.configured_output_tokens, Some(8_000));
 
         let from_cli = Config::resolve(
             &Cli::parse_from([
@@ -1543,19 +1467,11 @@ mod tests {
         credentials.keys.insert("default".into(), "secret".into());
         credentials.save(&paths).unwrap();
         assert!(!paths.config_file.exists());
-        assert!(
-            fs::read_to_string(&paths.credentials_file)
-                .unwrap()
-                .contains("secret")
-        );
+        assert!(fs::read_to_string(&paths.credentials_file).unwrap().contains("secret"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&paths.credentials_file)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777;
+            let mode = fs::metadata(&paths.credentials_file).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
     }

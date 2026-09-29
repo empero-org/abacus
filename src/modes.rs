@@ -61,10 +61,7 @@ impl ModeCoach {
             .ok()
             .and_then(|content| serde_json::from_str::<ModeStats>(&content).ok())
             .unwrap_or_default();
-        Self {
-            stats: Arc::new(RwLock::new(stats)),
-            file: Some(file),
-        }
+        Self { stats: Arc::new(RwLock::new(stats)), file: Some(file) }
     }
 
     pub fn stats(&self) -> ModeStats {
@@ -140,10 +137,7 @@ mod tests {
             assert!(MODE_GUIDE.contains(gated), "guide should mention {gated}");
         }
         for allowed in ["grepping", "linters", "tests"] {
-            assert!(
-                MODE_GUIDE.contains(allowed),
-                "guide should permit {allowed}"
-            );
+            assert!(MODE_GUIDE.contains(allowed), "guide should permit {allowed}");
         }
         assert!(MODE_GUIDE.contains("SCOUT AND PLAN"));
         assert!(MODE_GUIDE.contains("BUILD AND FOLLOW"));
@@ -178,10 +172,7 @@ mod tests {
         for _ in 0..3 {
             coach.record_switch();
         }
-        assert!(
-            coach.reminder().is_empty(),
-            "a model that learns should stop being reminded"
-        );
+        assert!(coach.reminder().is_empty(), "a model that learns should stop being reminded");
     }
 
     #[test]

@@ -7,11 +7,7 @@ use tempfile::tempdir;
 
 #[tokio::test]
 async fn negotiates_lists_and_calls_stdio_mcp() {
-    if std::process::Command::new("python3")
-        .arg("--version")
-        .status()
-        .is_err()
-    {
+    if std::process::Command::new("python3").arg("--version").status().is_err() {
         return;
     }
     let directory = tempdir().unwrap();
@@ -48,20 +44,10 @@ for line in sys.stdin:
         },
     );
     let manager = McpManager::connect(&configs, directory.path()).await;
-    assert!(
-        manager.diagnostics().is_empty(),
-        "{:?}",
-        manager.diagnostics()
-    );
+    assert!(manager.diagnostics().is_empty(), "{:?}", manager.diagnostics());
+    assert_eq!(manager.tools().next().unwrap().exposed_name, "mcp__local__echo");
     assert_eq!(
-        manager.tools().next().unwrap().exposed_name,
-        "mcp__local__echo"
-    );
-    assert_eq!(
-        manager
-            .execute("mcp__local__echo", r#"{"text":"hello stdio"}"#)
-            .await
-            .unwrap(),
+        manager.execute("mcp__local__echo", r#"{"text":"hello stdio"}"#).await.unwrap(),
         "hello stdio"
     );
 }

@@ -27,9 +27,7 @@ pub fn expand_file_references(workspace: &Path, prompt: &str) -> Result<String> 
         }
         let relative = Path::new(raw);
         if relative.is_absolute()
-            || relative
-                .components()
-                .any(|part| matches!(part, Component::ParentDir))
+            || relative.components().any(|part| matches!(part, Component::ParentDir))
         {
             continue;
         }
@@ -65,9 +63,8 @@ pub fn expand_file_references(workspace: &Path, prompt: &str) -> Result<String> 
     }
     let mut expanded = prompt.to_owned();
     for (path, content) in attachments {
-        expanded.push_str(&format!(
-            "\n\n<attached_file path=\"{path}\">\n{content}\n</attached_file>"
-        ));
+        expanded
+            .push_str(&format!("\n\n<attached_file path=\"{path}\">\n{content}\n</attached_file>"));
     }
     Ok(expanded)
 }
@@ -97,16 +94,11 @@ pub fn user_content(workspace: &Path, attachments: &Path, prompt: &str) -> Value
         };
         let end = start + length + 1;
         let name = &text[start + "[image:".len()..end - 1];
-        let clean = Path::new(name)
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default();
+        let clean =
+            Path::new(name).file_name().and_then(|value| value.to_str()).unwrap_or_default();
         let path = attachments.join(clean);
-        let bytes = if !clean.is_empty() && clean == name {
-            std::fs::read(&path).ok()
-        } else {
-            None
-        };
+        let bytes =
+            if !clean.is_empty() && clean == name { std::fs::read(&path).ok() } else { None };
         match bytes {
             Some(bytes) if total + bytes.len() as u64 <= MAX_IMAGE_BYTES => {
                 total += bytes.len() as u64;
@@ -137,9 +129,7 @@ pub fn user_content(workspace: &Path, attachments: &Path, prompt: &str) -> Value
             }
             let relative = Path::new(raw);
             if relative.is_absolute()
-                || relative
-                    .components()
-                    .any(|part| matches!(part, Component::ParentDir))
+                || relative.components().any(|part| matches!(part, Component::ParentDir))
             {
                 continue;
             }
@@ -181,10 +171,7 @@ fn data_url_for(extension: &str, bytes: &[u8]) -> String {
         "webp" => "image/webp",
         _ => "image/png",
     };
-    format!(
-        "data:{mime};base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    )
+    format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
 #[cfg(test)]
@@ -260,12 +247,7 @@ mod tests {
         let content = user_content(workspace.path(), workspace.path(), "look at @shot.png");
         let parts = content.as_array().expect("content array");
         assert_eq!(parts.len(), 2);
-        assert!(
-            parts[1]["image_url"]["url"]
-                .as_str()
-                .unwrap()
-                .starts_with("data:image/png"),
-        );
+        assert!(parts[1]["image_url"]["url"].as_str().unwrap().starts_with("data:image/png"),);
         // The @token stays in the text so the model can see the reference.
         assert_eq!(parts[0]["text"], "look at @shot.png");
     }

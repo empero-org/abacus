@@ -56,12 +56,7 @@ pub struct TetherState {
 
 impl TetherState {
     pub fn new(intent: Option<String>) -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(Inner {
-                intent,
-                ..Inner::default()
-            })),
-        }
+        Self { inner: Arc::new(RwLock::new(Inner { intent, ..Inner::default() })) }
     }
 
     pub fn intent(&self) -> Option<String> {
@@ -205,10 +200,7 @@ async fn quick_call(
     cancel: &AtomicBool,
 ) -> Option<String> {
     let (deltas, _sink) = mpsc::unbounded_channel();
-    let completion = provider
-        .complete(&conversation, &[], deltas, cancel)
-        .await
-        .ok()?;
+    let completion = provider.complete(&conversation, &[], deltas, cancel).await.ok()?;
     if completion.cancelled || completion.content.trim().is_empty() {
         return None;
     }
@@ -244,9 +236,8 @@ pub async fn capture_intent(
 /// Empty when neither exists.
 pub fn agreed_plan(goal: &crate::goal::GoalState, tasks: &crate::task::TaskList) -> String {
     let mut parts: Vec<String> = Vec::new();
-    if let Some(goal) = goal
-        .snapshot()
-        .filter(|goal| goal.status == crate::goal::GoalStatus::Active)
+    if let Some(goal) =
+        goal.snapshot().filter(|goal| goal.status == crate::goal::GoalStatus::Active)
     {
         parts.push(format!("Active goal: {}", goal.objective));
     }
@@ -274,11 +265,7 @@ pub async fn check_drift(
     // postdates the intent snapshot. Without it the check flagged a running
     // build — with an approved 9-task list open — as drift from the greeting
     // that opened the session.
-    let plan = if plan.trim().is_empty() {
-        "(none recorded)".to_owned()
-    } else {
-        plan.to_owned()
-    };
+    let plan = if plan.trim().is_empty() { "(none recorded)".to_owned() } else { plan.to_owned() };
     let conversation = vec![
         serde_json::json!({"role": "system", "content": "You audit a coding-agent session against its intent. Be strict about drift, tolerant of legitimate sub-work (tests, refactors, debugging serve the intent)."}),
         serde_json::json!({"role": "user", "content": format!(
@@ -310,9 +297,7 @@ pub fn parse_verdict(reply: &str) -> Option<String> {
     }
     for prefix in ["OFF_TRACK", "OFF TRACK"] {
         if upper.starts_with(prefix) {
-            let rest = trimmed[prefix.len()..]
-                .trim_start_matches([':', '-', ' '])
-                .trim();
+            let rest = trimmed[prefix.len()..].trim_start_matches([':', '-', ' ']).trim();
             if !rest.is_empty() {
                 return Some(rest.to_owned());
             }
@@ -344,10 +329,7 @@ mod tests {
         assert!(compact.contains("drops rows"));
         assert!(!compact.contains("SECRET GIANT FILE BODY"), "{compact}");
         // Recorded thinking is part of the analysis: drift shows there first.
-        assert!(
-            compact.contains("thinking: maybe I should refactor everything"),
-            "{compact}"
-        );
+        assert!(compact.contains("thinking: maybe I should refactor everything"), "{compact}");
     }
 
     /// The reported failure: a long build phase flushed every user prompt out
@@ -371,10 +353,7 @@ mod tests {
             compact.contains("build the full SaaS backend"),
             "the actual request must survive: {compact}"
         );
-        assert!(
-            compact.contains("empero.org"),
-            "so must the opening prompt: {compact}"
-        );
+        assert!(compact.contains("empero.org"), "so must the opening prompt: {compact}");
         // Recent activity still gets its share.
         assert!(compact.contains("writing module 399"), "{compact}");
         // And the gap is visible, so nothing reads the remainder as the whole.
@@ -397,14 +376,8 @@ mod tests {
             );
         }
         let compact = compact_history(&messages);
-        assert!(
-            compact.contains("doing 49"),
-            "recent activity survives: {compact}"
-        );
-        assert!(
-            compact.contains("note 399"),
-            "newest prompts survive: {compact}"
-        );
+        assert!(compact.contains("doing 49"), "recent activity survives: {compact}");
+        assert!(compact.contains("note 399"), "newest prompts survive: {compact}");
         assert!(compact.len() <= COMPACT_HISTORY_CHARS + 300);
     }
 
@@ -412,11 +385,7 @@ mod tests {
     fn the_agreed_plan_is_rendered_for_the_drift_check() {
         let goal = crate::goal::GoalState::default();
         let tasks = crate::task::TaskList::default();
-        assert_eq!(
-            agreed_plan(&goal, &tasks),
-            "",
-            "nothing agreed, nothing said"
-        );
+        assert_eq!(agreed_plan(&goal, &tasks), "", "nothing agreed, nothing said");
 
         tasks.execute("task_create", r#"{"tasks":["scaffold repo","add auth"]}"#);
         let plan = agreed_plan(&goal, &tasks);
@@ -476,10 +445,7 @@ mod tests {
     fn steps_only_count_once_intent_exists() {
         let tether = TetherState::default();
         for _ in 0..100 {
-            assert!(
-                !tether.step_and_check_due(CHECK_EVERY_STEPS),
-                "no intent, no checks"
-            );
+            assert!(!tether.step_and_check_due(CHECK_EVERY_STEPS), "no intent, no checks");
         }
         tether.set_intent("do the thing".into());
         let mut due = 0;
