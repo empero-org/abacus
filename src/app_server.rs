@@ -150,6 +150,16 @@ struct OpenItem {
     summary: String,
 }
 
+impl OpenItem {
+    /// The item as a client sees a tool call at `status`.
+    fn tool(&self, name: &str, status: &str) -> Value {
+        json!({
+            "id": self.id, "type": self.kind, "name": name,
+            "command": self.summary, "status": status,
+        })
+    }
+}
+
 struct App {
     config: Config,
     settings: Settings,
@@ -645,15 +655,7 @@ impl App {
         notify("turn/started", json!({"threadId": self.thread_id(), "turnId": turn}));
         // The user's own message is an item too, so a client that replays
         // `item/*` alone reconstructs the whole transcript.
-        notify(
-            "item/completed",
-            json!({
-                "threadId": self.thread_id(),
-                "turnId": turn,
-                "completedAtMs": now_ms(),
-                "item": {"id": item_id, "type": "userMessage", "text": text},
-            }),
-        );
+        self.item("completed", json!({"id": item_id, "type": "userMessage", "text": text}));
 
         let options = TurnOptions {
             mode: self.mode,
@@ -675,73 +677,57 @@ impl App {
         ));
     }
 
-    /// Open a streaming item of `kind`, or return the one already open.
-    fn streaming_item(&mut self, kind: &'static str) -> String {
-        if let Some(open) = self.open_items.get(kind) {
-            return open.id.clone();
-        }
-        let id = self.next("item");
+    /// Announce an item of the running turn opening (`started`) or closing
+    /// (`completed`).
+    fn item(&self, phase: &str, item: Value) {
+        let stamp = if phase == "started" { "startedAtMs" } else { "completedAtMs" };
         notify(
-            "item/started",
+            &format!("item/{phase}"),
             json!({
                 "threadId": self.thread_id(),
                 "turnId": self.turn_id(),
-                "startedAtMs": now_ms(),
-                "item": {"id": id, "type": kind, "text": ""},
+                stamp: now_ms(),
+                "item": item,
             }),
         );
-        self.open_items
-            .insert(kind.to_owned(), OpenItem { id: id.clone(), kind, summary: String::new() });
-        id
     }
 
-    /// Close a streaming item, if one of that kind is open. Called before a
-    /// tool call and at end of turn so `item/completed` always arrives.
-    fn close_streaming(&mut self, kind: &str, text: &str) {
-        if let Some(open) = self.open_items.remove(kind) {
-            notify(
-                "item/completed",
-                json!({
-                    "threadId": self.thread_id(),
-                    "turnId": self.turn_id(),
-                    "completedAtMs": now_ms(),
-                    "item": {"id": open.id, "type": open.kind, "text": text},
-                }),
-            );
+    /// Append streamed text to the open item of `kind`, opening one if needed.
+    fn stream(&mut self, kind: &'static str, method: &str, text: String) {
+        if !self.open_items.contains_key(kind) {
+            let id = self.next("item");
+            self.item("started", json!({"id": id, "type": kind, "text": ""}));
+            self.open_items.insert(kind.to_owned(), OpenItem { id, kind, summary: String::new() });
         }
+        let open = self.open_items.get_mut(kind).expect("opened above");
+        open.summary.push_str(&text);
+        let id = open.id.clone();
+        notify(
+            method,
+            json!({
+                "threadId": self.thread_id(),
+                "turnId": self.turn_id(),
+                "itemId": id,
+                "delta": text,
+            }),
+        );
+    }
+
+    /// Open the item for a tool call and announce it at `status`.
+    fn open_tool(&mut self, name: &str, summary: &str, status: &str) -> String {
+        let open =
+            OpenItem { id: self.next("item"), kind: item_type(name), summary: summary.to_owned() };
+        self.item("started", open.tool(name, status));
+        let id = open.id.clone();
+        self.open_items.insert(name.to_owned(), open);
+        id
     }
 
     fn handle_event(&mut self, event: AgentEvent) {
         match event {
-            AgentEvent::Delta(text) => {
-                let id = self.streaming_item("agentMessage");
-                if let Some(open) = self.open_items.get_mut("agentMessage") {
-                    open.summary.push_str(&text);
-                }
-                notify(
-                    "item/agentMessage/delta",
-                    json!({
-                        "threadId": self.thread_id(),
-                        "turnId": self.turn_id(),
-                        "itemId": id,
-                        "delta": text,
-                    }),
-                );
-            }
+            AgentEvent::Delta(text) => self.stream("agentMessage", "item/agentMessage/delta", text),
             AgentEvent::Reasoning(text) => {
-                let id = self.streaming_item("reasoning");
-                if let Some(open) = self.open_items.get_mut("reasoning") {
-                    open.summary.push_str(&text);
-                }
-                notify(
-                    "item/reasoning/textDelta",
-                    json!({
-                        "threadId": self.thread_id(),
-                        "turnId": self.turn_id(),
-                        "itemId": id,
-                        "delta": text,
-                    }),
-                );
+                self.stream("reasoning", "item/reasoning/textDelta", text)
             }
             AgentEvent::ToolStarted { name, summary } => {
                 // A tool call ends whatever text was streaming: the model has
@@ -750,43 +736,17 @@ impl App {
                 // An approval for this tool already opened the item, so that
                 // the prompt could name the call it was about. Reuse it rather
                 // than announcing the same call twice.
-                if let Some(open) = self.open_items.get_mut(&name) {
-                    open.summary = summary;
-                    return;
+                match self.open_items.get_mut(&name) {
+                    Some(open) => open.summary = summary,
+                    None => drop(self.open_tool(&name, &summary, "inProgress")),
                 }
-                let id = self.next("item");
-                let kind = item_type(&name);
-                notify(
-                    "item/started",
-                    json!({
-                        "threadId": self.thread_id(),
-                        "turnId": self.turn_id(),
-                        "startedAtMs": now_ms(),
-                        "item": {
-                            "id": id, "type": kind, "name": name,
-                            "command": summary, "status": "inProgress",
-                        },
-                    }),
-                );
-                self.open_items.insert(name, OpenItem { id, kind, summary });
             }
             AgentEvent::ToolFinished { name, output } => {
-                let Some(open) = self.open_items.remove(&name) else {
-                    return;
-                };
-                notify(
-                    "item/completed",
-                    json!({
-                        "threadId": self.thread_id(),
-                        "turnId": self.turn_id(),
-                        "completedAtMs": now_ms(),
-                        "item": {
-                            "id": open.id, "type": open.kind, "name": name,
-                            "command": open.summary, "status": "completed",
-                            "output": output,
-                        },
-                    }),
-                );
+                if let Some(open) = self.open_items.remove(&name) {
+                    let mut item = open.tool(&name, "completed");
+                    item["output"] = json!(output);
+                    self.item("completed", item);
+                }
             }
             AgentEvent::ModeChanged { mode, reason } => notify(
                 "thread/mode/updated",
@@ -808,31 +768,7 @@ impl App {
                 // transcript, and a rejected call still leaves a visible item.
                 let item_id = match self.open_items.get(&request.tool) {
                     Some(open) => open.id.clone(),
-                    None => {
-                        let item_id = self.next("item");
-                        let kind = item_type(&request.tool);
-                        notify(
-                            "item/started",
-                            json!({
-                                "threadId": self.thread_id(),
-                                "turnId": self.turn_id(),
-                                "startedAtMs": now_ms(),
-                                "item": {
-                                    "id": item_id, "type": kind, "name": request.tool,
-                                    "command": request.summary, "status": "awaitingApproval",
-                                },
-                            }),
-                        );
-                        self.open_items.insert(
-                            request.tool.clone(),
-                            OpenItem {
-                                id: item_id.clone(),
-                                kind,
-                                summary: request.summary.clone(),
-                            },
-                        );
-                        item_id
-                    }
+                    None => self.open_tool(&request.tool, &request.summary, "awaitingApproval"),
                 };
                 emit(json!({
                     "jsonrpc": "2.0",
@@ -894,9 +830,12 @@ impl App {
     /// deltas renders.
     fn flush_streaming(&mut self) {
         for kind in ["agentMessage", "reasoning"] {
-            let text =
-                self.open_items.get(kind).map(|open| open.summary.clone()).unwrap_or_default();
-            self.close_streaming(kind, &text);
+            if let Some(open) = self.open_items.remove(kind) {
+                self.item(
+                    "completed",
+                    json!({"id": open.id, "type": open.kind, "text": open.summary}),
+                );
+            }
         }
     }
 
@@ -905,18 +844,7 @@ impl App {
         // Any tool still open lost its result to an interrupt; say so rather
         // than leaving a spinner running in the client forever.
         for (name, open) in std::mem::take(&mut self.open_items) {
-            notify(
-                "item/completed",
-                json!({
-                    "threadId": self.thread_id(),
-                    "turnId": self.turn_id(),
-                    "completedAtMs": now_ms(),
-                    "item": {
-                        "id": open.id, "type": open.kind, "name": name,
-                        "command": open.summary, "status": "aborted",
-                    },
-                }),
-            );
+            self.item("completed", open.tool(&name, "aborted"));
         }
         let turn = self.turn_id.take().unwrap_or_default();
         self.persist();

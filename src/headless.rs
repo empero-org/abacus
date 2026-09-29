@@ -118,185 +118,117 @@ pub async fn run(
         final_messages.push(json!({"role": "user", "content": state.prompt.clone()}));
     }
 
-    let mut current_task = if failure.is_none() {
-        Some(tokio::spawn(run_turn(
-            provider.clone(),
-            final_messages.clone(),
-            turn_options(&config, &allow, &services, &state, session_id.clone(), trace.clone()),
-            events.clone(),
-        )))
-    } else {
-        None
+    let start = |messages: Vec<Value>| {
+        let options =
+            turn_options(&config, &allow, &services, &state, session_id.clone(), trace.clone());
+        tokio::spawn(run_turn(provider.clone(), messages, options, events.clone()))
     };
+    let mut current_task = failure.is_none().then(|| start(final_messages.clone()));
 
-    if failure.is_none() {
-        'outer: loop {
-            let mut next_messages: Option<Vec<Value>> = None;
-            while let Some(event) = receiver.recv().await {
-                match event {
-                    AgentEvent::Delta(delta) => {
-                        text.push_str(&delta);
-                        match format {
-                            OutputFormat::Plain => {
-                                print!("{delta}");
-                                io::stdout().flush()?;
-                            }
-                            OutputFormat::StreamingJson => emit(json!({
-                                "type": "assistant.delta",
-                                "text": delta
-                            }))?,
-                            OutputFormat::Json => {}
-                        }
+    while failure.is_none()
+        && let Some(event) = receiver.recv().await
+    {
+        match event {
+            AgentEvent::Delta(delta) => {
+                text.push_str(&delta);
+                match format {
+                    OutputFormat::Plain => {
+                        print!("{delta}");
+                        io::stdout().flush()?;
                     }
-                    AgentEvent::Approval(request) => {
-                        let tool = request.tool.clone();
-                        let summary = request.summary.clone();
-                        let _ = request.respond.send(ApprovalDecision::Reject);
-                        match format {
-                            OutputFormat::Plain => eprintln!(
-                                "\n[rejected {tool}: {summary}; use --always-approve for headless mutations]"
-                            ),
-                            OutputFormat::StreamingJson => emit(json!({
-                                "type": "approval.rejected",
-                                "tool": tool,
-                                "summary": summary
-                            }))?,
-                            OutputFormat::Json => {}
-                        }
+                    OutputFormat::StreamingJson => {
+                        emit(json!({"type": "assistant.delta", "text": delta}))?
                     }
-                    AgentEvent::UserQuestion(request) => {
-                        // Headless mode can't show a modal — auto-pick the first
-                        // option so the agent loop can continue without blocking.
-                        let header = request.header.clone();
-                        let first = request.options.first().cloned().unwrap_or_default();
-                        let _ = request.respond.send(crate::agent::UserAnswer {
-                            selected_labels: if first.is_empty() {
-                                Vec::new()
-                            } else {
-                                vec![first]
-                            },
-                            custom_text: None,
-                        });
-                        match format {
-                            OutputFormat::Plain => {
-                                eprintln!("\n[auto-answered question: {header}]")
-                            }
-                            OutputFormat::StreamingJson => emit(json!({
-                                "type": "user_question.auto_answered",
-                                "header": header
-                            }))?,
-                            OutputFormat::Json => {}
-                        }
+                    OutputFormat::Json => {}
+                }
+            }
+            AgentEvent::Approval(request) => {
+                let _ = request.respond.send(ApprovalDecision::Reject);
+                let (tool, summary) = (request.tool, request.summary);
+                announce(
+                    format,
+                    &format!(
+                        "rejected {tool}: {summary}; use --always-approve for headless mutations"
+                    ),
+                    json!({"type": "approval.rejected", "tool": tool, "summary": summary}),
+                )?;
+            }
+            AgentEvent::UserQuestion(request) => {
+                // Headless mode can't show a modal — auto-pick the first
+                // option so the agent loop can continue without blocking.
+                let first = request.options.first().filter(|option| !option.is_empty()).cloned();
+                let _ = request.respond.send(crate::agent::UserAnswer {
+                    selected_labels: first.into_iter().collect(),
+                    custom_text: None,
+                });
+                announce(
+                    format,
+                    &format!("auto-answered question: {}", request.header),
+                    json!({"type": "user_question.auto_answered", "header": request.header}),
+                )?;
+            }
+            AgentEvent::ToolStarted { name, summary } => announce(
+                format,
+                &format!("{name}: {summary}"),
+                json!({"type": "tool.started", "tool": name, "summary": summary}),
+            )?,
+            AgentEvent::ToolFinished { name, output } => {
+                if format == OutputFormat::StreamingJson {
+                    emit(json!({"type": "tool.finished", "tool": name, "output": output}))?;
+                }
+            }
+            AgentEvent::ModeChanged { mode, reason } => announce(
+                format,
+                &format!("mode: {} · {reason}", mode.label()),
+                json!({
+                    "type": "mode.changed",
+                    "mode": mode.label().to_ascii_lowercase(),
+                    "reason": reason
+                }),
+            )?,
+            AgentEvent::Done { messages, .. } => {
+                final_messages = messages;
+                let Some(state) = ralph.as_mut() else { break };
+                if state.observe_output(crate::text::last_reply(&final_messages)) {
+                    aside(
+                        format,
+                        &format!("loop completed after {} iteration(s)", state.iteration),
+                    );
+                } else if state.status == RalphStatus::MaxIterations {
+                    aside(format, &format!("loop stopped at {} iteration(s)", state.iteration));
+                }
+                if !state.is_active() {
+                    break;
+                }
+                match state.begin_iteration() {
+                    Ok(iteration) => {
+                        aside(format, &format!("loop · iteration {iteration}"));
+                        final_messages
+                            .push(json!({"role": "user", "content": state.prompt.clone()}));
+                        current_task = Some(start(final_messages.clone()));
                     }
-                    AgentEvent::ToolStarted { name, summary } => match format {
-                        OutputFormat::Plain => eprintln!("\n[{name}: {summary}]"),
-                        OutputFormat::StreamingJson => emit(json!({
-                            "type": "tool.started",
-                            "tool": name,
-                            "summary": summary
-                        }))?,
-                        OutputFormat::Json => {}
-                    },
-                    AgentEvent::ToolFinished { name, output } => {
-                        if format == OutputFormat::StreamingJson {
-                            emit(json!({
-                                "type": "tool.finished",
-                                "tool": name,
-                                "output": output
-                            }))?;
-                        }
-                    }
-                    AgentEvent::ModeChanged { mode, reason } => match format {
-                        OutputFormat::Plain => eprintln!("\n[mode: {} · {reason}]", mode.label()),
-                        OutputFormat::StreamingJson => emit(json!({
-                            "type": "mode.changed",
-                            "mode": mode.label().to_ascii_lowercase(),
-                            "reason": reason
-                        }))?,
-                        OutputFormat::Json => {}
-                    },
-                    AgentEvent::Done { messages, .. } => {
-                        final_messages = messages;
-                        if let Some(state) = ralph.as_mut() {
-                            let completed = state.observe_output(
-                                &crate::text::last_reply(&final_messages).to_owned(),
-                            );
-                            if format == OutputFormat::Plain {
-                                if completed {
-                                    eprintln!(
-                                        "\n[loop completed after {} iteration(s)]",
-                                        state.iteration
-                                    );
-                                } else if state.status == RalphStatus::MaxIterations {
-                                    eprintln!(
-                                        "\n[loop stopped at {} iteration(s)]",
-                                        state.iteration
-                                    );
-                                }
-                            }
-                            if state.is_active() {
-                                match state.begin_iteration() {
-                                    Ok(iteration) => {
-                                        if format == OutputFormat::Plain {
-                                            eprintln!("\n[loop · iteration {iteration}]");
-                                        }
-                                        let mut messages = final_messages.clone();
-                                        messages.push(json!({"role": "user", "content": state.prompt.clone()}));
-                                        next_messages = Some(messages);
-                                    }
-                                    Err(error) => {
-                                        if format == OutputFormat::Plain {
-                                            eprintln!("\n[loop stopped: {error}]");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        break;
-                    }
-                    // Headless output is the answer, not the deliberation.
-                    AgentEvent::Reasoning(_) => {}
-                    AgentEvent::Notice(notice) => {
-                        eprintln!("note: {notice}");
-                    }
-                    AgentEvent::TraceFailed { error } => {
-                        eprintln!("warning: training trace disabled — {error}");
-                    }
-                    AgentEvent::Failed { error, messages } => {
-                        final_messages = messages;
-                        failure = Some(error.clone());
-                        if let Some(state) = ralph.as_mut() {
-                            let _ = state.pause();
-                        }
-                        if format == OutputFormat::Plain && ralph.is_some() {
-                            eprintln!("\n[loop paused after failure]");
-                        }
+                    Err(error) => {
+                        aside(format, &format!("loop stopped: {error}"));
                         break;
                     }
                 }
             }
-
-            if let Some(messages) = next_messages {
-                final_messages = messages.clone();
-                current_task = Some(tokio::spawn(run_turn(
-                    provider.clone(),
-                    messages,
-                    turn_options(
-                        &config,
-                        &allow,
-                        &services,
-                        &state,
-                        session_id.clone(),
-                        trace.clone(),
-                    ),
-                    events.clone(),
-                )));
-                continue 'outer;
+            // Headless output is the answer, not the deliberation.
+            AgentEvent::Reasoning(_) => {}
+            AgentEvent::Notice(notice) => eprintln!("note: {notice}"),
+            AgentEvent::TraceFailed { error } => {
+                eprintln!("warning: training trace disabled — {error}");
             }
-            break 'outer;
+            AgentEvent::Failed { error, messages } => {
+                final_messages = messages;
+                failure = Some(error);
+                if let Some(state) = ralph.as_mut() {
+                    let _ = state.pause();
+                    aside(format, "loop paused after failure");
+                }
+            }
         }
     }
-
     if let Some(task) = current_task {
         let _ = task.await;
     }
@@ -430,6 +362,23 @@ fn turn_options(
         session_id,
         ..state.turn(config, services.clone()).with_workspace_stores(config)
     }
+}
+
+/// A bracketed aside on stderr, in the plain format only.
+fn aside(format: OutputFormat, text: &str) {
+    if format == OutputFormat::Plain {
+        eprintln!("\n[{text}]");
+    }
+}
+
+/// Reports something that happened alongside the answer: an aside in the plain
+/// format, an event line when streaming, nothing when only the result is wanted.
+fn announce(format: OutputFormat, text: &str, event: Value) -> Result<()> {
+    aside(format, text);
+    if format == OutputFormat::StreamingJson {
+        emit(event)?;
+    }
+    Ok(())
 }
 
 fn emit(value: Value) -> Result<()> {
