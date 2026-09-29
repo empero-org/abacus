@@ -238,6 +238,77 @@ pub struct TurnOptions {
     pub cancel: Arc<AtomicBool>,
 }
 
+impl TurnOptions {
+    /// A turn that carries nothing over: inert stores, BUILD mode, mutations
+    /// allowed, no delegation. What a subagent or a test starts from.
+    pub fn bare(workspace: std::path::PathBuf, services: Arc<AgentServices>) -> Self {
+        Self {
+            workspace,
+            max_steps: 32,
+            tool_output_limit: 30_000,
+            mode: AgentMode::Build,
+            allow_mutations: Arc::new(AtomicBool::new(true)),
+            services,
+            session_id: None,
+            goal: GoalState::default(),
+            tasks: TaskList::default(),
+            compaction: CompactionState::default(),
+            compaction_budget: CompactionBudget::default(),
+            token_compression: false,
+            allow_subagents: false,
+            web_search: Default::default(),
+            papercuts: Default::default(),
+            handles: Default::default(),
+            harness: Default::default(),
+            tether: Default::default(),
+            hive: Default::default(),
+            aux_model: None,
+            subagent_model: None,
+            compaction_model: None,
+            injections: Default::default(),
+            modes: Default::default(),
+            safety: Default::default(),
+            safety_uses_main: false,
+            trace: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// A turn shaped by `config`: its limits, models, mode, and permissions.
+    /// Session state and stores are the caller's to fill in.
+    pub fn for_config(config: &crate::config::Config, services: Arc<AgentServices>) -> Self {
+        Self {
+            max_steps: config.max_steps,
+            tool_output_limit: config.tool_output_limit,
+            mode: config.mode.unwrap_or(AgentMode::Auto),
+            allow_mutations: Arc::new(AtomicBool::new(config.yes)),
+            compaction_budget: compression_budget(
+                config.model_limits.compaction_budget(),
+                config.token_compression,
+            ),
+            token_compression: config.token_compression,
+            allow_subagents: true,
+            web_search: config.web_search.clone(),
+            aux_model: config.aux_model.clone(),
+            subagent_model: config.subagent_model.clone(),
+            compaction_model: config.compaction_model.clone(),
+            ..Self::bare(config.workspace.clone(), services)
+        }
+    }
+
+    /// Load what the workspace has learned across sessions: recorded lessons,
+    /// the delegation record, and mode discipline.
+    pub fn with_workspace_stores(mut self, config: &crate::config::Config) -> Self {
+        self.papercuts = crate::papercuts::PapercutStore::load(
+            config.paths.papercuts_file.clone(),
+            &config.workspace,
+        );
+        self.hive = crate::hive::HiveHandle::load(config.paths.hive_file.clone());
+        self.modes = crate::modes::ModeCoach::load(config.paths.modes_file.clone());
+        self
+    }
+}
+
 pub fn run_turn(
     provider: Provider,
     messages: Vec<Value>,
@@ -1801,35 +1872,12 @@ mod tests {
 
     /// Minimal options for the injection tests — nothing here reaches a model.
     fn test_turn_options(injections: InjectionQueue) -> TurnOptions {
+        let here = std::path::PathBuf::from(".");
         TurnOptions {
-            workspace: std::path::PathBuf::from("."),
             max_steps: 1,
             tool_output_limit: 2_000,
-            mode: AgentMode::Build,
-            allow_mutations: Arc::new(AtomicBool::new(true)),
-            services: Arc::new(AgentServices::empty(std::path::PathBuf::from("."))),
-            session_id: None,
-            goal: GoalState::default(),
-            tasks: TaskList::default(),
-            compaction: CompactionState::default(),
-            compaction_budget: CompactionBudget::default(),
-            token_compression: false,
-            allow_subagents: false,
-            web_search: crate::web::WebConfig::default(),
-            papercuts: crate::papercuts::PapercutStore::default(),
-            harness: crate::harness::HarnessStore::default(),
-            handles: crate::handles::HandleStore::default(),
-            tether: crate::tether::TetherState::default(),
-            hive: crate::hive::HiveHandle::default(),
-            aux_model: None,
-            subagent_model: None,
-            compaction_model: None,
             injections,
-            modes: crate::modes::ModeCoach::default(),
-            safety: crate::safety::SafetyCache::default(),
-            safety_uses_main: false,
-            trace: None,
-            cancel: Arc::new(AtomicBool::new(false)),
+            ..TurnOptions::bare(here.clone(), Arc::new(AgentServices::empty(here)))
         }
     }
 

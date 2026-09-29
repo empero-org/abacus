@@ -14,12 +14,8 @@ use uuid::Uuid;
 
 use crate::{
     agent::{AgentEvent, AgentMode, TurnOptions, initial_messages, run_turn},
-    compaction::CompactionState,
-    goal::GoalState,
-    model_info::CompactionBudget,
     provider::Provider,
     services::AgentServices,
-    task::TaskList,
 };
 
 const MAX_SUBAGENTS: usize = 8;
@@ -654,13 +650,6 @@ impl SubagentRuntime {
             provider,
             messages,
             TurnOptions {
-                safety: crate::safety::SafetyCache::default(),
-                safety_uses_main: false,
-                // Subagent work is a different task shape from the main loop;
-                // mixing it into the same trace would blur the samples.
-                trace: None,
-                cancel: Arc::new(AtomicBool::new(false)),
-                workspace: worker_workspace,
                 max_steps: self.max_steps,
                 tool_output_limit: self.tool_output_limit,
                 // Scouts are mechanically read-only, not just instructed so:
@@ -668,27 +657,13 @@ impl SubagentRuntime {
                 // can flip.
                 mode: if role.read_only { AgentMode::Plan } else { AgentMode::Build },
                 allow_mutations: Arc::new(AtomicBool::new(!role.read_only)),
-                services,
-                session_id: None,
-                goal: GoalState::default(),
-                tasks: TaskList::default(),
-                compaction: CompactionState::default(),
-                compaction_budget: CompactionBudget::default(),
-                token_compression: false,
-                allow_subagents: false,
                 web_search: self.web_search.clone(),
-                // Inert: a subagent's snags belong to its delegated task, and
-                // its worktree paths would pollute workspace scoping.
-                papercuts: crate::papercuts::PapercutStore::default(),
-                harness: crate::harness::HarnessStore::default(),
-                handles: crate::handles::HandleStore::default(),
-                tether: crate::tether::TetherState::default(),
-                hive: crate::hive::HiveHandle::default(),
-                aux_model: None,
-                subagent_model: None,
-                compaction_model: None,
                 injections,
-                modes: crate::modes::ModeCoach::default(),
+                // Everything else stays inert. No trace: subagent work is a
+                // different task shape and would blur the samples. No
+                // papercuts: a worker's snags belong to its delegated task,
+                // and its worktree paths would pollute workspace scoping.
+                ..TurnOptions::bare(worker_workspace, services)
             },
             events,
         );

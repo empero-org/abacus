@@ -40,8 +40,7 @@ use crate::{
     activity::ActivityReporter,
     agent::{
         AgentEvent, AgentMode, ApprovalDecision, ApprovalRequest, DoneReason, TurnOptions,
-        UserQuestionRequest, compact_messages, compression_budget, initial_messages, message_chars,
-        run_turn,
+        UserQuestionRequest, compact_messages, initial_messages, message_chars, run_turn,
     },
     compaction::CompactionState,
     config::{Config, Credentials, PermissionMode, ProviderProtocol, SETTINGS_VERSION, Settings},
@@ -1782,12 +1781,8 @@ impl App {
             safety_uses_main: self.settings.ui.safety_uses_main,
             trace: self.trace.clone(),
             cancel: self.cancel.clone(),
-            workspace: self.config.workspace.clone(),
-            max_steps: self.config.max_steps,
-            tool_output_limit: self.config.tool_output_limit,
             mode: agent_mode,
             allow_mutations,
-            services: self.services.clone(),
             session_id: self.session.as_ref().map(|session| session.id.to_string()),
             goal: self.goal.clone(),
             papercuts: self.papercuts.clone(),
@@ -1795,20 +1790,11 @@ impl App {
             handles: self.handles.clone(),
             tether: self.tether.clone(),
             hive: self.hive.clone(),
-            aux_model: self.config.aux_model.clone(),
-            subagent_model: self.config.subagent_model.clone(),
-            compaction_model: self.config.compaction_model.clone(),
             injections: self.injections.clone(),
             modes: self.modes.clone(),
             tasks: self.tasks.clone(),
             compaction: self.compaction.clone(),
-            compaction_budget: compression_budget(
-                self.config.model_limits.compaction_budget(),
-                self.config.token_compression,
-            ),
-            token_compression: self.config.token_compression,
-            allow_subagents: true,
-            web_search: self.config.web_search.clone(),
+            ..TurnOptions::for_config(&self.config, self.services.clone())
         };
         self.running = Some(tokio::spawn(async move {
             run_turn(provider, messages, options, events).await;

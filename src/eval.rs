@@ -31,16 +31,13 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use crate::agent::{
-    AgentEvent, AgentMode, ApprovalDecision, TurnOptions, UserAnswer, compression_budget,
-    initial_messages, run_turn,
+    AgentEvent, AgentMode, ApprovalDecision, TurnOptions, UserAnswer, initial_messages, run_turn,
 };
 use crate::compaction::CompactionState;
 use crate::config::{AbacusPaths, Config, EvalState, Settings};
-use crate::goal::GoalState;
 use crate::model_info::ModelLimits;
 use crate::provider::Provider;
 use crate::services::AgentServices;
-use crate::task::TaskList;
 
 /// Where task definitions live, relative to the workspace.
 const TASKS_DIR: &str = "examples/evals";
@@ -344,44 +341,17 @@ async fn run_once(
     let cancel = Arc::new(AtomicBool::new(false));
     let (events, mut receiver) = mpsc::unbounded_channel();
     let turn = TurnOptions {
-        workspace: config.workspace.clone(),
-        max_steps: config.max_steps,
-        tool_output_limit: config.tool_output_limit,
         mode: config.mode.unwrap_or(AgentMode::Build),
         allow_mutations: Arc::new(AtomicBool::new(true)),
-        services: services.clone(),
-        session_id: None,
-        goal: GoalState::default(),
-        tasks: TaskList::default(),
         compaction: CompactionState::new(None),
-        compaction_budget: compression_budget(
-            config.model_limits.compaction_budget(),
-            config.token_compression,
-        ),
-        token_compression: config.token_compression,
         allow_subagents: task.file.allow_subagents,
-        web_search: config.web_search.clone(),
-        papercuts: crate::papercuts::PapercutStore::load(
-            config.paths.papercuts_file.clone(),
-            &config.workspace,
-        ),
         harness: crate::harness::HarnessStore::load_migrated(
             config.paths.harness_dir.clone(),
             &config.workspace,
             &config.paths.memories_file,
         ),
-        handles: crate::handles::HandleStore::default(),
-        tether: crate::tether::TetherState::default(),
-        hive: crate::hive::HiveHandle::load(config.paths.hive_file.clone()),
-        aux_model: config.aux_model.clone(),
-        subagent_model: config.subagent_model.clone(),
-        compaction_model: config.compaction_model.clone(),
-        injections: crate::agent::InjectionQueue::default(),
-        modes: crate::modes::ModeCoach::load(config.paths.modes_file.clone()),
-        safety: crate::safety::SafetyCache::default(),
-        safety_uses_main: false,
-        trace: None,
         cancel: cancel.clone(),
+        ..TurnOptions::for_config(&config, services.clone()).with_workspace_stores(&config)
     };
 
     let started = Instant::now();

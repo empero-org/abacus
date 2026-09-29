@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     activity::ActivityReporter,
-    agent::{AgentEvent, AgentMode, ApprovalDecision, TurnOptions, compression_budget, run_turn},
+    agent::{AgentEvent, ApprovalDecision, TurnOptions, run_turn},
     compaction::CompactionState,
     config::{Config, OutputFormat},
     goal::GoalState,
@@ -479,42 +479,18 @@ fn turn_options(
     handles: &crate::handles::HandleStore,
 ) -> TurnOptions {
     TurnOptions {
-        safety: crate::safety::SafetyCache::default(),
-        safety_uses_main: false,
         trace,
-        cancel: Arc::new(AtomicBool::new(false)),
-        workspace: config.workspace.clone(),
-        max_steps: config.max_steps,
-        tool_output_limit: config.tool_output_limit,
-        // A headless run defaults to AUTO so the model chooses; `--mode`
-        // pins it, which is what makes a read-only CI check expressible.
-        mode: config.mode.unwrap_or(AgentMode::Auto),
         allow_mutations: allow.clone(),
-        services: services.clone(),
         session_id,
         goal: goal.clone(),
         tasks: tasks.clone(),
         compaction: compaction.clone(),
-        compaction_budget: compression_budget(
-            config.model_limits.compaction_budget(),
-            config.token_compression,
-        ),
-        token_compression: config.token_compression,
-        allow_subagents: true,
-        papercuts: crate::papercuts::PapercutStore::load(
-            config.paths.papercuts_file.clone(),
-            &config.workspace,
-        ),
         harness: harness.clone(),
         handles: handles.clone(),
         tether: tether.clone(),
-        hive: crate::hive::HiveHandle::load(config.paths.hive_file.clone()),
-        aux_model: config.aux_model.clone(),
-        subagent_model: config.subagent_model.clone(),
-        compaction_model: config.compaction_model.clone(),
-        injections: crate::agent::InjectionQueue::default(),
-        modes: crate::modes::ModeCoach::load(config.paths.modes_file.clone()),
-        web_search: config.web_search.clone(),
+        // A headless run defaults to AUTO so the model chooses; `--mode`
+        // pins it, which is what makes a read-only CI check expressible.
+        ..TurnOptions::for_config(config, services.clone()).with_workspace_stores(config)
     }
 }
 

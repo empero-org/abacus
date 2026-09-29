@@ -42,7 +42,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::{
     agent::{
         AgentEvent, AgentMode, ApprovalDecision, DoneReason, InjectionQueue, TurnOptions,
-        UserAnswer, compression_budget, initial_messages, run_turn,
+        UserAnswer, initial_messages, run_turn,
     },
     compaction::CompactionState,
     config::{Config, Credentials, Settings},
@@ -685,40 +685,20 @@ impl App {
         );
 
         let options = TurnOptions {
-            workspace: self.config.workspace.clone(),
-            max_steps: self.config.max_steps,
-            tool_output_limit: self.config.tool_output_limit,
             mode: self.mode,
             allow_mutations: self.allow.clone(),
-            services: self.services.clone(),
             session_id: Some(self.thread_id()),
             goal: self.thread.goal.clone(),
             tasks: self.thread.tasks.clone(),
             compaction: self.thread.compaction.clone(),
-            compaction_budget: compression_budget(
-                self.config.model_limits.compaction_budget(),
-                self.config.token_compression,
-            ),
-            token_compression: self.config.token_compression,
-            allow_subagents: true,
-            web_search: self.config.web_search.clone(),
-            papercuts: crate::papercuts::PapercutStore::load(
-                self.config.paths.papercuts_file.clone(),
-                &self.config.workspace,
-            ),
             handles: self.thread.handles.clone(),
             harness: self.thread.harness.clone(),
             tether: self.thread.tether.clone(),
-            hive: crate::hive::HiveHandle::load(self.config.paths.hive_file.clone()),
-            aux_model: self.config.aux_model.clone(),
-            subagent_model: self.config.subagent_model.clone(),
-            compaction_model: self.config.compaction_model.clone(),
             injections: self.thread.injections.clone(),
-            modes: crate::modes::ModeCoach::load(self.config.paths.modes_file.clone()),
-            safety: crate::safety::SafetyCache::default(),
-            safety_uses_main: false,
             trace: self.thread.trace.clone(),
             cancel: self.cancel.clone(),
+            ..TurnOptions::for_config(&self.config, self.services.clone())
+                .with_workspace_stores(&self.config)
         };
         tokio::spawn(run_turn(
             self.provider.clone(),
