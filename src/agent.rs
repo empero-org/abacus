@@ -653,26 +653,24 @@ async fn run_turn_inner(
             // counts under the repeat-call heuristic.
             let settled = match call.name.as_str() {
                 "mode_set" => {
-                    Some(match set_auto_mode(options.mode, &mut active_mode, &call.arguments) {
-                        Ok((mode, reason)) => {
+                    Some(set_auto_mode(options.mode, &mut active_mode, &call.arguments).map(
+                        |(mode, reason)| {
                             // Choosing a mode unprompted is the habit worth
                             // reinforcing; it pays down earlier slips.
                             options.modes.record_switch();
                             let output = format!("Mode set to {}. Reason: {reason}", mode.label());
                             let _ = events.send(AgentEvent::ModeChanged { mode, reason });
                             output
-                        }
-                        Err(error) => format!("Error: {error:#}"),
-                    })
+                        },
+                    ))
                 }
-                "ask_user" => Some(match request_user_question(&call, &events).await {
-                    Ok(answer) => answer.describe(),
-                    Err(error) => format!("Error: {error:#}"),
-                }),
+                "ask_user" => Some(
+                    request_user_question(&call, &events).await.map(|answer| answer.describe()),
+                ),
                 _ => None,
             };
-            if let Some(output) = settled {
-                finish_tool(&call, output, &mut messages, &events);
+            if let Some(result) = settled {
+                finish_tool(&call, crate::tools::reply(result), &mut messages, &events);
                 continue;
             }
 

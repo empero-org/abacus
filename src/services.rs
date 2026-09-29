@@ -221,7 +221,7 @@ impl AgentServices {
             }
             _ => return None,
         };
-        Some(result.unwrap_or_else(|error| format!("Error: {error:#}")))
+        Some(crate::tools::reply(result))
     }
 
     fn create_skill(&self, arguments: &str) -> Result<String> {

@@ -57,10 +57,7 @@ pub struct ModeCoach {
 
 impl ModeCoach {
     pub fn load(file: PathBuf) -> Self {
-        let stats = std::fs::read_to_string(&file)
-            .ok()
-            .and_then(|content| serde_json::from_str::<ModeStats>(&content).ok())
-            .unwrap_or_default();
+        let stats: ModeStats = crate::config::read_json(&file);
         Self { stats: Arc::new(RwLock::new(stats)), file: Some(file) }
     }
 
@@ -69,10 +66,8 @@ impl ModeCoach {
     }
 
     fn save(&self, stats: &ModeStats) {
-        if let Some(file) = &self.file
-            && let Ok(serialized) = serde_json::to_vec_pretty(stats)
-        {
-            let _ = crate::config::atomic_write(file, &serialized, false);
+        if let Some(file) = &self.file {
+            crate::config::write_json(file, stats);
         }
     }
 

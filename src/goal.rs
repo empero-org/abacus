@@ -147,7 +147,7 @@ impl GoalState {
             "goal_update" => self.update(arguments),
             _ => return None,
         };
-        Some(result.unwrap_or_else(|error| format!("Error: {error:#}")))
+        Some(crate::tools::reply(result))
     }
 
     fn status_output(&self) -> Result<String> {

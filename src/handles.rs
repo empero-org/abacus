@@ -244,7 +244,7 @@ impl HandleStore {
             "handle_grep" => self.grep(arguments),
             _ => return None,
         };
-        Some(result.unwrap_or_else(|error| format!("Error: {error:#}")))
+        Some(crate::tools::reply(result))
     }
 
     fn list(&self) -> String {
@@ -426,10 +426,7 @@ pub async fn recurse(
     arguments: &str,
     cancel: &AtomicBool,
 ) -> String {
-    match recurse_inner(provider, store, arguments, cancel).await {
-        Ok(output) => output,
-        Err(error) => format!("Error: {error:#}"),
-    }
+    crate::tools::reply(recurse_inner(provider, store, arguments, cancel).await)
 }
 
 async fn recurse_inner(

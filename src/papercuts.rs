@@ -181,10 +181,7 @@ pub struct PapercutStore {
 impl PapercutStore {
     /// Load the store, applying time decay to every entry.
     pub fn load(file: PathBuf, workspace: &std::path::Path) -> Self {
-        let papercuts = std::fs::read_to_string(&file)
-            .ok()
-            .and_then(|content| serde_json::from_str::<Vec<Papercut>>(&content).ok())
-            .unwrap_or_default();
+        let papercuts: Vec<Papercut> = crate::config::read_json(&file);
         Self {
             inner: Arc::new(RwLock::new(Inner { papercuts, file: Some(file) })),
             workspace: workspace.to_string_lossy().into_owned(),
@@ -192,10 +189,8 @@ impl PapercutStore {
     }
 
     fn save_locked(inner: &Inner) {
-        if let Some(file) = &inner.file
-            && let Ok(serialized) = serde_json::to_vec_pretty(&inner.papercuts)
-        {
-            let _ = crate::config::atomic_write(file, &serialized, false);
+        if let Some(file) = &inner.file {
+            crate::config::write_json(file, &inner.papercuts);
         }
     }
 
@@ -238,10 +233,7 @@ impl PapercutStore {
     /// Virtual-tool dispatch, mirroring `GoalState::execute`.
     pub fn execute(&self, name: &str, arguments: &str) -> Option<String> {
         match name {
-            "papercut_record" => Some(match self.record_from_arguments(arguments) {
-                Ok(message) => message,
-                Err(error) => format!("Error: {error:#}"),
-            }),
+            "papercut_record" => Some(crate::tools::reply(self.record_from_arguments(arguments))),
             "papercut_list" => Some(self.list_for_model()),
             _ => None,
         }

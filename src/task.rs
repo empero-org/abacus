@@ -123,7 +123,7 @@ impl TaskList {
             "task_update" => self.update_from_args(arguments),
             _ => return None,
         };
-        Some(result.unwrap_or_else(|error| format!("Error: {error:#}")))
+        Some(crate::tools::reply(result))
     }
 
     fn list_output(&self) -> Result<String> {

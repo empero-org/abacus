@@ -267,10 +267,7 @@ impl SubagentRuntime {
     }
 
     pub async fn message(&self, arguments: &str) -> String {
-        match self.message_inner(arguments).await {
-            Ok(output) => output,
-            Err(error) => format!("Error: {error:#}"),
-        }
+        crate::tools::reply(self.message_inner(arguments).await)
     }
 
     async fn message_inner(&self, arguments: &str) -> Result<String> {
@@ -373,10 +370,7 @@ impl SubagentRuntime {
     }
 
     pub async fn execute(&self, arguments: &str) -> String {
-        match self.execute_inner(arguments).await {
-            Ok(output) => output,
-            Err(error) => format!("Error: {error:#}"),
-        }
+        crate::tools::reply(self.execute_inner(arguments).await)
     }
 
     async fn execute_inner(&self, arguments: &str) -> Result<String> {

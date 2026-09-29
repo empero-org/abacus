@@ -1235,6 +1235,22 @@ pub fn workspace_from_cli(cli: &Cli) -> Result<PathBuf> {
     resolve_workspace(cli.path.as_deref())
 }
 
+/// Reads a JSON state file, starting from the default when it is missing or
+/// unreadable: these files hold learned history, never anything a run depends on.
+pub fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+/// Writes a JSON state file, best effort, for the same reason.
+pub fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) {
+    if let Ok(content) = serde_json::to_vec_pretty(value) {
+        let _ = atomic_write(path, &content, false);
+    }
+}
+
 pub fn atomic_write(path: &Path, content: &[u8], private: bool) -> Result<()> {
     let parent = path.parent().context("path has no parent directory")?;
     fs::create_dir_all(parent)?;

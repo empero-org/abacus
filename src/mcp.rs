@@ -228,7 +228,7 @@ impl McpManager {
             format_tool_result(&result)
         }
         .await;
-        Some(result.unwrap_or_else(|error| format!("Error: {error:#}")))
+        Some(crate::tools::reply(result))
     }
 }
 

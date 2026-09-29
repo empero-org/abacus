@@ -573,10 +573,7 @@ impl HarnessStore {
     /// empty rather than failing: this is read on every prompt build, so a bad
     /// parse must never brick a session. The next save rewrites it cleanly.
     pub fn load(dir: PathBuf, workspace: &Path) -> Self {
-        let durable = std::fs::read_to_string(dir.join(STATE_FILE))
-            .ok()
-            .and_then(|content| serde_json::from_str::<HarnessState>(&content).ok())
-            .unwrap_or_default();
+        let durable: HarnessState = crate::config::read_json(&dir.join(STATE_FILE));
         Self {
             inner: Arc::new(RwLock::new(Inner {
                 durable,
@@ -604,10 +601,8 @@ impl HarnessStore {
     }
 
     fn save_locked(inner: &Inner) {
-        if let Some(dir) = &inner.dir
-            && let Ok(serialized) = serde_json::to_vec_pretty(&inner.durable)
-        {
-            let _ = crate::config::atomic_write(&dir.join(STATE_FILE), &serialized, false);
+        if let Some(dir) = &inner.dir {
+            crate::config::write_json(&dir.join(STATE_FILE), &inner.durable);
         }
     }
 
@@ -816,15 +811,9 @@ impl HarnessStore {
 
     pub fn execute(&self, name: &str, arguments: &str) -> Option<String> {
         match name {
-            "memory_record" => Some(match self.record(arguments) {
-                Ok(message) => message,
-                Err(error) => format!("Error: {error:#}"),
-            }),
+            "memory_record" => Some(crate::tools::reply(self.record(arguments))),
             "memory_list" => Some(self.list_for_model()),
-            "memory_forget" => Some(match self.forget(arguments) {
-                Ok(message) => message,
-                Err(error) => format!("Error: {error:#}"),
-            }),
+            "memory_forget" => Some(crate::tools::reply(self.forget(arguments))),
             _ => None,
         }
     }

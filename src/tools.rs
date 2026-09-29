@@ -95,6 +95,11 @@ fn remove(path: &Path) -> Result<()> {
 }
 
 /// `output`, or `note` when there was none.
+/// What a tool hands back to the model: its output, or the failure to react to.
+pub fn reply(result: Result<String>) -> String {
+    result.unwrap_or_else(|error| format!("Error: {error:#}"))
+}
+
 fn or_note(output: String, note: &str) -> String {
     if output.trim().is_empty() { note.to_owned() } else { output }
 }
@@ -263,10 +268,7 @@ impl ToolExecutor {
             other => Err(anyhow!("unknown tool: {other}")),
         };
 
-        match result {
-            Ok(output) => truncate(output, self.output_limit),
-            Err(error) => format!("Error: {error:#}"),
-        }
+        reply(result.map(|output| truncate(output, self.output_limit)))
     }
 
     pub fn approval_details(&self, call: &ToolCall) -> String {
@@ -322,10 +324,7 @@ impl ToolExecutor {
         let limit = args.limit.clamp(1, 2_000);
         let mut sections = Vec::new();
         for raw in &args.paths {
-            let body = match self.read_file_range(raw, 1, limit) {
-                Ok(body) => body,
-                Err(error) => format!("Error: {error:#}"),
-            };
+            let body = reply(self.read_file_range(raw, 1, limit));
             sections.push(format!("===== {raw} =====\n{body}"));
         }
         Ok(sections.join("\n\n"))
