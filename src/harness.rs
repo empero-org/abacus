@@ -143,6 +143,33 @@ fn default_path() -> String {
 }
 
 impl HarnessEntry {
+    /// The next version of `before`, or the first version of a new entry, with
+    /// everything an entry keeps from one version to the next. A new entry is
+    /// durable, applies everywhere, and is titled by its id until told otherwise.
+    fn next(before: Option<&Self>, kind: EntryKind, id: &str, source: &str) -> Self {
+        let now = Utc::now();
+        let source = source.to_owned();
+        match before {
+            Some(entry) => {
+                Self { source, updated_at: now, version: entry.version + 1, ..entry.clone() }
+            }
+            None => Self {
+                id: id.to_owned(),
+                kind,
+                title: id.to_owned(),
+                content: String::new(),
+                path: default_path(),
+                lifetime: Lifetime::Durable,
+                workspace: None,
+                metadata: Map::new(),
+                source,
+                created_at: now,
+                updated_at: now,
+                version: 1,
+            },
+        }
+    }
+
     /// `session` or `durable`, for display.
     pub fn lifetime_label(&self) -> &'static str {
         self.lifetime.label()
@@ -435,45 +462,24 @@ pub fn apply_proposal(
                 push(false, Some("entry not found".to_owned()), None, None);
             }
             EditAction::Create | EditAction::Update => {
-                let now = Utc::now();
+                // An existing entry keeps its lifetime and workspace: a
+                // refinement edits content, it does not silently change blast
+                // radius.
+                let base = match &before {
+                    Some(entry) => HarnessEntry::next(Some(entry), edit.kind, &entry_id, "refine"),
+                    None => HarnessEntry {
+                        lifetime,
+                        workspace: workspace.map(str::to_owned),
+                        ..HarnessEntry::next(None, edit.kind, &entry_id, "refine")
+                    },
+                };
+                let content = edit.content.as_deref().unwrap_or(&base.content).trim();
                 let after = HarnessEntry {
-                    id: entry_id.clone(),
-                    kind: edit.kind,
-                    title: edit
-                        .title
-                        .clone()
-                        .or_else(|| before.as_ref().map(|entry| entry.title.clone()))
-                        .unwrap_or_else(|| entry_id.clone()),
-                    content: crate::text::clip(
-                        edit.content
-                            .as_deref()
-                            .or(before.as_ref().map(|entry| entry.content.as_str()))
-                            .unwrap_or_default()
-                            .trim(),
-                        MAX_CONTENT_CHARS,
-                        "…",
-                    ),
-                    path: edit
-                        .path
-                        .clone()
-                        .or_else(|| before.as_ref().map(|entry| entry.path.clone()))
-                        .unwrap_or_else(default_path),
-                    // An existing entry keeps its lifetime: a refinement edits
-                    // content, it does not silently change blast radius.
-                    lifetime: before.as_ref().map(|entry| entry.lifetime).unwrap_or(lifetime),
-                    workspace: before
-                        .as_ref()
-                        .map(|entry| entry.workspace.clone())
-                        .unwrap_or_else(|| workspace.map(str::to_owned)),
-                    metadata: edit
-                        .metadata
-                        .clone()
-                        .or_else(|| before.as_ref().map(|entry| entry.metadata.clone()))
-                        .unwrap_or_default(),
-                    source: "refine".to_owned(),
-                    created_at: before.as_ref().map(|entry| entry.created_at).unwrap_or(now),
-                    updated_at: now,
-                    version: before.as_ref().map(|entry| entry.version + 1).unwrap_or(1),
+                    content: crate::text::clip(content, MAX_CONTENT_CHARS, "…"),
+                    title: edit.title.clone().unwrap_or(base.title),
+                    path: edit.path.clone().unwrap_or(base.path),
+                    metadata: edit.metadata.clone().unwrap_or(base.metadata),
+                    ..base
                 };
                 state.entries.of_mut(edit.kind).insert(entry_id.clone(), after.clone());
                 touched.insert(key);
@@ -509,35 +515,27 @@ pub fn apply_proposal(
 /// Invert an applied refinement. Edits are undone in reverse so that a batch
 /// touching the same entry twice unwinds to where it started.
 pub fn rollback_proposal(target: &RefinementResult) -> RefinementProposal {
-    let mut edits = Vec::new();
-    for edit in target.applied_edits.iter().rev() {
-        if !edit.applied {
-            continue;
-        }
-        match (&edit.before, &edit.after) {
-            (Some(before), _) => edits.push(RefinementEdit {
-                action: if edit.after.is_some() { EditAction::Update } else { EditAction::Create },
-                kind: edit.kind,
-                id: Some(edit.id.clone()),
-                title: Some(before.title.clone()),
-                content: Some(before.content.clone()),
-                path: Some(before.path.clone()),
-                metadata: Some(before.metadata.clone()),
-                reason: Some(format!("rollback of {}", target.id)),
-            }),
-            (None, Some(_)) => edits.push(RefinementEdit {
-                action: EditAction::Delete,
-                kind: edit.kind,
-                id: Some(edit.id.clone()),
-                title: None,
-                content: None,
-                path: None,
-                metadata: None,
-                reason: Some(format!("rollback of {}", target.id)),
-            }),
-            (None, None) => {}
-        }
-    }
+    let undo = |edit: &AppliedEdit| {
+        let before = edit.before.as_ref();
+        let action = match (before, &edit.after) {
+            (Some(_), Some(_)) => EditAction::Update,
+            (Some(_), None) => EditAction::Create,
+            (None, Some(_)) => EditAction::Delete,
+            (None, None) => return None,
+        };
+        Some(RefinementEdit {
+            action,
+            kind: edit.kind,
+            id: Some(edit.id.clone()),
+            title: before.map(|entry| entry.title.clone()),
+            content: before.map(|entry| entry.content.clone()),
+            path: before.map(|entry| entry.path.clone()),
+            metadata: before.map(|entry| entry.metadata.clone()),
+            reason: Some(format!("rollback of {}", target.id)),
+        })
+    };
+    let edits = target.applied_edits.iter().rev().filter(|edit| edit.applied).filter_map(undo);
+    let edits = edits.collect();
     RefinementProposal {
         summary: format!("Roll back refinement {}", target.id),
         rationale: format!(
@@ -836,7 +834,6 @@ impl HarnessStore {
             _ => Some(self.workspace.clone()),
         };
         let id = slug(&title, "memory");
-        let now = Utc::now();
 
         let mut inner = self.inner.write().expect("harness lock");
         // An existing entry is updated where it already lives, so re-recording
@@ -863,18 +860,11 @@ impl HarnessStore {
             inner.session.entries.memory.get(&id).cloned()
         };
         let entry = HarnessEntry {
-            id: id.clone(),
-            kind: EntryKind::Memory,
             title: title.clone(),
             content: crate::text::clip(body, MAX_CONTENT_CHARS, "…"),
-            path: existing.as_ref().map(|entry| entry.path.clone()).unwrap_or_else(default_path),
             lifetime: if durable_hit || promoted { Lifetime::Durable } else { Lifetime::Session },
             workspace,
-            metadata: existing.as_ref().map(|entry| entry.metadata.clone()).unwrap_or_default(),
-            source: "model".to_owned(),
-            created_at: existing.as_ref().map(|entry| entry.created_at).unwrap_or(now),
-            updated_at: now,
-            version: existing.as_ref().map(|entry| entry.version + 1).unwrap_or(1),
+            ..HarnessEntry::next(existing.as_ref(), EntryKind::Memory, &id, "model")
         };
         let updated = existing.is_some();
 
@@ -909,14 +899,7 @@ impl HarnessStore {
         let arguments: Arguments =
             serde_json::from_str(arguments).context("invalid memory_forget arguments")?;
         let title = arguments.title.trim();
-        let id = slug(title, "");
-        let mut inner = self.inner.write().expect("harness lock");
-        let from_session = inner.session.entries.memory.remove(&id).is_some();
-        let from_durable = inner.durable.entries.memory.remove(&id).is_some();
-        if from_durable {
-            Self::save_locked(&inner);
-        }
-        if !from_session && !from_durable {
+        if !self.remove(EntryKind::Memory, &slug(title, "")) {
             bail!("no memory titled `{title}` in this workspace");
         }
         Ok(format!("Memory \"{title}\" forgotten."))
@@ -1060,46 +1043,27 @@ impl HarnessStore {
         {
             for memory in legacy {
                 let id = slug(&memory.title, "memory");
-                inner.durable.entries.memory.insert(
-                    id.clone(),
-                    HarnessEntry {
-                        id,
-                        kind: EntryKind::Memory,
-                        title: memory.title,
-                        content: crate::text::clip(memory.body.trim(), MAX_CONTENT_CHARS, "…"),
-                        path: default_path(),
-                        lifetime: Lifetime::Durable,
-                        workspace: memory.workspace,
-                        metadata: Map::new(),
-                        source: "migration".to_owned(),
-                        created_at: memory.created_at,
-                        updated_at: memory.updated_at,
-                        version: 1,
-                    },
-                );
+                let entry = HarnessEntry {
+                    title: memory.title,
+                    content: crate::text::clip(memory.body.trim(), MAX_CONTENT_CHARS, "…"),
+                    workspace: memory.workspace,
+                    created_at: memory.created_at,
+                    updated_at: memory.updated_at,
+                    ..HarnessEntry::next(None, EntryKind::Memory, &id, "migration")
+                };
+                inner.durable.entries.memory.insert(id, entry);
                 imported += 1;
             }
         }
 
         if let Some(notes) = read_notes_block(workspace_dir) {
-            let now = Utc::now();
-            inner.durable.entries.prompt.insert(
-                "working_notes".to_owned(),
-                HarnessEntry {
-                    id: "working_notes".to_owned(),
-                    kind: EntryKind::Prompt,
-                    title: "Working notes".to_owned(),
-                    content: crate::text::clip(&notes, MAX_CONTENT_CHARS, "…"),
-                    path: default_path(),
-                    lifetime: Lifetime::Durable,
-                    workspace: Some(self.workspace.clone()),
-                    metadata: Map::new(),
-                    source: "migration".to_owned(),
-                    created_at: now,
-                    updated_at: now,
-                    version: 1,
-                },
-            );
+            let entry = HarnessEntry {
+                title: "Working notes".to_owned(),
+                content: crate::text::clip(&notes, MAX_CONTENT_CHARS, "…"),
+                workspace: Some(self.workspace.clone()),
+                ..HarnessEntry::next(None, EntryKind::Prompt, "working_notes", "migration")
+            };
+            inner.durable.entries.prompt.insert(entry.id.clone(), entry);
             imported += 1;
         }
 
@@ -1110,11 +1074,12 @@ impl HarnessStore {
     }
 }
 
-/// The delegation roles Abacus ships with, as ordinary entries.
+/// The delegation roles Abacus ships with, as ordinary entries: id, title,
+/// whether the role is read-only, and its prompt.
 ///
 /// `read_only` in the metadata is enforced mechanically, not just instructed:
 /// a spec carrying it runs its worker in PLAN with mutations locked off.
-const BUILT_IN_SUBAGENTS: [(&str, &str, bool, &str); 3] = [
+pub const BUILT_IN_SUBAGENTS: [(&str, &str, bool, &str); 3] = [
     (
         "drone",
         "Drone — builder",
@@ -1147,32 +1112,22 @@ const BUILT_IN_SUBAGENTS: [(&str, &str, bool, &str); 3] = [
 /// a user who deleted one keeps it deleted only until the next seed — which is
 /// the right trade for roles the tool schema still names.
 fn seed_subagents(state: &mut HarnessState) -> usize {
-    let now = Utc::now();
     let mut added = 0;
     for (id, title, read_only, prompt) in BUILT_IN_SUBAGENTS {
         if state.entries.subagent.contains_key(id) {
             continue;
         }
-        let mut metadata = Map::new();
-        metadata.insert("read_only".to_owned(), Value::Bool(read_only));
-        metadata.insert("built_in".to_owned(), Value::Bool(true));
-        state.entries.subagent.insert(
-            id.to_owned(),
-            HarnessEntry {
-                id: id.to_owned(),
-                kind: EntryKind::Subagent,
-                title: title.to_owned(),
-                content: prompt.to_owned(),
-                path: "roles".to_owned(),
-                lifetime: Lifetime::Durable,
-                workspace: None,
-                metadata,
-                source: "built-in".to_owned(),
-                created_at: now,
-                updated_at: now,
-                version: 1,
-            },
-        );
+        let entry = HarnessEntry {
+            title: title.to_owned(),
+            content: prompt.to_owned(),
+            path: "roles".to_owned(),
+            metadata: Map::from_iter([
+                ("read_only".to_owned(), Value::Bool(read_only)),
+                ("built_in".to_owned(), Value::Bool(true)),
+            ]),
+            ..HarnessEntry::next(None, EntryKind::Subagent, id, "built-in")
+        };
+        state.entries.subagent.insert(id.to_owned(), entry);
         added += 1;
     }
     added

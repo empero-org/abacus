@@ -89,26 +89,11 @@ impl SubagentRole {
         }
     }
 
-    fn system_prompt(self) -> &'static str {
-        match self {
-            Self::Drone => {
-                "You are a DRONE: a builder. Execute exactly the delegated change, run the \
-                 narrowest checks that verify it, and report what you changed and what you ran. \
-                 Do not investigate beyond what the change requires. Do not spawn subagents, \
-                 commit, push, or modify paths outside the workspace."
-            }
-            Self::Scout => {
-                "You are a SCOUT: a researcher. Investigate the delegated question — read code, \
-                 crawl the repository, search the web where allowed — and report findings with \
-                 exact file paths and evidence. You must NOT modify anything; your value is the \
-                 fidelity of what you bring back. Do not spawn subagents."
-            }
-            Self::Worker => {
-                "You are an isolated subagent. Complete only the delegated task. You may edit \
-                 and test this worktree. Do not spawn more subagents, commit, push, or modify \
-                 paths outside the workspace. Finish with a concise summary and exact checks run."
-            }
-        }
+    /// The role as Abacus ships it: its prompt, and whether it may only read.
+    fn built_in(self) -> (&'static str, bool) {
+        let shipped = crate::harness::BUILT_IN_SUBAGENTS;
+        let role = shipped.iter().find(|(id, ..)| *id == self.label()).expect("a shipped role");
+        (role.3, role.2)
     }
 }
 
@@ -163,10 +148,11 @@ fn resolve_role(harness: &crate::harness::HarnessStore, task: &SubagentTask) -> 
             system_prompt: entry.content,
         };
     }
+    let (system_prompt, read_only) = task.role.built_in();
     ResolvedRole {
         label: task.role.label().to_owned(),
-        system_prompt: task.role.system_prompt().to_owned(),
-        read_only: task.role == SubagentRole::Scout,
+        system_prompt: system_prompt.to_owned(),
+        read_only,
     }
 }
 

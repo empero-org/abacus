@@ -153,6 +153,20 @@ impl Papercut {
         self.workspace.as_deref().is_none_or(|scope| scope == workspace)
     }
 
+    /// The snag was met again: the lesson grows stronger.
+    fn trip(&mut self, now: DateTime<Utc>) {
+        self.strength = self.decayed_strength(now) + 1.0;
+        self.trip_count += 1;
+        self.last_tripped_at = Some(now);
+    }
+
+    /// Note that the lesson is being shown, and hand back its reminder.
+    fn recall(&mut self, now: DateTime<Utc>) -> String {
+        self.recall_count += 1;
+        self.last_recalled_at = Some(now);
+        self.reminder()
+    }
+
     /// The reminder as the model sees it, inline in a tool result.
     fn reminder(&self) -> String {
         let mut text = format!("[papercut] {} — fix: {}", self.title, self.fix);
@@ -296,10 +310,7 @@ impl PapercutStore {
         if let Some(existing) = inner.papercuts.iter_mut().find(|papercut| {
             papercut.title.eq_ignore_ascii_case(&title) && papercut.workspace == workspace
         }) {
-            let now = Utc::now();
-            existing.strength = existing.decayed_strength(now) + 1.0;
-            existing.trip_count += 1;
-            existing.last_tripped_at = Some(now);
+            existing.trip(Utc::now());
             existing.fix = arguments.fix.trim().to_owned();
             for tripwire in tripwires {
                 if !existing.tripwires.iter().any(|known| known.eq_ignore_ascii_case(&tripwire)) {
@@ -363,21 +374,16 @@ impl PapercutStore {
         let mut inner = self.inner.write().expect("papercut lock");
         let haystack_lower = haystack.to_ascii_lowercase();
         let now = Utc::now();
-        let workspace = self.workspace.clone();
         let mut reminders = Vec::new();
         let mut changed = false;
         for papercut in &mut inner.papercuts {
-            if !papercut.in_scope(&workspace) || !papercut.matches(&haystack_lower) {
+            if !papercut.in_scope(&self.workspace) || !papercut.matches(&haystack_lower) {
                 continue;
             }
-            papercut.strength = papercut.decayed_strength(now) + 1.0;
-            papercut.trip_count += 1;
-            papercut.last_tripped_at = Some(now);
+            papercut.trip(now);
             changed = true;
             if papercut.off_cooldown(now) {
-                papercut.recall_count += 1;
-                papercut.last_recalled_at = Some(now);
-                reminders.push(papercut.reminder());
+                reminders.push(papercut.recall(now));
             }
         }
         if changed {
@@ -392,22 +398,16 @@ impl PapercutStore {
     pub fn force_recall_top(&self, limit: usize) -> Vec<String> {
         let mut inner = self.inner.write().expect("papercut lock");
         let now = Utc::now();
-        let workspace = self.workspace.clone();
         let mut ranked: Vec<usize> = (0..inner.papercuts.len())
-            .filter(|&index| inner.papercuts[index].in_scope(&workspace))
+            .filter(|&index| inner.papercuts[index].in_scope(&self.workspace))
             .collect();
         ranked.sort_by(|&a, &b| {
             let strength_a = inner.papercuts[a].decayed_strength(now);
             let strength_b = inner.papercuts[b].decayed_strength(now);
             strength_b.partial_cmp(&strength_a).unwrap_or(std::cmp::Ordering::Equal)
         });
-        let mut reminders = Vec::new();
-        for index in ranked.into_iter().take(limit) {
-            let papercut = &mut inner.papercuts[index];
-            papercut.recall_count += 1;
-            papercut.last_recalled_at = Some(now);
-            reminders.push(papercut.reminder());
-        }
+        let top = ranked.into_iter().take(limit);
+        let reminders: Vec<String> = top.map(|index| inner.papercuts[index].recall(now)).collect();
         if !reminders.is_empty() {
             Self::save_locked(&inner);
         }
