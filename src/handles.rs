@@ -38,7 +38,6 @@ use anyhow::{Context, Result, bail};
 use futures_util::{StreamExt, stream};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
 
 use crate::provider::Provider;
 
@@ -482,8 +481,7 @@ async fn recurse_inner(
                     )
                 }),
             ];
-            let (deltas, _sink) = mpsc::unbounded_channel();
-            let completion = provider.complete(&conversation, &[], deltas, cancel).await;
+            let completion = provider.ask(&conversation, &[], cancel).await;
             (index, completion, schema)
         }
     }))

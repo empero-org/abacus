@@ -217,10 +217,6 @@ impl SessionStore {
         Ok(session)
     }
 
-    pub fn for_session(paths: &AbacusPaths, workspace: PathBuf) -> Self {
-        Self::new(paths, workspace)
-    }
-
     pub fn save(&self, session: &Session) -> Result<()> {
         fs::create_dir_all(&self.directory)?;
         let content = serde_json::to_vec_pretty(session).context("could not encode session")?;
@@ -300,9 +296,6 @@ impl SessionStore {
     /// Older session files predate persisted token totals, so their transcript
     /// size provides a best-effort estimate instead of leaving the chart empty.
     pub fn usage(&self) -> Result<Vec<SessionUsage>> {
-        if !self.directory.exists() {
-            return Ok(Vec::new());
-        }
         let mut usage = self
             .headers()?
             .into_iter()
@@ -354,25 +347,14 @@ impl SessionStore {
         Ok(session)
     }
 
-    pub fn path_for(&self, id: Uuid) -> PathBuf {
-        self.path(id)
-    }
-
-    fn path(&self, id: Uuid) -> PathBuf {
+    pub fn path(&self, id: Uuid) -> PathBuf {
         self.directory.join(format!("{id}.json"))
     }
 }
 
 fn title_from_prompt(prompt: &str) -> String {
-    let one_line = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
-    let title = one_line.chars().take(72).collect::<String>();
-    if title.is_empty() {
-        "New session".to_owned()
-    } else if one_line.chars().count() > 72 {
-        format!("{title}…")
-    } else {
-        title
-    }
+    let title = crate::text::clip(&crate::text::squeeze(prompt), 72, "…");
+    if title.is_empty() { "New session".to_owned() } else { title }
 }
 
 /// Fix message-history corruption left behind by interrupted or failed turns,

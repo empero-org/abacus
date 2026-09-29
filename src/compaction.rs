@@ -22,7 +22,6 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
 
 use std::sync::atomic::AtomicBool;
 
@@ -90,9 +89,6 @@ impl CompactionState {
     }
 }
 
-/// Run microcompaction (every turn) and rolling-summary compaction (when over
-/// threshold). Mutates `messages` in place and updates `state`. The budgets are
-/// derived from the chosen model's context window (see `model_info`).
 /// Whether the next `compact` call is likely to run rolling-summary
 /// compaction — the tier that erases verbatim history. Exposed so the agent
 /// can run its reflection pass first, while the evidence still exists.
@@ -138,6 +134,9 @@ impl<'a> Summariser<'a> {
     }
 }
 
+/// Run microcompaction (every turn) and rolling-summary compaction (when over
+/// threshold). Mutates `messages` in place and updates `state`. The budgets are
+/// derived from the chosen model's context window (see `model_info`).
 pub async fn compact(
     summariser: &Summariser<'_>,
     messages: &mut Vec<Value>,
@@ -181,47 +180,34 @@ pub async fn compact(
     }
 
     let to_summarize: Vec<Value> = messages[head_end..cut].to_vec();
-    match summarize(summariser, state, messages, &to_summarize, budget, cancel).await {
+    let note = match summarize(summariser, state, messages, &to_summarize, budget, cancel).await {
         Ok(summary) => {
             // Backstop: a model that ignores the compression directive must not
             // be able to reinstate the growth loop, so an oversized summary is
             // cut structurally. The tail is kept because the most recent state
             // is what the next turn needs.
             state.running_summary = Some(bound_summary(summary, budget.summary_budget_chars));
-            let head: Vec<Value> = messages[..head_end].to_vec();
-            let tail: Vec<Value> = messages[cut..].to_vec();
-            messages.clear();
-            messages.extend(head);
-            messages.extend(tail);
-            // Microcompact the rebuilt history (tail may still carry stale output).
-            microcompact(messages, budget);
+            None
         }
-        Err(error) => {
-            // Last-resort fallback: drop the middle with a local trace note so the
-            // loop never breaks. Preserve the head and a smaller tail.
-            let head: Vec<Value> = messages[..head_end].to_vec();
-            let dropped = cut - head_end;
-            let trace = crate::agent::compaction_trace(&messages[head_end..cut]);
-            let note = if trace.is_empty() {
-                format!(
-                    "{dropped} older conversation messages were omitted to fit the model context. Reinspect files when prior details matter."
-                )
-            } else {
-                format!(
-                    "{dropped} older conversation messages were omitted to fit the model context. Earlier actions, in order: {trace} Reinspect files when prior details matter."
-                )
+        // Last-resort fallback: drop the middle with a local trace note so the
+        // loop never breaks. An existing good summary is left as it is.
+        Err(_) => {
+            let trace = crate::agent::compaction_trace(&to_summarize);
+            let actions = match trace.as_str() {
+                "" => String::new(),
+                trace => format!(" Earlier actions, in order: {trace}"),
             };
-            let tail: Vec<Value> = messages[cut..].to_vec();
-            messages.clear();
-            messages.extend(head);
-            messages.push(json!({"role":"system","content":note}));
-            messages.extend(tail);
-            microcompact(messages, budget);
-            // Surface the failure via the state so callers can observe it, but
-            // keep going. We do not overwrite an existing good summary.
-            let _ = error;
+            Some(json!({"role":"system","content":format!(
+                "{} older conversation messages were omitted to fit the model context.{actions} \
+                 Reinspect files when prior details matter.",
+                to_summarize.len()
+            )}))
         }
-    }
+    };
+    // The middle gives way to the note, when there is one. What is left may
+    // still carry stale output.
+    messages.splice(head_end..cut, note);
+    microcompact(messages, budget);
 }
 
 /// Cap a summary at `budget` chars, keeping the end.
@@ -487,11 +473,7 @@ async fn summarize_in_context(
     let mut messages = conversation.to_vec();
     messages.push(json!({"role": "user", "content": directive}));
 
-    let (delta_tx, mut delta_rx) = mpsc::unbounded_channel::<crate::provider::Chunk>();
-    let drain = tokio::spawn(async move { while delta_rx.recv().await.is_some() {} });
-    let result = summariser.provider.complete(&messages, summariser.tools, delta_tx, cancel).await;
-    let _ = drain.await;
-
+    let result = summariser.provider.ask(&messages, summariser.tools, cancel).await;
     let completion = result.map_err(|error| format!("{error:#}"))?;
     if completion.cancelled {
         return Err("cancelled".to_owned());
@@ -554,14 +536,7 @@ async fn summarize_range(
         }
         messages.push(json!({"role":"user","content": directive}));
 
-        // Drain streaming deltas silently — the summary is internal memory, not
-        // assistant output to show the user.
-        let (delta_tx, mut delta_rx) = mpsc::unbounded_channel::<crate::provider::Chunk>();
-        let drain = tokio::spawn(async move { while delta_rx.recv().await.is_some() {} });
-        let result = provider.complete(&messages, &[], delta_tx, cancel).await;
-        let _ = drain.await;
-
-        match result {
+        match provider.ask(&messages, &[], cancel).await {
             Ok(completion) => {
                 let cleaned = strip_analysis(&completion.content);
                 let trimmed = cleaned.trim();

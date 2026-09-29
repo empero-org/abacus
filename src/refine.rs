@@ -24,7 +24,6 @@ use std::sync::atomic::AtomicBool;
 
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
 
 use crate::harness::{HarnessStore, Lifetime, RefinementProposal, RefinementResult};
 use crate::provider::Provider;
@@ -303,9 +302,7 @@ async fn complete(
     tools: &[Value],
     cancel: &AtomicBool,
 ) -> Option<String> {
-    // Deltas are discarded: a refinement is bookkeeping, not output.
-    let (deltas, _sink) = mpsc::unbounded_channel();
-    let completion = provider.complete(messages, tools, deltas, cancel).await.ok()?;
+    let completion = provider.ask(messages, tools, cancel).await.ok()?;
     if completion.cancelled || completion.content.trim().is_empty() {
         return None;
     }

@@ -1282,9 +1282,7 @@ pub async fn draft_reply(provider: &Provider, messages: &[Value]) -> Option<Stri
         json!({"role": "system", "content": PROMPT}),
         json!({"role": "user", "content": format!("Assistant's last reply:\n{tail}")}),
     ];
-    let (deltas, _sink) = mpsc::unbounded_channel();
-    let never = AtomicBool::new(false);
-    let completion = provider.complete(&request, &[], deltas, &never).await.ok()?;
+    let completion = provider.ask(&request, &[], &AtomicBool::new(false)).await.ok()?;
     let draft = completion
         .content
         .trim()

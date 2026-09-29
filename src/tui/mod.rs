@@ -1219,7 +1219,7 @@ impl App {
                     && let Ok(session) = store.load(&summary.id.to_string())
                     && crate::sync::is_placeholder(&session)
                 {
-                    let _ = std::fs::remove_file(store.path_for(summary.id));
+                    let _ = std::fs::remove_file(store.path(summary.id));
                     let _ = std::fs::remove_file(
                         config.paths.traces_dir.join(format!("{}.jsonl", summary.id)),
                     );

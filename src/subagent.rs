@@ -654,9 +654,7 @@ async fn coerce_to_schema(provider: &Provider, report: &str, schema: &Value) -> 
         }
         let conversation =
             vec![json!({"role":"system","content":system}), json!({"role":"user","content":user})];
-        let (deltas, _sink) = mpsc::unbounded_channel();
-        let cancel = AtomicBool::new(false);
-        let completion = match provider.complete(&conversation, &[], deltas, &cancel).await {
+        let completion = match provider.ask(&conversation, &[], &AtomicBool::new(false)).await {
             Ok(completion) => completion,
             Err(error) => {
                 last_error = format!("{error:#}");

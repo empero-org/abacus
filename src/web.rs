@@ -482,9 +482,8 @@ async fn extract_from(
             "Request:\n{request}\n\n--- BEGIN PAGE DATA ---\n{page}\n--- END PAGE DATA ---"
         )}),
     ];
-    let (deltas, _sink) = tokio::sync::mpsc::unbounded_channel();
     let never = std::sync::atomic::AtomicBool::new(false);
-    let completion = provider.complete(&conversation, &[], deltas, &never).await.ok()?;
+    let completion = provider.ask(&conversation, &[], &never).await.ok()?;
     let answer = completion.content.trim();
     (!answer.is_empty()).then(|| answer.to_owned())
 }

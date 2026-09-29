@@ -380,6 +380,18 @@ impl Provider {
         reply.finish(cancelled)
     }
 
+    /// Complete without an audience, for a call whose answer Abacus reads
+    /// itself rather than shows as it arrives.
+    pub async fn ask(
+        &self,
+        messages: &[Value],
+        tools: &[Value],
+        cancel: &AtomicBool,
+    ) -> Result<Completion> {
+        let (deltas, _unread) = mpsc::unbounded_channel();
+        self.complete(messages, tools, deltas, cancel).await
+    }
+
     /// Send `body`, or give up with `None` when `cancel` is raised first.
     ///
     /// The request is raced as well as the stream: `post_stream` waits for

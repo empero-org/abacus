@@ -99,9 +99,7 @@ impl SyncClient {
     }
 
     async fn revision(&self, id: &str) -> Result<Option<u64>> {
-        let response = self.request(reqwest::Method::GET, "/v1/sync/sessions").send().await?;
-        let sessions: SessionList = decode(response).await?;
-        Ok(sessions.items.into_iter().find(|item| item.id == id).map(|item| item.revision))
+        Ok(self.sessions().await?.into_iter().find(|item| item.id == id).map(|item| item.revision))
     }
 
     pub async fn push(&self, session: &Session, trace: &[u8], force: bool) -> Result<u64> {
@@ -591,7 +589,7 @@ impl SyncClient {
 }
 
 fn install_pulled(paths: &AbacusPaths, session: Session, trace: &[u8], force: bool) -> Result<()> {
-    let store = SessionStore::for_session(paths, session.workspace.clone());
+    let store = SessionStore::new(paths, session.workspace.clone());
     if let Ok(local) = store.load(&session.id.to_string())
         && !force
     {

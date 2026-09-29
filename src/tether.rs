@@ -19,7 +19,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
 use serde_json::Value;
-use tokio::sync::mpsc;
 
 use crate::provider::Provider;
 
@@ -207,8 +206,7 @@ async fn quick_call(
     conversation: Vec<Value>,
     cancel: &AtomicBool,
 ) -> Option<String> {
-    let (deltas, _sink) = mpsc::unbounded_channel();
-    let completion = provider.complete(&conversation, &[], deltas, cancel).await.ok()?;
+    let completion = provider.ask(&conversation, &[], cancel).await.ok()?;
     if completion.cancelled || completion.content.trim().is_empty() {
         return None;
     }

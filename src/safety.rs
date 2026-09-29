@@ -26,7 +26,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
-use tokio::sync::mpsc;
 
 use crate::provider::Provider;
 
@@ -597,9 +596,7 @@ async fn ask(provider: &Provider, prompt: &str, data: &str, yes: &str) -> bool {
         json!({"role": "system", "content": prompt}),
         json!({"role": "user", "content": data}),
     ];
-    let (deltas, _sink) = mpsc::unbounded_channel();
-    let never = AtomicBool::new(false);
-    match provider.complete(&messages, &[], deltas, &never).await {
+    match provider.ask(&messages, &[], &AtomicBool::new(false)).await {
         // The answer must be the word itself: a model that explains instead of
         // answering has not answered.
         Ok(completion) => completion.content.trim().eq_ignore_ascii_case(yes),
