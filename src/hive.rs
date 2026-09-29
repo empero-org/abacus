@@ -499,9 +499,12 @@ mod tests {
         stats.workers = 40;
         stats.worker_failures = 2;
         assert_eq!(stats.tier(), HiveTier::Hive);
-        // A high failure rate holds a veteran at swarm tier.
-        stats.worker_failures = 20;
+        // A high failure rate holds a veteran at swarm tier, and one where
+        // workers mostly fail sends it back to probing.
+        stats.worker_failures = 14;
         assert_eq!(stats.tier(), HiveTier::Swarm);
+        stats.worker_failures = 20;
+        assert_eq!(stats.tier(), HiveTier::Probing);
     }
 
     #[test]
