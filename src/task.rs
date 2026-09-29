@@ -68,14 +68,7 @@ impl TaskList {
         if tasks.is_empty() {
             return String::new();
         }
-        let rendered = tasks
-            .iter()
-            .enumerate()
-            .map(|(index, task)| {
-                format!("{}. [{}] {}", index + 1, if task.done { 'x' } else { ' ' }, task.text)
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let rendered = render_tasks(&tasks);
         let pending_count = tasks.iter().filter(|task| !task.done).count();
         format!(
             "<task_list>\n{rendered}\n</task_list>\n\

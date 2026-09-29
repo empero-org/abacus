@@ -840,14 +840,15 @@ async fn run_tool(
     if let Err(error) = options.services.run_hooks("before_tool", session, &before).await {
         return format!("Error: {error:#}");
     }
+    let reply = crate::tools::reply;
     let mut output = if name == "spawn_subagents" && options.allow_subagents {
-        subagents.execute(arguments).await
+        reply(subagents.execute(arguments).await)
     } else if name == "message_subagent" && options.allow_subagents {
-        subagents.message(arguments).await
+        reply(subagents.message(arguments).await)
     } else if name == "handle_recurse" {
         // Apart from the other handle tools because it makes model calls: the
         // aux model reads the chunks, the main model decides what to ask.
-        crate::handles::recurse(aux, &options.handles, arguments, &options.cancel).await
+        reply(crate::handles::recurse(aux, &options.handles, arguments, &options.cancel).await)
     } else if let Some(output) = options
         .goal
         .execute(name, arguments)

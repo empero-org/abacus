@@ -240,11 +240,7 @@ impl SubagentRuntime {
         })
     }
 
-    pub async fn message(&self, arguments: &str) -> String {
-        crate::tools::reply(self.message_inner(arguments).await)
-    }
-
-    async fn message_inner(&self, arguments: &str) -> Result<String> {
+    pub async fn message(&self, arguments: &str) -> Result<String> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct MessageArgs {
@@ -331,11 +327,7 @@ impl SubagentRuntime {
         }
     }
 
-    pub async fn execute(&self, arguments: &str) -> String {
-        crate::tools::reply(self.execute_inner(arguments).await)
-    }
-
-    async fn execute_inner(&self, arguments: &str) -> Result<String> {
+    pub async fn execute(&self, arguments: &str) -> Result<String> {
         let args = parse_args(arguments)?;
         // The parent snapshot is taken now, in the foreground, so background
         // workers start from the workspace as it was when they were spawned

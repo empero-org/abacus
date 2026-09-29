@@ -40,6 +40,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::provider::Provider;
+use crate::schema::function;
 
 /// Tool output at or above this size is bound instead of inlined.
 pub const BIND_THRESHOLD_CHARS: usize = 20_000;
@@ -175,12 +176,12 @@ impl HandleStore {
 
     pub fn tool_specs() -> Vec<Value> {
         vec![
-            spec(
+            function(
                 "handle_list",
                 "List the large payloads bound in this session, with their sizes and shapes.",
                 json!({"type":"object","properties":{}}),
             ),
-            spec(
+            function(
                 "handle_info",
                 "Describe one bound payload — size, line count, detected shape, and a short head and tail sample — without pulling the whole thing into context.",
                 json!({
@@ -189,7 +190,7 @@ impl HandleStore {
                     "required":["id"]
                 }),
             ),
-            spec(
+            function(
                 "handle_slice",
                 "Read a line range from a bound payload. Use after handle_info or handle_grep has told you where to look.",
                 json!({
@@ -202,7 +203,7 @@ impl HandleStore {
                     "required":["id"]
                 }),
             ),
-            spec(
+            function(
                 "handle_grep",
                 "Search a bound payload with a regular expression and get matching lines with their line numbers.",
                 json!({
@@ -215,7 +216,7 @@ impl HandleStore {
                     "required":["id","pattern"]
                 }),
             ),
-            spec(
+            function(
                 "handle_recurse",
                 "Ask one question of every part of a bound payload at once. The payload is split into chunks and a separate model call answers your question against each, concurrently; you get the answers back together. Use this when the answer could be anywhere in something too large to read — counting, extracting, or summarising across the whole thing. Prefer handle_grep when you know the string you are looking for.",
                 json!({
@@ -407,28 +408,12 @@ impl HandleStore {
     }
 }
 
-fn spec(name: &str, description: &str, parameters: Value) -> Value {
-    json!({
-        "type":"function",
-        "function":{"name":name,"description":description,"parameters":parameters}
-    })
-}
-
 /// Map a question over every chunk of a bound payload, concurrently.
 ///
 /// Depth is one by construction: a sub-call is a bare model call with no tools,
 /// so it cannot recurse. That is the paper's own choice, and it is what keeps a
 /// fan-out from becoming a fan-out of fan-outs.
 pub async fn recurse(
-    provider: &Provider,
-    store: &HandleStore,
-    arguments: &str,
-    cancel: &AtomicBool,
-) -> String {
-    crate::tools::reply(recurse_inner(provider, store, arguments, cancel).await)
-}
-
-async fn recurse_inner(
     provider: &Provider,
     store: &HandleStore,
     arguments: &str,

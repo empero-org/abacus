@@ -555,51 +555,46 @@ const PATH_PROMPT: &str = "You decide whether an agent may READ a file path outs
      mail, or personal documents unrelated to software.\n\nAnswer with exactly one word: READ or \
      SECRET.";
 
-/// Ask the model whether a command only inspects. Fails closed on any error or
-/// any answer that is not the expected word.
+/// Ask the model whether a command only inspects.
 pub async fn command_is_safe(provider: &Provider, cache: &SafetyCache, command: &str) -> bool {
-    let key = format!("cmd:{command}");
-    if let Some(known) = cache.get(&key) {
-        return known;
-    }
-    let allowed = ask(provider, COMMAND_PROMPT, &format!("Command:\n{command}"), "INSPECT").await;
-    cache.put(key, allowed);
-    allowed
+    let data = format!("Command:\n{command}");
+    judged(provider, cache, format!("cmd:{command}"), (COMMAND_PROMPT, &data, "INSPECT")).await
 }
 
 /// Ask the model whether an environment file is safe to read.
 pub async fn env_file_is_readable(provider: &Provider, cache: &SafetyCache, path: &Path) -> bool {
-    let display = path.display().to_string();
-    let key = format!("env:{display}");
-    if let Some(known) = cache.get(&key) {
-        return known;
-    }
-    let allowed = ask(provider, ENV_PROMPT, &format!("Path:\n{display}"), "READ").await;
-    cache.put(key, allowed);
-    allowed
+    let (path, prompt) = (path.display(), ENV_PROMPT);
+    judged(provider, cache, format!("env:{path}"), (prompt, &format!("Path:\n{path}"), "READ"))
+        .await
 }
 
 /// Ask the model whether a path outside the workspace is safe to read.
 pub async fn path_is_readable(provider: &Provider, cache: &SafetyCache, path: &Path) -> bool {
-    let display = path.display().to_string();
-    let key = format!("path:{display}");
+    let (path, prompt) = (path.display(), PATH_PROMPT);
+    judged(provider, cache, format!("path:{path}"), (prompt, &format!("Path:\n{path}"), "READ"))
+        .await
+}
+
+/// One question to the classifier, remembered under `key`. Fails closed on any
+/// error and on any answer that is not the expected word: a model that explains
+/// instead of answering has not answered.
+async fn judged(
+    provider: &Provider,
+    cache: &SafetyCache,
+    key: String,
+    (prompt, data, yes): (&str, &str, &str),
+) -> bool {
     if let Some(known) = cache.get(&key) {
         return known;
     }
-    let allowed = ask(provider, PATH_PROMPT, &format!("Path:\n{display}"), "READ").await;
-    cache.put(key, allowed);
-    allowed
-}
-
-async fn ask(provider: &Provider, prompt: &str, data: &str, yes: &str) -> bool {
     let messages = vec![
         json!({"role": "system", "content": prompt}),
         json!({"role": "user", "content": data}),
     ];
-    // The answer must be the word itself: a model that explains instead of
-    // answering has not answered.
     let answer = provider.answer(&messages, &[], &AtomicBool::new(false)).await;
-    answer.is_some_and(|answer| answer.eq_ignore_ascii_case(yes))
+    let allowed = answer.is_some_and(|answer| answer.eq_ignore_ascii_case(yes));
+    cache.put(key, allowed);
+    allowed
 }
 
 #[cfg(test)]
