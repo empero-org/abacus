@@ -1003,67 +1003,6 @@ impl App {
         names
     }
 
-    /// Create a profile that references a scripted endpoint. The endpoint's
-    /// URL, model, and protocol are copied onto the profile so it validates and
-    /// applies immediately; the `endpoint` reference drives auth, headers, and
-    /// body overrides. When the endpoint declares no model, the model field is
-    /// opened for the user to fill.
-    pub(super) fn add_scripted_provider(&mut self, name: &str) {
-        let endpoint = match crate::endpoint::ScriptedEndpoint::resolve(
-            name,
-            &self.config.paths.endpoints_dir,
-        ) {
-            Ok(endpoint) => endpoint,
-            Err(error) => {
-                self.status = format!("could not load endpoint {name}: {error:#}");
-                return;
-            }
-        };
-        let mut profile_id = name.to_owned();
-        let mut suffix = 2;
-        while self.settings.profiles.contains_key(&profile_id) {
-            profile_id = format!("{name}-{suffix}");
-            suffix += 1;
-        }
-        let model = endpoint.model.clone().unwrap_or_default();
-        self.settings.profiles.insert(
-            profile_id.clone(),
-            crate::config::ProviderProfile {
-                name: endpoint.display_name().to_owned(),
-                base_url: endpoint.url.clone(),
-                model: model.clone(),
-                protocol: endpoint.protocol,
-                endpoint: Some(name.to_owned()),
-                ..Default::default()
-            },
-        );
-        let previous = self.settings.default_profile.clone();
-        self.settings.default_profile = profile_id.clone();
-
-        // With a model from the endpoint the profile is complete — apply it.
-        // Without one, persist-but-don't-apply and open the model field, the
-        // same contract the preset path uses.
-        if model.trim().is_empty() {
-            self.pending_provider = Some(PendingProvider { profile: profile_id.clone(), previous });
-            if let Err(error) = self.settings.save(&self.config.paths) {
-                self.status = format!("could not add endpoint: {error:#}");
-                return;
-            }
-            self.status = format!("{profile_id} added — set a model");
-            self.ask_for_model();
-        } else {
-            match self.save_and_apply_settings() {
-                Ok(()) => {
-                    self.status = format!("{profile_id} active — {}", endpoint.display_name())
-                }
-                Err(error) => {
-                    self.settings.default_profile = previous;
-                    self.status = format!("could not apply endpoint: {error:#}");
-                }
-            }
-        }
-    }
-
     /// Accept the highlighted picker row, or `index` when a click named one.
     pub(super) fn accept_picker(&mut self, index: Option<usize>) {
         let Some(picker) = &self.picker else {
@@ -1207,76 +1146,85 @@ impl App {
         }
     }
 
-    /// Create a profile from a preset (or a blank custom one), make it active,
-    /// and open the field that most needs filling in next.
+    /// Create a profile — from a preset, a scripted endpoint under
+    /// `~/.abacus/endpoints`, or blank — and make it the active one.
+    ///
+    /// A scripted endpoint is copied onto the profile (URL, model, protocol)
+    /// so it validates at once, while the `endpoint` reference keeps driving
+    /// auth, headers, and body overrides.
     pub(super) fn add_provider(&mut self, id: &str) {
-        if let Some(name) = id.strip_prefix(ENDPOINT_SENTINEL_PREFIX) {
-            return self.add_scripted_provider(name);
-        }
-        let preset = crate::setup::PRESETS.iter().find(|preset| preset.id == id);
-        let (name, base_url, protocol, env_key) = match preset {
-            Some(preset) => (
-                preset.name.to_owned(),
-                preset.base_url.to_owned(),
-                preset.protocol,
-                preset.env_key.map(str::to_owned),
-            ),
-            None => (
-                "Custom".to_owned(),
-                "http://localhost:8000/v1".to_owned(),
-                ProviderProtocol::ChatCompletions,
-                None,
-            ),
+        use crate::config::ProviderProfile;
+        let (base, profile) = if let Some(name) = id.strip_prefix(ENDPOINT_SENTINEL_PREFIX) {
+            let endpoints = &self.config.paths.endpoints_dir;
+            let endpoint = match crate::endpoint::ScriptedEndpoint::resolve(name, endpoints) {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    self.status = format!("could not load endpoint {name}: {error:#}");
+                    return;
+                }
+            };
+            let profile = ProviderProfile {
+                name: endpoint.display_name().to_owned(),
+                base_url: endpoint.url.clone(),
+                model: endpoint.model.clone().unwrap_or_default(),
+                protocol: endpoint.protocol,
+                endpoint: Some(name.to_owned()),
+                ..Default::default()
+            };
+            (name, profile)
+        } else if let Some(preset) = crate::setup::PRESETS.iter().find(|preset| preset.id == id) {
+            let profile = ProviderProfile {
+                name: preset.name.to_owned(),
+                base_url: preset.base_url.to_owned(),
+                protocol: preset.protocol,
+                api_key_env: preset.env_key.map(str::to_owned),
+                ..Default::default()
+            };
+            (preset.id, profile)
+        } else {
+            let profile = ProviderProfile {
+                name: "Custom".to_owned(),
+                base_url: "http://localhost:8000/v1".to_owned(),
+                ..Default::default()
+            };
+            ("custom", profile)
         };
         // Never silently replace an existing profile of the same name.
-        let mut profile_id = if preset.is_some() { id.to_owned() } else { "custom".to_owned() };
-        let mut suffix = 2;
-        while self.settings.profiles.contains_key(&profile_id) {
-            profile_id = format!("{}-{suffix}", preset.map(|p| p.id).unwrap_or("custom"));
-            suffix += 1;
+        let profile_id = std::iter::once(base.to_owned())
+            .chain((2..).map(|suffix| format!("{base}-{suffix}")))
+            .find(|candidate| !self.settings.profiles.contains_key(candidate))
+            .expect("an unused suffix exists");
+        let (name, ready) = (profile.name.clone(), !profile.model.trim().is_empty());
+        let key = profile
+            .api_key_env
+            .clone()
+            .filter(|name| !std::env::var(name).is_ok_and(|value| !value.trim().is_empty()));
+        self.settings.profiles.insert(profile_id.clone(), profile);
+        let previous = std::mem::replace(&mut self.settings.default_profile, profile_id.clone());
+
+        // With a model the profile is complete — apply it.
+        if ready {
+            let result = self.save_and_apply_settings();
+            if !self.report(result, format!("{profile_id} active — {name}"), "could not apply") {
+                self.settings.default_profile = previous;
+            }
+            return;
         }
-        self.settings.profiles.insert(
-            profile_id.clone(),
-            crate::config::ProviderProfile {
-                name,
-                base_url,
-                protocol,
-                api_key_env: env_key.clone(),
-                ..Default::default()
-            },
-        );
-        // Deliberately persisted but *not* applied: a profile with no model
-        // fails validation, and applying a half-made provider would break the
-        // running session. The live config keeps pointing at the old profile
-        // until a model is committed, at which point the normal save-and-apply
-        // path picks it up.
-        self.pending_provider = Some(PendingProvider {
-            profile: profile_id.clone(),
-            previous: self.settings.default_profile.clone(),
-        });
-        self.settings.default_profile = profile_id.clone();
+        // Without one it is persisted but *not* applied: a profile with no
+        // model fails validation, and applying a half-made provider would
+        // break the running session. The live config keeps pointing at the
+        // old profile until a model is committed.
+        self.pending_provider = Some(PendingProvider { profile: profile_id.clone(), previous });
         if let Err(error) = self.settings.save(&self.config.paths) {
             self.status = format!("could not add provider: {error:#}");
             return;
         }
-        let needs_key = env_key
-            .as_deref()
-            .is_some_and(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()));
-        self.status = if needs_key {
-            format!("{profile_id} added — set a model")
-        } else if env_key.is_some() {
-            format!(
-                "{profile_id} added — set a model, then an API key ({})",
-                env_key.as_deref().unwrap_or_default()
-            )
-        } else {
-            format!("{profile_id} added — set a model")
+        self.status = match key {
+            Some(key) => format!("{profile_id} added — set a model, then an API key ({key})"),
+            None => format!("{profile_id} added — set a model"),
         };
-        // A new profile has no model, which is the one field it cannot run
-        // without; open it rather than leaving the user to find it.
         self.ask_for_model();
     }
-
     /// Put the cursor on the model field and open it. A new profile has no
     /// model, which is the one thing it cannot run without.
     pub(super) fn ask_for_model(&mut self) {
