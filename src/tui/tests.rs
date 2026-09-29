@@ -277,12 +277,12 @@ fn a_completed_command_can_be_sent() {
     let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
     for ch in "/help".chars() {
         let before = app.input.text();
-        handle_key(&mut app, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
+        press(&mut app, KeyCode::Char(ch));
         app.sync_completion(&before);
     }
     // Fully typed, so Enter must send rather than re-accept the suggestion.
     assert!(app.visible_completion().is_some(), "popup lists the match");
-    handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+    press(&mut app, KeyCode::Enter);
     assert!(app.input.is_empty(), "Enter should have submitted");
     assert!(app.show_help, "/help should have run");
 }
@@ -292,11 +292,11 @@ fn accepting_a_suggestion_closes_the_popup() {
     let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
     for ch in "/comp".chars() {
         let before = app.input.text();
-        handle_key(&mut app, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
+        press(&mut app, KeyCode::Char(ch));
         app.sync_completion(&before);
     }
     let before = app.input.text();
-    handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+    press(&mut app, KeyCode::Tab);
     app.sync_completion(&before);
     assert_eq!(app.input.text(), "/compact ");
     // The trailing space is the signal that choosing is done. Trimming it
@@ -305,7 +305,7 @@ fn accepting_a_suggestion_closes_the_popup() {
         app.visible_completion().is_none(),
         "a completed command must not keep offering itself"
     );
-    handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+    press(&mut app, KeyCode::Enter);
     assert!(app.input.is_empty(), "Enter should have submitted");
 }
 
@@ -600,7 +600,7 @@ fn abandoning_the_model_prompt_rolls_the_new_provider_back() {
     assert_eq!(app.settings.default_profile, "groq");
 
     // Esc out of the model prompt.
-    handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+    press(&mut app, KeyCode::Esc);
     assert_eq!(app.settings.default_profile, "test", "the previous profile should be restored");
     assert!(
         !app.settings.profiles.contains_key("groq"),
@@ -624,7 +624,7 @@ fn a_committed_model_keeps_the_new_provider() {
     assert!(app.pending_provider.is_none());
 
     // A later Esc must not undo a finished profile.
-    handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+    press(&mut app, KeyCode::Esc);
     assert!(app.settings.profiles.contains_key("groq"));
 }
 
@@ -688,15 +688,12 @@ fn a_picker_opened_from_config_is_visible_and_owns_the_keys() {
     app.open_profile_picker();
 
     // Drawn on top: the config panel must not paint over its own child.
-    let backend = TestBackend::new(96, 34);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let rendered = buffer_text(terminal.backend().buffer(), 96, 34);
+    let rendered = render(&mut app, 96, 34);
     assert!(rendered.contains("PROFILE"), "picker should be visible");
     assert!(rendered.contains("Add a provider"), "picker rows should be visible");
 
     // And it owns the keys, rather than them going to the panel behind it.
-    handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::empty()));
+    press(&mut app, KeyCode::Down);
     assert_eq!(app.picker.as_ref().expect("picker").selected, 1);
     assert_eq!(
         app.config_panel.as_ref().expect("panel").selected,
@@ -713,7 +710,7 @@ fn a_draft_is_only_offered_to_an_idle_composer() {
     // Typing invalidates a shown draft immediately.
     app.draft = Some("run the tests".into());
     let before = app.input.text();
-    handle_key(&mut app, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()));
+    press(&mut app, KeyCode::Char('x'));
     app.sync_completion(&before);
     assert_eq!(app.draft, None, "a draft must not linger over typed text");
 
@@ -734,7 +731,7 @@ fn a_draft_is_only_offered_to_an_idle_composer() {
 fn tab_takes_the_draft_and_leaves_completion_alone() {
     let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
     app.draft = Some("add a regression test".into());
-    handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+    press(&mut app, KeyCode::Tab);
     assert_eq!(app.input.text(), "add a regression test");
     assert_eq!(app.draft, None, "accepting consumes it");
 
@@ -743,7 +740,7 @@ fn tab_takes_the_draft_and_leaves_completion_alone() {
     app.input.insert_str("/mod");
     app.sync_completion("");
     app.draft = Some("should be ignored".into());
-    handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+    press(&mut app, KeyCode::Tab);
     assert!(app.input.text().starts_with("/mod"));
     assert_ne!(app.input.text(), "should be ignored");
 }
@@ -781,10 +778,7 @@ fn a_trackpad_burst_scrolls_a_line_at_a_time() {
 fn the_footer_separates_session_total_from_context_size() {
     let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
     app.entries = vec![Entry::new(EntryKind::Assistant, "hi")];
-    let backend = TestBackend::new(100, 20);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let rendered = buffer_text(terminal.backend().buffer(), 100, 20);
+    let rendered = render(&mut app, 100, 20);
     // "449.1k tokens · ctx 24%" read as one measurement of the same thing.
     // They are what the session has spent and how full the window is, so
     // the first is a direction pair and the second carries a denominator.
@@ -805,8 +799,7 @@ fn resting_the_pointer_on_the_arrows_opens_the_token_breakdown() {
     let mut terminal = Terminal::new(backend).unwrap();
 
     // Nothing is open until the pointer is actually on the readout.
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(!buffer_text(terminal.backend().buffer(), 100, 20).contains("TOKENS"));
+    assert!(!render(&mut app, 100, 20).contains("TOKENS"));
 
     // The footer's last row, inside the arrows: they sit at the left of the
     // right-aligned group, whose width the context meter dominates.
@@ -1032,24 +1025,19 @@ async fn the_rate_is_off_by_default_and_only_shows_while_running() {
     app.entries = vec![Entry::new(EntryKind::User, "go")];
 
     // Not running: the status bar has no rate to report.
-    let backend = TestBackend::new(110, 16);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(!buffer_text(terminal.backend().buffer(), 110, 16).contains("tok/s"));
+    assert!(!render(&mut app, 110, 16).contains("tok/s"));
 
     // Running with the toggle on, it appears beside the elapsed time.
     app.start_turn("go".into(), "go".into(), false);
     app.turn_started = Some(Instant::now() - Duration::from_secs(10));
     app.turn_output_chars = 4_000;
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let rendered = buffer_text(terminal.backend().buffer(), 110, 16);
+    let rendered = render(&mut app, 110, 16);
     assert!(rendered.contains("tok/s"), "{rendered}");
     assert!(rendered.contains("100 tok/s"), "4000 chars / 4 / 10s");
 
     // And stays hidden when the toggle is off, even mid-turn.
     app.settings.ui.show_token_rate = false;
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(!buffer_text(terminal.backend().buffer(), 110, 16).contains("tok/s"));
+    assert!(!render(&mut app, 110, 16).contains("tok/s"));
 }
 
 #[test]
@@ -1067,7 +1055,7 @@ fn ctrl_o_steps_a_question_aside_and_a_new_dialog_returns_visible() {
     handle_key(&mut app, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert!(app.overlay_hidden);
     // While hidden, transcript keys work instead of feeding the dialog.
-    handle_key(&mut app, KeyEvent::new(KeyCode::PageUp, KeyModifiers::empty()));
+    press(&mut app, KeyCode::PageUp);
     assert!(app.question.is_some(), "the question is parked, not lost");
     handle_key(&mut app, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert!(!app.overlay_hidden);
@@ -1098,7 +1086,7 @@ fn f3_toggles_thinking_and_hides_streamed_reasoning_blocks() {
     };
     assert!(joined(&visible).contains("step by step"));
 
-    handle_key(&mut app, KeyEvent::new(KeyCode::F(3), KeyModifiers::empty()));
+    press(&mut app, KeyCode::F(3));
     assert!(!app.settings.ui.show_thinking);
     let hidden = ui::transcript(&app.entries, 60, "•", None, false);
     assert!(!joined(&hidden).contains("step by step"));
@@ -1217,12 +1205,12 @@ async fn esc_esc_rewinds_to_the_previous_prompt() {
     app.push_entry(Entry::new(EntryKind::Assistant, "first answer"));
 
     // One Esc only arms; nothing is discarded yet.
-    handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+    press(&mut app, KeyCode::Esc);
     assert_eq!(app.messages.len(), 3);
     assert!(app.status.contains("esc again"), "{}", app.status);
 
     // A second Esc rewinds: prompt back in the composer, turn discarded.
-    handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+    press(&mut app, KeyCode::Esc);
     assert_eq!(app.input.text(), "first question");
     assert_eq!(app.messages.len(), 1, "only the system message remains");
     assert!(
@@ -1232,8 +1220,8 @@ async fn esc_esc_rewinds_to_the_previous_prompt() {
 
     // Any other key disarms: Esc, type, Esc must not rewind.
     app.input.clear();
-    handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
-    handle_key(&mut app, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()));
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('x'));
     assert!(app.rewind_armed.is_none());
 }
 
@@ -1247,10 +1235,7 @@ fn approval_modal_spells_out_the_choices() {
         details: "$ rm -rf build/".into(),
         respond,
     });
-    let backend = TestBackend::new(110, 34);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let rendered = buffer_text(terminal.backend().buffer(), 110, 34);
+    let rendered = render(&mut app, 110, 34);
     assert!(rendered.contains("Yes, run it once"), "{rendered}");
     assert!(rendered.contains("allow this for the rest of the session"), "{rendered}");
     assert!(rendered.contains("tell Abacus in chat what to do instead"), "{rendered}");
@@ -1521,24 +1506,19 @@ fn transcript_wraps_to_an_exact_row_count() {
 fn polished_layout_renders_at_standard_and_compact_sizes() {
     for (width, height) in [(120, 36), (80, 24), (60, 20)] {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        let rendered = buffer_text(terminal.backend().buffer(), width, height);
+        let rendered = render(&mut app, width, height);
         assert!(rendered.contains("ABACUS"));
         assert!(rendered.contains("focused coding agent") || width < 72);
         assert!(rendered.contains("commands"));
 
         app.config_panel = Some(ConfigPanel { selected: 0, editing: None });
-        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        let rendered = buffer_text(terminal.backend().buffer(), width, height);
+        let rendered = render(&mut app, width, height);
         assert!(rendered.contains("CONFIGURATION"));
         assert!(rendered.contains("Active profile"));
 
         app.config_panel = None;
         app.open_feedback();
-        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        let rendered = buffer_text(terminal.backend().buffer(), width, height);
+        let rendered = render(&mut app, width, height);
         assert!(rendered.contains("FEEDBACK"));
         assert!(rendered.contains("Category"));
     }
@@ -1551,10 +1531,7 @@ fn transcript_renders_markdown_semantically() {
         EntryKind::Assistant,
         "# Result\n\nUse **cargo test** and `cargo clippy`.\n\n```rust\nfn main() {}\n```\n\n| Check | State |\n|---|---|\n| tests | green |",
     )];
-    let backend = TestBackend::new(80, 30);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let rendered = buffer_text(terminal.backend().buffer(), 80, 30);
+    let rendered = render(&mut app, 80, 30);
     assert!(rendered.contains("Result"));
     assert!(rendered.contains("cargo test"));
     assert!(rendered.contains("╭─ rust"));
@@ -1584,10 +1561,7 @@ fn semantic_diff_approval_renders_at_standard_and_compact_sizes() {
             details: patch.into(),
             respond,
         });
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        let rendered = buffer_text(terminal.backend().buffer(), width, height);
+        let rendered = render(&mut app, width, height);
         assert!(rendered.contains("APPROVAL REQUIRED"));
         assert!(rendered.contains("src/main.rs"));
         assert!(rendered.contains("+1"));
@@ -1776,19 +1750,15 @@ fn usage_dashboard_renders_and_switches_views() {
         tab: UsageTab::Overview,
         range: UsageRange::AllTime,
     });
-    let backend = TestBackend::new(110, 32);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let rendered = buffer_text(terminal.backend().buffer(), 110, 32);
+    let rendered = render(&mut app, 110, 32);
     assert!(rendered.contains("USAGE"));
     assert!(rendered.contains("Overview"));
     assert!(rendered.contains("Favorite model"));
     assert!(rendered.contains("abacus-pro"));
     assert!(rendered.contains("20.0k"));
 
-    handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let rendered = buffer_text(terminal.backend().buffer(), 110, 32);
+    press(&mut app, KeyCode::Tab);
+    let rendered = render(&mut app, 110, 32);
     assert!(rendered.contains("Sessions"));
     assert!(rendered.contains("Tokens"));
     assert!(rendered.contains("abacus-pro"));
@@ -1820,10 +1790,7 @@ fn the_model_hub_renders_both_columns_in_one_box() {
         hub.scope = 2;
         hub.pane = crate::model_hub::Pane::Body;
     }
-    let backend = TestBackend::new(110, 24);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let rendered = buffer_text(terminal.backend().buffer(), 110, 24);
+    let rendered = render(&mut app, 110, 24);
 
     assert!(rendered.contains("MODELS"), "{rendered}");
     // Sidebar and body are both live, and the sidebar carries the profile
@@ -1851,10 +1818,9 @@ fn the_model_hub_renders_both_columns_in_one_box() {
 
     // Typing filters rather than navigating — the list is searched, not walked.
     for ch in "gpt".chars() {
-        handle_key(&mut app, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
+        press(&mut app, KeyCode::Char(ch));
     }
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let rendered = buffer_text(terminal.backend().buffer(), 110, 24);
+    let rendered = render(&mut app, 110, 24);
     assert!(rendered.contains("gpt-5"), "{rendered}");
     assert!(!rendered.contains("claude-sonnet"), "{rendered}");
 }
@@ -1874,13 +1840,13 @@ fn picking_a_model_for_a_role_assigns_it_and_returns_to_the_roles_list() {
         hub.selected = 1;
     }
     // Enter on the role opens the catalog with the role in hand…
-    handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+    press(&mut app, KeyCode::Enter);
     let hub = app.model_hub.as_ref().expect("hub is still open");
     assert_eq!(hub.assigning.as_deref(), Some("aux"));
     assert!(matches!(hub.current_scope(), Scope::Profile { .. }));
 
     // …and Enter on a model assigns it and comes back.
-    handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+    press(&mut app, KeyCode::Enter);
     let hub = app.model_hub.as_ref().expect("hub is still open");
     assert_eq!(hub.assigning, None);
     assert_eq!(*hub.current_scope(), Scope::Roles);
@@ -1892,7 +1858,7 @@ fn picking_a_model_for_a_role_assigns_it_and_returns_to_the_roles_list() {
     assert_eq!(app.config.aux_model.as_deref(), Some("openai/gpt-5"));
 
     // Delete clears it back to inheriting.
-    handle_key(&mut app, KeyEvent::new(KeyCode::Delete, KeyModifiers::empty()));
+    press(&mut app, KeyCode::Delete);
     assert_eq!(app.settings.profiles["test"].role_model("aux"), None);
 }
 
@@ -1908,7 +1874,7 @@ fn enter_on_a_model_with_no_role_in_hand_switches_the_profile_model() {
         hub.scope = 2;
         hub.pane = crate::model_hub::Pane::Body;
     }
-    handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+    press(&mut app, KeyCode::Enter);
     assert_eq!(app.settings.profiles["test"].model, "openai/gpt-5");
     assert_eq!(app.config.model, "openai/gpt-5", "and it is applied live");
 }
@@ -2013,7 +1979,7 @@ fn completion_popup_navigates_and_inserts_the_highlighted_row() {
     let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
     for ch in "/mod".chars() {
         let before = app.input.text();
-        handle_key(&mut app, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
+        press(&mut app, KeyCode::Char(ch));
         app.sync_completion(&before);
     }
     let (items, _) = app.visible_completion().expect("command completion");
@@ -2022,14 +1988,14 @@ fn completion_popup_navigates_and_inserts_the_highlighted_row() {
 
     // Down moves the highlight rather than reaching for prompt history.
     let before = app.input.text();
-    handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::empty()));
+    press(&mut app, KeyCode::Down);
     app.sync_completion(&before);
     assert_eq!(app.completion_index, 1);
     assert_eq!(app.input.text(), "/mod", "navigation must not edit the draft");
 
     // Enter inserts what is highlighted, not the first match.
     let before = app.input.text();
-    handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+    press(&mut app, KeyCode::Enter);
     app.sync_completion(&before);
     assert_eq!(app.input.text(), format!("{} ", items[1].0));
 }
@@ -2042,14 +2008,14 @@ fn editing_the_draft_resets_the_highlight_and_revives_a_dismissed_popup() {
     app.completion_index = 1;
 
     // Esc dismisses without leaving insert mode or clearing the draft.
-    handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+    press(&mut app, KeyCode::Esc);
     assert!(app.completion_dismissed);
     assert!(app.visible_completion().is_none());
     assert_eq!(app.input.text(), "/mod");
 
     // Typing brings it back, at the top of the fresh list.
     let before = app.input.text();
-    handle_key(&mut app, KeyEvent::new(KeyCode::Char('e'), KeyModifiers::empty()));
+    press(&mut app, KeyCode::Char('e'));
     app.sync_completion(&before);
     assert!(!app.completion_dismissed);
     assert_eq!(app.completion_index, 0);
@@ -2076,12 +2042,12 @@ fn normal_mode_walks_blocks_and_unfolds_the_selected_tool() {
     app.mode = InputMode::Normal;
 
     // k from nothing selects the last block, not the first.
-    handle_key(&mut app, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::empty()));
+    press(&mut app, KeyCode::Char('k'));
     assert_eq!(app.cursor, Some(1));
     assert!(!app.follow, "selecting stops follow-mode");
 
     let collapsed = ui::transcript(&app.entries, 60, "•", app.cursor, true).lines.len();
-    handle_key(&mut app, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()));
+    press(&mut app, KeyCode::Char('o'));
     assert!(
         app.entries[1].tool.as_ref().expect("tool").expanded,
         "o should unfold the selected tool"
@@ -2099,7 +2065,7 @@ fn normal_mode_walks_blocks_and_unfolds_the_selected_tool() {
         .collect();
     assert!(text.contains("line 40"), "full output should be reachable");
 
-    handle_key(&mut app, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()));
+    press(&mut app, KeyCode::Char('o'));
     assert!(!app.entries[1].tool.as_ref().expect("tool").expanded);
 }
 
@@ -2127,7 +2093,7 @@ fn a_selected_block_is_scrolled_into_view() {
 
     // Walk to the very first block; the viewport has to follow it up.
     for _ in 0..60 {
-        handle_key(&mut app, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::empty()));
+        press(&mut app, KeyCode::Char('k'));
     }
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(app.cursor, Some(0));
@@ -2224,7 +2190,7 @@ async fn esc_asks_a_running_turn_to_stop_before_killing_it() {
     // First press is cooperative: the turn is asked to stop so it can
     // report the work it already did, rather than being killed and losing
     // every tool result from this turn.
-    handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+    press(&mut app, KeyCode::Esc);
     assert!(app.cancel.load(Ordering::Relaxed), "stop was requested");
     assert!(app.running.is_some(), "the turn should still be finishing up");
     assert!(app.status.contains("interrupting"));
@@ -2245,8 +2211,8 @@ async fn a_second_interrupt_escalates_and_settles_the_open_tool_row() {
     }));
     app.tool_started = Some(Instant::now());
 
-    handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
-    handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Esc);
 
     assert!(app.running.is_none(), "a second esc forces the stop");
     assert!(app.turn_started.is_none());
@@ -2276,7 +2242,7 @@ async fn ctrl_c_arm_resets_so_a_later_interrupt_is_not_a_quit() {
     app.handle_ctrl_c();
     assert!(app.last_ctrl_c.is_some());
     // Any other key cancels the pending exit.
-    handle_key(&mut app, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()));
+    press(&mut app, KeyCode::Char('x'));
     assert!(app.last_ctrl_c.is_none());
     // So the next Ctrl+C starts over rather than quitting.
     app.handle_ctrl_c();
@@ -2402,6 +2368,18 @@ fn test_app(base_url: &str) -> (TempDir, App) {
     )
     .unwrap();
     (directory, app)
+}
+
+/// Draw one frame at `width` x `height` and return what is on screen.
+fn render(app: &mut App, width: u16, height: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|frame| draw(frame, app)).unwrap();
+    buffer_text(terminal.backend().buffer(), width, height)
+}
+
+/// Press an unmodified key.
+fn press(app: &mut App, code: KeyCode) {
+    handle_key(app, KeyEvent::new(code, KeyModifiers::empty()));
 }
 
 fn buffer_text(buffer: &ratatui::buffer::Buffer, width: u16, height: u16) -> String {
