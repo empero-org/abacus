@@ -87,9 +87,10 @@ impl CronStore {
         Ok(())
     }
 
-    fn lock(&self) -> Result<FileLock> {
+    fn lock(&self) -> Result<PidLock> {
         self.ensure()?;
-        FileLock::acquire(&self.lock_file, Duration::from_secs(10))
+        let patience = Duration::from_secs(10);
+        PidLock::acquire(&self.lock_file, patience, "timed out waiting for cron store lock")
     }
 
     fn load_unlocked(&self) -> Result<JobFile> {
@@ -115,39 +116,30 @@ impl CronStore {
     }
 
     fn add(&self, request: NewCronJob) -> Result<CronJob> {
-        let NewCronJob {
-            name,
-            expression,
-            prompt,
-            workspace,
-            profile,
-            always_approve,
-            timeout_minutes,
-        } = request;
-        if name.trim().is_empty() || name.len() > 100 {
+        if request.name.trim().is_empty() || request.name.len() > 100 {
             bail!("job name must contain 1 to 100 characters");
         }
-        if prompt.trim().is_empty() || prompt.len() > 100_000 {
+        if request.prompt.trim().is_empty() || request.prompt.len() > 100_000 {
             bail!("job prompt must contain 1 to 100000 characters");
         }
-        let workspace = workspace
+        let workspace = request
+            .workspace
             .canonicalize()
-            .with_context(|| format!("invalid workspace: {}", workspace.display()))?;
-        let schedule = normalize_schedule(&expression)?;
+            .with_context(|| format!("invalid workspace: {}", request.workspace.display()))?;
+        let schedule = normalize_schedule(&request.expression)?;
         let now = Utc::now();
-        let next_run = next_after(&schedule, now)?;
         let job = CronJob {
             id: Uuid::new_v4(),
-            name,
+            name: request.name,
+            next_run: next_after(&schedule, now)?,
             schedule,
-            prompt,
+            prompt: request.prompt,
             workspace,
-            profile,
-            always_approve,
-            timeout_seconds: timeout_minutes.clamp(1, 24 * 60) * 60,
+            profile: request.profile,
+            always_approve: request.always_approve,
+            timeout_seconds: request.timeout_minutes.clamp(1, 24 * 60) * 60,
             enabled: true,
             created_at: now,
-            next_run,
             last_started_at: None,
             last_completed_at: None,
             last_status: None,
@@ -334,7 +326,9 @@ pub async fn handle(
 }
 
 async fn run_daemon(store: &CronStore, once: bool, poll_seconds: u64) -> Result<()> {
-    let _guard = DaemonGuard::acquire(&store.directory.join("daemon.lock"))?;
+    store.ensure()?;
+    let running = "the Abacus cron daemon is already running";
+    let _guard = PidLock::acquire(&store.directory.join("daemon.lock"), Duration::ZERO, running)?;
     loop {
         let jobs = store.claim_due(Utc::now())?;
         stream::iter(jobs)
@@ -462,73 +456,34 @@ fn resolve_job(jobs: &[CronJob], prefix: &str) -> Result<usize> {
     }
 }
 
-struct FileLock {
+/// A lock file holding its owner's PID, so a lock left behind by a dead process is
+/// taken over instead of waited on.
+struct PidLock {
     path: PathBuf,
 }
 
-impl FileLock {
-    fn acquire(path: &Path, timeout: Duration) -> Result<Self> {
-        let deadline = std::time::Instant::now() + timeout;
+impl PidLock {
+    /// Waits up to `patience` for a live owner to let go, then fails with `busy`.
+    fn acquire(path: &Path, patience: Duration, busy: &str) -> Result<Self> {
+        let deadline = std::time::Instant::now() + patience;
         loop {
             match OpenOptions::new().write(true).create_new(true).open(path) {
                 Ok(mut file) => {
                     writeln!(file, "{}", std::process::id())?;
                     return Ok(Self { path: path.to_owned() });
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if !lock_owner_alive(path) {
-                        let _ = fs::remove_file(path);
-                        continue;
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        bail!("timed out waiting for cron store lock");
-                    }
-                    std::thread::sleep(Duration::from_millis(25));
+                Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
+                    return Err(error.into());
                 }
-                Err(error) => return Err(error.into()),
+                Err(_) if !lock_owner_alive(path) && fs::remove_file(path).is_ok() => {}
+                Err(_) if std::time::Instant::now() >= deadline => bail!("{busy}"),
+                Err(_) => std::thread::sleep(Duration::from_millis(25)),
             }
         }
     }
 }
 
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-struct DaemonGuard {
-    path: PathBuf,
-}
-
-impl DaemonGuard {
-    fn acquire(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        for _ in 0..2 {
-            match OpenOptions::new().write(true).create_new(true).open(path) {
-                Ok(mut file) => {
-                    writeln!(file, "{}", std::process::id())?;
-                    return Ok(Self { path: path.to_owned() });
-                }
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::AlreadyExists
-                        && !lock_owner_alive(path) =>
-                {
-                    let _ = fs::remove_file(path);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    bail!("the Abacus cron daemon is already running")
-                }
-                Err(error) => return Err(error.into()),
-            }
-        }
-        bail!("could not acquire the cron daemon lock")
-    }
-}
-
-impl Drop for DaemonGuard {
+impl Drop for PidLock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
