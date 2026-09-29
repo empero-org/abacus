@@ -388,7 +388,10 @@ impl HiveHandle {
             .snapshot()
             .into_iter()
             .filter(|worker| worker.state == WorkerState::Running)
-            .map(|worker| format!("{} ({}, {})", worker.name, worker.role, worker.activity))
+            // Name and role only. The live activity line changes on every tool
+            // call a worker makes, and this guidance is conversation context:
+            // a text that changes that often is re-sent on every step.
+            .map(|worker| format!("{} ({})", worker.name, worker.role))
             .collect();
         let in_flight = if running.is_empty() {
             String::new()

@@ -1,4 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::hash::{Hash, Hasher};
+use std::io::Write as _;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -86,6 +89,9 @@ pub struct Provider {
     /// Whether to mark prompt-cache breakpoints on Anthropic requests, cleared
     /// if the endpoint turns out not to understand `cache_control`.
     caches_prompt: Arc<AtomicBool>,
+    /// Per-request cache telemetry. Shared by every clone so one process
+    /// writes one file and tracks one set of conversation prefixes.
+    cache_log: Option<Arc<CacheLog>>,
 }
 
 /// A piece of streamed output. Reasoning is kept separate from the answer all
@@ -189,6 +195,9 @@ impl Provider {
             stream_gate: config.one_stream.then(|| Arc::new(Semaphore::new(1))),
             prefers_leading_system: Arc::new(AtomicBool::new(false)),
             caches_prompt: Arc::new(AtomicBool::new(config.prompt_cache)),
+            cache_log: Some(Arc::new(CacheLog::open(
+                config.paths.root.join(CACHE_LOG_FILE),
+            ))),
         })
     }
 
@@ -248,11 +257,23 @@ impl Provider {
         &self,
         reported: Option<Usage>,
         messages: &[Value],
+        tools: usize,
+        upstream: Option<&str>,
         content: &str,
         calls: &BTreeMap<usize, PartialToolCall>,
     ) {
         let usage = reported.unwrap_or_else(|| estimate_usage(messages, content, calls));
         self.ledger.record(&usage);
+        if let Some(log) = &self.cache_log {
+            log.request(RequestRecord {
+                model: &self.model,
+                upstream,
+                messages,
+                tools,
+                reported: reported.is_some(),
+                usage: &usage,
+            });
+        }
         // The prompt count is the exact size of the context that was just sent,
         // so the window gauge can stop guessing from character counts. Cached
         // input counts: the window was that full whether or not it was billed.
@@ -359,6 +380,9 @@ impl Provider {
         {
             body["provider"] = provider;
         }
+        if let Some(session) = self.openrouter_session() {
+            body["session_id"] = json!(session);
+        }
         // Scripted overrides win over everything Abacus put in the body, and
         // its removals fire last — a required `store: false` or a rejected
         // `parallel_tool_calls` is honoured no matter what was built above.
@@ -445,6 +469,10 @@ impl Provider {
         let mut calls: BTreeMap<usize, PartialToolCall> = BTreeMap::new();
         let mut text = TextStream::default();
         let mut reported_usage: Option<Usage> = None;
+        // Which upstream an aggregator routed this request to. Each upstream
+        // keeps its own cache, so a spread here is a cache miss Abacus did not
+        // cause and cannot see any other way.
+        let mut upstream: Option<String> = None;
         let mut truncated = false;
         let mut stream = response.bytes_stream();
 
@@ -476,6 +504,7 @@ impl Provider {
                         &mut text,
                     )?;
                     capture_usage(&data, &mut reported_usage, parse_chat_usage);
+                    capture_upstream(&data, &mut upstream);
                     truncated |= chunk_hit_length_limit(&data);
                 }
             }
@@ -492,10 +521,18 @@ impl Provider {
                     &mut text,
                 )?;
                 capture_usage(&data, &mut reported_usage, parse_chat_usage);
+                capture_upstream(&data, &mut upstream);
                 truncated |= chunk_hit_length_limit(&data);
             }
         }
-        self.record_tokens(reported_usage, messages, &content, &calls);
+        self.record_tokens(
+            reported_usage,
+            messages,
+            tools.len(),
+            upstream.as_deref(),
+            &content,
+            &calls,
+        );
         // Fallback for models that emit tool calls as text instead of native
         // `tool_calls` (common for open-weight models via Ollama/llama.cpp/raw
         // vLLM). When no native calls arrived, parse the assistant text and lift
@@ -539,6 +576,9 @@ impl Provider {
         }
         if let Some(effort) = self.reasoning_effort {
             body["reasoning"] = json!({"effort": effort.openai_label()});
+        }
+        if let Some(session) = self.openrouter_session() {
+            body["session_id"] = json!(session);
         }
         self.apply_scripted_body(&mut body);
         let response = tokio::select! {
@@ -585,7 +625,14 @@ impl Provider {
                 capture_usage(&data, &mut reported_usage, parse_responses_usage);
             }
         }
-        self.record_tokens(reported_usage, messages, &content, &calls);
+        self.record_tokens(
+            reported_usage,
+            messages,
+            tools.len(),
+            None,
+            &content,
+            &calls,
+        );
         finish_completion(content, reasoning, calls, cancelled, false)
     }
 
@@ -743,7 +790,14 @@ impl Provider {
                 &mut truncated,
             )?;
         }
-        self.record_tokens(reported_usage, messages, &content, &calls);
+        self.record_tokens(
+            reported_usage,
+            messages,
+            tools.len(),
+            None,
+            &content,
+            &calls,
+        );
         finish_completion(content, reasoning, calls, cancelled, truncated)
     }
 
@@ -754,6 +808,19 @@ impl Provider {
     /// and a pin silently does nothing rather than breaking a plain endpoint.
     fn routes_upstream(&self) -> bool {
         self.endpoint.contains("openrouter.ai")
+    }
+
+    /// The conversation id to send OpenRouter as its top-level `session_id`.
+    ///
+    /// OpenRouter serves one model from several upstream providers, and each
+    /// keeps its own prompt cache — so a request routed to a different upstream
+    /// than the last one misses the cache however stable its prefix is. A
+    /// `session_id` pins the conversation to one upstream from its first
+    /// request. Without one, OpenRouter has to infer the conversation from a
+    /// hash of its opening messages, and only starts pinning once it has seen a
+    /// cache hit. An explicit `provider.order` still takes priority.
+    fn openrouter_session(&self) -> Option<&str> {
+        self.routes_upstream().then_some(self.session_id.as_str())
     }
 
     /// The session id to send as `x-opencode-session`, when this endpoint is
@@ -1388,6 +1455,151 @@ fn capture_usage(data: &str, usage: &mut Option<Usage>, parse: fn(&Value) -> Opt
     }
 }
 
+/// Record the upstream provider an aggregator names in its stream chunks
+/// (OpenRouter's top-level `provider`). Every chunk repeats it, so only the
+/// first is parsed.
+fn capture_upstream(data: &str, upstream: &mut Option<String>) {
+    if upstream.is_some() || !data.contains("\"provider\"") {
+        return;
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(data)
+        && let Some(name) = value.get("provider").and_then(Value::as_str)
+    {
+        *upstream = Some(name.to_owned());
+    }
+}
+
+/// Where per-request cache telemetry is written, under the Abacus home.
+const CACHE_LOG_FILE: &str = "cache.jsonl";
+/// Past this size the log is rotated once, at startup, to `cache.jsonl.1`.
+const CACHE_LOG_ROTATE_BYTES: u64 = 16 * 1024 * 1024;
+/// Conversations whose last prefix is remembered. Aux and detached calls each
+/// open their own, so the map is cleared rather than grown without bound.
+const CACHE_LOG_CONVERSATIONS: usize = 64;
+
+/// Per-request cache telemetry, one JSON line per request.
+///
+/// A session cache rate says *that* requests are missing the cache, never
+/// *why*. Each line here says why: what the provider reported, which upstream
+/// served it (an aggregator routes between providers, and each keeps its own
+/// cache), and how much of the prompt was byte-identical to the previous request
+/// in the same conversation. A request whose prefix was stable but came back
+/// uncached is a routing or provider miss; one whose prefix changed is
+/// Abacus's own doing. Without the second figure the two are indistinguishable.
+#[derive(Debug)]
+pub struct CacheLog {
+    path: PathBuf,
+    /// Hash and serialised length of each message of the last request, per
+    /// conversation.
+    prefixes: std::sync::Mutex<HashMap<u64, Vec<(u64, usize)>>>,
+}
+
+/// One request, as `CacheLog::request` receives it.
+struct RequestRecord<'a> {
+    model: &'a str,
+    upstream: Option<&'a str>,
+    messages: &'a [Value],
+    tools: usize,
+    reported: bool,
+    usage: &'a Usage,
+}
+
+impl CacheLog {
+    fn open(path: PathBuf) -> Self {
+        if std::fs::metadata(&path).is_ok_and(|meta| meta.len() > CACHE_LOG_ROTATE_BYTES) {
+            let _ = std::fs::rename(&path, path.with_extension("jsonl.1"));
+        }
+        Self {
+            path,
+            prefixes: std::sync::Mutex::default(),
+        }
+    }
+
+    /// Identify a conversation the way OpenRouter's sticky routing does: by the
+    /// first system message and the first message that is not one. The main
+    /// loop, and the compaction and refine calls made inside it, share a key;
+    /// a detached side call gets its own.
+    fn conversation(messages: &[Value]) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        messages
+            .iter()
+            .find(|message| message["role"] == "system")
+            .map(Value::to_string)
+            .hash(&mut hasher);
+        messages
+            .iter()
+            .find(|message| message["role"] != "system")
+            .map(Value::to_string)
+            .hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Characters of `messages` identical to the previous request in the same
+    /// conversation, and the total — then remember this request for the next.
+    fn stable_prefix(&self, conversation: u64, messages: &[Value]) -> (usize, usize) {
+        let current: Vec<(u64, usize)> = messages
+            .iter()
+            .map(|message| {
+                let text = message.to_string();
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                text.hash(&mut hasher);
+                (hasher.finish(), text.len())
+            })
+            .collect();
+        let total = current.iter().map(|(_, len)| len).sum();
+        let Ok(mut prefixes) = self.prefixes.lock() else {
+            return (0, total);
+        };
+        let stable = prefixes.get(&conversation).map_or(0, |previous| {
+            previous
+                .iter()
+                .zip(&current)
+                .take_while(|(before, now)| before.0 == now.0)
+                .map(|(_, now)| now.1)
+                .sum()
+        });
+        if prefixes.len() >= CACHE_LOG_CONVERSATIONS && !prefixes.contains_key(&conversation) {
+            prefixes.clear();
+        }
+        prefixes.insert(conversation, current);
+        (stable, total)
+    }
+
+    fn request(&self, record: RequestRecord<'_>) {
+        let conversation = Self::conversation(record.messages);
+        let (stable_chars, prompt_chars) = self.stable_prefix(conversation, record.messages);
+        let usage = record.usage;
+        let line = json!({
+            "ts": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs_f64())
+                .unwrap_or_default(),
+            "model": record.model,
+            "upstream": record.upstream,
+            "conversation": format!("{conversation:016x}"),
+            "messages": record.messages.len(),
+            "tools": record.tools,
+            "reported": record.reported,
+            "prompt": usage.prompt,
+            "cached": usage.cache_read,
+            "cache_write": usage.cache_write,
+            "completion": usage.completion,
+            "cached_pct": (usage.prompt > 0).then(|| usage.cache_read * 100 / usage.prompt),
+            "prompt_chars": prompt_chars,
+            "stable_chars": stable_chars,
+            "stable_pct": (prompt_chars > 0).then(|| stable_chars * 100 / prompt_chars),
+        });
+        // Telemetry must never fail a request, so write errors are dropped.
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+}
+
 fn parse_chat_usage(value: &Value) -> Option<Usage> {
     usage_total(value.get("usage")?)
 }
@@ -1557,19 +1769,17 @@ const DEFAULT_ANTHROPIC_MAX_TOKENS: usize = 32_000;
 /// turns.
 ///
 /// Only *leading* system messages become `system` blocks. A system message that
-/// appears after the conversation has started is Abacus's volatile context block
-/// (see `build_provider_messages`), and hoisting it to the front would put
-/// turn-by-turn churn at the head of the request — the one place a prefix cache
-/// cannot tolerate it. It is rendered as a tagged text block in the final user
-/// turn instead, which is where it already belongs semantically: context handed
-/// to the model just before it answers, not part of its standing instructions.
+/// appears after the conversation has started is a session context block Abacus
+/// appended to the history (see `sync_session_context` in the agent), and it is
+/// rendered where it stands, as a text block in a user turn: hoisting it would
+/// move it ahead of every turn that preceded it, rewriting the prefix a cache
+/// needs to hold still. One that is not already tagged — a compaction note — is
+/// tagged here so the model does not read it as the user speaking.
 ///
 /// With `cache` set, two `cache_control` breakpoints are marked: the end of the
-/// system blocks, and the end of the last turn that is *not* volatile context.
-/// The second is what rolls forward — each turn reads the previous breakpoint's
-/// prefix and writes only the delta — while the volatile tail after it stays
-/// uncached, because caching something that changes every turn only pays for a
-/// write nothing will read.
+/// system blocks, and the end of the request. The history is append-only, so
+/// the whole request is the prefix of the next one: each turn reads everything
+/// the last one wrote and writes only its own delta.
 fn anthropic_messages(
     messages: &[Value],
     system_prefix: Option<&str>,
@@ -1604,13 +1814,12 @@ fn anthropic_messages(
                 if !started {
                     system.push(json!({"type": "text", "text": text}));
                 } else {
-                    push(
-                        "user",
-                        vec![json!({
-                            "type": "text",
-                            "text": format!("<session_context>\n{text}\n</session_context>"),
-                        })],
-                    );
+                    let text = if text.starts_with("<session_context") {
+                        text.to_owned()
+                    } else {
+                        format!("<session_context>\n{text}\n</session_context>")
+                    };
+                    push("user", vec![json!({"type": "text", "text": text})]);
                 }
             }
             "user" => {
@@ -1665,21 +1874,10 @@ fn anthropic_messages(
     (system, converted)
 }
 
-/// Put the rolling cache breakpoint on the last content block that is not
-/// volatile session context, so the cached prefix is exactly the stable history.
+/// Put the rolling cache breakpoint on the last content block of the request.
 fn mark_history_breakpoint(turns: &mut [(String, Vec<Value>)]) {
-    for (_, blocks) in turns.iter_mut().rev() {
-        for block in blocks.iter_mut().rev() {
-            if block["type"] == "text"
-                && block["text"]
-                    .as_str()
-                    .is_some_and(|text| text.starts_with("<session_context>"))
-            {
-                continue;
-            }
-            block["cache_control"] = json!({"type": "ephemeral"});
-            return;
-        }
+    if let Some(block) = turns.last_mut().and_then(|(_, blocks)| blocks.last_mut()) {
+        block["cache_control"] = json!({"type": "ephemeral"});
     }
 }
 
@@ -2140,6 +2338,17 @@ mod tests {
             };
             Provider::new(&config).unwrap()
         }
+
+        // OpenRouter is sent the same id as its `session_id`, and nobody else is.
+        assert!(
+            provider_for("https://openrouter.ai/api/v1")
+                .openrouter_session()
+                .is_some()
+        );
+        assert_eq!(
+            provider_for("https://api.openai.com/v1").openrouter_session(),
+            None
+        );
 
         let mut provider = provider_for("https://opencode.ai/zen/go/v1");
         let session = provider
@@ -2680,43 +2889,40 @@ mod tests {
     }
 
     #[test]
-    fn trailing_system_context_stays_out_of_the_cached_prefix() {
-        // What build_provider_messages produces: the static system prompt, the
-        // conversation, then one volatile context block at the end.
+    fn session_context_renders_in_place_and_the_request_end_is_cached() {
+        let block = "<session_context layer=\"goal\">\nship it\n</session_context>";
         let history = vec![
             json!({"role": "system", "content": "You are Abacus."}),
             json!({"role": "user", "content": "read the file"}),
             json!({"role": "assistant", "content": "On it."}),
-            json!({"role": "system", "content": "goal: ship it"}),
+            json!({"role": "system", "content": block}),
+            json!({"role": "system", "content": "3 older messages were omitted"}),
         ];
         let (system, messages) = anthropic_messages(&history, None, true);
 
-        // Only the leading block is a system block. Hoisting the trailing one
-        // would put turn-by-turn churn ahead of the whole history.
+        // Only the leading block is a system block; hoisting a later one would
+        // rewrite the prefix it follows.
         assert_eq!(system.len(), 1);
-        assert_eq!(system[0]["text"], "You are Abacus.");
-        assert_eq!(
-            system[0]["cache_control"]["type"], "ephemeral",
-            "the static prompt is a breakpoint"
-        );
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
 
-        // The volatile block rides along in the final user turn, tagged so the
-        // model does not read it as the user speaking.
         let last = messages.last().unwrap();
         assert_eq!(last["role"], "user");
-        let text = last["content"][0]["text"].as_str().unwrap();
-        assert!(text.starts_with("<session_context>"), "got {text}");
-        assert!(text.contains("goal: ship it"));
+        let blocks = last["content"].as_array().unwrap();
+        assert_eq!(
+            blocks[0]["text"], block,
+            "already tagged, so not wrapped twice"
+        );
+        let note = blocks[1]["text"].as_str().unwrap();
         assert!(
-            last["content"][0].get("cache_control").is_none(),
-            "caching a block that changes every turn only pays for a write nobody reads"
+            note.starts_with("<session_context>"),
+            "an untagged note is tagged: {note}"
         );
 
-        // The rolling breakpoint sits on the last *stable* block instead.
-        assert_eq!(
-            messages[1]["content"][0]["cache_control"]["type"], "ephemeral",
-            "the end of the conversation is what the next turn reads back"
-        );
+        // The history is append-only, so the whole request is the next one's
+        // prefix and the breakpoint goes at its very end.
+        assert_eq!(blocks[1]["cache_control"]["type"], "ephemeral");
+        assert!(blocks[0].get("cache_control").is_none());
+        assert!(messages[1]["content"][0].get("cache_control").is_none());
     }
 
     #[test]
@@ -2741,6 +2947,87 @@ mod tests {
         let (system, messages) = anthropic_messages(&history, None, false);
         assert_eq!(system.len(), 2, "both precede the conversation");
         assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
+    fn the_upstream_an_aggregator_names_is_captured_once() {
+        let mut upstream = None;
+        capture_upstream(r#"{"choices":[{"delta":{"content":"hi"}}]}"#, &mut upstream);
+        assert_eq!(upstream, None);
+        capture_upstream(
+            r#"{"id":"gen-1","provider":"DeepInfra","choices":[{"delta":{"content":"a"}}]}"#,
+            &mut upstream,
+        );
+        capture_upstream(
+            r#"{"id":"gen-1","provider":"Novita","choices":[{"delta":{"content":"b"}}]}"#,
+            &mut upstream,
+        );
+        assert_eq!(
+            upstream.as_deref(),
+            Some("DeepInfra"),
+            "one request, one upstream"
+        );
+    }
+
+    #[test]
+    fn the_cache_log_tells_a_stable_prefix_from_a_rewritten_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = CacheLog::open(directory.path().join(CACHE_LOG_FILE));
+        let usage = Usage {
+            total: 110,
+            prompt: 100,
+            completion: 10,
+            cache_read: 60,
+            cache_write: 0,
+        };
+        let request = |messages: &[Value]| {
+            log.request(RequestRecord {
+                model: "m",
+                upstream: Some("DeepInfra"),
+                messages,
+                tools: 3,
+                reported: true,
+                usage: &usage,
+            })
+        };
+        let system = json!({"role": "system", "content": "You are Abacus."});
+        let user = json!({"role": "user", "content": "fix it"});
+        let assistant = json!({"role": "assistant", "content": "on it"});
+        let tail = |text: &str| json!({"role": "system", "content": text});
+
+        request(&[system.clone(), user.clone(), tail("mode: plan")]);
+        // The history grew and the volatile tail changed: everything before
+        // the tail is a reusable prefix.
+        request(&[
+            system.clone(),
+            user.clone(),
+            assistant.clone(),
+            tail("mode: build"),
+        ]);
+        // A rewritten system prompt is a different conversation altogether.
+        request(&[
+            tail("You are Abacus. goal: x"),
+            user.clone(),
+            tail("mode: build"),
+        ]);
+
+        let lines: Vec<Value> = std::fs::read_to_string(directory.path().join(CACHE_LOG_FILE))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(
+            lines[0]["stable_chars"], 0,
+            "nothing to compare the first with"
+        );
+        let shared = (system.to_string().len() + user.to_string().len()) as u64;
+        assert_eq!(lines[1]["stable_chars"], shared);
+        assert_eq!(lines[1]["conversation"], lines[0]["conversation"]);
+        assert_ne!(lines[2]["conversation"], lines[1]["conversation"]);
+        assert_eq!(lines[2]["stable_chars"], 0);
+        assert_eq!(lines[1]["upstream"], "DeepInfra");
+        assert_eq!(lines[1]["cached_pct"], 60);
     }
 
     #[test]

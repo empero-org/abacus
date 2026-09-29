@@ -7768,7 +7768,9 @@ fn draw_usage_tooltip(
         }
         None => rows.push(("cache", "not reported".to_owned(), muted())),
     }
-    rows.push(("total", ui::format_count(usage.total), muted()));
+    // The breakdown above counts this run; the ledger's total also carries
+    // every earlier run of a resumed session, which is why it can dwarf them.
+    rows.push(("all runs", ui::format_count(usage.total), muted()));
 
     let label_width = rows
         .iter()

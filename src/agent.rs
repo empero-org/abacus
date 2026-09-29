@@ -429,7 +429,8 @@ async fn run_turn_inner(
         // re-hit the provider; compaction and delta-forwarding happen once.
         const EMPTY_COMPLETION_RETRY_LIMIT: usize = 2;
         let mut empty_retries: usize = 0;
-        let mut provider_messages = build_provider_messages(&messages, &options, active_mode);
+        sync_session_context(&mut messages, &options, active_mode);
+        let mut provider_messages = messages.clone();
         let completion = loop {
             let completion = match provider
                 .complete(
@@ -479,7 +480,8 @@ async fn run_turn_inner(
                 // message list in case compaction or context state changed.
                 tokio::time::sleep(std::time::Duration::from_millis(500 * empty_retries as u64))
                     .await;
-                provider_messages = build_provider_messages(&messages, &options, active_mode);
+                sync_session_context(&mut messages, &options, active_mode);
+                provider_messages = messages.clone();
                 continue;
             }
             break completion;
@@ -1480,55 +1482,79 @@ fn mode_prompt(mode: AgentMode) -> &'static str {
     }
 }
 
-/// Build the message list sent to the provider from the trimmed conversation
-/// `messages`, then layering on extension/summary/goal/task/mode system messages
-/// on top. Extracted so the empty-completion retry loop can rebuild it without
-/// duplicating the layering logic.
-fn build_provider_messages(
-    messages: &[Value],
-    options: &TurnOptions,
-    active_mode: AgentMode,
-) -> Vec<Value> {
-    let mut provider_messages = messages.to_vec();
-    // Everything below is volatile: the rolling summary, harness memory, goal,
-    // task list, mode and tether correction all move as the session works. It
-    // goes in ONE block at the very end of the request, after the conversation.
-    //
-    // That position is the whole point. A provider-side prompt cache is a
-    // prefix cache: it can only reuse a request whose leading bytes are
-    // identical to a previous one. Layering this context into the leading
-    // system message — which is what this function used to do, via
-    // `merge_system_messages` — rewrote the first tokens of every request, so a
-    // long session re-paid full price for its entire history on every single
-    // turn. Appended last, the cacheable prefix is the static system prompt
-    // plus the append-only conversation, and only the small volatile tail is
-    // ever uncached.
-    let mut layers: Vec<String> = Vec::new();
-    let mut layer = |text: String| {
-        if !text.trim().is_empty() {
-            layers.push(text);
+/// The opening of a context block Abacus appended to the conversation. The
+/// layer name follows, so each layer can be found — and compared — on its own.
+pub(crate) const SESSION_CONTEXT_TAG: &str = "<session_context";
+
+/// Body written for a layer that has stopped applying, so the copy still in
+/// history is not read as current.
+const CLEARED_LAYER: &str = "(cleared — this no longer applies)";
+
+/// The session's context layers, in the order they are first introduced.
+fn context_layers(options: &TurnOptions, active_mode: AgentMode) -> Vec<(&'static str, String)> {
+    vec![
+        ("extensions", options.services.prompt_context()),
+        ("summary", options.compaction.prompt_context()),
+        ("memory", options.harness.prompt_context()),
+        (
+            "correction",
+            options.tether.correction_layer().unwrap_or_default(),
+        ),
+        (
+            "delegation",
+            if options.allow_subagents {
+                options.hive.guidance()
+            } else {
+                String::new()
+            },
+        ),
+        ("goal", options.goal.prompt_context()),
+        ("tasks", options.tasks.prompt_context()),
+        ("mode", mode_prompt(active_mode).to_owned()),
+        ("mode_reminder", options.modes.reminder()),
+    ]
+}
+
+/// Bring the conversation's context up to date by *appending* what changed.
+///
+/// Every provider cache is a prefix cache, and they differ in how forgiving
+/// they are. Anthropic reads up to a marked breakpoint; vLLM and SGLang match
+/// any shared prefix. DeepSeek-style caches are strictest: they store units at
+/// request boundaries — the end of the input, the end of the output — and a
+/// later request hits only if it contains one of those units *whole*.
+///
+/// Context used to ride as one block rebuilt at the end of every request and
+/// dropped before the next. The history before it was stable, but no stored
+/// unit ever was: each ended in a block the next request no longer had. Such a
+/// cache missed until it noticed the common prefix on its own, several requests
+/// later — observed as a run of 0% hits on every step of a turn.
+///
+/// Appended to the history instead, and only when a layer's text actually
+/// changes, every request is exactly the previous request plus the model's
+/// reply plus whatever followed it. That is the one shape every cache hits
+/// immediately. Each layer is its own message, so a goal's iteration count
+/// ticking over re-sends the goal, not the harness memory beside it; a layer
+/// that goes away is marked cleared rather than silently left standing.
+fn sync_session_context(messages: &mut Vec<Value>, options: &TurnOptions, active_mode: AgentMode) {
+    for (name, text) in context_layers(options, active_mode) {
+        let open = format!("{SESSION_CONTEXT_TAG} layer=\"{name}\">\n");
+        let text = text.trim();
+        let body = if text.is_empty() { CLEARED_LAYER } else { text };
+        let content = format!("{open}{body}\n</session_context>");
+        let (seen, unchanged) = messages
+            .iter()
+            .rev()
+            .filter(|message| message["role"] == "system")
+            .filter_map(|message| message["content"].as_str())
+            .find(|existing| existing.starts_with(&open))
+            .map_or((false, false), |existing| (true, existing == content));
+        // Nothing to clear if the layer was never introduced; nothing to send
+        // if what the model last saw is still true.
+        if unchanged || (!seen && text.is_empty()) {
+            continue;
         }
-    };
-    layer(options.services.prompt_context());
-    layer(options.compaction.prompt_context());
-    layer(options.harness.prompt_context());
-    if let Some(correction) = options.tether.correction_layer() {
-        layer(correction);
+        messages.push(json!({"role": "system", "content": content}));
     }
-    if options.allow_subagents {
-        layer(options.hive.guidance());
-    }
-    layer(options.goal.prompt_context());
-    layer(options.tasks.prompt_context());
-    layer(mode_prompt(active_mode).to_owned());
-    layer(options.modes.reminder());
-    if !layers.is_empty() {
-        provider_messages.push(json!({"role":"system","content": layers.join("\n\n")}));
-    }
-    // Strict chat templates that demand a leading system message are handled in
-    // the provider, which is the layer that knows (and learns) what an endpoint
-    // accepts — and which pays for the rewrite in cache misses.
-    provider_messages
 }
 
 /// Fold every non-leading `system` message into a single leading one.
@@ -1919,45 +1945,99 @@ mod tests {
         }
     }
 
+    fn appended(history: &[Value], from: usize) -> Vec<String> {
+        history[from..]
+            .iter()
+            .map(|message| {
+                assert_eq!(message["role"], "system");
+                message["content"].as_str().unwrap().to_owned()
+            })
+            .collect()
+    }
+
     #[test]
-    fn volatile_context_is_appended_and_never_rewrites_the_prefix() {
+    fn session_context_is_appended_only_when_it_changes() {
         let options = test_turn_options(InjectionQueue::default());
-        let history = vec![
+        let mut history = vec![
             json!({"role": "system", "content": "base prompt"}),
             json!({"role": "user", "content": "fix the parser"}),
             json!({"role": "assistant", "content": "on it"}),
         ];
+        let opening = history.clone();
 
-        let first = build_provider_messages(&history, &options, AgentMode::Build);
-        // The conversation is passed through untouched, in order, with the
-        // volatile context as one block after it.
-        assert_eq!(&first[..3], &history[..]);
-        assert_eq!(first.len(), 4);
-        assert_eq!(first[3]["role"], "system");
-        let volatile = first[3]["content"].as_str().unwrap();
+        sync_session_context(&mut history, &options, AgentMode::Build);
+        assert_eq!(
+            &history[..3],
+            &opening[..],
+            "history before it is untouched"
+        );
+        let first = appended(&history, 3);
         assert!(
-            volatile.contains("BUILD"),
-            "mode rides in the tail: {volatile}"
+            first
+                .iter()
+                .all(|block| block.starts_with(SESSION_CONTEXT_TAG))
+        );
+        assert!(
+            first
+                .iter()
+                .any(|block| block.contains("layer=\"mode\"") && block.contains("BUILD")),
+            "{first:?}"
         );
 
-        // Change the volatile state the way a turn does, and the prefix — the
-        // system prompt and every conversation message — must be byte-identical.
-        // This is the whole prompt-cache story: a rewritten first message means
-        // the provider has nothing to reuse and the session re-pays for its own
-        // history every turn.
+        // A step later with nothing changed, nothing is appended: the next
+        // request is exactly the last one plus what happened since, which is
+        // the only shape a boundary-unit cache can hit.
+        history.push(json!({"role": "assistant", "content": "step two"}));
+        let settled = history.clone();
+        sync_session_context(&mut history, &options, AgentMode::Build);
+        assert_eq!(history, settled);
+
+        // Goal and mode change: only those two layers are re-sent, after
+        // everything the provider has already seen.
         options
             .goal
             .set(Some(crate::goal::Goal::new("ship the parser fix").unwrap()))
             .unwrap();
-        let second = build_provider_messages(&history, &options, AgentMode::Plan);
-        assert_eq!(
-            &second[..3],
-            &first[..3],
-            "the cacheable prefix must not move when context changes"
+        sync_session_context(&mut history, &options, AgentMode::Plan);
+        assert_eq!(&history[..settled.len()], &settled[..], "never rewritten");
+        let changed = appended(&history, settled.len());
+        assert_eq!(changed.len(), 2, "{changed:?}");
+        assert!(
+            changed
+                .iter()
+                .any(|block| block.contains("layer=\"goal\"")
+                    && block.contains("ship the parser fix"))
         );
-        let volatile = second.last().unwrap()["content"].as_str().unwrap();
-        assert!(volatile.contains("ship the parser fix"));
-        assert!(volatile.contains("PLAN"));
+        assert!(
+            changed
+                .iter()
+                .any(|block| block.contains("layer=\"mode\"") && block.contains("PLAN"))
+        );
+    }
+
+    #[test]
+    fn a_layer_that_stops_applying_is_marked_cleared() {
+        let options = test_turn_options(InjectionQueue::default());
+        let mut history = vec![
+            json!({"role": "system", "content": "base prompt"}),
+            json!({"role": "user", "content": "fix the parser"}),
+        ];
+        options
+            .goal
+            .set(Some(crate::goal::Goal::new("ship the parser fix").unwrap()))
+            .unwrap();
+        sync_session_context(&mut history, &options, AgentMode::Build);
+        let before = history.len();
+
+        options.goal.set(None).unwrap();
+        sync_session_context(&mut history, &options, AgentMode::Build);
+        let cleared = appended(&history, before);
+        assert_eq!(cleared.len(), 1);
+        assert!(cleared[0].contains("layer=\"goal\"") && cleared[0].contains(CLEARED_LAYER));
+
+        // Cleared once is enough.
+        sync_session_context(&mut history, &options, AgentMode::Build);
+        assert_eq!(history.len(), before + 1);
     }
 
     #[test]
