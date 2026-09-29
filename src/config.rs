@@ -1130,7 +1130,6 @@ impl Default for AgentSettings {
 #[serde(default)]
 pub struct Credentials {
     pub keys: BTreeMap<String, String>,
-    #[serde(default)]
     pub sync: Option<SyncCredentials>,
 }
 
@@ -1348,7 +1347,6 @@ mod tests {
                 name: "Local".into(),
                 base_url: "http://localhost:11434/v1".into(),
                 model: "codestral".into(),
-                protocol: ProviderProtocol::ChatCompletions,
                 ..Default::default()
             },
         );
@@ -1392,7 +1390,6 @@ mod tests {
                 name: "Local".into(),
                 base_url: "http://localhost:11434/v1".into(),
                 model: "codestral".into(),
-                protocol: ProviderProtocol::ChatCompletions,
                 ..Default::default()
             },
         );
@@ -1436,7 +1433,6 @@ mod tests {
                 name: "Local".into(),
                 base_url: "http://localhost:11434/v1".into(),
                 model: "codestral".into(),
-                protocol: ProviderProtocol::ChatCompletions,
                 ..Default::default()
             },
         );

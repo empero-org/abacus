@@ -32,9 +32,7 @@ pub struct ToolCall {
 #[derive(Deserialize)]
 struct EditFileArgs {
     path: String,
-    #[serde(default)]
     old_text: Option<String>,
-    #[serde(default)]
     new_text: Option<String>,
     #[serde(default)]
     edits: Vec<EditOperation>,
@@ -581,11 +579,9 @@ impl ToolExecutor {
         #[derive(Deserialize)]
         struct Args {
             query: String,
-            #[serde(default)]
             max_results: Option<usize>,
             /// What the caller wants answered. With it, the top results are
             /// opened and read rather than merely listed.
-            #[serde(default)]
             extract: Option<String>,
         }
         if !self.web.enabled {
@@ -601,11 +597,9 @@ impl ToolExecutor {
         #[derive(Deserialize)]
         struct Args {
             url: String,
-            #[serde(default)]
             max_chars: Option<usize>,
             /// What the caller wants from the page. With it, the page is read
             /// by the auxiliary model and only the answer comes back.
-            #[serde(default)]
             extract: Option<String>,
         }
         if !self.web.enabled {
@@ -854,11 +848,8 @@ impl ToolExecutor {
         struct Args {
             #[serde(default)]
             staged: bool,
-            #[serde(default)]
             path: Option<String>,
-            #[serde(default)]
             base: Option<String>,
-            #[serde(default)]
             head: Option<String>,
         }
         let args: Args = parse_args(arguments)?;
@@ -893,7 +884,6 @@ impl ToolExecutor {
         struct Args {
             #[serde(default = "default_log_limit")]
             max_count: usize,
-            #[serde(default)]
             path: Option<String>,
         }
         let args: Args = parse_args(arguments)?;

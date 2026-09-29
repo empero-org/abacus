@@ -108,7 +108,6 @@ pub struct Papercut {
     pub tripwires: Vec<String>,
     /// `None` applies everywhere; otherwise the canonical workspace path the
     /// lesson belongs to.
-    #[serde(default)]
     pub workspace: Option<String>,
     pub created_at: DateTime<Utc>,
     #[serde(default = "default_strength")]
@@ -117,9 +116,7 @@ pub struct Papercut {
     pub trip_count: u32,
     #[serde(default)]
     pub recall_count: u32,
-    #[serde(default)]
     pub last_tripped_at: Option<DateTime<Utc>>,
-    #[serde(default)]
     pub last_recalled_at: Option<DateTime<Utc>>,
 }
 
@@ -259,7 +256,6 @@ impl PapercutStore {
             #[serde(default)]
             references: Vec<String>,
             tripwires: Vec<String>,
-            #[serde(default)]
             scope: Option<String>,
         }
         let arguments: Arguments =

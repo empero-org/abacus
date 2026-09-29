@@ -483,30 +483,9 @@ pub async fn discover_endpoints(
     if !base_url.contains("openrouter.ai") {
         bail!("provider routing is an OpenRouter feature; this profile points at {base_url}");
     }
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(12))
-        .user_agent(concat!("abacus-agent/", env!("CARGO_PKG_VERSION")))
-        .build()?;
-    let mut request = client
-        .get(format!(
-            "{}/models/{}/endpoints",
-            base_url.trim_end_matches('/'),
-            model.trim_matches('/')
-        ))
-        .header(header::ACCEPT, "application/json");
-    if let Some(key) = api_key {
-        request = request.bearer_auth(key);
-    }
-    let response = request.send().await.context("could not reach provider")?;
-    let status = response.status();
-    if !status.is_success() {
-        let detail = response.text().await.unwrap_or_default();
-        bail!(
-            "provider returned {status}: {}",
-            crate::text::clip(&crate::text::flat(&detail), 240, "")
-        );
-    }
-    let value: Value = response.json().await.context("provider returned invalid JSON")?;
+    let url =
+        format!("{}/models/{}/endpoints", base_url.trim_end_matches('/'), model.trim_matches('/'));
+    let value = get_json(&url, api_key, REQUEST_TIMEOUT).await?;
     Ok(value["data"]["endpoints"]
         .as_array()
         .into_iter()
@@ -533,37 +512,28 @@ pub async fn discover_model_cards(
     base_url: &str,
     api_key: Option<&str>,
 ) -> Result<Vec<crate::model_info::ModelCard>> {
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(12))
-        .user_agent(concat!("abacus-agent/", env!("CARGO_PKG_VERSION")))
-        .build()?;
-    let mut request = client
-        .get(format!("{}/models", base_url.trim_end_matches('/')))
-        .header(header::ACCEPT, "application/json");
-    if let Some(key) = api_key {
-        request = request.bearer_auth(key);
-    }
-    let response = request.send().await.context("could not reach provider")?;
-    let status = response.status();
-    if !status.is_success() {
-        let detail = response.text().await.unwrap_or_default();
-        bail!(
-            "provider returned {status}: {}",
-            crate::text::clip(&crate::text::flat(&detail), 240, "")
-        );
-    }
-    let value: Value = response.json().await.context("provider returned invalid JSON")?;
-    Ok(crate::model_info::parse_model_cards(&value))
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    Ok(crate::model_info::parse_model_cards(&get_json(&url, api_key, REQUEST_TIMEOUT).await?))
 }
 
 pub async fn discover_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<String>> {
+    Ok(discover_model_cards(base_url, api_key).await?.into_iter().map(|card| card.id).collect())
+}
+
+/// How long a provider gets to answer a discovery request.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+
+/// GET `url` from a provider and parse the JSON it answers with.
+pub(crate) async fn get_json(
+    url: &str,
+    api_key: Option<&str>,
+    timeout: std::time::Duration,
+) -> Result<Value> {
     let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(12))
+        .timeout(timeout)
         .user_agent(concat!("abacus-agent/", env!("CARGO_PKG_VERSION")))
         .build()?;
-    let mut request = client
-        .get(format!("{}/models", base_url.trim_end_matches('/')))
-        .header(header::ACCEPT, "application/json");
+    let mut request = client.get(url).header(header::ACCEPT, "application/json");
     if let Some(key) = api_key {
         request = request.bearer_auth(key);
     }
@@ -576,8 +546,7 @@ pub async fn discover_models(base_url: &str, api_key: Option<&str>) -> Result<Ve
             crate::text::clip(&crate::text::flat(&detail), 240, "")
         );
     }
-    let value: Value = response.json().await.context("provider returned invalid JSON")?;
-    Ok(crate::model_info::parse_model_cards(&value).into_iter().map(|card| card.id).collect())
+    response.json().await.context("provider returned invalid JSON")
 }
 
 /// Present the discovered models. A provider can list hundreds, so the list is

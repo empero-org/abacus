@@ -31,7 +31,6 @@ use crate::config::ProviderProtocol;
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScriptedEndpoint {
     /// Display name; falls back to the file stem.
-    #[serde(default)]
     pub name: Option<String>,
     /// The full request URL, used verbatim — this replaces the base-url +
     /// protocol-path construction entirely.
@@ -41,15 +40,12 @@ pub struct ScriptedEndpoint {
     pub protocol: ProviderProtocol,
     /// Optional model this endpoint serves, filled in when the profile leaves
     /// its model blank.
-    #[serde(default)]
     pub model: Option<String>,
     /// Optional models-list URL for `abacus models` and limit detection. When
     /// absent, detection is simply skipped for this endpoint.
-    #[serde(default)]
     pub models_url: Option<String>,
     /// How to authenticate. Absent means "use the profile's ordinary API key"
     /// (or none).
-    #[serde(default)]
     pub auth: Option<Auth>,
     /// Extra static headers sent on every request. Values may contain
     /// `{uuid}`/`{session}`, replaced with a per-session random hex UUID — for
@@ -59,7 +55,6 @@ pub struct ScriptedEndpoint {
     /// Text prepended as the first system block (Anthropic) or to the system
     /// message (OpenAI). This is how the Anthropic billing-attribution line is
     /// injected: it must be its own leading system block.
-    #[serde(default)]
     pub system_prefix: Option<String>,
     /// Body fields deep-merged onto every request after Abacus builds it —
     /// scripted values win, so this is how a required `store: false` or
@@ -83,20 +78,15 @@ pub struct Auth {
     #[serde(default = "default_auth_format")]
     pub format: String,
     /// A literal token. Discouraged — prefer a source that is not in the file.
-    #[serde(default)]
     pub token: Option<String>,
     /// Environment variable holding the token.
-    #[serde(default)]
     pub env: Option<String>,
     /// A JSON file to read the token from (e.g. an OAuth `auth.json`).
-    #[serde(default)]
     pub file: Option<PathBuf>,
     /// Dotted path (`tokens.access_token`) or JSON Pointer (`/tokens/access_token`)
     /// into `file`. When absent, the whole file is used, trimmed.
-    #[serde(default)]
     pub file_field: Option<String>,
     /// A command whose stdout is the token — for a source that must refresh.
-    #[serde(default)]
     pub command: Option<Vec<String>>,
 }
 

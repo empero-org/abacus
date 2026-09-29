@@ -24,7 +24,6 @@ pub struct Goal {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub iterations: u32,
-    #[serde(default)]
     pub note: Option<String>,
 }
 
@@ -162,7 +161,6 @@ impl GoalState {
         #[derive(Deserialize)]
         struct Args {
             status: String,
-            #[serde(default)]
             note: Option<String>,
         }
         let args: Args = serde_json::from_str(arguments)?;

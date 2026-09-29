@@ -128,7 +128,6 @@ pub struct HarnessEntry {
     pub path: String,
     pub lifetime: Lifetime,
     /// `None` applies everywhere; otherwise the canonical workspace path.
-    #[serde(default)]
     pub workspace: Option<String>,
     #[serde(default)]
     pub metadata: Map<String, Value>,
@@ -235,17 +234,11 @@ pub enum EditAction {
 pub struct RefinementEdit {
     pub action: EditAction,
     pub kind: EntryKind,
-    #[serde(default)]
     pub id: Option<String>,
-    #[serde(default)]
     pub title: Option<String>,
-    #[serde(default)]
     pub content: Option<String>,
-    #[serde(default)]
     pub path: Option<String>,
-    #[serde(default)]
     pub metadata: Option<Map<String, Value>>,
-    #[serde(default)]
     pub reason: Option<String>,
 }
 
@@ -262,12 +255,9 @@ pub struct AppliedEdit {
     pub action: EditAction,
     pub kind: EntryKind,
     pub id: String,
-    #[serde(default)]
     pub before: Option<HarnessEntry>,
-    #[serde(default)]
     pub after: Option<HarnessEntry>,
     pub applied: bool,
-    #[serde(default)]
     pub error: Option<String>,
 }
 
@@ -278,7 +268,6 @@ pub struct RefinementResult {
     pub rationale: String,
     pub expected_outcome: String,
     pub applied_edits: Vec<AppliedEdit>,
-    #[serde(default)]
     pub rollback_of: Option<String>,
     pub created_at: DateTime<Utc>,
 }
@@ -845,7 +834,6 @@ impl HarnessStore {
         struct Arguments {
             title: String,
             body: String,
-            #[serde(default)]
             scope: Option<String>,
         }
         let arguments: Arguments =
@@ -1078,7 +1066,6 @@ impl HarnessStore {
         struct LegacyMemory {
             title: String,
             body: String,
-            #[serde(default)]
             workspace: Option<String>,
             created_at: DateTime<Utc>,
             updated_at: DateTime<Utc>,

@@ -35,9 +35,7 @@ pub struct SkillRegistry {
 struct Frontmatter {
     name: String,
     description: String,
-    #[serde(default)]
     license: Option<String>,
-    #[serde(default)]
     compatibility: Option<String>,
 }
 

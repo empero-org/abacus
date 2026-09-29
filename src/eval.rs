@@ -53,7 +53,6 @@ const CHECK_TIMEOUT_SECONDS: u64 = 120;
 #[serde(deny_unknown_fields)]
 struct TaskFile {
     prompt: String,
-    #[serde(default)]
     description: Option<String>,
     #[serde(default = "default_max_steps")]
     max_steps: usize,
@@ -62,7 +61,6 @@ struct TaskFile {
     /// `plan`, `build`, or `auto`. Defaults to `build` — most tasks are
     /// scored on a mutation, and AUTO would make the mode-selection step part
     /// of what is being measured.
-    #[serde(default)]
     mode: Option<String>,
     #[serde(default)]
     allow_subagents: bool,

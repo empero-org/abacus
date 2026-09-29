@@ -20,7 +20,6 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use reqwest::{Client, header};
 use serde_json::Value;
 
 /// Conservative fallbacks when nothing else is known. Safe for most modern
@@ -298,20 +297,8 @@ pub async fn detect_limits(
 ) -> Option<(usize, Option<usize>)> {
     // Short timeout: this is a non-blocking best-effort pre-flight, and a server
     // that doesn't implement /models would otherwise stall every launch.
-    let client = Client::builder()
-        .timeout(Duration::from_secs(2))
-        .user_agent(concat!("abacus-agent/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .ok()?;
-    let mut request = client.get(models_url).header(header::ACCEPT, "application/json");
-    if let Some(key) = api_key {
-        request = request.bearer_auth(key);
-    }
-    let response = request.send().await.ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let value: Value = response.json().await.ok()?;
+    let timeout = Duration::from_secs(2);
+    let value = crate::setup::get_json(models_url, api_key, timeout).await.ok()?;
     extract_limits_from_models(&value, model)
 }
 

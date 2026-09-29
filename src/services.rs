@@ -230,7 +230,6 @@ impl AgentServices {
             name: String,
             description: String,
             instructions: String,
-            #[serde(default)]
             scope: Option<String>,
         }
         let args: Args =
@@ -277,7 +276,6 @@ impl AgentServices {
         #[derive(serde::Deserialize)]
         struct Args {
             name: String,
-            #[serde(default)]
             description: Option<String>,
             instructions: String,
         }

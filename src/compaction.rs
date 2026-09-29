@@ -714,6 +714,21 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Append `count` calls to `tool`, each with the result `result` gives it.
+    fn tool_calls(
+        messages: &mut Vec<Value>,
+        count: usize,
+        tool: &str,
+        result: impl Fn(usize) -> String,
+    ) {
+        for i in 0..count {
+            messages.push(json!({"role":"assistant","content":null,"tool_calls":[
+                {"id":format!("c{i}"),"type":"function","function":{"name":tool,"arguments":"{}"}}
+            ]}));
+            messages.push(json!({"role":"tool","tool_call_id":format!("c{i}"),"name":tool,"content":result(i)}));
+        }
+    }
+
     #[test]
     fn small_contexts_keep_every_finding_verbatim() {
         // Regression: microcompaction used to blank tool results every turn,
@@ -725,12 +740,7 @@ mod tests {
             summary_budget_chars: 4_000,
         };
         let mut messages = vec![json!({"role":"system","content":"rules"})];
-        for i in 0..20 {
-            messages.push(json!({"role":"assistant","content":null,"tool_calls":[
-                {"id":format!("c{i}"),"type":"function","function":{"name":"read_file","arguments":"{}"}}
-            ]}));
-            messages.push(json!({"role":"tool","tool_call_id":format!("c{i}"),"name":"read_file","content":format!("finding {i}")}));
-        }
+        tool_calls(&mut messages, 20, "read_file", |i| format!("finding {i}"));
         assert!(!should_microcompact(&messages, &budget));
         // Mirror compact()'s policy: under threshold, nothing is blanked.
         if should_microcompact(&messages, &budget) {
@@ -754,12 +764,7 @@ mod tests {
             summary_budget_chars: 4_000,
         };
         let mut messages = vec![json!({"role":"system","content":"rules"})];
-        for i in 0..20 {
-            messages.push(json!({"role":"assistant","content":null,"tool_calls":[
-                {"id":format!("c{i}"),"type":"function","function":{"name":"read_file","arguments":"{}"}}
-            ]}));
-            messages.push(json!({"role":"tool","tool_call_id":format!("c{i}"),"name":"read_file","content":"x".repeat(200)}));
-        }
+        tool_calls(&mut messages, 20, "read_file", |_| "x".repeat(200));
         assert!(should_microcompact(&messages, &budget));
         assert!(!under_pressure(&messages, &CompactionState::default(), &budget));
         microcompact(&mut messages, &CompactionBudget::default());
@@ -776,12 +781,7 @@ mod tests {
     #[test]
     fn microcompact_blanks_old_compactable_results_only() {
         let mut messages = vec![json!({"role":"system","content":"rules"})];
-        for i in 0..20 {
-            messages.push(json!({"role":"assistant","content":null,"tool_calls":[
-                {"id":format!("c{i}"),"type":"function","function":{"name":"read_file","arguments":"{}"}}
-            ]}));
-            messages.push(json!({"role":"tool","tool_call_id":format!("c{i}"),"name":"read_file","content":format!("big file body {i}")}));
-        }
+        tool_calls(&mut messages, 20, "read_file", |i| format!("big file body {i}"));
         microcompact(&mut messages, &CompactionBudget::default());
         // The most recent 8 read_file results stay live; older ones become the sentinel.
         let live = messages
@@ -801,12 +801,7 @@ mod tests {
     #[test]
     fn microcompact_leaves_non_compactable_tools_alone() {
         let mut messages = vec![json!({"role":"system","content":"rules"})];
-        for i in 0..20 {
-            messages.push(json!({"role":"assistant","content":null,"tool_calls":[
-                {"id":format!("e{i}"),"type":"function","function":{"name":"edit_file","arguments":"{}"}}
-            ]}));
-            messages.push(json!({"role":"tool","tool_call_id":format!("e{i}"),"name":"edit_file","content":format!("edited {i}")}));
-        }
+        tool_calls(&mut messages, 20, "edit_file", |i| format!("edited {i}"));
         microcompact(&mut messages, &CompactionBudget::default());
         let edited = messages
             .iter()
@@ -864,12 +859,7 @@ mod tests {
     fn shrinking_is_idempotent_across_turns() {
         let once = shrink_tool_result("grep", "todo", "src/a.rs:1: todo\nsrc/b.rs:2: todo");
         let mut messages = vec![json!({"role":"system","content":"rules"})];
-        for i in 0..20 {
-            messages.push(json!({"role":"assistant","content":null,"tool_calls":[
-                {"id":format!("c{i}"),"type":"function","function":{"name":"grep","arguments":"{}"}}
-            ]}));
-            messages.push(json!({"role":"tool","tool_call_id":format!("c{i}"),"name":"grep","content":once.clone()}));
-        }
+        tool_calls(&mut messages, 20, "grep", |_| once.clone());
         microcompact(&mut messages, &CompactionBudget::default());
         // Nothing should have been wrapped a second time.
         assert!(
@@ -886,12 +876,7 @@ mod tests {
     fn the_hot_tail_is_bounded_by_size_as_well_as_count() {
         let big = "x".repeat(5_000);
         let mut messages = vec![json!({"role":"system","content":"rules"})];
-        for i in 0..12 {
-            messages.push(json!({"role":"assistant","content":null,"tool_calls":[
-                {"id":format!("c{i}"),"type":"function","function":{"name":"read_file","arguments":"{}"}}
-            ]}));
-            messages.push(json!({"role":"tool","tool_call_id":format!("c{i}"),"name":"read_file","content":big.clone()}));
-        }
+        tool_calls(&mut messages, 12, "read_file", |_| big.clone());
         let budget = CompactionBudget {
             compact_at_chars: 100_000,
             recent_budget_chars: 20_000,
@@ -939,12 +924,7 @@ mod tests {
             json!({"role":"system","content":"rules"}),
             json!({"role":"user","content":"fix the importer"}),
         ];
-        for i in 0..8 {
-            messages.push(json!({"role":"assistant","content":null,"tool_calls":[
-                {"id":format!("c{i}"),"type":"function","function":{"name":"read_file","arguments":"{}"}}
-            ]}));
-            messages.push(json!({"role":"tool","tool_call_id":format!("c{i}"),"name":"read_file","content":format!("finding {i}")}));
-        }
+        tool_calls(&mut messages, 8, "read_file", |i| format!("finding {i}"));
         assert!(opening_turn_still_live(&messages));
         assert_eq!(last_user_index(&messages), Some(1));
 

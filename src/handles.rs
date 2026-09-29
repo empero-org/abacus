@@ -301,9 +301,7 @@ impl HandleStore {
         #[derive(Deserialize)]
         struct Args {
             id: String,
-            #[serde(default)]
             start_line: Option<usize>,
-            #[serde(default)]
             end_line: Option<usize>,
         }
         let args: Args =
@@ -337,7 +335,6 @@ impl HandleStore {
         struct Args {
             id: String,
             pattern: String,
-            #[serde(default)]
             context: Option<usize>,
         }
         let args: Args =
@@ -445,11 +442,8 @@ async fn recurse_inner(
     struct Args {
         id: String,
         prompt: String,
-        #[serde(default)]
         chunks: Option<usize>,
-        #[serde(default)]
         schema: Option<Value>,
-        #[serde(default)]
         concurrency: Option<usize>,
     }
     let args: Args = serde_json::from_str(arguments).context("invalid handle_recurse arguments")?;

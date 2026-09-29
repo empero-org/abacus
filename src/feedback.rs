@@ -21,9 +21,7 @@ pub struct FeedbackPayload {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FeedbackReceipt {
-    #[serde(default)]
     pub id: Option<String>,
-    #[serde(default)]
     pub message: Option<String>,
 }
 

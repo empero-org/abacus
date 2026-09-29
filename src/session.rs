@@ -102,22 +102,17 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub messages: Vec<Value>,
-    #[serde(default)]
     pub goal: Option<Goal>,
-    #[serde(default)]
     pub ralph_loop: Option<RalphLoop>,
     #[serde(default)]
     pub tasks: Vec<Task>,
-    #[serde(default)]
     pub compaction: Option<CompactionState>,
     /// Tether snapshot: what this session is trying to achieve. Captured after
     /// the first answered prompt, refreshed before compaction.
-    #[serde(default)]
     pub intent: Option<String>,
     /// Session-lifetime harness entries. Durable ones live in `~/.abacus`;
     /// these are the ones that have not yet earned a place there, so they ride
     /// the session and are gone when it is.
-    #[serde(default)]
     pub harness: Option<crate::harness::HarnessState>,
     /// Approximate provider-reported token total accumulated across resumes.
     #[serde(default)]

@@ -50,16 +50,13 @@ struct SubagentTask {
     /// An optional model slug for this worker, run on the same endpoint as the
     /// orchestrator — so one swarm can fan out across several models (e.g. five
     /// different OpenRouter models). None uses the orchestrator's model.
-    #[serde(default)]
     model: Option<String>,
     /// A JSON Schema this worker's answer must satisfy. When set, the worker's
     /// prose report is coerced into the shape and validated, so the parent gets
     /// data instead of something it has to re-read.
-    #[serde(default)]
     schema: Option<Value>,
     /// A harness `subagent` entry id supplying this worker's role prompt and
     /// privileges, instead of one of the built-in roles.
-    #[serde(default)]
     spec: Option<String>,
     /// Prior conversation for a resumed worker — never part of the tool call,
     /// set only by `message_subagent` so the worker continues instead of

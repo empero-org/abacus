@@ -216,7 +216,6 @@ async fn switching_away_from_a_scripted_profile_drops_the_endpoint() {
             name: "Plain".into(),
             base_url: "https://openrouter.ai/api/v1".into(),
             model: "some/model".into(),
-            protocol: ProviderProtocol::ChatCompletions,
             ..Default::default()
         },
     );
@@ -393,7 +392,6 @@ fn the_profile_row_opens_a_picker_that_switches_profiles() {
             name: "Second".into(),
             base_url: "http://127.0.0.1:9/v1".into(),
             model: "other-model".into(),
-            protocol: ProviderProtocol::ChatCompletions,
             ..Default::default()
         },
     );
@@ -430,7 +428,6 @@ fn extra_profile_with_limits(
             name: id.to_owned(),
             base_url: "http://127.0.0.1:9/v1".into(),
             model: model.into(),
-            protocol: ProviderProtocol::ChatCompletions,
             context_window,
             max_output_tokens,
             ..Default::default()
@@ -680,7 +677,6 @@ fn a_picker_opened_from_config_is_visible_and_owns_the_keys() {
             name: "Second".into(),
             base_url: "http://127.0.0.1:9/v1".into(),
             model: "other".into(),
-            protocol: ProviderProtocol::ChatCompletions,
             ..Default::default()
         },
     );
@@ -2348,7 +2344,6 @@ fn test_app(base_url: &str) -> (TempDir, App) {
             name: "Test".into(),
             base_url: base_url.into(),
             model: "test-model".into(),
-            protocol: ProviderProtocol::ChatCompletions,
             ..Default::default()
         },
     );
