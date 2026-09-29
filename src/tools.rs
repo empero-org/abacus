@@ -46,6 +46,61 @@ struct EditOperation {
     new_text: String,
 }
 
+/// Apply each edit in order; every `old_text` must match exactly once.
+fn apply_edits(mut content: String, edits: &[EditOperation]) -> Result<String> {
+    for (index, edit) in edits.iter().enumerate() {
+        if edit.old_text.is_empty() {
+            bail!("edit {} has empty old_text", index + 1);
+        }
+        let count = content.matches(&edit.old_text).count();
+        if count != 1 {
+            bail!("edit {} old_text must match exactly once; found {count} matches", index + 1);
+        }
+        content = content.replacen(&edit.old_text, &edit.new_text, 1);
+    }
+    Ok(content)
+}
+
+#[derive(Deserialize)]
+struct PathContent {
+    path: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct DeleteArgs {
+    path: String,
+    #[serde(default)]
+    recursive: bool,
+}
+
+/// A file's text before and after `addition` is appended on a line of its own.
+fn appended(path: &Path, addition: &str) -> (String, String) {
+    let old = fs::read_to_string(path).unwrap_or_default();
+    let mut new = old.clone();
+    if !new.is_empty() && !new.ends_with('\n') {
+        new.push('\n');
+    }
+    new.push_str(addition);
+    (old, new)
+}
+
+/// Remove whatever is at `path`: a file, a symlink, or a whole directory.
+fn remove(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+/// `output`, or `note` when there was none.
+fn or_note(output: String, note: &str) -> String {
+    if output.trim().is_empty() { note.to_owned() } else { output }
+}
+
 impl EditFileArgs {
     fn into_operations(self) -> Result<(String, Vec<EditOperation>)> {
         let mut operations = self.edits;
@@ -565,105 +620,63 @@ impl ToolExecutor {
         let (raw_path, operations) = args.into_operations()?;
         let path = self.resolve_existing(&raw_path)?;
         guard_secret(&path)?;
-        let mut content = fs::read_to_string(&path)
+        let content = fs::read_to_string(&path)
             .with_context(|| format!("could not read {raw_path} as UTF-8 text"))?;
-        for (index, edit) in operations.iter().enumerate() {
-            if edit.old_text.is_empty() {
-                bail!("edit {} has empty old_text", index + 1);
-            }
-            let count = content.matches(&edit.old_text).count();
-            if count != 1 {
-                bail!("edit {} old_text must match exactly once; found {count} matches", index + 1);
-            }
-            content = content.replacen(&edit.old_text, &edit.new_text, 1);
-        }
+        let content = apply_edits(content, &operations)?;
         write_text_atomic(&path, &content)
             .with_context(|| format!("could not write {raw_path}"))?;
         Ok(format!("Applied {} edit(s) to {raw_path}.", operations.len()))
     }
 
-    fn write_file(&self, arguments: &str) -> Result<String> {
-        #[derive(Deserialize)]
-        struct Args {
-            path: String,
-            content: String,
-        }
-
-        let args: Args = parse_args(arguments)?;
-        let path = self.resolve_for_write(&args.path)?;
+    /// Resolve a path that is about to be written, creating its parents.
+    fn writable(&self, raw: &str) -> Result<PathBuf> {
+        let path = self.resolve_for_write(raw)?;
         guard_secret(&path)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
-                .with_context(|| format!("could not create parent directory for {}", args.path))?;
+                .with_context(|| format!("could not create parent directory for {raw}"))?;
         }
+        Ok(path)
+    }
+
+    /// Check that every path may be touched by a git command.
+    fn guard_paths(&self, paths: &[String]) -> Result<()> {
+        paths.iter().try_for_each(|raw| guard_secret(&self.resolve_for_write(raw)?))
+    }
+
+    fn write_file(&self, arguments: &str) -> Result<String> {
+        let args: PathContent = parse_args(arguments)?;
+        let path = self.writable(&args.path)?;
         write_text_atomic(&path, &args.content)
             .with_context(|| format!("could not write {}", args.path))?;
         Ok(format!("Wrote {}.", args.path))
     }
 
     fn append_file(&self, arguments: &str) -> Result<String> {
-        #[derive(Deserialize)]
-        struct Args {
-            path: String,
-            content: String,
-        }
-
-        let args: Args = parse_args(arguments)?;
-        let path = self.resolve_for_write(&args.path)?;
-        guard_secret(&path)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("could not create parent directory for {}", args.path))?;
-        }
-        let old = if path.exists() {
-            fs::read_to_string(&path).unwrap_or_default()
-        } else {
-            String::new()
-        };
-        let mut new = old.clone();
-        if !new.is_empty() && !new.ends_with('\n') {
-            new.push('\n');
-        }
-        new.push_str(&args.content);
+        let args: PathContent = parse_args(arguments)?;
+        let path = self.writable(&args.path)?;
+        let (_, new) = appended(&path, &args.content);
         write_text_atomic(&path, &new).with_context(|| format!("could not write {}", args.path))?;
         Ok(format!("Appended to {}.", args.path))
     }
 
     async fn apply_patch(&self, arguments: &str) -> Result<String> {
-        #[derive(Deserialize)]
-        struct Args {
-            patch: String,
-        }
-        let args: Args = parse_args(arguments)?;
-        validate_patch(&self.root, &args.patch)?;
-        run_git_apply(&self.root, &args.patch, true).await?;
-        run_git_apply(&self.root, &args.patch, false).await?;
+        let patch = self.preview_patch(arguments)?;
+        run_git_apply(&self.root, &patch, true).await?;
+        run_git_apply(&self.root, &patch, false).await?;
         Ok("Applied patch successfully.".to_owned())
     }
 
     fn delete_file(&self, arguments: &str) -> Result<String> {
-        #[derive(Deserialize)]
-        struct Args {
-            path: String,
-            #[serde(default)]
-            recursive: bool,
-        }
-        let args: Args = parse_args(arguments)?;
+        let args: DeleteArgs = parse_args(arguments)?;
         let path = self.resolve_mutation_existing(&args.path)?;
         if path == self.root {
             bail!("cannot delete the workspace root");
         }
-        let metadata = fs::symlink_metadata(&path)?;
-        if metadata.file_type().is_symlink() {
-            fs::remove_file(&path)?;
-        } else if metadata.is_dir() {
-            if !args.recursive {
-                bail!("directory deletion requires recursive=true");
-            }
-            fs::remove_dir_all(&path)?;
-        } else {
-            fs::remove_file(&path)?;
+        if path.is_dir() && !fs::symlink_metadata(&path)?.is_symlink() && !args.recursive {
+            bail!("directory deletion requires recursive=true");
         }
+        remove(&path)?;
         Ok(format!("Deleted {}.", args.path))
     }
 
@@ -685,14 +698,7 @@ impl ToolExecutor {
             if !args.overwrite {
                 bail!("destination already exists; set overwrite=true to replace it");
             }
-            let metadata = fs::symlink_metadata(&destination)?;
-            if metadata.file_type().is_symlink() {
-                fs::remove_file(&destination)?;
-            } else if metadata.is_dir() {
-                fs::remove_dir_all(&destination)?;
-            } else {
-                fs::remove_file(&destination)?;
-            }
+            remove(&destination)?;
         }
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
@@ -720,24 +726,11 @@ impl ToolExecutor {
         let path = self.resolve_existing(&raw_path)?;
         guard_secret(&path)?;
         let content = fs::read_to_string(&path)?;
-        let mut updated = content.clone();
-        for (index, edit) in operations.iter().enumerate() {
-            let count = updated.matches(&edit.old_text).count();
-            if count != 1 {
-                bail!("edit {} old_text must match exactly once; found {count} matches", index + 1);
-            }
-            updated = updated.replacen(&edit.old_text, &edit.new_text, 1);
-        }
-        Ok(unified_diff(&raw_path, &content, &updated))
+        Ok(unified_diff(&raw_path, &content, &apply_edits(content.clone(), &operations)?))
     }
 
     fn preview_write(&self, arguments: &str) -> Result<String> {
-        #[derive(Deserialize)]
-        struct Args {
-            path: String,
-            content: String,
-        }
-        let args: Args = parse_args(arguments)?;
+        let args: PathContent = parse_args(arguments)?;
         let path = self.resolve_for_write(&args.path)?;
         guard_secret(&path)?;
         let old = if path.exists() { fs::read_to_string(path)? } else { String::new() };
@@ -745,27 +738,14 @@ impl ToolExecutor {
     }
 
     fn preview_append(&self, arguments: &str) -> Result<String> {
-        #[derive(Deserialize)]
-        struct Args {
-            path: String,
-            content: String,
-        }
-        let args: Args = parse_args(arguments)?;
+        let args: PathContent = parse_args(arguments)?;
         let path = self.resolve_for_write(&args.path)?;
         guard_secret(&path)?;
-        let old = if path.exists() {
-            fs::read_to_string(&path).unwrap_or_default()
-        } else {
-            String::new()
-        };
-        let mut new = old.clone();
-        if !new.is_empty() && !new.ends_with('\n') {
-            new.push('\n');
-        }
-        new.push_str(&args.content);
+        let (old, new) = appended(&path, &args.content);
         Ok(unified_diff(&args.path, &old, &new))
     }
 
+    /// The patch itself, once every path it names has been checked.
     fn preview_patch(&self, arguments: &str) -> Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -777,13 +757,7 @@ impl ToolExecutor {
     }
 
     fn preview_delete(&self, arguments: &str) -> Result<String> {
-        #[derive(Deserialize)]
-        struct Args {
-            path: String,
-            #[serde(default)]
-            recursive: bool,
-        }
-        let args: Args = parse_args(arguments)?;
+        let args: DeleteArgs = parse_args(arguments)?;
         let path = self.resolve_mutation_existing(&args.path)?;
         let metadata = fs::symlink_metadata(&path)?;
         if metadata.file_type().is_symlink() {
@@ -801,7 +775,8 @@ impl ToolExecutor {
         Ok(format!("Delete {}{}", args.path, if path.is_dir() { " recursively" } else { "" }))
     }
 
-    fn preview_git_commit(&self, arguments: &str) -> Result<String> {
+    /// The arguments of a commit, checked: a message, and paths safe to stage.
+    fn commit_args(&self, arguments: &str) -> Result<(String, Vec<String>)> {
         #[derive(Deserialize)]
         struct Args {
             message: String,
@@ -813,16 +788,18 @@ impl ToolExecutor {
         if message.is_empty() {
             bail!("commit message cannot be empty");
         }
-        for raw in &args.paths {
-            let path = self.resolve_for_write(raw)?;
-            guard_secret(&path)?;
+        if message.chars().count() > 2_000 {
+            bail!("commit message exceeds 2,000 characters");
         }
-        let paths =
-            if args.paths.is_empty() { "staged changes".to_owned() } else { args.paths.join(" ") };
-        Ok(format!("git commit -m {:?} -- {paths}", message))
+        if args.paths.len() > 100 {
+            bail!("git_commit accepts at most 100 paths");
+        }
+        self.guard_paths(&args.paths)?;
+        Ok((message.to_owned(), args.paths))
     }
 
-    fn preview_git_restore(&self, arguments: &str) -> Result<String> {
+    /// The arguments of a restore, checked: paths, and whether to stop at the index.
+    fn restore_args(&self, arguments: &str) -> Result<(Vec<String>, &'static str)> {
         #[derive(Deserialize)]
         struct Args {
             paths: Vec<String>,
@@ -833,12 +810,43 @@ impl ToolExecutor {
         if args.paths.is_empty() {
             bail!("at least one path is required");
         }
-        for raw in &args.paths {
-            let path = self.resolve_for_write(raw)?;
-            guard_secret(&path)?;
+        if args.paths.len() > 100 {
+            bail!("git_restore accepts at most 100 paths");
         }
-        let target = if args.staged_only { "index" } else { "HEAD" };
-        Ok(format!("git restore → {} ({})", target, args.paths.join(" ")))
+        self.guard_paths(&args.paths)?;
+        Ok((args.paths, if args.staged_only { "index" } else { "HEAD" }))
+    }
+
+    fn preview_git_commit(&self, arguments: &str) -> Result<String> {
+        let (message, paths) = self.commit_args(arguments)?;
+        let paths = if paths.is_empty() { "staged changes".to_owned() } else { paths.join(" ") };
+        Ok(format!("git commit -m {message:?} -- {paths}"))
+    }
+
+    fn preview_git_restore(&self, arguments: &str) -> Result<String> {
+        let (paths, target) = self.restore_args(arguments)?;
+        Ok(format!("git restore → {target} ({})", paths.join(" ")))
+    }
+
+    /// Run git in the workspace and return what it printed, or fail with what
+    /// it complained about.
+    async fn git<S: AsRef<std::ffi::OsStr>>(&self, args: &[S]) -> Result<String> {
+        // The subcommand, past any `-c key=value` configuration.
+        let name = args
+            .iter()
+            .filter_map(|arg| arg.as_ref().to_str())
+            .find(|arg| *arg != "-c" && !arg.contains('='))
+            .unwrap_or("command");
+        let output = timeout(
+            Duration::from_secs(30),
+            Command::new("git").args(args).current_dir(&self.root).output(),
+        )
+        .await
+        .map_err(|_| anyhow!("git {name} timed out"))??;
+        if !output.status.success() {
+            bail!("git {name} failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
     async fn git_diff(&self, arguments: &str) -> Result<String> {
@@ -858,53 +866,26 @@ impl ToolExecutor {
             bail!("head requires base; pass both revisions to diff a range");
         }
         if let Some(path) = &args.path {
-            let _ = self.resolve_for_write(path)?;
+            self.resolve_for_write(path)?;
         }
         let base = args.base.as_deref().map(validate_ref).transpose()?;
         let head = args.head.as_deref().map(validate_ref).transpose()?;
-        let mut command = Command::new("git");
-        command.arg("diff");
+        let mut command = vec!["diff".to_owned()];
         // --cached is only meaningful against the index; a two-revision range
         // compares committed trees directly, so it ignores the staging area.
         if args.staged && head.is_none() {
-            command.arg("--cached");
+            command.push("--cached".to_owned());
         }
-        command.arg("--no-ext-diff");
-        if let Some(base) = &base {
-            command.arg(base);
-        }
-        if let Some(head) = &head {
-            command.arg(head);
-        }
-        command.arg("--");
-        if let Some(path) = args.path {
-            command.arg(path);
-        }
-        let output = timeout(Duration::from_secs(30), command.current_dir(&self.root).output())
-            .await
-            .map_err(|_| anyhow!("git diff timed out"))??;
-        if !output.status.success() {
-            bail!("git diff failed: {}", String::from_utf8_lossy(&output.stderr));
-        }
-        let output = String::from_utf8_lossy(&output.stdout).into_owned();
-        if output.is_empty() { Ok("No diff.".to_owned()) } else { Ok(output) }
+        command.push("--no-ext-diff".to_owned());
+        command.extend(base.into_iter().chain(head));
+        command.push("--".to_owned());
+        command.extend(args.path);
+        Ok(or_note(self.git(&command).await?, "No diff."))
     }
 
     async fn git_status(&self) -> Result<String> {
-        let output = timeout(
-            Duration::from_secs(30),
-            Command::new("git")
-                .args(["status", "--short", "--branch", "--untracked-files=all"])
-                .current_dir(&self.root)
-                .output(),
-        )
-        .await
-        .map_err(|_| anyhow!("git status timed out"))??;
-        if !output.status.success() {
-            bail!("git status failed: {}", String::from_utf8_lossy(&output.stderr));
-        }
-        let value = String::from_utf8_lossy(&output.stdout).into_owned();
-        Ok(if value.trim().is_empty() { "Working tree clean.".to_owned() } else { value })
+        let status = self.git(&["status", "--short", "--branch", "--untracked-files=all"]).await?;
+        Ok(or_note(status, "Working tree clean."))
     }
 
     async fn git_log(&self, arguments: &str) -> Result<String> {
@@ -919,133 +900,54 @@ impl ToolExecutor {
         if let Some(path) = &args.path {
             self.resolve_for_write(path)?;
         }
-        let mut command = Command::new("git");
-        command.args([
-            "log",
-            "--oneline",
-            "--decorate",
-            &format!("--max-count={}", args.max_count.clamp(1, 50)),
-        ]);
-        if let Some(path) = args.path {
-            command.args(["--", &path]);
+        let count = format!("--max-count={}", args.max_count.clamp(1, 50));
+        let mut command = vec!["log", "--oneline", "--decorate", &count];
+        if let Some(path) = &args.path {
+            command.extend(["--", path]);
         }
-        let output = timeout(Duration::from_secs(30), command.current_dir(&self.root).output())
-            .await
-            .map_err(|_| anyhow!("git log timed out"))??;
-        if !output.status.success() {
-            let error = String::from_utf8_lossy(&output.stderr);
-            if error.contains("does not have any commits")
-                || error.contains("does not have any commits yet")
-            {
-                return Ok("No commits.".to_owned());
+        match self.git(&command).await {
+            Ok(log) => Ok(or_note(log, "No commits.")),
+            Err(error) if error.to_string().contains("does not have any commits") => {
+                Ok("No commits.".to_owned())
             }
-            bail!("git log failed: {error}");
+            Err(error) => Err(error),
         }
-        let value = String::from_utf8_lossy(&output.stdout).into_owned();
-        Ok(if value.trim().is_empty() { "No commits.".to_owned() } else { value })
     }
 
     async fn git_commit(&self, arguments: &str) -> Result<String> {
-        #[derive(Deserialize)]
-        struct Args {
-            message: String,
-            #[serde(default)]
-            paths: Vec<String>,
+        let (message, paths) = self.commit_args(arguments)?;
+        if !paths.is_empty() {
+            let mut add = vec!["add", "--"];
+            add.extend(paths.iter().map(String::as_str));
+            self.git(&add).await?;
         }
-
-        let args: Args = parse_args(arguments)?;
-        let message = args.message.trim();
-        if message.is_empty() {
-            bail!("commit message cannot be empty");
-        }
-        if message.chars().count() > 2_000 {
-            bail!("commit message exceeds 2,000 characters");
-        }
-        if args.paths.len() > 100 {
-            bail!("git_commit accepts at most 100 paths");
-        }
-        for raw in &args.paths {
-            let path = self.resolve_for_write(raw)?;
-            guard_secret(&path)?;
-        }
-
-        if !args.paths.is_empty() {
-            let mut add = Command::new("git");
-            add.arg("add").arg("--");
-            for raw in &args.paths {
-                add.arg(raw);
+        match self.git(&["commit", "-m", &message, "--"]).await {
+            Ok(stdout) => Ok(format!("Committed.\n{stdout}")),
+            Err(error) if error.to_string().contains("nothing to commit") => {
+                bail!("nothing to commit")
             }
-            let output = timeout(Duration::from_secs(30), add.current_dir(&self.root).output())
-                .await
-                .map_err(|_| anyhow!("git add timed out"))??;
-            if !output.status.success() {
-                bail!("git add failed: {}", String::from_utf8_lossy(&output.stderr));
-            }
+            Err(error) => Err(error),
         }
-
-        let mut commit = Command::new("git");
-        commit.args(["commit", "-m", message, "--"]);
-        let output = timeout(Duration::from_secs(30), commit.current_dir(&self.root).output())
-            .await
-            .map_err(|_| anyhow!("git commit timed out"))??;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("nothing to commit") {
-                bail!("nothing to commit");
-            }
-            bail!("git commit failed: {stderr}");
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(format!("Committed.\n{stdout}"))
     }
 
     async fn git_restore(&self, arguments: &str) -> Result<String> {
-        #[derive(Deserialize)]
-        struct Args {
-            paths: Vec<String>,
-            #[serde(default)]
-            staged_only: bool,
-        }
-
-        let args: Args = parse_args(arguments)?;
-        if args.paths.is_empty() {
-            bail!("at least one path is required");
-        }
-        if args.paths.len() > 100 {
-            bail!("git_restore accepts at most 100 paths");
-        }
-        for raw in &args.paths {
-            let path = self.resolve_for_write(raw)?;
-            guard_secret(&path)?;
-        }
-
-        let mut command = Command::new("git");
+        let (paths, target) = self.restore_args(arguments)?;
         // core.autocrlf=false so restored content is byte-identical to HEAD
         // rather than being re-encoded with the host's line-ending setting.
-        command.args(["-c", "core.autocrlf=false", "restore"]);
-        if args.staged_only {
-            command.arg("--staged");
+        let mut command = vec!["-c", "core.autocrlf=false", "restore"];
+        if target == "index" {
+            command.push("--staged");
         } else {
-            command.args(["--source=HEAD", "--staged", "--worktree"]);
+            command.extend(["--source=HEAD", "--staged", "--worktree"]);
         }
-        command.arg("--");
-        for raw in &args.paths {
-            command.arg(raw);
-        }
-        let output = timeout(Duration::from_secs(30), command.current_dir(&self.root).output())
-            .await
-            .map_err(|_| anyhow!("git restore timed out"))??;
-        if !output.status.success() {
-            bail!("git restore failed: {}", String::from_utf8_lossy(&output.stderr));
-        }
-        Ok(format!(
-            "Restored {} path(s) to {}.",
-            args.paths.len(),
-            if args.staged_only { "index" } else { "HEAD" }
-        ))
+        command.push("--");
+        command.extend(paths.iter().map(String::as_str));
+        self.git(&command).await?;
+        Ok(format!("Restored {} path(s) to {target}.", paths.len()))
     }
 
-    async fn git_show(&self, arguments: &str) -> Result<String> {
+    /// The arguments of a history lookup, checked: a path and a revision.
+    fn revision_args(&self, arguments: &str) -> Result<(String, String)> {
         #[derive(Deserialize)]
         struct Args {
             path: String,
@@ -1053,56 +955,27 @@ impl ToolExecutor {
             revision: String,
         }
         let args: Args = parse_args(arguments)?;
-        let path = self.resolve_for_write(&args.path)?;
-        guard_secret(&path)?;
-        let revision = validate_ref(&args.revision)?;
-        let object = format!("{revision}:{}", args.path);
-        let output = timeout(
-            Duration::from_secs(30),
-            Command::new("git").args(["show", &object]).current_dir(&self.root).output(),
-        )
-        .await
-        .map_err(|_| anyhow!("git show timed out"))??;
-        if !output.status.success() {
-            bail!("git show failed: {}", String::from_utf8_lossy(&output.stderr));
-        }
-        let content = String::from_utf8_lossy(&output.stdout);
-        let lines: Vec<&str> = content.lines().collect();
-        let numbered = lines
-            .iter()
+        guard_secret(&self.resolve_for_write(&args.path)?)?;
+        Ok((args.path, validate_ref(&args.revision)?))
+    }
+
+    async fn git_show(&self, arguments: &str) -> Result<String> {
+        let (path, revision) = self.revision_args(arguments)?;
+        let content = self.git(&["show", &format!("{revision}:{path}")]).await?;
+        let numbered = content
+            .lines()
             .enumerate()
             .take(2_000)
             .map(|(index, line)| format!("{:>5} | {line}", index + 1))
             .collect::<Vec<_>>()
             .join("\n");
-        Ok(format!(">>> {revision}:{} ({} lines)\n{numbered}", args.path, lines.len()))
+        Ok(format!(">>> {revision}:{path} ({} lines)\n{numbered}", content.lines().count()))
     }
 
     async fn git_blame(&self, arguments: &str) -> Result<String> {
-        #[derive(Deserialize)]
-        struct Args {
-            path: String,
-            #[serde(default = "default_head")]
-            revision: String,
-        }
-        let args: Args = parse_args(arguments)?;
-        let path = self.resolve_for_write(&args.path)?;
-        guard_secret(&path)?;
-        let revision = validate_ref(&args.revision)?;
-        let output = timeout(
-            Duration::from_secs(30),
-            Command::new("git")
-                .args(["blame", "--date=short", &revision, "--", &args.path])
-                .current_dir(&self.root)
-                .output(),
-        )
-        .await
-        .map_err(|_| anyhow!("git blame timed out"))??;
-        if !output.status.success() {
-            bail!("git blame failed: {}", String::from_utf8_lossy(&output.stderr));
-        }
-        let value = String::from_utf8_lossy(&output.stdout).into_owned();
-        Ok(if value.trim().is_empty() { "No blame output.".to_owned() } else { value })
+        let (path, revision) = self.revision_args(arguments)?;
+        let blame = self.git(&["blame", "--date=short", &revision, "--", &path]).await?;
+        Ok(or_note(blame, "No blame output."))
     }
 
     async fn git_checkout(&self, arguments: &str) -> Result<String> {
@@ -1114,24 +987,14 @@ impl ToolExecutor {
         }
         let args: Args = parse_args(arguments)?;
         let branch = validate_branch(&args.branch)?;
-        let mut command = Command::new("git");
-        command.arg("checkout");
-        if args.create {
-            command.arg("-b");
-        }
-        command.arg(&branch);
-        let output = timeout(Duration::from_secs(30), command.current_dir(&self.root).output())
-            .await
-            .map_err(|_| anyhow!("git checkout timed out"))??;
-        if !output.status.success() {
-            bail!("git checkout failed: {}", String::from_utf8_lossy(&output.stderr));
-        }
-        Ok(format!(
-            "{} branch {branch}.",
-            if args.create { "Created and switched to" } else { "Switched to" }
-        ))
+        let (flags, done): (&[&str], _) = if args.create {
+            (&["checkout", "-b"], "Created and switched to")
+        } else {
+            (&["checkout"], "Switched to")
+        };
+        self.git(&[flags, &[branch.as_str()]].concat()).await?;
+        Ok(format!("{done} branch {branch}."))
     }
-
     async fn run_command(&self, arguments: &str) -> Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -1930,6 +1793,10 @@ mod tests {
         assert_eq!(declared_sleep_seconds("echo sleep"), None);
     }
     use super::*;
+
+    fn tool_call(name: &str, arguments: impl Into<String>) -> ToolCall {
+        ToolCall { id: "1".into(), name: name.into(), arguments: arguments.into() }
+    }
     use std::process::Command as StdCommand;
     use tempfile::tempdir;
 
@@ -1943,11 +1810,7 @@ mod tests {
         fs::write(root.join(".git").join("config"), "needle inside git\n").unwrap();
         fs::write(root.join("real.txt"), "needle in real file\n").unwrap();
         let tools = ToolExecutor::new(root);
-        let call = ToolCall {
-            id: "1".into(),
-            name: "grep".into(),
-            arguments: r#"{"query":"needle"}"#.into(),
-        };
+        let call = tool_call("grep", r#"{"query":"needle"}"#);
         let output = tools.execute(&call).await;
         assert!(output.contains("real.txt"), "should match real files");
         assert!(!output.contains(".git"), "must not descend into .git: {output}");
@@ -1964,11 +1827,7 @@ mod tests {
 
         let approved = OutsideReads::default();
         let tools = ToolExecutor::new(workspace).with_outside_reads(approved.clone());
-        let call = ToolCall {
-            id: "1".into(),
-            name: "read_file".into(),
-            arguments: format!(r#"{{"path":"{}"}}"#, secret.display()),
-        };
+        let call = tool_call("read_file", format!(r#"{{"path":"{}"}}"#, secret.display()));
 
         // Nothing approved yet: the read is refused, and says why.
         let refused = tools.execute(&call).await;
@@ -1995,11 +1854,10 @@ mod tests {
         let approved = OutsideReads::default();
         approved.write().unwrap().insert(target.canonicalize().unwrap());
         let tools = ToolExecutor::new(workspace).with_outside_reads(approved);
-        let call = ToolCall {
-            id: "1".into(),
-            name: "write_file".into(),
-            arguments: format!(r#"{{"path":"{}","content":"overwritten"}}"#, target.display()),
-        };
+        let call = tool_call(
+            "write_file",
+            format!(r#"{{"path":"{}","content":"overwritten"}}"#, target.display()),
+        );
         let result = tools.execute(&call).await;
         assert!(
             result.to_lowercase().contains("absolute")
@@ -2024,11 +1882,7 @@ mod tests {
         let approved = OutsideReads::default();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap())
             .with_outside_reads(approved.clone());
-        let read = |path: &str| ToolCall {
-            id: "1".into(),
-            name: "read_file".into(),
-            arguments: format!(r#"{{"path":"{path}"}}"#),
-        };
+        let read = |path: &str| tool_call("read_file", format!(r#"{{"path":"{path}"}}"#));
 
         for name in [".env.example", ".env.sample", ".env.template", ".env.dist", ".env.defaults"] {
             let output = tools.execute(&read(name)).await;
@@ -2053,11 +1907,8 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("file.txt"), "same\nsame\n").unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
-        let call = ToolCall {
-            id: "1".into(),
-            name: "edit_file".into(),
-            arguments: r#"{"path":"file.txt","old_text":"same","new_text":"new"}"#.into(),
-        };
+        let call =
+            tool_call("edit_file", r#"{"path":"file.txt","old_text":"same","new_text":"new"}"#);
         assert!(tools.execute(&call).await.contains("found 2 matches"));
     }
 
@@ -2067,11 +1918,7 @@ mod tests {
         fs::write(dir.path().join("main.rs"), "needle\n").unwrap();
         fs::write(dir.path().join("notes.txt"), "needle\n").unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
-        let call = ToolCall {
-            id: "1".into(),
-            name: "grep".into(),
-            arguments: r#"{"query":"needle","glob":["**/*.rs","*.rs"]}"#.into(),
-        };
+        let call = tool_call("grep", r#"{"query":"needle","glob":["**/*.rs","*.rs"]}"#);
         let output = tools.execute(&call).await;
         assert!(output.contains("main.rs:1"));
         assert!(!output.contains("notes.txt"));
@@ -2086,11 +1933,7 @@ mod tests {
         )
         .unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
-        let call = ToolCall {
-            id: "1".into(),
-            name: "grep".into(),
-            arguments: r#"{"query":"needle","context":1}"#.into(),
-        };
+        let call = tool_call("grep", r#"{"query":"needle","context":1}"#);
         let output = tools.execute(&call).await;
         // Match lines use the ":" marker, context lines use "-".
         assert!(output.contains("main.rs:3: needle"));
@@ -2107,11 +1950,8 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("file.txt"), "old\n").unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
-        let call = ToolCall {
-            id: "1".into(),
-            name: "edit_file".into(),
-            arguments: r#"{"path":"file.txt","old_text":"old","new_text":"new"}"#.into(),
-        };
+        let call =
+            tool_call("edit_file", r#"{"path":"file.txt","old_text":"old","new_text":"new"}"#);
         let preview = tools.approval_details(&call);
         assert!(preview.contains("-old"));
         assert!(preview.contains("+new"));
@@ -2121,11 +1961,7 @@ mod tests {
     async fn tool_search_discovers_grep_by_capability() {
         let dir = tempdir().unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
-        let call = ToolCall {
-            id: "1".into(),
-            name: "tool_search".into(),
-            arguments: r#"{"query":"regex"}"#.into(),
-        };
+        let call = tool_call("tool_search", r#"{"query":"regex"}"#);
         let output = tools.execute(&call).await;
         assert!(output.contains("grep:"));
     }
@@ -2144,11 +1980,8 @@ mod tests {
         fs::write(dir.path().join("value.txt"), "one\ntwo\n").unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
         let patch = unified_diff("value.txt", "one\ntwo\n", "one\nchanged\nthree\n");
-        let call = ToolCall {
-            id: "patch".into(),
-            name: "apply_patch".into(),
-            arguments: serde_json::to_string(&json!({"patch": patch})).unwrap(),
-        };
+        let call =
+            tool_call("apply_patch", serde_json::to_string(&json!({"patch": patch})).unwrap());
         let preview = tools.approval_details(&call);
         assert!(preview.contains("+changed"));
         assert_eq!(tools.execute(&call).await, "Applied patch successfully.");
@@ -2166,11 +1999,8 @@ mod tests {
             "--- a/../outside\n+++ b/../outside\n@@ -0,0 +1 @@\n+x\n",
             "--- /dev/null\n+++ b/.env\n@@ -0,0 +1 @@\n+TOKEN=x\n",
         ] {
-            let call = ToolCall {
-                id: "unsafe".into(),
-                name: "apply_patch".into(),
-                arguments: serde_json::to_string(&json!({"patch": patch})).unwrap(),
-            };
+            let call =
+                tool_call("apply_patch", serde_json::to_string(&json!({"patch": patch})).unwrap());
             assert!(tools.execute(&call).await.starts_with("Error:"));
         }
         assert!(!dir.path().join("../outside").exists());
@@ -2182,18 +2012,11 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("old.txt"), "remove me\n").unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
-        let delete = ToolCall {
-            id: "delete".into(),
-            name: "delete_file".into(),
-            arguments: r#"{"path":"old.txt"}"#.into(),
-        };
+        let delete = tool_call("delete_file", r#"{"path":"old.txt"}"#);
         assert!(tools.approval_details(&delete).contains("-remove me"));
 
-        let outside = ToolCall {
-            id: "move".into(),
-            name: "move_file".into(),
-            arguments: r#"{"source":"old.txt","destination":"../escaped.txt"}"#.into(),
-        };
+        let outside =
+            tool_call("move_file", r#"{"source":"old.txt","destination":"../escaped.txt"}"#);
         assert!(tools.execute(&outside).await.contains("parent path traversal"));
         assert!(dir.path().join("old.txt").exists());
     }
@@ -2211,9 +2034,8 @@ mod tests {
         );
         fs::write(dir.path().join("untracked.txt"), "hello\n").unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
-        let status =
-            ToolCall { id: "status".into(), name: "git_status".into(), arguments: "{}".into() };
-        let log = ToolCall { id: "log".into(), name: "git_log".into(), arguments: "{}".into() };
+        let status = tool_call("git_status", "{}");
+        let log = tool_call("git_log", "{}");
         assert!(tools.execute(&status).await.contains("untracked.txt"));
         assert!(tools.execute(&log).await.contains("No commits."));
     }
@@ -2224,11 +2046,7 @@ mod tests {
         fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
         fs::write(dir.path().join("b.txt"), "beta\n").unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
-        let call = ToolCall {
-            id: "1".into(),
-            name: "read_files".into(),
-            arguments: r#"{"paths":["a.txt","b.txt","missing.txt"]}"#.into(),
-        };
+        let call = tool_call("read_files", r#"{"paths":["a.txt","b.txt","missing.txt"]}"#);
         let output = tools.execute(&call).await;
         assert!(output.contains("===== a.txt ====="));
         assert!(output.contains("alpha"));
@@ -2261,13 +2079,9 @@ mod tests {
             .unwrap();
         fs::write(dir.path().join("file.txt"), "first\n").unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
-        let call = ToolCall {
-            id: "commit".into(),
-            name: "git_commit".into(),
-            arguments: r#"{"message":"initial","paths":["file.txt"]}"#.into(),
-        };
+        let call = tool_call("git_commit", r#"{"message":"initial","paths":["file.txt"]}"#);
         assert!(tools.execute(&call).await.starts_with("Committed."));
-        let log = ToolCall { id: "log".into(), name: "git_log".into(), arguments: "{}".into() };
+        let log = tool_call("git_log", "{}");
         assert!(tools.execute(&log).await.contains("initial"));
     }
 
@@ -2294,19 +2108,11 @@ mod tests {
             .unwrap();
         fs::write(dir.path().join("file.txt"), "original\n").unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
-        let commit = ToolCall {
-            id: "commit".into(),
-            name: "git_commit".into(),
-            arguments: r#"{"message":"baseline","paths":["file.txt"]}"#.into(),
-        };
+        let commit = tool_call("git_commit", r#"{"message":"baseline","paths":["file.txt"]}"#);
         tools.execute(&commit).await;
         fs::write(dir.path().join("file.txt"), "mutated\n").unwrap();
         assert_eq!(fs::read_to_string(dir.path().join("file.txt")).unwrap(), "mutated\n");
-        let restore = ToolCall {
-            id: "restore".into(),
-            name: "git_restore".into(),
-            arguments: r#"{"paths":["file.txt"]}"#.into(),
-        };
+        let restore = tool_call("git_restore", r#"{"paths":["file.txt"]}"#);
         assert!(tools.execute(&restore).await.contains("HEAD"));
         assert_eq!(fs::read_to_string(dir.path().join("file.txt")).unwrap(), "original\n");
     }
@@ -2331,21 +2137,9 @@ mod tests {
         init_repo(dir.path());
         fs::write(dir.path().join("file.txt"), "first\nsecond\n").unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
-        tools
-            .execute(&ToolCall {
-                id: "c".into(),
-                name: "git_commit".into(),
-                arguments: r#"{"message":"base","paths":["file.txt"]}"#.into(),
-            })
-            .await;
+        tools.execute(&tool_call("git_commit", r#"{"message":"base","paths":["file.txt"]}"#)).await;
         fs::write(dir.path().join("file.txt"), "first\nCHANGED\n").unwrap();
-        let output = tools
-            .execute(&ToolCall {
-                id: "s".into(),
-                name: "git_show".into(),
-                arguments: r#"{"path":"file.txt"}"#.into(),
-            })
-            .await;
+        let output = tools.execute(&tool_call("git_show", r#"{"path":"file.txt"}"#)).await;
         assert!(output.contains("second"));
         assert!(!output.contains("CHANGED"));
     }
@@ -2356,44 +2150,19 @@ mod tests {
         init_repo(dir.path());
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
         fs::write(dir.path().join("file.txt"), "first\n").unwrap();
-        tools
-            .execute(&ToolCall {
-                id: "c1".into(),
-                name: "git_commit".into(),
-                arguments: r#"{"message":"one","paths":["file.txt"]}"#.into(),
-            })
-            .await;
+        tools.execute(&tool_call("git_commit", r#"{"message":"one","paths":["file.txt"]}"#)).await;
         fs::write(dir.path().join("file.txt"), "first\nsecond\n").unwrap();
-        tools
-            .execute(&ToolCall {
-                id: "c2".into(),
-                name: "git_commit".into(),
-                arguments: r#"{"message":"two","paths":["file.txt"]}"#.into(),
-            })
-            .await;
+        tools.execute(&tool_call("git_commit", r#"{"message":"two","paths":["file.txt"]}"#)).await;
         // A clean working tree: the default diff is empty, but the range diff
         // between the two commits must surface the added line.
-        let working = tools
-            .execute(&ToolCall { id: "d0".into(), name: "git_diff".into(), arguments: "{}".into() })
-            .await;
+        let working = tools.execute(&tool_call("git_diff", "{}")).await;
         assert_eq!(working, "No diff.");
-        let range = tools
-            .execute(&ToolCall {
-                id: "d1".into(),
-                name: "git_diff".into(),
-                arguments: r#"{"base":"HEAD~1","head":"HEAD"}"#.into(),
-            })
-            .await;
+        let range =
+            tools.execute(&tool_call("git_diff", r#"{"base":"HEAD~1","head":"HEAD"}"#)).await;
         assert!(range.contains("+second"), "range diff was: {range}");
         assert!(!range.contains("Error:"));
         // head without base is rejected.
-        let invalid = tools
-            .execute(&ToolCall {
-                id: "d2".into(),
-                name: "git_diff".into(),
-                arguments: r#"{"head":"HEAD"}"#.into(),
-            })
-            .await;
+        let invalid = tools.execute(&tool_call("git_diff", r#"{"head":"HEAD"}"#)).await;
         assert!(invalid.starts_with("Error:"));
     }
 
@@ -2403,20 +2172,8 @@ mod tests {
         init_repo(dir.path());
         fs::write(dir.path().join("file.txt"), "first\n").unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
-        tools
-            .execute(&ToolCall {
-                id: "c".into(),
-                name: "git_commit".into(),
-                arguments: r#"{"message":"base","paths":["file.txt"]}"#.into(),
-            })
-            .await;
-        let output = tools
-            .execute(&ToolCall {
-                id: "b".into(),
-                name: "git_blame".into(),
-                arguments: r#"{"path":"file.txt"}"#.into(),
-            })
-            .await;
+        tools.execute(&tool_call("git_commit", r#"{"message":"base","paths":["file.txt"]}"#)).await;
+        let output = tools.execute(&tool_call("git_blame", r#"{"path":"file.txt"}"#)).await;
         assert!(!output.contains("Error:"));
         assert!(output.contains("first"));
     }
@@ -2427,27 +2184,13 @@ mod tests {
         init_repo(dir.path());
         fs::write(dir.path().join("file.txt"), "first\n").unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
-        tools
-            .execute(&ToolCall {
-                id: "c".into(),
-                name: "git_commit".into(),
-                arguments: r#"{"message":"base","paths":["file.txt"]}"#.into(),
-            })
-            .await;
+        tools.execute(&tool_call("git_commit", r#"{"message":"base","paths":["file.txt"]}"#)).await;
         let output = tools
-            .execute(&ToolCall {
-                id: "co".into(),
-                name: "git_checkout".into(),
-                arguments: r#"{"branch":"feature/x","create":true}"#.into(),
-            })
+            .execute(&tool_call("git_checkout", r#"{"branch":"feature/x","create":true}"#))
             .await;
         assert!(output.contains("Created and switched to"));
         let branch = tools
-            .execute(&ToolCall {
-                id: "b".into(),
-                name: "run_command".into(),
-                arguments: r#"{"command":"git branch --show-current"}"#.into(),
-            })
+            .execute(&tool_call("run_command", r#"{"command":"git branch --show-current"}"#))
             .await;
         assert!(branch.contains("feature/x"));
     }
@@ -2457,17 +2200,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
         tools
-            .execute(&ToolCall {
-                id: "1".into(),
-                name: "append_file".into(),
-                arguments: r#"{"path":"log.txt","content":"line one"}"#.into(),
-            })
+            .execute(&tool_call("append_file", r#"{"path":"log.txt","content":"line one"}"#))
             .await;
-        let second = ToolCall {
-            id: "2".into(),
-            name: "append_file".into(),
-            arguments: r#"{"path":"log.txt","content":"line two"}"#.into(),
-        };
+        let second = tool_call("append_file", r#"{"path":"log.txt","content":"line two"}"#);
         tools.execute(&second).await;
         assert_eq!(fs::read_to_string(dir.path().join("log.txt")).unwrap(), "line one\nline two");
         assert!(tools.approval_details(&second).contains("line two"));
@@ -2477,11 +2212,7 @@ mod tests {
     fn git_commit_rejects_empty_message_without_git() {
         let dir = tempdir().unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
-        let call = ToolCall {
-            id: "1".into(),
-            name: "git_commit".into(),
-            arguments: r#"{"message":"   "}"#.into(),
-        };
+        let call = tool_call("git_commit", r#"{"message":"   "}"#);
         assert!(tools.approval_details(&call).contains("commit message cannot be empty"));
     }
 
@@ -2520,11 +2251,7 @@ mod tests {
         fs::write(dir.path().join("target.txt"), "keep\n").unwrap();
         symlink("target.txt", dir.path().join("link.txt")).unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
-        let call = ToolCall {
-            id: "delete-link".into(),
-            name: "delete_file".into(),
-            arguments: r#"{"path":"link.txt"}"#.into(),
-        };
+        let call = tool_call("delete_file", r#"{"path":"link.txt"}"#);
         assert!(tools.approval_details(&call).contains("symlink"));
         assert_eq!(tools.execute(&call).await, "Deleted link.txt.");
         assert!(!dir.path().join("link.txt").exists());
