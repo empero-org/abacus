@@ -347,200 +347,252 @@ enum ConfigKey {
     AdvancedToml,
 }
 
-/// The config panel's rows: section headings interleaved with settings, so a
-/// long flat list becomes something you can scan by area of concern.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConfigRow {
-    Heading(&'static str),
-    Key(ConfigKey),
-}
-
-const CONFIG_ROWS: &[ConfigRow] = &[
-    ConfigRow::Heading("PROVIDER"),
-    ConfigRow::Key(ConfigKey::Profile),
-    ConfigRow::Key(ConfigKey::Model),
-    ConfigRow::Key(ConfigKey::AuxModel),
-    ConfigRow::Key(ConfigKey::Effort),
-    ConfigRow::Key(ConfigKey::BaseUrl),
-    ConfigRow::Key(ConfigKey::Protocol),
-    ConfigRow::Key(ConfigKey::Providers),
-    ConfigRow::Key(ConfigKey::Fallbacks),
-    ConfigRow::Key(ConfigKey::ApiKey),
-    ConfigRow::Key(ConfigKey::ContextWindow),
-    ConfigRow::Key(ConfigKey::MaxOutput),
-    ConfigRow::Heading("AGENT"),
-    ConfigRow::Key(ConfigKey::Permission),
-    ConfigRow::Key(ConfigKey::MaxSteps),
-    ConfigRow::Key(ConfigKey::ToolOutputLimit),
-    ConfigRow::Key(ConfigKey::ProjectTrust),
-    ConfigRow::Key(ConfigKey::TokenCompression),
-    ConfigRow::Key(ConfigKey::OneStream),
-    ConfigRow::Heading("SEARCH"),
-    ConfigRow::Key(ConfigKey::SearchEnabled),
-    ConfigRow::Key(ConfigKey::SearchBackend),
-    ConfigRow::Key(ConfigKey::SearchInstanceUrl),
-    ConfigRow::Key(ConfigKey::SearchApiKeyEnv),
-    ConfigRow::Key(ConfigKey::SearchSharedInstance),
-    ConfigRow::Heading("INTERFACE"),
-    ConfigRow::Key(ConfigKey::Theme),
-    ConfigRow::Key(ConfigKey::Glyphs),
-    ConfigRow::Key(ConfigKey::VimMode),
-    ConfigRow::Key(ConfigKey::ShowThinking),
-    ConfigRow::Key(ConfigKey::TokenRate),
-    ConfigRow::Key(ConfigKey::Animations),
-    ConfigRow::Key(ConfigKey::Tooltips),
-    ConfigRow::Key(ConfigKey::DraftReplies),
-    ConfigRow::Key(ConfigKey::CheckUpdates),
-    ConfigRow::Key(ConfigKey::SafetyModel),
-    ConfigRow::Key(ConfigKey::TraceLogging),
-    ConfigRow::Heading("PRIVACY"),
-    ConfigRow::Key(ConfigKey::FeedbackEnabled),
-    ConfigRow::Key(ConfigKey::FeedbackDiagnostics),
-    ConfigRow::Key(ConfigKey::FeedbackEndpoint),
-    ConfigRow::Heading("ADVANCED"),
-    ConfigRow::Key(ConfigKey::AdvancedToml),
+/// The config panel, section by section: every setting with its label, how it
+/// is changed, and one line on what it actually does — shown for whichever row
+/// the cursor is on, because a settings screen that only lists names makes the
+/// reader guess. One table, so display order, selection order, and the text
+/// beside each row cannot drift apart.
+const SETTINGS: &[(&str, &[Setting])] = &[
+    (
+        "PROVIDER",
+        &[
+            toggled(
+                ConfigKey::Profile,
+                "Active profile",
+                "Which stored provider profile this session talks to. Enter to switch, r to rename, d to delete, n to add.",
+            ),
+            typed(
+                ConfigKey::Model,
+                "Model",
+                "Model ID sent to the provider. /model lists what the endpoint offers.",
+            ),
+            typed(
+                ConfigKey::AuxModel,
+                "Auxiliary model",
+                "Cheaper model on this same endpoint for background calls (refine, drafts, tether, command checks). Blank = same as the main model.",
+            ),
+            typed(
+                ConfigKey::Effort,
+                "Reasoning effort",
+                "How hard the model thinks: minimal, low, medium, high — or blank to leave it to the provider. Models without reasoning ignore it.",
+            ),
+            typed(
+                ConfigKey::BaseUrl,
+                "Provider URL",
+                "OpenAI-compatible endpoint, including the /v1 suffix.",
+            ),
+            toggled(
+                ConfigKey::Protocol,
+                "Wire protocol",
+                "Chat Completions suits most providers; Responses is OpenAI and xAI.",
+            ),
+            typed(
+                ConfigKey::Providers,
+                "Upstream providers",
+                "OpenRouter only: which suppliers may serve this model, best first. `abacus providers` lists them.",
+            ),
+            toggled(
+                ConfigKey::Fallbacks,
+                "Allow other providers",
+                "Off pins strictly — a request fails rather than landing on an unpinned provider.",
+            ),
+            typed(
+                ConfigKey::ApiKey,
+                "API key",
+                "Stored in credentials.toml with owner-only permissions. Never shown back.",
+            ),
+            typed(
+                ConfigKey::ContextWindow,
+                "Context window",
+                "This profile's context window in tokens (accepts 128k / 1m). Blank returns to auto-detection.",
+            ),
+            typed(
+                ConfigKey::MaxOutput,
+                "Max output tokens",
+                "This profile's max output tokens sent as max_tokens (accepts 8k / 64k). Blank returns to auto — set this when the provider rejects the detected value.",
+            ),
+        ],
+    ),
+    (
+        "AGENT",
+        &[
+            toggled(
+                ConfigKey::Permission,
+                "Permission mode",
+                "Ask before every mutation, or allow them for the session.",
+            ),
+            typed(
+                ConfigKey::MaxSteps,
+                "Maximum agent steps",
+                "How many tool calls one turn may make before it stops.",
+            ),
+            typed(
+                ConfigKey::ToolOutputLimit,
+                "Tool output limit",
+                "Characters of tool output kept before truncation.",
+            ),
+            toggled(
+                ConfigKey::ProjectTrust,
+                "Trust this project",
+                "Allow this project's own plugins, hooks, and MCP servers to run.",
+            ),
+            toggled(
+                ConfigKey::TokenCompression,
+                "Token Compression",
+                "Balanced high-savings mode: tighter context, fewer background checks, and no draft or routine refine calls.",
+            ),
+            toggled(
+                ConfigKey::OneStream,
+                "One Stream",
+                "Serialize main and auxiliary upstream requests. Explicit subagents keep their own streams.",
+            ),
+        ],
+    ),
+    (
+        "SEARCH",
+        &[
+            toggled(
+                ConfigKey::SearchEnabled,
+                "Web search",
+                "Whether the web_search and read_page tools are offered to the model at all.",
+            ),
+            toggled(
+                ConfigKey::SearchBackend,
+                "Search backend",
+                "Enter cycles auto → searxng → brave → bing. Auto picks whatever is configured: your SearXNG instance, then Brave if its key is set, else Bing.",
+            ),
+            typed(
+                ConfigKey::SearchInstanceUrl,
+                "SearXNG URL",
+                "Base URL of your SearXNG instance, e.g. http://localhost:8888. It must have the JSON format enabled in settings.yml. Blank to unset.",
+            ),
+            typed(
+                ConfigKey::SearchApiKeyEnv,
+                "Search key variable",
+                "Environment variable holding the search API key. Blank uses the backend default (BRAVE_API_KEY for Brave).",
+            ),
+            toggled(
+                ConfigKey::SearchSharedInstance,
+                "Shared SearXNG",
+                "Allow falling back to a public SearXNG instance when nothing else is configured. Off by default: queries would leave to a host neither you nor Abacus runs.",
+            ),
+        ],
+    ),
+    (
+        "INTERFACE",
+        &[
+            toggled(
+                ConfigKey::Theme,
+                "Theme",
+                "Dark, light, auto, or a theme file from ~/.abacus/themes. `/theme export <name>` writes one to edit.",
+            ),
+            toggled(
+                ConfigKey::Glyphs,
+                "Glyphs",
+                "Which glyph set to draw with. `nerd` needs a patched font installed, so it is never chosen for you.",
+            ),
+            toggled(
+                ConfigKey::VimMode,
+                "Vim keybindings",
+                "Esc enters normal mode in the composer instead of clearing it.",
+            ),
+            toggled(
+                ConfigKey::ShowThinking,
+                "Show thinking",
+                "Show the model's reasoning, where the provider streams it apart from the answer.",
+            ),
+            toggled(
+                ConfigKey::TokenRate,
+                "Show tokens/second",
+                "Show a live generation rate while a turn runs. Estimated.",
+            ),
+            toggled(
+                ConfigKey::Animations,
+                "Animations",
+                "Spinners and the wave on running tool calls.",
+            ),
+            toggled(
+                ConfigKey::Tooltips,
+                "Welcome tips",
+                "The guidance block on the welcome screen.",
+            ),
+            toggled(
+                ConfigKey::DraftReplies,
+                "Draft next message",
+                "Predict a likely follow-up in the empty composer. One short model call per turn.",
+            ),
+            toggled(
+                ConfigKey::CheckUpdates,
+                "Update reminder",
+                "Check GitHub daily for a newer version tag and say so. Never downloads anything.",
+            ),
+            toggled(
+                ConfigKey::SafetyModel,
+                "Safety classifier",
+                "Which model judges whether a borderline command only inspects, in PLAN and AUTO.",
+            ),
+            toggled(
+                ConfigKey::TraceLogging,
+                "Training traces",
+                "Append every model call to ~/.abacus/traces as JSONL for fine-tuning. Stays local.",
+            ),
+        ],
+    ),
+    (
+        "PRIVACY",
+        &[
+            toggled(
+                ConfigKey::FeedbackEnabled,
+                "Feedback",
+                "Whether /feedback is available at all.",
+            ),
+            toggled(
+                ConfigKey::FeedbackDiagnostics,
+                "Feedback diagnostics",
+                "Attach extension diagnostics to feedback. Never your transcript.",
+            ),
+            typed(
+                ConfigKey::FeedbackEndpoint,
+                "Feedback endpoint",
+                "Where /feedback submissions are sent.",
+            ),
+        ],
+    ),
+    (
+        "ADVANCED",
+        &[toggled(
+            ConfigKey::AdvancedToml,
+            "Advanced configuration",
+            "Open the raw TOML for settings without a row here.",
+        )],
+    ),
 ];
 
-/// One line explaining what a setting actually does, shown for whichever row
-/// the cursor is on. A settings screen that only lists names makes the reader
-/// guess; this is the cheapest possible fix for that.
-fn config_help(key: ConfigKey) -> &'static str {
-    match key {
-        ConfigKey::Profile => {
-            "Which stored provider profile this session talks to. Enter to switch, r to rename, d to delete, n to add."
-        }
-        ConfigKey::Model => "Model ID sent to the provider. /model lists what the endpoint offers.",
-        ConfigKey::AuxModel => {
-            "Cheaper model on this same endpoint for background calls (refine, drafts, tether, command checks). Blank = same as the main model."
-        }
-        ConfigKey::Effort => {
-            "How hard the model thinks: minimal, low, medium, high — or blank to leave it to the provider. Models without reasoning ignore it."
-        }
-        ConfigKey::BaseUrl => "OpenAI-compatible endpoint, including the /v1 suffix.",
-        ConfigKey::Protocol => {
-            "Chat Completions suits most providers; Responses is OpenAI and xAI."
-        }
-        ConfigKey::Providers => {
-            "OpenRouter only: which suppliers may serve this model, best first. `abacus providers` lists them."
-        }
-        ConfigKey::Fallbacks => {
-            "Off pins strictly — a request fails rather than landing on an unpinned provider."
-        }
-        ConfigKey::ApiKey => {
-            "Stored in credentials.toml with owner-only permissions. Never shown back."
-        }
-        ConfigKey::Permission => "Ask before every mutation, or allow them for the session.",
-        ConfigKey::Theme => {
-            "Dark, light, auto, or a theme file from ~/.abacus/themes. `/theme export <name>` writes one to edit."
-        }
-        ConfigKey::Glyphs => {
-            "Which glyph set to draw with. `nerd` needs a patched font installed, so it is never chosen for you."
-        }
-        ConfigKey::VimMode => "Esc enters normal mode in the composer instead of clearing it.",
-        ConfigKey::ShowThinking => {
-            "Show the model's reasoning, where the provider streams it apart from the answer."
-        }
-        ConfigKey::TokenRate => "Show a live generation rate while a turn runs. Estimated.",
-        ConfigKey::Animations => "Spinners and the wave on running tool calls.",
-        ConfigKey::Tooltips => "The guidance block on the welcome screen.",
-        ConfigKey::DraftReplies => {
-            "Predict a likely follow-up in the empty composer. One short model call per turn."
-        }
-        ConfigKey::SearchEnabled => {
-            "Whether the web_search and read_page tools are offered to the model at all."
-        }
-        ConfigKey::SearchBackend => {
-            "Enter cycles auto → searxng → brave → bing. Auto picks whatever is configured: your SearXNG instance, then Brave if its key is set, else Bing."
-        }
-        ConfigKey::SearchInstanceUrl => {
-            "Base URL of your SearXNG instance, e.g. http://localhost:8888. It must have the JSON format enabled in settings.yml. Blank to unset."
-        }
-        ConfigKey::SearchApiKeyEnv => {
-            "Environment variable holding the search API key. Blank uses the backend default (BRAVE_API_KEY for Brave)."
-        }
-        ConfigKey::SearchSharedInstance => {
-            "Allow falling back to a public SearXNG instance when nothing else is configured. Off by default: queries would leave to a host neither you nor Abacus runs."
-        }
-        ConfigKey::TokenCompression => {
-            "Balanced high-savings mode: tighter context, fewer background checks, and no draft or routine refine calls."
-        }
-        ConfigKey::OneStream => {
-            "Serialize main and auxiliary upstream requests. Explicit subagents keep their own streams."
-        }
-        ConfigKey::CheckUpdates => {
-            "Check GitHub daily for a newer version tag and say so. Never downloads anything."
-        }
-        ConfigKey::SafetyModel => {
-            "Which model judges whether a borderline command only inspects, in PLAN and AUTO."
-        }
-        ConfigKey::TraceLogging => {
-            "Append every model call to ~/.abacus/traces as JSONL for fine-tuning. Stays local."
-        }
-        ConfigKey::MaxSteps => "How many tool calls one turn may make before it stops.",
-        ConfigKey::ContextWindow => {
-            "This profile's context window in tokens (accepts 128k / 1m). Blank returns to auto-detection."
-        }
-        ConfigKey::MaxOutput => {
-            "This profile's max output tokens sent as max_tokens (accepts 8k / 64k). Blank returns to auto — set this when the provider rejects the detected value."
-        }
-        ConfigKey::ToolOutputLimit => "Characters of tool output kept before truncation.",
-        ConfigKey::ProjectTrust => {
-            "Allow this project's own plugins, hooks, and MCP servers to run."
-        }
-        ConfigKey::FeedbackEnabled => "Whether /feedback is available at all.",
-        ConfigKey::FeedbackDiagnostics => {
-            "Attach extension diagnostics to feedback. Never your transcript."
-        }
-        ConfigKey::FeedbackEndpoint => "Where /feedback submissions are sent.",
-        ConfigKey::AdvancedToml => "Open the raw TOML for settings without a row here.",
-    }
+/// One row of the config panel.
+struct Setting {
+    key: ConfigKey,
+    label: &'static str,
+    /// Whether Enter opens a text field, rather than cycling the value.
+    typed: bool,
+    help: &'static str,
 }
 
-/// The selectable settings, in the order `CONFIG_ROWS` displays them.
-///
-/// `ConfigPanel::selected` indexes this, and the panel derives its cursor from
-/// display position, so the two orderings must agree exactly —
-/// `config_rows_and_keys_agree` pins that. They diverged once, and the symptom
-/// was the panel editing a different setting from the one under the cursor.
-const CONFIG_KEYS: &[ConfigKey] = &[
-    ConfigKey::Profile,
-    ConfigKey::Model,
-    ConfigKey::AuxModel,
-    ConfigKey::Effort,
-    ConfigKey::BaseUrl,
-    ConfigKey::Protocol,
-    ConfigKey::Providers,
-    ConfigKey::Fallbacks,
-    ConfigKey::ApiKey,
-    ConfigKey::ContextWindow,
-    ConfigKey::MaxOutput,
-    ConfigKey::Permission,
-    ConfigKey::MaxSteps,
-    ConfigKey::ToolOutputLimit,
-    ConfigKey::ProjectTrust,
-    ConfigKey::TokenCompression,
-    ConfigKey::OneStream,
-    ConfigKey::SearchEnabled,
-    ConfigKey::SearchBackend,
-    ConfigKey::SearchInstanceUrl,
-    ConfigKey::SearchApiKeyEnv,
-    ConfigKey::SearchSharedInstance,
-    ConfigKey::Theme,
-    ConfigKey::Glyphs,
-    ConfigKey::VimMode,
-    ConfigKey::ShowThinking,
-    ConfigKey::TokenRate,
-    ConfigKey::Animations,
-    ConfigKey::Tooltips,
-    ConfigKey::DraftReplies,
-    ConfigKey::CheckUpdates,
-    ConfigKey::SafetyModel,
-    ConfigKey::TraceLogging,
-    ConfigKey::FeedbackEnabled,
-    ConfigKey::FeedbackDiagnostics,
-    ConfigKey::FeedbackEndpoint,
-    ConfigKey::AdvancedToml,
-];
+const fn typed(key: ConfigKey, label: &'static str, help: &'static str) -> Setting {
+    Setting { key, label, typed: true, help }
+}
+
+const fn toggled(key: ConfigKey, label: &'static str, help: &'static str) -> Setting {
+    Setting { key, label, typed: false, help }
+}
+
+fn settings() -> impl Iterator<Item = &'static Setting> {
+    SETTINGS.iter().flat_map(|(_, rows)| rows.iter())
+}
+
+/// The setting for `key`, and where the cursor has to be to select it.
+fn setting(key: ConfigKey) -> (usize, &'static Setting) {
+    settings().enumerate().find(|(_, setting)| setting.key == key).expect("every key has a row")
+}
 
 struct ConfigPanel {
     selected: usize,
@@ -2941,7 +2993,7 @@ impl App {
             }
             ConfigKey::Fallbacks => {
                 let profile = self.active_profile_mut()?;
-                profile.allow_fallbacks = !profile.allow_fallbacks;
+                toggle(&mut profile.allow_fallbacks);
             }
             ConfigKey::Protocol => {
                 let profile = self.active_profile_mut()?;
@@ -2962,7 +3014,7 @@ impl App {
                     };
             }
             ConfigKey::SearchEnabled => {
-                self.settings.search.enabled = !self.settings.search.enabled;
+                toggle(&mut self.settings.search.enabled);
                 self.apply_search_settings();
             }
             ConfigKey::SearchBackend => {
@@ -2976,8 +3028,7 @@ impl App {
                 self.apply_search_settings();
             }
             ConfigKey::SearchSharedInstance => {
-                self.settings.search.use_shared_instance =
-                    !self.settings.search.use_shared_instance;
+                toggle(&mut self.settings.search.use_shared_instance);
                 self.apply_search_settings();
             }
             // Both cycle through the built-ins and whatever the user has
@@ -3008,39 +3059,29 @@ impl App {
                 };
                 crate::ui::set_glyphs(self.settings.ui.glyphs);
             }
-            ConfigKey::VimMode => self.settings.ui.vim_mode = !self.settings.ui.vim_mode,
-            ConfigKey::ShowThinking => {
-                self.settings.ui.show_thinking = !self.settings.ui.show_thinking
-            }
-            ConfigKey::TokenRate => {
-                self.settings.ui.show_token_rate = !self.settings.ui.show_token_rate
-            }
-            ConfigKey::Animations => self.settings.ui.animations = !self.settings.ui.animations,
-            ConfigKey::Tooltips => self.settings.ui.show_tooltips = !self.settings.ui.show_tooltips,
-            ConfigKey::CheckUpdates => {
-                self.settings.ui.check_updates = !self.settings.ui.check_updates
-            }
-            ConfigKey::SafetyModel => {
-                self.settings.ui.safety_uses_main = !self.settings.ui.safety_uses_main
-            }
+            ConfigKey::VimMode => toggle(&mut self.settings.ui.vim_mode),
+            ConfigKey::ShowThinking => toggle(&mut self.settings.ui.show_thinking),
+            ConfigKey::TokenRate => toggle(&mut self.settings.ui.show_token_rate),
+            ConfigKey::Animations => toggle(&mut self.settings.ui.animations),
+            ConfigKey::Tooltips => toggle(&mut self.settings.ui.show_tooltips),
+            ConfigKey::CheckUpdates => toggle(&mut self.settings.ui.check_updates),
+            ConfigKey::SafetyModel => toggle(&mut self.settings.ui.safety_uses_main),
             ConfigKey::DraftReplies => {
-                self.settings.ui.draft_replies = !self.settings.ui.draft_replies;
+                toggle(&mut self.settings.ui.draft_replies);
                 if !self.settings.ui.draft_replies {
                     self.clear_draft();
                 }
             }
             ConfigKey::TokenCompression => {
-                self.settings.agent.token_compression = !self.settings.agent.token_compression;
+                toggle(&mut self.settings.agent.token_compression);
                 self.config.token_compression = self.settings.agent.token_compression;
                 if self.config.token_compression {
                     self.clear_draft();
                 }
             }
-            ConfigKey::OneStream => {
-                self.settings.agent.one_stream = !self.settings.agent.one_stream;
-            }
+            ConfigKey::OneStream => toggle(&mut self.settings.agent.one_stream),
             ConfigKey::TraceLogging => {
-                self.settings.trace.enabled = !self.settings.trace.enabled;
+                toggle(&mut self.settings.trace.enabled);
                 self.config.trace_enabled = self.settings.trace.enabled;
                 if self.settings.trace.enabled {
                     // Opened on the next persist, which keeps one code path
@@ -3054,12 +3095,9 @@ impl App {
                 let trusted = self.settings.trust.contains(&self.config.workspace);
                 self.settings.trust.set(&self.config.workspace, !trusted);
             }
-            ConfigKey::FeedbackEnabled => {
-                self.settings.feedback.enabled = !self.settings.feedback.enabled
-            }
+            ConfigKey::FeedbackEnabled => toggle(&mut self.settings.feedback.enabled),
             ConfigKey::FeedbackDiagnostics => {
-                self.settings.feedback.include_diagnostics =
-                    !self.settings.feedback.include_diagnostics
+                toggle(&mut self.settings.feedback.include_diagnostics)
             }
             ConfigKey::AdvancedToml => {
                 self.open_raw_config();
@@ -3068,7 +3106,7 @@ impl App {
             _ => return Ok(()),
         }
         self.save_and_apply_settings()?;
-        self.status = format!("{} updated", config_label(key));
+        self.status = format!("{} updated", setting(key).1.label);
         Ok(())
     }
 
@@ -3315,7 +3353,7 @@ impl App {
                 if key == ConfigKey::Model {
                     self.pending_provider = None;
                 }
-                self.status = format!("{} saved", config_label(key));
+                self.status = format!("{} saved", setting(key).1.label);
             }
             Err(error) => {
                 self.status = format!("configuration error: {error:#}");
@@ -3632,14 +3670,7 @@ impl App {
                 return;
             }
             self.status = format!("{profile_id} added — set a model");
-            if self.config_panel.is_some()
-                && let Some(index) = CONFIG_KEYS.iter().position(|key| *key == ConfigKey::Model)
-            {
-                if let Some(panel) = &mut self.config_panel {
-                    panel.selected = index;
-                }
-                self.begin_config_edit(ConfigKey::Model);
-            }
+            self.ask_for_model();
         } else {
             match self.save_and_apply_settings() {
                 Ok(()) => {
@@ -3926,13 +3957,27 @@ impl App {
         };
         // A new profile has no model, which is the one field it cannot run
         // without; open it rather than leaving the user to find it.
-        if self.config_panel.is_some()
-            && let Some(index) = CONFIG_KEYS.iter().position(|key| *key == ConfigKey::Model)
-        {
-            if let Some(panel) = &mut self.config_panel {
-                panel.selected = index;
-            }
+        self.ask_for_model();
+    }
+
+    /// Put the cursor on the model field and open it. A new profile has no
+    /// model, which is the one thing it cannot run without.
+    fn ask_for_model(&mut self) {
+        if let Some(panel) = &mut self.config_panel {
+            panel.selected = setting(ConfigKey::Model).0;
             self.begin_config_edit(ConfigKey::Model);
+        }
+    }
+
+    /// Enter on a config row: open its text field, or cycle its value.
+    fn activate_setting(&mut self, index: usize) {
+        let Some(setting) = settings().nth(index) else {
+            return;
+        };
+        if setting.typed {
+            self.begin_config_edit(setting.key);
+        } else if let Err(error) = self.cycle_config_value(setting.key) {
+            self.status = format!("configuration error: {error:#}");
         }
     }
 
@@ -4370,6 +4415,61 @@ impl App {
         self.entries_rev = self.entries_rev.wrapping_add(1);
         self.cursor_pending = true;
         true
+    }
+
+    /// Return to the live tail of the transcript.
+    fn follow_tail(&mut self) {
+        self.follow = true;
+        self.clear_cursor();
+    }
+
+    /// Esc on an idle, empty composer: the first press arms a rewind, a second
+    /// within the window performs it. Two presses because the rewind discards
+    /// the turn that followed — it must not fire off a stray Esc.
+    fn arm_or_rewind(&mut self) {
+        if self.rewind_armed.take().is_some_and(|armed| armed.elapsed() < Duration::from_secs(3)) {
+            self.rewind_to_previous_prompt();
+            self.mode = InputMode::Insert;
+        } else if self.entries.iter().any(|entry| entry.kind == EntryKind::User) {
+            self.rewind_armed = Some(Instant::now());
+            self.status = "esc again to rewind and edit your last message".to_owned();
+        }
+    }
+
+    /// F2: hand the mouse back to the terminal so click-drag selects text the
+    /// way it does anywhere else, and take it back for the wheel and clickable
+    /// rows. The mouse starts captured; this is the escape hatch on terminals
+    /// without a Shift-drag bypass, so a captured TUI never becomes a place
+    /// you cannot copy out of.
+    fn toggle_mouse(&mut self) {
+        toggle(&mut self.mouse_captured);
+        let switched = if self.mouse_captured {
+            execute!(io::stdout(), EnableMouseCapture)
+        } else {
+            execute!(io::stdout(), DisableMouseCapture)
+        };
+        self.status = match (switched, self.mouse_captured) {
+            (Err(_), _) => "could not switch mouse mode",
+            (_, true) => "mouse captured — wheel scrolls, rows click · F2 to select text again",
+            (_, false) => "mouse released — drag to select and copy · F2 for wheel scrolling",
+        }
+        .to_owned();
+    }
+
+    /// F12: pick up the most recent session that was actually used, or offer
+    /// the list when there is none.
+    fn resume_latest(&mut self) {
+        let used =
+            self.session_store.as_ref().and_then(|store| store.list().ok()).and_then(|sessions| {
+                sessions
+                    .into_iter()
+                    .filter(|session| session.message_count > 1 || session.title != "New session")
+                    .max_by_key(|session| session.updated_at)
+            });
+        match used {
+            Some(session) => self.resume_session(&session.id.to_string()),
+            None => self.list_sessions(),
+        }
     }
 
     fn clear_cursor(&mut self) {
@@ -4908,471 +5008,275 @@ async fn event_loop(
     Ok(())
 }
 
+/// Whether `key` is Ctrl plus `letter`.
+fn ctrl(key: KeyEvent, letter: char) -> bool {
+    key.code == KeyCode::Char(letter) && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+/// The scroll keys every read-only overlay shares. Returns whether `key` was one.
+fn scroll_keys(offset: &mut u16, key: KeyEvent) -> bool {
+    *offset = match key.code {
+        KeyCode::Char('j') | KeyCode::Down => offset.saturating_add(1),
+        KeyCode::Char('k') | KeyCode::Up => offset.saturating_sub(1),
+        KeyCode::PageDown => offset.saturating_add(10),
+        KeyCode::PageUp => offset.saturating_sub(10),
+        _ => return false,
+    };
+    true
+}
+
+/// Route a key press to whatever owns the keyboard: a global shortcut first,
+/// then the topmost overlay, then the composer.
 fn handle_key(app: &mut App, key: KeyEvent) {
-    // The "Ctrl+C twice to exit" window only counts consecutive Ctrl+C presses;
-    // any other key cancels a pending exit so a later interrupt is never misread
-    // as a quit.
-    let is_ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
-    if !is_ctrl_c {
+    // The "Ctrl+C twice to exit" window and an armed rewind both count only
+    // consecutive presses; any other key cancels them, so a later interrupt
+    // or Esc is never misread.
+    if !ctrl(key, 'c') {
         app.last_ctrl_c = None;
     }
-    // With a selection up, Ctrl+C means copy — the meaning it has everywhere
-    // else. Without one it keeps its terminal meaning of interrupt/clear/quit.
-    if is_ctrl_c && let Some(selected) = app.input.selected_text() {
-        app.copy_to_clipboard(&selected, "selection");
-        app.input.clear_selection();
-        return;
-    }
-    // Likewise an armed rewind: only an immediate second Esc may fire it.
     if key.code != KeyCode::Esc {
         app.rewind_armed = None;
     }
-    // F3 flips reasoning visibility everywhere — including blocks already in
-    // the transcript — so a busy answer can be read without the deliberation.
-    if key.code == KeyCode::F(3) {
-        app.set_show_thinking(!app.settings.ui.show_thinking);
-        return;
-    }
-    // Ctrl+O steps an open approval or question aside so the output behind it
-    // can be read (and scrolled); pressing it again brings the dialog back.
-    if key.modifiers.contains(KeyModifiers::CONTROL)
-        && key.code == KeyCode::Char('o')
-        && app.approval.is_none()
-        && app.question.is_none()
-        && app.config_panel.is_none()
-        && app.raw_config.is_none()
-        && app.feedback_form.is_none()
+    let dialog = app.approval.is_some() || app.question.is_some();
+    let dialog_open = dialog && !app.overlay_hidden;
+    let editing_form =
+        app.config_panel.is_some() || app.raw_config.is_some() || app.feedback_form.is_some();
+
+    // With a selection up, Ctrl+C means copy — the meaning it has everywhere
+    // else. Without one it keeps its terminal meaning of interrupt/clear/quit.
+    if ctrl(key, 'c')
+        && let Some(selected) = app.input.selected_text()
     {
-        // No dialog to step aside: open the newest tool block instead. This
-        // works mid-turn, which is the point — watching a long command's
-        // output should not require it to finish first.
-        app.toggle_latest_tool();
-        return;
+        app.copy_to_clipboard(&selected, "selection");
+        return app.input.clear_selection();
     }
-    if key.modifiers.contains(KeyModifiers::CONTROL)
-        && key.code == KeyCode::Char('o')
-        && (app.approval.is_some() || app.question.is_some())
-    {
-        app.overlay_hidden = !app.overlay_hidden;
-        app.status = if app.overlay_hidden {
-            "dialog hidden — ctrl+o to answer".to_owned()
-        } else {
-            "dialog restored".to_owned()
-        };
-        return;
+    match key.code {
+        // F3 flips reasoning visibility everywhere — including blocks already
+        // in the transcript — so a busy answer can be read without it.
+        KeyCode::F(3) => {
+            app.set_show_thinking(!app.settings.ui.show_thinking);
+            return;
+        }
+        KeyCode::F(2) => return app.toggle_mouse(),
+        // Ctrl+O steps an open approval or question aside so the output behind
+        // it can be read; pressing it again brings the dialog back. With no
+        // dialog it opens the newest tool block instead — mid-turn too, so
+        // watching a long command's output does not require it to finish.
+        KeyCode::Char('o') if ctrl(key, 'o') && dialog => {
+            toggle(&mut app.overlay_hidden);
+            app.status = if app.overlay_hidden {
+                "dialog hidden — ctrl+o to answer".to_owned()
+            } else {
+                "dialog restored".to_owned()
+            };
+            return;
+        }
+        KeyCode::Char('o') if ctrl(key, 'o') && !editing_form => {
+            app.toggle_latest_tool();
+            return;
+        }
+        // Ctrl+G jumps back to the live tail from anywhere, in any mode.
+        KeyCode::Char('g') if ctrl(key, 'g') => return app.follow_tail(),
+        // Ctrl+P: the subagent board. Approval and question dialogs keep
+        // priority — a swarm view must never shadow a pending decision.
+        KeyCode::Char('p') if ctrl(key, 'p') && !dialog_open => {
+            toggle(&mut app.hive_overlay);
+            app.hive_scroll = 0;
+            return;
+        }
+        _ => {}
     }
-    // Ctrl+G jumps back to the live tail from anywhere, in any mode.
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('g') {
-        app.follow = true;
-        app.clear_cursor();
-        return;
-    }
-    // F2: hand the mouse back to the terminal so click-drag selects text the
-    // way it does anywhere else, and take it back when you want the wheel and
-    // clickable rows again. The mouse starts captured — the wheel is what most
-    // people expect to scroll the transcript — and F2 is the escape hatch on
-    // terminals without a Shift-drag bypass, so a captured TUI never becomes a
-    // place you cannot copy out of.
-    if key.code == KeyCode::F(2) {
-        app.mouse_captured = !app.mouse_captured;
-        let mut out = io::stdout();
-        let switched = if app.mouse_captured {
-            execute!(out, EnableMouseCapture).is_ok()
-        } else {
-            execute!(out, DisableMouseCapture).is_ok()
-        };
-        app.status = if !switched {
-            "could not switch mouse mode".to_owned()
-        } else if app.mouse_captured {
-            "mouse captured — wheel scrolls, rows click · F2 to select text again".to_owned()
-        } else {
-            "mouse released — drag to select and copy · F2 for wheel scrolling".to_owned()
-        };
-        return;
-    }
-    // Ctrl+P: the subagent board overlay. Approval and question dialogs keep
-    // priority — a swarm detail view must never shadow a pending decision.
-    let dialog_open = (app.approval.is_some() || app.question.is_some()) && !app.overlay_hidden;
-    if key.modifiers.contains(KeyModifiers::CONTROL)
-        && key.code == KeyCode::Char('p')
-        && !dialog_open
-    {
-        app.hive_overlay = !app.hive_overlay;
-        app.hive_scroll = 0;
-        return;
-    }
+
     if app.hive_overlay && !dialog_open {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => app.hive_overlay = false,
-            KeyCode::Char('j') | KeyCode::Down => {
-                app.hive_scroll = app.hive_scroll.saturating_add(1)
-            }
-            KeyCode::Char('k') | KeyCode::Up => app.hive_scroll = app.hive_scroll.saturating_sub(1),
-            KeyCode::PageDown => app.hive_scroll = app.hive_scroll.saturating_add(10),
-            KeyCode::PageUp => app.hive_scroll = app.hive_scroll.saturating_sub(10),
-            _ => {}
+        if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+            app.hive_overlay = false;
         }
-        return;
-    }
-    if app.approval.is_some() && !app.overlay_hidden {
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Enter => app.decide(ApprovalDecision::Once),
-            KeyCode::Char('a') => app.decide(ApprovalDecision::Always),
-            KeyCode::Char('n') | KeyCode::Esc => app.decide(ApprovalDecision::Reject),
-            KeyCode::Char('k') | KeyCode::Up => {
-                app.approval_scroll = app.approval_scroll.saturating_sub(1)
-            }
-            KeyCode::Char('j') | KeyCode::Down => {
-                app.approval_scroll = app.approval_scroll.saturating_add(1)
-            }
-            KeyCode::PageUp => app.approval_scroll = app.approval_scroll.saturating_sub(10),
-            KeyCode::PageDown => app.approval_scroll = app.approval_scroll.saturating_add(10),
-            KeyCode::Char('v') => {
-                if let Some(approval) = &mut app.approval
-                    && approval.diff.is_some()
-                {
-                    approval.view = if approval.view == ApprovalView::Unified {
-                        ApprovalView::Raw
-                    } else {
-                        ApprovalView::Unified
-                    };
-                    app.approval_scroll = 0;
-                    app.approval_horizontal = 0;
-                }
-            }
-            KeyCode::Char('h') | KeyCode::Left => {
-                app.approval_horizontal = app.approval_horizontal.saturating_sub(4)
-            }
-            KeyCode::Char('l') | KeyCode::Right => {
-                app.approval_horizontal = app.approval_horizontal.saturating_add(4)
-            }
-            KeyCode::Home => {
-                app.approval_scroll = 0;
-                app.approval_horizontal = 0;
-            }
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.handle_ctrl_c()
-            }
-            _ => {}
-        }
-        return;
-    }
-
-    // ask_user modal: navigate options, toggle selected (multi-select),
-    // type a custom answer, confirm with Enter, cancel with Esc.
-    if !app.overlay_hidden
-        && let Some(question) = &mut app.question
-    {
-        if question.editing_custom {
-            match key.code {
-                KeyCode::Esc => {
-                    question.editing_custom = false;
-                }
-                KeyCode::Enter => {
-                    // Confirm: submit whatever is in the custom field,
-                    // merging in any toggled options.
-                    app.answer_user_question();
-                }
-                KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    question.custom.delete_word_backward()
-                }
-                KeyCode::Backspace => question.custom.backspace(),
-                KeyCode::Delete => question.custom.delete(),
-                KeyCode::Left
-                    if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) =>
-                {
-                    question.custom.move_word_backward()
-                }
-                KeyCode::Right
-                    if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) =>
-                {
-                    question.custom.move_word_forward()
-                }
-                KeyCode::Left => question.custom.move_left(),
-                KeyCode::Right => question.custom.move_right(),
-                KeyCode::Home => question.custom.move_start(),
-                KeyCode::End => question.custom.move_end(),
-                KeyCode::Up => question.custom.move_up(),
-                KeyCode::Down => question.custom.move_down(),
-                KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    question.custom.delete_word_backward()
-                }
-                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    question.custom.delete_to_start()
-                }
-                KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    question.custom.delete_to_end()
-                }
-                KeyCode::Char(ch)
-                    if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                {
-                    question.custom.insert(ch)
-                }
-                _ => {}
-            }
-            return;
-        }
-        match key.code {
-            KeyCode::Esc => {
-                // Cancelling sends the current state — whatever is
-                // toggled/typed. If nothing's set, the agent sees the
-                // "User skipped the question" message above.
-                app.answer_user_question();
-            }
-            KeyCode::Enter => app.answer_user_question(),
-            KeyCode::Up | KeyCode::Char('k') => {
-                if question.cursor == 0 && !question.options.is_empty() {
-                    question.cursor = question.options.len() - 1;
-                } else {
-                    question.cursor = question.cursor.saturating_sub(1);
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if question.options.is_empty() {
-                    question.cursor = 0;
-                } else {
-                    question.cursor = (question.cursor + 1) % question.options.len();
-                }
-            }
-            KeyCode::Char(' ') => {
-                if !question.options.is_empty() && question.multi_select {
-                    let idx = question.cursor;
-                    if let Some(slot) = question.selected.get_mut(idx) {
-                        *slot = !*slot;
-                    }
-                }
-            }
-            KeyCode::Char('x') => {
-                if !question.options.is_empty() {
-                    if question.multi_select {
-                        if let Some(slot) = question.selected.get_mut(question.cursor) {
-                            *slot = !*slot;
-                        }
-                    } else {
-                        // Single-select: clear all and toggle this one on,
-                        // then confirm immediately.
-                        for slot in question.selected.iter_mut() {
-                            *slot = false;
-                        }
-                        if let Some(slot) = question.selected.get_mut(question.cursor) {
-                            *slot = true;
-                        }
-                        app.answer_user_question();
-                    }
-                }
-            }
-            KeyCode::Char('t') => {
-                // Tab to the custom text field.
-                question.editing_custom = true;
-            }
-            _ => {}
-        }
-        return;
-    }
-
-    // Routed before the panels: a picker opened from /config sits on top of it
-    // and must own the keys while it is up.
-    if app.picker.is_some() {
-        // An inline rename / delete prompt owns the keys until it is dismissed.
-        if app.picker.as_ref().is_some_and(|picker| picker.prompt.is_some()) {
-            handle_picker_prompt(app, key);
-            return;
-        }
-        let mut accept = false;
-        let mut cancel = false;
-        let mut rename = false;
-        let mut delete = false;
-        let mut add = false;
-        if let Some(picker) = &mut app.picker {
-            match key.code {
-                KeyCode::Char('k') | KeyCode::Up => {
-                    picker.selected = picker.selected.saturating_sub(1)
-                }
-                KeyCode::Char('j') | KeyCode::Down => {
-                    picker.selected =
-                        (picker.selected + 1).min(picker.items.len().saturating_sub(1))
-                }
-                KeyCode::Enter => accept = true,
-                KeyCode::Esc | KeyCode::Char('q') => cancel = true,
-                KeyCode::Char('r') if picker.action == PickerAction::SwitchProfile => rename = true,
-                KeyCode::Char('d') if picker.action == PickerAction::SwitchProfile => delete = true,
-                KeyCode::Char('n') | KeyCode::Char('+')
-                    if picker.action == PickerAction::SwitchProfile =>
-                {
-                    add = true
-                }
-                _ => {}
-            }
-        }
-        if accept {
-            app.accept_picker(None);
-        } else if cancel {
-            app.picker = None;
-        } else if add {
-            app.open_provider_picker();
-        } else if rename && let Some(id) = app.selected_profile_id() {
-            app.begin_profile_rename(&id);
-        } else if delete && let Some(id) = app.selected_profile_id() {
-            app.begin_profile_delete(&id);
-        }
-        return;
-    }
-
-    if app.raw_config.is_some() {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
+        scroll_keys(&mut app.hive_scroll, key);
+    } else if dialog_open && app.approval.is_some() {
+        approval_key(app, key);
+    } else if dialog_open {
+        question_key(app, key);
+    // Before the panels: a picker opened from /config sits on top of it and
+    // must own the keys while it is up.
+    } else if app.picker.is_some() {
+        picker_key(app, key);
+    } else if let Some(editor) = &mut app.raw_config {
+        if ctrl(key, 's') {
             app.save_raw_config();
         } else if key.code == KeyCode::Esc {
             app.raw_config = None;
             app.status = "configuration edit cancelled".to_owned();
-        } else if let Some(editor) = &mut app.raw_config {
+        } else {
             edit_buffer(&mut editor.input, key, true);
         }
-        return;
-    }
-
-    if app.feedback_form.is_some() {
-        let sending = app.feedback_form.as_ref().is_some_and(|form| form.sending);
-        if sending {
-            return;
+    } else if let Some(form) = app.feedback_form.as_mut().filter(|form| !form.sending) {
+        match key.code {
+            _ if ctrl(key, 's') => app.submit_feedback(),
+            _ if ctrl(key, 'd') => toggle(&mut form.include_diagnostics),
+            KeyCode::Tab => form.category = (form.category + 1) % FEEDBACK_CATEGORIES.len(),
+            KeyCode::Esc => app.feedback_form = None,
+            _ => edit_buffer(&mut form.input, key, true),
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
-            app.submit_feedback();
-        } else if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('d') {
-            if let Some(form) = &mut app.feedback_form {
-                form.include_diagnostics = !form.include_diagnostics;
-            }
-        } else if key.code == KeyCode::Tab {
-            if let Some(form) = &mut app.feedback_form {
-                form.category = (form.category + 1) % FEEDBACK_CATEGORIES.len();
-            }
-        } else if key.code == KeyCode::Esc {
-            app.feedback_form = None;
-        } else if let Some(form) = &mut app.feedback_form {
-            edit_buffer(&mut form.input, key, true);
-        }
-        return;
-    }
-
-    if app.model_hub.is_some() {
+    } else if app.feedback_form.is_some() {
+        // Sending: the form takes no keys until the request settles.
+    } else if app.model_hub.is_some() {
         handle_model_hub_key(app, key);
-        return;
-    }
-
-    if app.config_panel.is_some() {
-        let editing = app.config_panel.as_ref().and_then(|panel| panel.editing.as_ref()).is_some();
-        if editing {
-            if key.code == KeyCode::Esc {
-                if let Some(panel) = &mut app.config_panel {
-                    panel.editing = None;
-                }
-                app.cancel_pending_provider();
-            } else if key.code == KeyCode::Enter {
-                app.commit_config_edit();
-            } else if let Some((_, input)) =
-                app.config_panel.as_mut().and_then(|panel| panel.editing.as_mut())
-            {
-                edit_buffer(input, key, false);
-            }
-        } else {
-            let mut activate = false;
-            if let Some(panel) = &mut app.config_panel {
-                match key.code {
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        panel.selected = panel.selected.saturating_sub(1)
-                    }
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        panel.selected = (panel.selected + 1).min(CONFIG_KEYS.len() - 1)
-                    }
-                    KeyCode::Enter | KeyCode::Char(' ') => activate = true,
-                    KeyCode::Esc | KeyCode::Char('q') => app.config_panel = None,
-                    _ => {}
-                }
-            }
-            if activate {
-                let key = app.config_panel.as_ref().map(|panel| CONFIG_KEYS[panel.selected]);
-                if let Some(key) = key {
-                    if config_key_is_editable(key) {
-                        app.begin_config_edit(key);
-                    } else if let Err(error) = app.cycle_config_value(key) {
-                        app.status = format!("configuration error: {error:#}");
-                    }
-                }
-            }
-        }
-        return;
-    }
-
-    if let Some(panel) = &mut app.usage_panel {
+    } else if app.config_panel.is_some() {
+        config_key(app, key);
+    } else if let Some(panel) = &mut app.usage_panel {
         match key.code {
             KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
-                panel.tab = if panel.tab == UsageTab::Overview {
-                    UsageTab::Models
-                } else {
-                    UsageTab::Overview
+                panel.tab = match panel.tab {
+                    UsageTab::Overview => UsageTab::Models,
+                    UsageTab::Models => UsageTab::Overview,
                 };
             }
             KeyCode::Char('r') => panel.range = panel.range.next(),
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => app.usage_panel = None,
             _ => {}
         }
-        return;
-    }
-
-    if app.show_help {
+    } else if app.show_help {
         if matches!(key.code, KeyCode::Esc | KeyCode::Char('?') | KeyCode::Enter) {
             app.show_help = false;
         }
-        return;
-    }
-
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
+    } else {
         match key.code {
-            KeyCode::Char('q') => {
-                app.quit = true;
-                return;
-            }
-            KeyCode::Char('c') => {
-                app.handle_ctrl_c();
-                return;
-            }
-            _ => {}
+            _ if ctrl(key, 'q') => app.quit = true,
+            _ if ctrl(key, 'c') => app.handle_ctrl_c(),
+            KeyCode::F(1) => app.show_help = true,
+            KeyCode::F(12) => app.resume_latest(),
+            KeyCode::BackTab => app.toggle_agent_mode(),
+            _ if app.mode == InputMode::Insert => handle_insert_key(app, key),
+            _ => handle_normal_key(app, key),
         }
-    }
-    if key.code == KeyCode::F(1) {
-        app.show_help = true;
-        return;
-    }
-    if key.code == KeyCode::F(12) {
-        if let Some(store) = app.session_store.clone()
-            && let Ok(mut summaries) = store.list()
-        {
-            summaries.retain(|summary| summary.message_count > 1 || summary.title != "New session");
-            if !summaries.is_empty()
-                && let Some(latest) = store.latest().ok()
-                && summaries.iter().any(|summary| summary.id == latest.id)
-            {
-                let _ = app.resume_session(&latest.id.to_string());
-                return;
-            }
-            if let Some(summary) = summaries.into_iter().next_back() {
-                let _ = app.resume_session(&summary.id.to_string());
-                return;
-            }
-        }
-        let _ = app.list_sessions();
-        return;
-    }
-    if key.code == KeyCode::BackTab {
-        app.toggle_agent_mode();
-        return;
-    }
-
-    match app.mode {
-        InputMode::Insert => handle_insert_key(app, key),
-        InputMode::Normal => handle_normal_key(app, key),
     }
 }
 
+fn approval_key(app: &mut App, key: KeyEvent) {
+    if scroll_keys(&mut app.approval_scroll, key) {
+        return;
+    }
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Enter => app.decide(ApprovalDecision::Once),
+        KeyCode::Char('a') => app.decide(ApprovalDecision::Always),
+        KeyCode::Char('n') | KeyCode::Esc => app.decide(ApprovalDecision::Reject),
+        KeyCode::Char('v') => {
+            if let Some(approval) = app.approval.as_mut().filter(|approval| approval.diff.is_some())
+            {
+                approval.view = match approval.view {
+                    ApprovalView::Unified => ApprovalView::Raw,
+                    ApprovalView::Raw => ApprovalView::Unified,
+                };
+                (app.approval_scroll, app.approval_horizontal) = (0, 0);
+            }
+        }
+        KeyCode::Char('h') | KeyCode::Left => {
+            app.approval_horizontal = app.approval_horizontal.saturating_sub(4)
+        }
+        KeyCode::Char('l') | KeyCode::Right => {
+            app.approval_horizontal = app.approval_horizontal.saturating_add(4)
+        }
+        KeyCode::Home => (app.approval_scroll, app.approval_horizontal) = (0, 0),
+        KeyCode::Char('c') if ctrl(key, 'c') => app.handle_ctrl_c(),
+        _ => {}
+    }
+}
+
+/// The `ask_user` modal: navigate options, toggle them (multi-select), type a
+/// custom answer, confirm with Enter. Esc sends whatever is set so far — if
+/// nothing is, the agent is told the question was skipped.
+fn question_key(app: &mut App, key: KeyEvent) {
+    let Some(question) = &mut app.question else {
+        return;
+    };
+    if question.editing_custom {
+        return match key.code {
+            KeyCode::Esc => question.editing_custom = false,
+            KeyCode::Enter => app.answer_user_question(),
+            _ => edit_buffer(&mut question.custom, key, false),
+        };
+    }
+    let count = question.options.len();
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter => app.answer_user_question(),
+        KeyCode::Up | KeyCode::Char('k') if count > 0 => {
+            question.cursor = (question.cursor + count - 1) % count
+        }
+        KeyCode::Down | KeyCode::Char('j') if count > 0 => {
+            question.cursor = (question.cursor + 1) % count
+        }
+        KeyCode::Char(' ' | 'x') if question.multi_select => {
+            question.selected.get_mut(question.cursor).into_iter().for_each(toggle);
+        }
+        // Single-select: choosing is answering.
+        KeyCode::Char('x') if count > 0 => {
+            question.selected.fill(false);
+            question.selected[question.cursor] = true;
+            app.answer_user_question();
+        }
+        KeyCode::Char('t') => question.editing_custom = true,
+        _ => {}
+    }
+}
+
+fn picker_key(app: &mut App, key: KeyEvent) {
+    let Some(picker) = &mut app.picker else {
+        return;
+    };
+    // An inline rename / delete prompt owns the keys until it is dismissed.
+    if picker.prompt.is_some() {
+        return handle_picker_prompt(app, key);
+    }
+    let profiles = picker.action == PickerAction::SwitchProfile;
+    match key.code {
+        KeyCode::Char('k') | KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+        KeyCode::Char('j') | KeyCode::Down => {
+            picker.selected = (picker.selected + 1).min(picker.items.len().saturating_sub(1))
+        }
+        KeyCode::Enter => app.accept_picker(None),
+        KeyCode::Esc | KeyCode::Char('q') => app.picker = None,
+        KeyCode::Char('n' | '+') if profiles => app.open_provider_picker(),
+        KeyCode::Char('r' | 'd') if profiles => {
+            let Some(id) = app.selected_profile_id() else {
+                return;
+            };
+            if key.code == KeyCode::Char('r') {
+                app.begin_profile_rename(&id);
+            } else {
+                app.begin_profile_delete(&id);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn config_key(app: &mut App, key: KeyEvent) {
+    let Some(panel) = &mut app.config_panel else {
+        return;
+    };
+    if let Some((_, input)) = &mut panel.editing {
+        return match key.code {
+            KeyCode::Esc => {
+                panel.editing = None;
+                app.cancel_pending_provider();
+            }
+            KeyCode::Enter => app.commit_config_edit(),
+            _ => edit_buffer(input, key, false),
+        };
+    }
+    match key.code {
+        KeyCode::Char('k') | KeyCode::Up => panel.selected = panel.selected.saturating_sub(1),
+        KeyCode::Char('j') | KeyCode::Down => {
+            panel.selected = (panel.selected + 1).min(settings().count() - 1)
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            let selected = panel.selected;
+            app.activate_setting(selected);
+        }
+        KeyCode::Esc | KeyCode::Char('q') => app.config_panel = None,
+        _ => {}
+    }
+}
 /// Route a left click to whatever was drawn under it.
 ///
 /// Regions are tested in the order they stack on screen — the completion popup
@@ -5447,12 +5351,7 @@ fn handle_click(app: &mut App, column: u16, row: u16) {
             panel.selected = index;
         }
         if already {
-            let key = CONFIG_KEYS[index];
-            if config_key_is_editable(key) {
-                app.begin_config_edit(key);
-            } else if let Err(error) = app.cycle_config_value(key) {
-                app.status = format!("configuration error: {error:#}");
-            }
+            app.activate_setting(index);
         }
         return;
     }
@@ -5469,13 +5368,15 @@ fn handle_click(app: &mut App, column: u16, row: u16) {
 }
 
 fn handle_insert_key(app: &mut App, key: KeyEvent) {
-    let modified_enter =
-        key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT);
+    let modifiers = key.modifiers;
+    let shifted = modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
+    let control = modifiers.contains(KeyModifiers::CONTROL);
     // While the completion popup is up it owns the navigation keys: up/down
     // move the highlight, Enter and Tab insert it, and Esc dismisses the list
     // rather than leaving insert mode. Everything else falls through to normal
     // editing, so typing keeps filtering.
     let completing = app.visible_completion().is_some();
+    let page = app.transcript_height.saturating_sub(2);
     match key.code {
         KeyCode::Esc if completing => app.completion_dismissed = true,
         // A running turn owns Esc: stopping the agent is the more urgent
@@ -5483,252 +5384,147 @@ fn handle_insert_key(app: &mut App, key: KeyEvent) {
         KeyCode::Esc if app.running.is_some() => {
             app.request_interrupt();
         }
-        // Modified arrows scroll the transcript from insert mode; both Alt and
-        // Shift are accepted because terminals differ in which they deliver.
-        KeyCode::Up if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) => {
-            app.scroll_up(3)
-        }
-        KeyCode::Down if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) => {
-            app.scroll_down(3)
-        }
-        KeyCode::Up if completing => app.move_completion(-1),
-        KeyCode::Down if completing => app.move_completion(1),
-        // Ctrl+Shift+Enter forks the session at the current history, leaving
-        // the draft in the composer so it can be sent in the new branch.
-        KeyCode::Enter
-            if key.modifiers.contains(KeyModifiers::CONTROL)
-                && key.modifiers.contains(KeyModifiers::SHIFT) =>
-        {
-            app.fork_session()
-        }
-        // When the popup declines — because the command is already typed out in
-        // full — Enter must still send. Consuming it here regardless is what
-        // made a finished command unsendable.
-        KeyCode::Enter if completing && !modified_enter => {
-            if !app.accept_completion() {
-                app.submit();
-            }
-        }
         KeyCode::Esc if app.settings.ui.vim_mode => app.mode = InputMode::Normal,
-        // Esc on an idle, empty composer: double-press rewinds to the previous
-        // prompt for editing. Two presses because the rewind discards the
-        // turn that followed — it must not fire off a stray Esc.
-        KeyCode::Esc if app.input.is_empty() => match app.rewind_armed {
-            Some(armed) if armed.elapsed() < Duration::from_secs(3) => {
-                app.rewind_armed = None;
-                app.rewind_to_previous_prompt();
-            }
-            _ => {
-                if app.entries.iter().any(|entry| entry.kind == EntryKind::User) {
-                    app.rewind_armed = Some(Instant::now());
-                    app.status = "esc again to rewind and edit your last message".to_owned();
-                }
-            }
-        },
+        KeyCode::Esc if app.input.is_empty() => app.arm_or_rewind(),
         // Outside vim mode Esc is otherwise inert; use it to abandon a draft,
         // which is what every other composer does.
         KeyCode::Esc => app.input.clear(),
-        KeyCode::Enter if modified_enter => app.input.insert('\n'),
-        KeyCode::Enter => app.submit(),
-        // Ctrl+J is a real control byte every terminal forwards, so it is the
-        // reliable newline even where Shift/Alt+Enter are indistinguishable from
-        // plain Enter (e.g. macOS Terminal.app). It may arrive as Char('j')+Ctrl
-        // or, on some terminals, fold into Enter+Ctrl (covered by modified_enter).
-        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.input.insert('\n')
-        }
-        KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.input.delete_word_backward()
-        }
-        KeyCode::Backspace => app.input.backspace(),
-        KeyCode::Delete => app.input.delete(),
-        KeyCode::Left if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) => {
-            app.input.move_word_backward()
-        }
-        KeyCode::Right if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) => {
-            app.input.move_word_forward()
-        }
-        KeyCode::Left => app.input.move_left(),
-        KeyCode::Right => app.input.move_right(),
+
+        // Modified arrows scroll the transcript from insert mode; both Alt and
+        // Shift are accepted because terminals differ in which they deliver.
+        KeyCode::Up if shifted => app.scroll_up(3),
+        KeyCode::Down if shifted => app.scroll_down(3),
+        KeyCode::Up if completing => app.move_completion(-1),
+        KeyCode::Down if completing => app.move_completion(1),
         // Within a multi-line draft the arrows move through it; only at the
         // top or bottom edge do they reach for prompt history.
-        KeyCode::Up => {
-            let width = app.composer_width as usize;
-            if !app.input.move_up_wrapped(width) {
-                app.history_prev();
-            }
+        KeyCode::Up if !app.input.move_up_wrapped(app.composer_width as usize) => {
+            app.history_prev()
         }
-        KeyCode::Down => {
-            let width = app.composer_width as usize;
-            if !app.input.move_down_wrapped(width) {
-                app.history_next();
-            }
+        KeyCode::Down if !app.input.move_down_wrapped(app.composer_width as usize) => {
+            app.history_next()
         }
+        KeyCode::Up | KeyCode::Down => {}
+        KeyCode::PageUp => app.scroll_up(page),
+        KeyCode::PageDown => app.scroll_down(page),
         // Ctrl+Home/End jump the transcript; plain Home/End stay line motions.
-        KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => app.scroll_up(u16::MAX),
-        KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.follow = true;
-            app.clear_cursor();
-        }
-        KeyCode::Home => app.input.move_start(),
-        KeyCode::End => app.input.move_end(),
-        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.input.delete_word_backward()
-        }
-        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.input.delete_to_start()
-        }
-        KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.input.delete_to_end()
-        }
-        KeyCode::PageUp => app.scroll_up(app.transcript_height.saturating_sub(2)),
-        KeyCode::PageDown => app.scroll_down(app.transcript_height.saturating_sub(2)),
-        KeyCode::Tab => {
-            // With an empty composer there is no completion to accept, so Tab
-            // is free to take the drafted follow-up.
-            if let Some(draft) = app.draft.take().filter(|_| app.input.is_empty()) {
+        KeyCode::Home if control => app.scroll_up(u16::MAX),
+        KeyCode::End if control => app.follow_tail(),
+
+        // Ctrl+Shift+Enter forks the session at the current history, leaving
+        // the draft in the composer so it can be sent in the new branch.
+        KeyCode::Enter if control && modifiers.contains(KeyModifiers::SHIFT) => app.fork_session(),
+        // Shift/Alt/Ctrl+Enter is a newline. So is Ctrl+J, a real control byte
+        // every terminal forwards, which makes it the reliable spelling where
+        // modified Enter is indistinguishable from plain Enter.
+        KeyCode::Enter if shifted || control => app.input.insert('\n'),
+        KeyCode::Char('j') if control => app.input.insert('\n'),
+        // When the popup declines — because the command is already typed out
+        // in full — Enter must still send.
+        KeyCode::Enter if completing && app.accept_completion() => {}
+        KeyCode::Enter => app.submit(),
+        // With an empty composer there is no completion to accept, so Tab is
+        // free to take the drafted follow-up.
+        KeyCode::Tab => match app.draft.take().filter(|_| app.input.is_empty()) {
+            Some(draft) => {
                 app.input.insert_str(&draft);
                 app.clear_draft();
-            } else {
+            }
+            None => {
                 app.accept_completion();
             }
-        }
-        // Editor keys people expect from every other text box. Ctrl+A selects
-        // all, Ctrl+Z/Ctrl+Y walk the undo history.
-        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        },
+
+        // Editor keys people expect from every other text box.
+        KeyCode::Char('a') if control => {
             app.input.select_all();
             app.status = "selected all — ^C copies, typing replaces".to_owned();
         }
-        KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if !app.input.undo() {
-                app.status = "nothing to undo".to_owned();
-            }
+        KeyCode::Char('z') if control && !app.input.undo() => {
+            app.status = "nothing to undo".to_owned()
         }
-        KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if !app.input.redo() {
-                app.status = "nothing to redo".to_owned();
-            }
+        KeyCode::Char('y') if control && !app.input.redo() => {
+            app.status = "nothing to redo".to_owned()
         }
-        // Ctrl+V: paste from the system clipboard. Images first — a terminal's
-        // own paste can only ever deliver text, so this key is the sole route
-        // by which a screenshot on the clipboard can reach the prompt. With no
-        // image present it falls through to text, covering terminals that send
-        // the raw Ctrl+V byte instead of a bracketed paste.
-        KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.paste_from_clipboard();
-        }
-        KeyCode::Char(ch)
-            if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-        {
-            app.input.insert(ch)
-        }
-        _ => {}
+        KeyCode::Char('z' | 'y') if control => {}
+        // Ctrl+V: images first — a terminal's own paste can only ever deliver
+        // text, so this key is the sole route by which a screenshot on the
+        // clipboard can reach the prompt.
+        KeyCode::Char('v') if control => app.paste_from_clipboard(),
+        _ => edit_buffer(&mut app.input, key, false),
     }
 }
 
 fn handle_normal_key(app: &mut App, key: KeyEvent) {
+    let half = app.transcript_height / 2;
+    let page = app.transcript_height.saturating_sub(2);
     if key.modifiers.contains(KeyModifiers::CONTROL) {
-        match key.code {
-            KeyCode::Char('u') => app.scroll_up(app.transcript_height / 2),
-            KeyCode::Char('d') => app.scroll_down(app.transcript_height / 2),
+        return match key.code {
+            KeyCode::Char('u') => app.scroll_up(half),
+            KeyCode::Char('d') => app.scroll_down(half),
             KeyCode::Char('y') => app.scroll_up(1),
             KeyCode::Char('e') => app.scroll_down(1),
             _ => {}
-        }
-        return;
+        };
     }
-
-    let prefix = app.normal_prefix.take();
-    match (prefix, key.code) {
+    let insert = |app: &mut App| app.mode = InputMode::Insert;
+    match (app.normal_prefix.take(), key.code) {
         (Some('d'), KeyCode::Char('d')) => app.input.clear(),
         (Some('g'), KeyCode::Char('g')) => {
             app.scroll = 0;
             app.follow = false;
             app.clear_cursor();
         }
-        (_, KeyCode::Char('d')) => app.normal_prefix = Some('d'),
-        (_, KeyCode::Char('g')) => app.normal_prefix = Some('g'),
-        (_, KeyCode::Char('i')) => app.mode = InputMode::Insert,
+        (_, KeyCode::Char(prefix @ ('d' | 'g'))) => app.normal_prefix = Some(prefix),
+        (_, KeyCode::Char('i')) => insert(app),
         (_, KeyCode::Char('a')) => {
             app.input.move_right();
-            app.mode = InputMode::Insert;
+            insert(app);
         }
         (_, KeyCode::Char('A')) => {
             app.input.move_end();
-            app.mode = InputMode::Insert;
+            insert(app);
         }
         (_, KeyCode::Char('I')) => {
             app.input.move_start();
-            app.mode = InputMode::Insert;
+            insert(app);
         }
         (_, KeyCode::Char('w')) => app.input.move_word_forward(),
         (_, KeyCode::Char('b')) => app.input.move_word_backward(),
-        (_, KeyCode::Char('0')) | (_, KeyCode::Home) => app.input.move_start(),
-        (_, KeyCode::Char('$')) | (_, KeyCode::End) => app.input.move_end(),
-        (_, KeyCode::Char('x')) | (_, KeyCode::Delete) => app.input.delete(),
-        // j/k walk the transcript block by block. Line-at-a-time scrolling
-        // moved to Ctrl+E / Ctrl+Y: a cursor you can act on is worth more than
-        // one-row nudges, which the wheel and PgUp/PgDn already cover.
-        (_, KeyCode::Char('j')) | (_, KeyCode::Down) => app.move_cursor(1),
-        (_, KeyCode::Char('k')) | (_, KeyCode::Up) => app.move_cursor(-1),
+        (_, KeyCode::Char('0') | KeyCode::Home) => app.input.move_start(),
+        (_, KeyCode::Char('$') | KeyCode::End) => app.input.move_end(),
+        (_, KeyCode::Char('x') | KeyCode::Delete) => app.input.delete(),
+        // j/k walk the transcript block by block; line-at-a-time scrolling is
+        // Ctrl+E / Ctrl+Y. A cursor you can act on is worth more than one-row
+        // nudges, which the wheel and PgUp/PgDn already cover.
+        (_, KeyCode::Char('j') | KeyCode::Down) => app.move_cursor(1),
+        (_, KeyCode::Char('k') | KeyCode::Up) => app.move_cursor(-1),
         // Copy without needing the terminal at all: `y` takes the selected
         // block, `Y` the last assistant reply.
-        (_, KeyCode::Char('y')) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.yank_selected_block()
-        }
+        (_, KeyCode::Char('y')) => app.yank_selected_block(),
         (_, KeyCode::Char('Y')) => app.yank_last_reply(),
-        (_, KeyCode::Char('o')) | (_, KeyCode::Char(' ')) => {
+        (_, KeyCode::Char('o' | ' ')) => {
             app.toggle_cursor_fold(None);
         }
-        (_, KeyCode::Char('l')) | (_, KeyCode::Right) => {
-            if !app.toggle_cursor_fold(Some(true)) {
-                app.input.move_right();
-            }
+        (_, KeyCode::Char('l') | KeyCode::Right) if !app.toggle_cursor_fold(Some(true)) => {
+            app.input.move_right()
         }
-        (_, KeyCode::Char('h')) | (_, KeyCode::Left) => {
-            if !app.toggle_cursor_fold(Some(false)) {
-                app.input.move_left();
-            }
+        (_, KeyCode::Char('h') | KeyCode::Left) if !app.toggle_cursor_fold(Some(false)) => {
+            app.input.move_left()
         }
-        (_, KeyCode::PageUp) => app.scroll_up(app.transcript_height.saturating_sub(2)),
-        (_, KeyCode::PageDown) => app.scroll_down(app.transcript_height.saturating_sub(2)),
-        (_, KeyCode::Char('G')) => {
-            app.follow = true;
-            app.clear_cursor();
-        }
+        (_, KeyCode::PageUp) => app.scroll_up(page),
+        (_, KeyCode::PageDown) => app.scroll_down(page),
+        (_, KeyCode::Char('G')) => app.follow_tail(),
         // With a cursor active Esc clears it; otherwise the same esc-esc
         // rewind as insert mode, so vim users are not locked out of it.
-        (_, KeyCode::Esc) => {
-            if app.cursor.is_some() {
-                app.clear_cursor();
-            } else if app.running.is_none() && app.input.is_empty() {
-                match app.rewind_armed {
-                    Some(armed) if armed.elapsed() < Duration::from_secs(3) => {
-                        app.rewind_armed = None;
-                        app.rewind_to_previous_prompt();
-                        app.mode = InputMode::Insert;
-                    }
-                    _ => {
-                        if app.entries.iter().any(|entry| entry.kind == EntryKind::User) {
-                            app.rewind_armed = Some(Instant::now());
-                            app.status =
-                                "esc again to rewind and edit your last message".to_owned();
-                        }
-                    }
-                }
-            }
-        }
-        (_, KeyCode::Enter) => {
-            if !app.toggle_cursor_fold(None) {
-                app.mode = InputMode::Insert;
-            }
-        }
+        (_, KeyCode::Esc) if app.cursor.is_some() => app.clear_cursor(),
+        (_, KeyCode::Esc) if app.running.is_none() && app.input.is_empty() => app.arm_or_rewind(),
+        (_, KeyCode::Enter) if !app.toggle_cursor_fold(None) => insert(app),
         (_, KeyCode::Char('?')) => app.show_help = true,
         (_, KeyCode::Char('q')) if app.running.is_none() => app.quit = true,
         _ => {}
     }
 }
-
 fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
     app.hits.borrow_mut().clear();
@@ -7535,9 +7331,9 @@ fn draw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let Some(panel) = &app.config_panel else {
         return;
     };
-    // Two rows of chrome, one blank, one help line — sized to the content so
-    // the panel never leaves a band of dead space.
-    let body_rows = CONFIG_ROWS.len() as u16;
+    // Sized to the content, so the panel never leaves a band of dead space:
+    // a row per heading and setting, two of chrome, two for the help line.
+    let body_rows = (SETTINGS.len() + settings().count()) as u16;
     let popup = ui::centered(area.width.saturating_sub(8).min(96), body_rows + 4, area);
     let inner = open_overlay(
         frame,
@@ -7546,76 +7342,60 @@ fn draw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
         secondary(),
         &[("↑↓", "move"), ("enter", "edit"), ("esc", "close"), ("", "saved immediately")],
     );
-    // The last two rows are a separator and the help line for the selected row.
     let help_height = 2u16.min(inner.height);
     let list = Rect { height: inner.height.saturating_sub(help_height), ..inner };
-
     let width = list.width as usize;
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut key_index = 0usize;
-    let mut selected_row = 0usize;
-    // Build every row first, then window around the cursor: with headings
-    // interleaved, a row's position is no longer its index in CONFIG_KEYS.
-    // Rows are kept as spans rather than finished lines because a row cannot
-    // know whether the pointer is over it until the window fixes where it
-    // lands on screen.
+
+    // Build every row first, then window around the cursor. Rows stay as
+    // spans until then: a row cannot know whether the pointer is over it
+    // before the window fixes where it lands on screen.
     let mut rows: Vec<(Option<usize>, Vec<Span<'static>>)> = Vec::new();
-    for row in CONFIG_ROWS {
-        match row {
-            ConfigRow::Heading(title) => {
-                rows.push((None, vec![bold(format!("  {title}"), rail())]))
+    let mut selected_row = 0;
+    let mut index = 0;
+    for (heading, section) in SETTINGS {
+        rows.push((None, vec![bold(format!("  {heading}"), rail())]));
+        for setting in *section {
+            let selected = index == panel.selected;
+            if selected {
+                selected_row = rows.len();
             }
-            ConfigRow::Key(key) => {
-                let index = key_index;
-                key_index += 1;
-                let selected = index == panel.selected;
-                if selected {
-                    selected_row = rows.len();
-                }
-                let mut content =
-                    vec![Span::styled(format!("{:<26}", config_label(*key)), emphasis(selected))];
-                content.extend(config_value_spans(
-                    &app.config_value(*key),
-                    width.saturating_sub(30),
-                    selected,
-                ));
-                rows.push((Some(index), content));
-            }
+            let mut content =
+                vec![Span::styled(format!("{:<26}", setting.label), emphasis(selected))];
+            let value = app.config_value(setting.key);
+            content.extend(config_value_spans(&value, width.saturating_sub(30), selected));
+            rows.push((Some(index), content));
+            index += 1;
         }
     }
     let visible = list.height as usize;
     let first = selected_row
         .saturating_sub(visible.saturating_sub(1))
         .min(rows.len().saturating_sub(visible.min(rows.len())));
+    let mut lines: Vec<Line<'static>> = Vec::new();
     for (offset, (index, content)) in rows.into_iter().skip(first).take(visible).enumerate() {
-        let rect = Rect { x: list.x, y: list.y + offset as u16, width: list.width, height: 1 };
-        match index {
+        let rect = Rect { y: list.y + offset as u16, height: 1, ..list };
+        lines.push(match index {
             Some(index) => {
                 app.hits.borrow_mut().config.push((rect, index));
-                let state = app.row_state(rect, index == panel.selected);
-                lines.push(ui::list_row(state, width, content));
+                ui::list_row(app.row_state(rect, index == panel.selected), width, content)
             }
-            None => lines.push(Line::from(content)),
-        }
+            None => Line::from(content),
+        });
     }
     frame.render_widget(Paragraph::new(Text::from(lines)), list);
 
-    if help_height == 2 {
-        let help = Rect { y: list.bottom(), height: 2, ..inner };
-        let key = CONFIG_KEYS[panel.selected.min(CONFIG_KEYS.len() - 1)];
+    if let Some(setting) = settings().nth(panel.selected).filter(|_| help_height == 2) {
+        let help = ui::truncate(setting.help, inner.width as usize);
         frame.render_widget(
-            Paragraph::new(Text::from(vec![
-                ui::rule(inner.width),
-                Line::from(fg(ui::truncate(config_help(key), inner.width as usize), muted())),
-            ])),
-            help,
+            Paragraph::new(Text::from(vec![ui::rule(inner.width), Line::from(fg(help, muted()))])),
+            Rect { y: list.bottom(), height: 2, ..inner },
         );
     }
 
     if let Some((key, input)) = &panel.editing {
         let editor = ui::centered(popup.width.saturating_sub(10), 3, popup);
         frame.render_widget(Clear, editor);
-        let block = ui::overlay_block(config_label(*key), primary(), None);
+        let block = ui::overlay_block(setting(*key).1.label, primary(), None);
         let field = block.inner(editor);
         frame.render_widget(block, editor);
         let value = input.text();
@@ -8578,48 +8358,6 @@ fn validate_settings(settings: &Settings) -> Result<()> {
     Ok(())
 }
 
-fn config_label(key: ConfigKey) -> &'static str {
-    match key {
-        ConfigKey::Profile => "Active profile",
-        ConfigKey::Model => "Model",
-        ConfigKey::AuxModel => "Auxiliary model",
-        ConfigKey::Effort => "Reasoning effort",
-        ConfigKey::BaseUrl => "Provider URL",
-        ConfigKey::Protocol => "Wire protocol",
-        ConfigKey::Providers => "Upstream providers",
-        ConfigKey::Fallbacks => "Allow other providers",
-        ConfigKey::ApiKey => "API key",
-        ConfigKey::Permission => "Permission mode",
-        ConfigKey::Theme => "Theme",
-        ConfigKey::Glyphs => "Glyphs",
-        ConfigKey::VimMode => "Vim keybindings",
-        ConfigKey::ShowThinking => "Show thinking",
-        ConfigKey::TokenRate => "Show tokens/second",
-        ConfigKey::Animations => "Animations",
-        ConfigKey::Tooltips => "Welcome tips",
-        ConfigKey::DraftReplies => "Draft next message",
-        ConfigKey::SearchEnabled => "Web search",
-        ConfigKey::SearchBackend => "Search backend",
-        ConfigKey::SearchInstanceUrl => "SearXNG URL",
-        ConfigKey::SearchApiKeyEnv => "Search key variable",
-        ConfigKey::SearchSharedInstance => "Shared SearXNG",
-        ConfigKey::TokenCompression => "Token Compression",
-        ConfigKey::OneStream => "One Stream",
-        ConfigKey::CheckUpdates => "Update reminder",
-        ConfigKey::SafetyModel => "Safety classifier",
-        ConfigKey::TraceLogging => "Training traces",
-        ConfigKey::MaxSteps => "Maximum agent steps",
-        ConfigKey::ContextWindow => "Context window",
-        ConfigKey::MaxOutput => "Max output tokens",
-        ConfigKey::ToolOutputLimit => "Tool output limit",
-        ConfigKey::ProjectTrust => "Trust this project",
-        ConfigKey::FeedbackEnabled => "Feedback",
-        ConfigKey::FeedbackDiagnostics => "Feedback diagnostics",
-        ConfigKey::FeedbackEndpoint => "Feedback endpoint",
-        ConfigKey::AdvancedToml => "Advanced configuration",
-    }
-}
-
 /// Parse an optional token count for a limit override: blank clears it, a
 /// number (with `k`/`m` suffixes) sets it.
 fn parse_optional_tokens(value: &str) -> Result<Option<usize>> {
@@ -8650,25 +8388,6 @@ fn aux_provider_for(config: &Config, provider: &Provider) -> Provider {
     }
 }
 
-fn config_key_is_editable(key: ConfigKey) -> bool {
-    matches!(
-        key,
-        ConfigKey::Model
-            | ConfigKey::AuxModel
-            | ConfigKey::Effort
-            | ConfigKey::BaseUrl
-            | ConfigKey::Providers
-            | ConfigKey::ApiKey
-            | ConfigKey::MaxSteps
-            | ConfigKey::ContextWindow
-            | ConfigKey::MaxOutput
-            | ConfigKey::ToolOutputLimit
-            | ConfigKey::SearchInstanceUrl
-            | ConfigKey::SearchApiKeyEnv
-            | ConfigKey::FeedbackEndpoint
-    )
-}
-
 /// The value column of a config row.
 ///
 /// A setting that is simply on or off gets the same `[x]` / `[/]` mark the
@@ -8690,32 +8409,35 @@ fn numbered<'a, T>(rows: &'a [T], number: &str) -> Option<&'a T> {
     rows.get(number.trim().parse::<usize>().ok()?.saturating_sub(1))
 }
 
+fn toggle(flag: &mut bool) {
+    *flag = !*flag;
+}
+
 fn on_off(value: bool) -> String {
     if value { "On" } else { "Off" }.to_owned()
 }
 
+/// The editing keys every text field shares.
 fn edit_buffer(input: &mut InputBuffer, key: KeyEvent, multiline: bool) {
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    let word = key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Enter if multiline => input.insert('\n'),
-        KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            input.delete_word_backward()
-        }
+        KeyCode::Backspace if control => input.delete_word_backward(),
         KeyCode::Backspace => input.backspace(),
         KeyCode::Delete => input.delete(),
+        KeyCode::Left if word => input.move_word_backward(),
+        KeyCode::Right if word => input.move_word_forward(),
         KeyCode::Left => input.move_left(),
         KeyCode::Right => input.move_right(),
         KeyCode::Up => input.move_up(),
         KeyCode::Down => input.move_down(),
         KeyCode::Home => input.move_start(),
         KeyCode::End => input.move_end(),
-        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            input.delete_word_backward()
-        }
-        KeyCode::Char(character)
-            if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-        {
-            input.insert(character)
-        }
+        KeyCode::Char('w') if control => input.delete_word_backward(),
+        KeyCode::Char('u') if control => input.delete_to_start(),
+        KeyCode::Char('k') if control => input.delete_to_end(),
+        KeyCode::Char(character) if !word => input.insert(character),
         _ => {}
     }
 }
@@ -10398,27 +10120,13 @@ mod tests {
     }
 
     #[test]
-    fn config_rows_and_keys_agree() {
-        // The panel numbers its rows by display position but looks settings up
-        // in CONFIG_KEYS. If the two orders drift, the cursor sits on one row
-        // and Enter edits another.
-        let displayed = CONFIG_ROWS
-            .iter()
-            .filter_map(|row| match row {
-                ConfigRow::Key(key) => Some(*key),
-                ConfigRow::Heading(_) => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(displayed, CONFIG_KEYS);
-        // Every heading must precede at least one setting, or it renders as a
-        // label with nothing under it.
-        assert!(matches!(CONFIG_ROWS.first(), Some(ConfigRow::Heading(_))));
-        for pair in CONFIG_ROWS.windows(2) {
-            if let ConfigRow::Heading(title) = pair[0] {
-                assert!(
-                    matches!(pair[1], ConfigRow::Key(_)),
-                    "heading {title} has no settings under it"
-                );
+    fn every_setting_has_one_row_under_a_heading() {
+        let mut seen = Vec::new();
+        for (heading, section) in SETTINGS {
+            assert!(!section.is_empty(), "heading {heading} has no settings under it");
+            for setting in *section {
+                assert!(!seen.contains(&setting.key), "{:?} is listed twice", setting.key);
+                seen.push(setting.key);
             }
         }
     }
