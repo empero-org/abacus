@@ -42,17 +42,14 @@ use crate::{
         AgentEvent, AgentMode, ApprovalDecision, ApprovalRequest, DoneReason, TurnOptions,
         UserQuestionRequest, compact_messages, initial_messages, message_chars, run_turn,
     },
-    compaction::CompactionState,
     config::{Config, Credentials, PermissionMode, ProviderProtocol, SETTINGS_VERSION, Settings},
     context::expand_file_references,
     diff::{DiffDocument, DiffLineKind},
-    goal::GoalState,
     input::{InputBuffer, InputMode},
     provider::Provider,
     ralph::{RalphLoop, RalphStatus},
     services::AgentServices,
-    session::{Session, SessionStore, SessionUsage},
-    task::TaskList,
+    session::{Session, SessionState, SessionStore, SessionUsage},
     theme::{
         ThemeMode, border, danger, inverse, muted, primary, rail, secondary, success, surface,
         text, warning,
@@ -652,14 +649,10 @@ struct App {
     session: Option<Session>,
     session_store: Option<SessionStore>,
     services: Arc<AgentServices>,
-    goal: GoalState,
+    /// What the conversation carries between turns.
+    state: SessionState,
     papercuts: crate::papercuts::PapercutStore,
-    harness: crate::harness::HarnessStore,
-    handles: crate::handles::HandleStore,
-    tether: crate::tether::TetherState,
     hive: crate::hive::HiveHandle,
-    /// Mid-turn arrivals: user steering and finished background subagents.
-    injections: crate::agent::InjectionQueue,
     /// Mode-discipline counts behind the escalating reminder.
     modes: crate::modes::ModeCoach,
     /// Whether Abacus is holding the mouse. Holding it enables wheel scrolling
@@ -670,8 +663,6 @@ struct App {
     /// Ctrl+P: the subagent detail overlay.
     hive_overlay: bool,
     hive_scroll: u16,
-    tasks: TaskList,
-    compaction: CompactionState,
     ralph_loop: Option<RalphLoop>,
     entries: Vec<Entry>,
     input: InputBuffer,
@@ -847,17 +838,8 @@ impl App {
         let tokens = Arc::new(crate::provider::TokenLedger::new(initial_tokens));
         let provider = Provider::with_tokens(&config, tokens.clone())?;
         let aux_provider = aux_provider_for(&config, &provider);
-        let goal = GoalState::new(session.as_ref().and_then(|session| session.goal.clone()));
-        let tether = crate::tether::TetherState::new(
-            session.as_ref().and_then(|session| session.intent.clone()),
-        );
         let hive = crate::hive::HiveHandle::load(config.paths.hive_file.clone());
         let modes = crate::modes::ModeCoach::load(config.paths.modes_file.clone());
-        let tasks = TaskList::new(
-            session.as_ref().map(|session| session.tasks.clone()).unwrap_or_default(),
-        );
-        let compaction =
-            session.as_ref().and_then(|session| session.compaction.clone()).unwrap_or_default();
         let ralph_loop = session.as_ref().and_then(|session| session.ralph_loop.clone());
         let messages = session
             .as_ref()
@@ -897,22 +879,7 @@ impl App {
             config.paths.papercuts_file.clone(),
             &config.workspace,
         );
-        // Promotion counts distinct sessions, so a run with no session file
-        // yet still needs a stable key — otherwise a fresh session contributes
-        // no evidence and a lesson could never earn its way to durable.
-        let session_key = session
-            .as_ref()
-            .map(|session| session.id.to_string())
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let harness = crate::harness::HarnessStore::load_migrated(
-            config.paths.harness_dir.clone(),
-            &config.workspace,
-            &config.paths.memories_file,
-        )
-        .with_session(session_key);
-        if let Some(state) = session.as_ref().and_then(|session| session.harness.clone()) {
-            harness.restore_session(state);
-        }
+        let state = SessionState::open(&config, session.as_ref(), session_key(session.as_ref()));
         if let Some(store) = &session_store
             && let Ok(summaries) = store.list()
         {
@@ -959,19 +926,13 @@ impl App {
             session,
             session_store: session_store.clone(),
             services,
-            goal,
+            state,
             papercuts,
-            harness,
-            handles: crate::handles::HandleStore::default(),
-            tether,
             hive,
-            injections: crate::agent::InjectionQueue::default(),
             modes,
             mouse_captured: true,
             hive_overlay: false,
             hive_scroll: 0,
-            tasks,
-            compaction,
             ralph_loop,
             entries,
             input: InputBuffer::new(),
@@ -1578,7 +1539,7 @@ impl App {
     /// the whole turn to end arrives too late to change what it was correcting.
     fn steer(&mut self, prompt: String) {
         self.push_entry(Entry::new(EntryKind::User, prompt.clone()));
-        self.injections.push(crate::agent::Injection::UserMessage(prompt));
+        self.state.injections.push(crate::agent::Injection::UserMessage(prompt));
         self.follow = true;
         self.status = "steering · delivered after the current step".to_owned();
     }
@@ -1790,17 +1751,10 @@ impl App {
             mode: agent_mode,
             allow_mutations,
             session_id: self.session.as_ref().map(|session| session.id.to_string()),
-            goal: self.goal.clone(),
             papercuts: self.papercuts.clone(),
-            harness: self.harness.clone(),
-            handles: self.handles.clone(),
-            tether: self.tether.clone(),
             hive: self.hive.clone(),
-            injections: self.injections.clone(),
             modes: self.modes.clone(),
-            tasks: self.tasks.clone(),
-            compaction: self.compaction.clone(),
-            ..TurnOptions::for_config(&self.config, self.services.clone())
+            ..self.state.turn(&self.config, self.services.clone())
         };
         self.running = Some(tokio::spawn(async move {
             run_turn(provider, messages, options, events).await;
@@ -1892,7 +1846,7 @@ impl App {
             return self.say("/btw is for while a turn is running — ask it directly instead.");
         }
         self.say(format!("Noted, by the way: {note}"));
-        self.injections.push(crate::agent::Injection::SideNote(note.to_owned()));
+        self.state.injections.push(crate::agent::Injection::SideNote(note.to_owned()));
         self.status = "noted · delivered after the current step".to_owned();
     }
 
@@ -2150,10 +2104,10 @@ impl App {
         use crate::harness::EntryKind::Memory;
         // One ordering for display and delete alike, or the numbers the user
         // sees would target different entries.
-        let snapshot = self.harness.snapshot_of(Memory);
+        let snapshot = self.state.harness.snapshot_of(Memory);
         if let Some(number) = argument.strip_prefix("delete") {
             let removed = numbered(&snapshot, number)
-                .filter(|memory| self.harness.remove(Memory, &memory.id));
+                .filter(|memory| self.state.harness.remove(Memory, &memory.id));
             return match removed {
                 Some(memory) => self.say(format!("Memory \"{}\" deleted.", memory.title)),
                 None => self.fail("Usage: /memories delete <number> — numbers from /memories"),
@@ -2196,7 +2150,7 @@ impl App {
                 return self
                     .fail("Usage: /harness revert <refinement-id> — ids come from /harness log");
             }
-            return match self.harness.rollback(id) {
+            return match self.state.harness.rollback(id) {
                 Ok(result) => self.say(format!(
                     "Reverted {id} ({} edit(s) undone): {}\nThis rollback is itself {} — \
                      revert it to redo.",
@@ -2208,7 +2162,7 @@ impl App {
             };
         }
         if argument == "log" {
-            let history = self.harness.history();
+            let history = self.state.harness.history();
             if history.is_empty() {
                 return self.say(
                     "No refinements recorded yet. Abacus refines after a long turn, or when \
@@ -2228,7 +2182,7 @@ impl App {
         }
         let mut lines: Vec<String> = Vec::new();
         for kind in crate::harness::EntryKind::ALL {
-            let entries = self.harness.snapshot_of(kind);
+            let entries = self.state.harness.snapshot_of(kind);
             if entries.is_empty() {
                 continue;
             }
@@ -2278,11 +2232,7 @@ impl App {
             return;
         };
         session.update_messages(self.messages.clone());
-        session.intent = self.tether.intent();
-        session.harness = Some(self.harness.session_snapshot());
-        session.goal = self.goal.snapshot();
-        session.tasks = self.tasks.snapshot();
-        session.compaction = Some(self.compaction.clone());
+        self.state.save(session);
         session.ralph_loop = self.ralph_loop.clone();
         session.tokens_used = self.provider.tokens_used();
         session.active_secs =
@@ -2343,6 +2293,7 @@ impl App {
         let (result, start_prompt) = if argument.is_empty() {
             (
                 Ok(self
+                    .state
                     .goal
                     .snapshot()
                     .map(|goal| {
@@ -2361,8 +2312,11 @@ impl App {
                 None,
             )
         } else if argument == "pause" {
-            let result =
-                self.goal.pause().map(|_| "Goal paused. Use /goal resume when ready.".to_owned());
+            let result = self
+                .state
+                .goal
+                .pause()
+                .map(|_| "Goal paused. Use /goal resume when ready.".to_owned());
             if result.is_ok()
                 && let Some(handle) = self.running.take()
             {
@@ -2377,7 +2331,7 @@ impl App {
             }
             (result, None)
         } else if argument == "resume" {
-            match self.goal.resume() {
+            match self.state.goal.resume() {
                 Ok(goal) => (
                     Ok("Goal resumed.".to_owned()),
                     Some(("Resume goal".to_owned(), goal.objective)),
@@ -2385,10 +2339,11 @@ impl App {
                 Err(error) => (Err(error), None),
             }
         } else if argument == "clear" {
-            (self.goal.set(None).map(|()| "Goal cleared.".to_owned()), None)
+            (self.state.goal.set(None).map(|()| "Goal cleared.".to_owned()), None)
         } else if matches!(argument, "done" | "complete") {
             (
                 Ok(self
+                    .state
                     .goal
                     .execute("goal_update", r#"{"status":"complete"}"#)
                     .unwrap_or_else(|| "Error: no goal is set".to_owned())),
@@ -2396,11 +2351,14 @@ impl App {
             )
         } else if let Some(objective) = argument.strip_prefix("edit ") {
             (
-                self.goal.edit(objective).map(|goal| format!("Goal updated: {}", goal.objective)),
+                self.state
+                    .goal
+                    .edit(objective)
+                    .map(|goal| format!("Goal updated: {}", goal.objective)),
                 None,
             )
         } else {
-            match self.goal.create(argument) {
+            match self.state.goal.create(argument) {
                 Ok(goal) => (
                     Ok(format!("Goal set: {}", goal.objective)),
                     Some((goal.objective.clone(), goal.objective)),
@@ -2539,22 +2497,31 @@ impl App {
         self.say("Ralph loop cancelled by user.");
     }
 
+    /// Point the app at `session`, or at a blank conversation, with the state
+    /// that travels with one. Steering and worker reports already in flight
+    /// stay queued: they belong to the process, not to a session.
+    fn adopt(&mut self, session: Option<Session>) {
+        let injections = self.state.injections.clone();
+        let state =
+            SessionState::open(&self.config, session.as_ref(), session_key(session.as_ref()));
+        self.state = SessionState { injections, ..state };
+        self.messages = session
+            .as_ref()
+            .map_or_else(|| initial_messages(&self.config.workspace), |s| s.messages.clone());
+        self.ctx_chars = message_chars(&self.messages);
+        self.set_entries(entries_from_messages(&self.messages));
+        self.ralph_loop = session.as_ref().and_then(|session| session.ralph_loop.clone());
+        self.tokens.store_total(session.as_ref().map_or(0, |session| session.tokens_used));
+        self.session_initial_active_secs = session.as_ref().map_or(0, |s| s.active_secs);
+        self.started = Instant::now();
+        self.session = session; // `None` is recreated lazily on the first send
+        self.scroll = 0;
+    }
+
     fn new_session(&mut self) {
         self.persist_session();
-        self.messages = initial_messages(&self.config.workspace);
-        self.session = None; // persist_session recreates lazily on first send
-        self.set_entries(Vec::new());
-        self.goal = GoalState::default();
-        self.tasks = TaskList::default();
-        self.compaction = CompactionState::default();
-        self.ralph_loop = None;
-        self.tokens.store_total(0);
-        self.session_initial_active_secs = 0;
-        self.started = Instant::now();
+        self.adopt(None);
         self.say("New session.");
-        self.scroll = 0;
-        self.follow = true;
-        self.ctx_chars = message_chars(&self.messages);
     }
 
     /// Reopen the conversation as a new session — a fork. The original session
@@ -2699,24 +2666,13 @@ impl App {
         };
         match store.load(id.trim()) {
             Ok(session) => {
-                self.messages = session.messages.clone();
-                self.set_entries(entries_from_messages(&self.messages));
-                self.say(format!("Resumed {} ({})", session.title, &session.id.to_string()[..8]));
-                self.goal = GoalState::new(session.goal.clone());
-                self.tasks = TaskList::new(session.tasks.clone());
-                self.compaction = session.compaction.clone().unwrap_or_default();
-                self.ralph_loop = session.ralph_loop.clone();
-                self.tokens.store_total(session.tokens_used);
-                self.session_initial_active_secs = session.active_secs;
-                self.started = Instant::now();
-                self.session = Some(session);
-                self.follow = true;
+                let resumed =
+                    format!("Resumed {} ({})", session.title, &session.id.to_string()[..8]);
+                self.adopt(Some(session));
+                self.say(resumed);
                 self.status = "ready".to_owned();
-                self.ctx_chars = message_chars(&self.messages);
             }
-            Err(error) => {
-                self.fail(format!("Could not resume session: {error}"));
-            }
+            Err(error) => self.fail(format!("Could not resume session: {error}")),
         }
     }
 
@@ -4137,7 +4093,7 @@ impl App {
         self.status = "refining the harness".to_owned();
         let provider = self.aux_provider.clone();
         let messages = self.messages.clone();
-        let (harness, papercuts) = (self.harness.clone(), self.papercuts.clone());
+        let (harness, papercuts) = (self.state.harness.clone(), self.papercuts.clone());
         let workspace = self.config.workspace.clone();
         let instructions = (!instructions.is_empty()).then(|| instructions.to_owned());
         let events = self.background_tx.clone();
@@ -4603,10 +4559,10 @@ impl App {
     /// report to deliver. Start a turn to hand it over, the same way a running
     /// turn would have picked it up between tool calls.
     fn deliver_pending_injections(&mut self) -> bool {
-        if self.running.is_some() || self.injections.is_empty() {
+        if self.running.is_some() || self.state.injections.is_empty() {
             return false;
         }
-        let pending = self.injections.drain();
+        let pending = self.state.injections.drain();
         let mut delivered = false;
         for injection in pending {
             let crate::agent::Injection::SubagentReport(report) = injection else {
@@ -5538,8 +5494,9 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let composer_text_width = area.width.min(CONTENT_COLUMNS).saturating_sub(6).max(1) as usize;
     app.composer_width = composer_text_width as u16;
     let input_height = (app.input.wrapped_line_count(composer_text_width) as u16 + 2).clamp(3, 12);
-    let task_height = u16::from(app.goal.snapshot().is_some() || app.ralph_loop.is_some()) * 2
-        + u16::from(!app.tasks.is_empty())
+    let task_height = u16::from(app.state.goal.snapshot().is_some() || app.ralph_loop.is_some())
+        * 2
+        + u16::from(!app.state.tasks.is_empty())
         + app.hive.board.strip_rows();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -5884,7 +5841,7 @@ fn draw_welcome(frame: &mut Frame<'_>, area: Rect, app: &App) {
 /// band rather than as more transcript.
 fn draw_task_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let mut lines = Vec::new();
-    if let Some(goal) = app.goal.snapshot() {
+    if let Some(goal) = app.state.goal.snapshot() {
         let set = ui::glyphs();
         let (glyph, color) = match goal.status {
             crate::goal::GoalStatus::Active => (set.goal, primary()),
@@ -5915,7 +5872,7 @@ fn draw_task_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
             fg("   /cancel-loop", rail()),
         ]));
     }
-    let tasks = app.tasks.snapshot();
+    let tasks = app.state.tasks.snapshot();
     if !tasks.is_empty() {
         let done = tasks.iter().filter(|task| task.done).count();
         let percent = ((done * 100) / tasks.len().max(1)) as u16;
@@ -8404,6 +8361,12 @@ fn config_value_spans(value: &str, width: usize, selected: bool) -> Vec<Span<'st
     }
 }
 
+/// The name a session goes by in the harness: its id, or a fresh one for a
+/// conversation that has not been saved yet.
+fn session_key(session: Option<&Session>) -> String {
+    session.map_or_else(|| uuid::Uuid::new_v4().to_string(), |session| session.id.to_string())
+}
+
 /// The row a 1-based `number` names in a listing.
 fn numbered<'a, T>(rows: &'a [T], number: &str) -> Option<&'a T> {
     rows.get(number.trim().parse::<usize>().ok()?.saturating_sub(1))
@@ -8702,7 +8665,7 @@ mod tests {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
         // With nothing running it declines rather than losing the note.
         assert!(app.slash_command("/btw is this thread safe?"));
-        assert!(app.injections.is_empty());
+        assert!(app.state.injections.is_empty());
         assert!(
             app.entries.last().unwrap().text.contains("ask it directly"),
             "{}",
@@ -8711,7 +8674,7 @@ mod tests {
 
         app.start_turn("do the thing".into(), "do the thing".into(), false);
         assert!(app.slash_command("/btw is this thread safe?"));
-        assert!(!app.injections.is_empty(), "handed to the running turn");
+        assert!(!app.state.injections.is_empty(), "handed to the running turn");
         assert!(app.status.contains("noted"), "{}", app.status);
         // The turn is untouched — a side note is not an interrupt.
         assert!(app.running.is_some());
@@ -8731,7 +8694,7 @@ mod tests {
         app.submit();
 
         // It goes to the running turn, not to the old wait-for-the-end queue.
-        assert!(!app.injections.is_empty(), "handed to the running turn");
+        assert!(!app.state.injections.is_empty(), "handed to the running turn");
         assert!(app.status.contains("steering"), "{}", app.status);
         assert!(app.input.is_empty(), "composer cleared");
         // The user sees their own message immediately.
@@ -8747,7 +8710,7 @@ mod tests {
         // Nothing pending → nothing happens.
         assert!(!app.deliver_pending_injections());
 
-        app.injections.push(crate::agent::Injection::SubagentReport("alpha: done".into()));
+        app.state.injections.push(crate::agent::Injection::SubagentReport("alpha: done".into()));
         assert!(app.deliver_pending_injections(), "a turn was started");
         assert!(app.running.is_some());
         let delivered = app
@@ -10340,7 +10303,7 @@ mod tests {
     async fn goal_text_becomes_the_starting_prompt_and_can_pause() {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
         app.goal_command("Finish the migration and keep tests green");
-        let goal = app.goal.snapshot().unwrap();
+        let goal = app.state.goal.snapshot().unwrap();
         assert_eq!(goal.objective, "Finish the migration and keep tests green");
         assert_eq!(goal.status, crate::goal::GoalStatus::Active);
         assert_eq!(
@@ -10349,15 +10312,15 @@ mod tests {
         );
         assert!(app.running.is_some());
         app.goal_command("pause");
-        assert_eq!(app.goal.snapshot().unwrap().status, crate::goal::GoalStatus::Paused);
+        assert_eq!(app.state.goal.snapshot().unwrap().status, crate::goal::GoalStatus::Paused);
         assert!(app.running.is_none());
         app.goal_command("edit Finish migration with all release checks");
         assert_eq!(
-            app.goal.snapshot().unwrap().objective,
+            app.state.goal.snapshot().unwrap().objective,
             "Finish migration with all release checks"
         );
         app.goal_command("clear");
-        assert!(app.goal.snapshot().is_none());
+        assert!(app.state.goal.snapshot().is_none());
     }
 
     #[test]

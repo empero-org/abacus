@@ -9,14 +9,11 @@ use tokio::sync::mpsc;
 use crate::{
     activity::ActivityReporter,
     agent::{AgentEvent, ApprovalDecision, TurnOptions, run_turn},
-    compaction::CompactionState,
     config::{Config, OutputFormat},
-    goal::GoalState,
     provider::Provider,
     ralph::{RalphLoop, RalphStatus},
     services::AgentServices,
-    session::{Session, SessionStore},
-    task::TaskList,
+    session::{Session, SessionState, SessionStore},
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -45,19 +42,6 @@ pub async fn run(
         .await?;
     let started = Instant::now();
     let activity_session = session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    // Migration from the pre-harness stores runs once, here. Keyed by the
-    // session id so promotion counts distinct sessions rather than distinct
-    // processes.
-    let harness = crate::harness::HarnessStore::load_migrated(
-        config.paths.harness_dir.clone(),
-        &config.workspace,
-        &config.paths.memories_file,
-    )
-    .with_session(activity_session.clone());
-    if let Some(state) = session.as_ref().and_then(|session| session.harness.clone()) {
-        harness.restore_session(state);
-    }
-    let handles = crate::handles::HandleStore::default();
     if crate::sync::is_configured(
         &crate::config::Credentials::load(&config.paths).unwrap_or_default(),
     ) && let Ok(count) = crate::sync::pull_workspace(&config.paths, &config.workspace).await
@@ -88,11 +72,9 @@ pub async fn run(
     });
     let (events, mut receiver) = mpsc::unbounded_channel();
     let allow = Arc::new(AtomicBool::new(config.yes));
-    let goal = GoalState::new(session.as_ref().and_then(|session| session.goal.clone()));
-    let tasks =
-        TaskList::new(session.as_ref().map(|session| session.tasks.clone()).unwrap_or_default());
-    let compaction =
-        session.as_ref().and_then(|session| session.compaction.clone()).unwrap_or_default();
+    // Keyed by the session id so promotion counts distinct sessions rather
+    // than distinct processes.
+    let state = SessionState::open(&config, session.as_ref(), activity_session.clone());
 
     let mut ralph = loop_config;
     let mut text = String::new();
@@ -124,10 +106,6 @@ pub async fn run(
         _ => None,
     };
 
-    let tether = crate::tether::TetherState::new(
-        session.as_ref().and_then(|session| session.intent.clone()),
-    );
-
     let mut failure: Option<String> = None;
 
     // Loop mode drives its own prompt replay; non-loop mode expects the caller to
@@ -144,19 +122,7 @@ pub async fn run(
         Some(tokio::spawn(run_turn(
             provider.clone(),
             final_messages.clone(),
-            turn_options(
-                &config,
-                &allow,
-                &services,
-                &goal,
-                &tasks,
-                &compaction,
-                session_id.clone(),
-                trace.clone(),
-                &tether,
-                &harness,
-                &handles,
-            ),
+            turn_options(&config, &allow, &services, &state, session_id.clone(), trace.clone()),
             events.clone(),
         )))
     } else {
@@ -318,14 +284,9 @@ pub async fn run(
                         &config,
                         &allow,
                         &services,
-                        &goal,
-                        &tasks,
-                        &compaction,
+                        &state,
                         session_id.clone(),
                         trace.clone(),
-                        &tether,
-                        &harness,
-                        &handles,
                     ),
                     events.clone(),
                 )));
@@ -344,11 +305,7 @@ pub async fn run(
         store,
         PersistedRun {
             messages: final_messages,
-            intent: tether.intent(),
-            harness: Some(harness.session_snapshot()),
-            goal: &goal,
-            tasks: &tasks,
-            compaction: &compaction,
+            state: &state,
             ralph: &ralph,
             profile: &config.profile,
             model: &config.model,
@@ -423,11 +380,7 @@ pub async fn run(
 
 struct PersistedRun<'a> {
     messages: Vec<Value>,
-    intent: Option<String>,
-    harness: Option<crate::harness::HarnessState>,
-    goal: &'a GoalState,
-    tasks: &'a TaskList,
-    compaction: &'a CompactionState,
+    state: &'a SessionState,
     ralph: &'a Option<RalphLoop>,
     profile: &'a str,
     model: &'a str,
@@ -449,11 +402,7 @@ fn persist_session(
         store.create(run.profile.to_owned(), run.model.to_owned(), run.messages.clone())?
     };
     session_value.update_messages(run.messages);
-    session_value.intent = run.intent;
-    session_value.harness = run.harness;
-    session_value.goal = run.goal.snapshot();
-    session_value.tasks = run.tasks.snapshot();
-    session_value.compaction = Some(run.compaction.clone());
+    run.state.save(&mut session_value);
     session_value.ralph_loop = run.ralph.clone();
     session_value.tokens_used = run.tokens_used;
     session_value.active_secs = session_value.active_secs.saturating_add(run.active_secs);
@@ -464,33 +413,21 @@ fn persist_session(
     Ok(Some(session_value.id.to_string()))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn turn_options(
     config: &Config,
     allow: &Arc<AtomicBool>,
     services: &Arc<AgentServices>,
-    goal: &GoalState,
-    tasks: &TaskList,
-    compaction: &CompactionState,
+    state: &SessionState,
     session_id: Option<String>,
     trace: Option<crate::sft::TraceWriter>,
-    tether: &crate::tether::TetherState,
-    harness: &crate::harness::HarnessStore,
-    handles: &crate::handles::HandleStore,
 ) -> TurnOptions {
+    // A headless run defaults to AUTO so the model chooses; `--mode` pins it,
+    // which is what makes a read-only CI check expressible.
     TurnOptions {
         trace,
         allow_mutations: allow.clone(),
         session_id,
-        goal: goal.clone(),
-        tasks: tasks.clone(),
-        compaction: compaction.clone(),
-        harness: harness.clone(),
-        handles: handles.clone(),
-        tether: tether.clone(),
-        // A headless run defaults to AUTO so the model chooses; `--mode`
-        // pins it, which is what makes a read-only CI check expressible.
-        ..TurnOptions::for_config(config, services.clone()).with_workspace_stores(config)
+        ..state.turn(config, services.clone()).with_workspace_stores(config)
     }
 }
 
@@ -537,11 +474,7 @@ mod tests {
             Some(store.clone()),
             PersistedRun {
                 messages,
-                intent: None,
-                harness: None,
-                goal: &GoalState::default(),
-                tasks: &TaskList::default(),
-                compaction: &CompactionState::default(),
+                state: &SessionState::default(),
                 ralph: &None,
                 profile: "local",
                 model: "model",
@@ -586,11 +519,7 @@ mod tests {
                     json!({"role":"system","content":"x"}),
                     json!({"role":"user","content":"continue"}),
                 ],
-                intent: None,
-                harness: None,
-                goal: &GoalState::default(),
-                tasks: &TaskList::default(),
-                compaction: &CompactionState::default(),
+                state: &SessionState::default(),
                 ralph: &None,
                 profile: "ignored",
                 model: "ignored",

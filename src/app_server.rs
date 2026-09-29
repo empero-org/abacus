@@ -41,16 +41,13 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     agent::{
-        AgentEvent, AgentMode, ApprovalDecision, DoneReason, InjectionQueue, TurnOptions,
-        UserAnswer, initial_messages, run_turn,
+        AgentEvent, AgentMode, ApprovalDecision, DoneReason, TurnOptions, UserAnswer,
+        initial_messages, run_turn,
     },
-    compaction::CompactionState,
     config::{Config, Credentials, Settings},
-    goal::GoalState,
     provider::Provider,
     services::AgentServices,
-    session::{Session, SessionStore},
-    task::TaskList,
+    session::{Session, SessionState, SessionStore},
 };
 
 /// Bumped when a frame's shape changes in a way a front end must notice.
@@ -114,13 +111,7 @@ struct ThreadState {
     /// is never persisted — opening the app should not litter the store.
     persisted: bool,
     messages: Vec<Value>,
-    goal: GoalState,
-    tasks: TaskList,
-    compaction: CompactionState,
-    tether: crate::tether::TetherState,
-    harness: crate::harness::HarnessStore,
-    handles: crate::handles::HandleStore,
-    injections: InjectionQueue,
+    state: SessionState,
     trace: Option<crate::sft::TraceWriter>,
 }
 
@@ -135,15 +126,7 @@ impl ThreadState {
                 initial_messages(&config.workspace),
             )
         });
-        let harness = crate::harness::HarnessStore::load_migrated(
-            config.paths.harness_dir.clone(),
-            &config.workspace,
-            &config.paths.memories_file,
-        )
-        .with_session(session.id.to_string());
-        if let Some(state) = session.harness.clone() {
-            harness.restore_session(state);
-        }
+        let state = SessionState::open(config, Some(&session), session.id.to_string());
         let trace = config
             .trace_enabled
             .then(|| {
@@ -151,19 +134,7 @@ impl ThreadState {
                     .ok()
             })
             .flatten();
-        Self {
-            messages: session.messages.clone(),
-            goal: GoalState::new(session.goal.clone()),
-            tasks: TaskList::new(session.tasks.clone()),
-            compaction: session.compaction.clone().unwrap_or_default(),
-            tether: crate::tether::TetherState::new(session.intent.clone()),
-            harness,
-            handles: crate::handles::HandleStore::default(),
-            injections: InjectionQueue::default(),
-            trace,
-            persisted,
-            session,
-        }
+        Self { messages: session.messages.clone(), state, trace, persisted, session }
     }
 
     fn id(&self) -> String {
@@ -431,7 +402,7 @@ impl App {
                 // at the next tool boundary instead of after everything it has
                 // already planned. `turn/steer` is the explicit spelling of it.
                 if self.turn_id.is_some() {
-                    self.thread.injections.push(crate::agent::Injection::UserMessage(text));
+                    self.thread.state.injections.push(crate::agent::Injection::UserMessage(text));
                     return Ok(json!({"steered": true, "turnId": self.turn_id()}));
                 }
                 if method == "turn/steer" {
@@ -688,16 +659,12 @@ impl App {
             mode: self.mode,
             allow_mutations: self.allow.clone(),
             session_id: Some(self.thread_id()),
-            goal: self.thread.goal.clone(),
-            tasks: self.thread.tasks.clone(),
-            compaction: self.thread.compaction.clone(),
-            handles: self.thread.handles.clone(),
-            harness: self.thread.harness.clone(),
-            tether: self.thread.tether.clone(),
-            injections: self.thread.injections.clone(),
             trace: self.thread.trace.clone(),
             cancel: self.cancel.clone(),
-            ..TurnOptions::for_config(&self.config, self.services.clone())
+            ..self
+                .thread
+                .state
+                .turn(&self.config, self.services.clone())
                 .with_workspace_stores(&self.config)
         };
         tokio::spawn(run_turn(
@@ -1052,11 +1019,7 @@ impl App {
         };
         let session = &mut self.thread.session;
         session.update_messages(self.thread.messages.clone());
-        session.intent = self.thread.tether.intent();
-        session.harness = Some(self.thread.harness.session_snapshot());
-        session.goal = self.thread.goal.snapshot();
-        session.tasks = self.thread.tasks.snapshot();
-        session.compaction = Some(self.thread.compaction.clone());
+        self.thread.state.save(session);
         session.tokens_used = self.tokens.total();
         session.model = self.config.model.clone();
         if let Err(error) = store.save(session) {

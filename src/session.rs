@@ -14,6 +14,83 @@ use crate::task::Task;
 
 const SESSION_VERSION: u32 = 3;
 
+/// What a conversation carries between turns: the state the model reads and
+/// writes as it works. Restored from a saved session, handed to every turn,
+/// and written back to the session when the turn ends. Every front end — the
+/// TUI, a headless run, the app server — holds one of these.
+#[derive(Clone, Default)]
+pub struct SessionState {
+    pub goal: crate::goal::GoalState,
+    pub tasks: crate::task::TaskList,
+    pub compaction: CompactionState,
+    /// What the session is trying to achieve, and drift-check bookkeeping.
+    pub tether: crate::tether::TetherState,
+    pub harness: crate::harness::HarnessStore,
+    /// Large tool outputs bound as inspectable variables.
+    pub handles: crate::handles::HandleStore,
+    /// Mid-turn arrivals: user steering and finished background subagents.
+    pub injections: crate::agent::InjectionQueue,
+}
+
+impl SessionState {
+    /// The state `session` left off with, or a fresh one.
+    ///
+    /// `key` names the session to the harness, which counts *distinct
+    /// sessions* when promoting a lesson to durable — so a run with no saved
+    /// session yet still needs a stable key, or it contributes no evidence.
+    pub fn open(config: &crate::config::Config, session: Option<&Session>, key: String) -> Self {
+        let harness = crate::harness::HarnessStore::load_migrated(
+            config.paths.harness_dir.clone(),
+            &config.workspace,
+            &config.paths.memories_file,
+        )
+        .with_session(key);
+        if let Some(state) = session.and_then(|session| session.harness.clone()) {
+            harness.restore_session(state);
+        }
+        Self {
+            goal: crate::goal::GoalState::new(session.and_then(|session| session.goal.clone())),
+            tasks: crate::task::TaskList::new(
+                session.map(|session| session.tasks.clone()).unwrap_or_default(),
+            ),
+            compaction: session.and_then(|session| session.compaction.clone()).unwrap_or_default(),
+            tether: crate::tether::TetherState::new(
+                session.and_then(|session| session.intent.clone()),
+            ),
+            harness,
+            handles: Default::default(),
+            injections: Default::default(),
+        }
+    }
+
+    /// Write this state into `session`, ready to be saved.
+    pub fn save(&self, session: &mut Session) {
+        session.intent = self.tether.intent();
+        session.harness = Some(self.harness.session_snapshot());
+        session.goal = self.goal.snapshot();
+        session.tasks = self.tasks.snapshot();
+        session.compaction = Some(self.compaction.clone());
+    }
+
+    /// The options for a turn over this state, shaped by `config`.
+    pub fn turn(
+        &self,
+        config: &crate::config::Config,
+        services: std::sync::Arc<crate::services::AgentServices>,
+    ) -> crate::agent::TurnOptions {
+        crate::agent::TurnOptions {
+            goal: self.goal.clone(),
+            tasks: self.tasks.clone(),
+            compaction: self.compaction.clone(),
+            tether: self.tether.clone(),
+            harness: self.harness.clone(),
+            handles: self.handles.clone(),
+            injections: self.injections.clone(),
+            ..crate::agent::TurnOptions::for_config(config, services)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub version: u32,
