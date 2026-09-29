@@ -83,17 +83,16 @@ pub struct EvalTask {
 
 impl EvalTask {
     fn mode(&self) -> Result<AgentMode> {
-        Ok(match self.file.mode.as_deref() {
-            None | Some("build") => AgentMode::Build,
-            Some("plan") => AgentMode::Plan,
-            Some("auto") => AgentMode::Auto,
-            Some(other) => bail!("task `{}`: unknown mode `{other}`", self.name),
-        })
+        let Some(mode) = self.file.mode.as_deref() else {
+            return Ok(AgentMode::Build);
+        };
+        AgentMode::parse(mode)
+            .with_context(|| format!("task `{}`: unknown mode `{mode}`", self.name))
     }
 }
 
 /// One task, one state setting, one repetition.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct RunOutcome {
     pub task: String,
     /// "on" or "off" — whether `~/.abacus` learned state was visible.
@@ -265,19 +264,11 @@ fn failed_outcome(
         task: task.name.clone(),
         state: if state_on { "on" } else { "off" },
         repetition,
-        passed: false,
-        tool_calls: 0,
-        assistant_steps: 0,
-        tokens: 0,
-        wall_ms: 0,
-        papercut_recalls: 0,
-        timed_out: false,
         error: Some(format!("{error:#}")),
-        check_output: String::new(),
+        ..Default::default()
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_once(
     config: &Config,
     settings: &Settings,
@@ -355,6 +346,9 @@ async fn run_once(
     let started = Instant::now();
     let handle = tokio::spawn(run_turn(provider, messages, turn, events));
 
+    let replies = |messages: &[serde_json::Value]| {
+        messages.iter().filter(|message| message["role"] == "assistant").count()
+    };
     let mut tool_calls = 0_usize;
     let mut papercut_recalls = 0_usize;
     let mut assistant_steps = 0_usize;
@@ -398,13 +392,11 @@ async fn run_once(
                 });
             }
             AgentEvent::Done { messages, .. } => {
-                assistant_steps =
-                    messages.iter().filter(|message| message["role"] == "assistant").count();
+                assistant_steps = replies(&messages);
                 break;
             }
             AgentEvent::Failed { error: failure, messages } => {
-                assistant_steps =
-                    messages.iter().filter(|message| message["role"] == "assistant").count();
+                assistant_steps = replies(&messages);
                 error = Some(failure);
                 break;
             }

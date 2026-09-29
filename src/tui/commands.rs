@@ -274,15 +274,13 @@ impl App {
     }
 
     pub(super) fn mode_command(&mut self, argument: &str) {
-        match argument.to_ascii_lowercase().as_str() {
-            "" => self.say(format!(
+        match AgentMode::parse(argument) {
+            Some(mode) => self.set_agent_mode(mode),
+            None if argument.is_empty() => self.say(format!(
                 "Mode: {}\nAUTO lets the model choose PLAN or BUILD per turn; pinned modes enforce your choice.",
                 self.agent_mode.label()
             )),
-            "auto" => self.set_agent_mode(AgentMode::Auto),
-            "plan" => self.set_agent_mode(AgentMode::Plan),
-            "build" => self.set_agent_mode(AgentMode::Build),
-            _ => self.fail("Usage: /mode auto|plan|build"),
+            None => self.fail("Usage: /mode auto|plan|build"),
         }
     }
 

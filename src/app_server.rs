@@ -44,7 +44,7 @@ use crate::{
         AgentEvent, AgentMode, ApprovalDecision, DoneReason, TurnOptions, UserAnswer,
         initial_messages, run_turn,
     },
-    config::{Config, Credentials, Settings},
+    config::{Config, Settings},
     provider::Provider,
     services::AgentServices,
     session::{Session, SessionState, SessionStore},
@@ -163,8 +163,6 @@ impl OpenItem {
 struct App {
     config: Config,
     settings: Settings,
-    #[allow(dead_code)]
-    credentials: Credentials,
     services: Arc<AgentServices>,
     store: Option<SessionStore>,
     thread: ThreadState,
@@ -189,7 +187,6 @@ struct App {
 pub async fn run(
     config: Config,
     settings: Settings,
-    credentials: Credentials,
     session: Option<Session>,
     store: Option<SessionStore>,
     services: Arc<AgentServices>,
@@ -204,7 +201,6 @@ pub async fn run(
         thread: ThreadState::new(&config, session),
         config,
         settings,
-        credentials,
         services,
         store,
         provider,
@@ -576,11 +572,8 @@ impl App {
                 self.update_profile(|profile| profile.reasoning_effort = effort)?;
             }
             "mode" => {
-                self.mode = match value.as_str().unwrap_or("auto") {
-                    "build" => AgentMode::Build,
-                    "plan" => AgentMode::Plan,
-                    _ => AgentMode::Auto,
-                };
+                let named = value.as_str().and_then(AgentMode::parse);
+                self.mode = named.unwrap_or(AgentMode::Auto);
             }
             "autoApprove" => self.allow.store(value.as_bool().unwrap_or(false), Ordering::Relaxed),
             other => return Err(anyhow!("`{other}` is not a writable key")),

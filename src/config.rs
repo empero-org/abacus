@@ -22,12 +22,8 @@ fn parse_token_arg(input: &str) -> Result<usize, String> {
 
 /// clap value parser for the tool-call text format.
 fn parse_agent_mode(input: &str) -> Result<crate::agent::AgentMode, String> {
-    match input.trim().to_ascii_lowercase().as_str() {
-        "auto" => Ok(crate::agent::AgentMode::Auto),
-        "plan" => Ok(crate::agent::AgentMode::Plan),
-        "build" => Ok(crate::agent::AgentMode::Build),
-        other => Err(format!("unknown mode `{other}` (expected auto, plan, or build)")),
-    }
+    crate::agent::AgentMode::parse(input)
+        .ok_or_else(|| format!("unknown mode `{}` (expected auto, plan, or build)", input.trim()))
 }
 
 fn parse_tool_format(input: &str) -> Result<ToolFormat, String> {

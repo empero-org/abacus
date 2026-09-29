@@ -306,10 +306,7 @@ pub async fn detect_limits(
 /// body. Split out from [`detect_limits`] so the parsing logic is unit-testable
 /// without standing up a mock server.
 fn extract_limits_from_models(value: &Value, model: &str) -> Option<(usize, Option<usize>)> {
-    let data = value["data"]
-        .as_array()
-        .or_else(|| value["models"].as_array())
-        .or_else(|| value.as_array())?;
+    let data = entries(value);
     let target = model.to_ascii_lowercase();
     let entry = data
         .iter()
@@ -319,13 +316,23 @@ fn extract_limits_from_models(value: &Value, model: &str) -> Option<(usize, Opti
                 item["id"].as_str().is_some_and(|id| id.to_ascii_lowercase().ends_with(&target))
             })
         })?;
-    let context = read_usize(entry, &["context_length", "max_context_length", "context_window"])?;
-    let output = read_usize(entry, &["max_completion_tokens", "max_output_tokens"]).or_else(|| {
-        entry
-            .get("top_provider")
-            .and_then(|tp| read_usize(tp, &["max_completion_tokens", "max_output_tokens"]))
-    });
-    Some((context, output))
+    let (context, output) = reported_limits(entry);
+    Some((context?, output))
+}
+
+/// The model entries of a `/models` payload, in whichever common shape it has.
+fn entries(value: &Value) -> &[Value] {
+    let list = value["data"].as_array().or(value["models"].as_array()).or(value.as_array());
+    list.map_or(&[], Vec::as_slice)
+}
+
+/// The context window and output cap an entry reports for its model.
+fn reported_limits(entry: &Value) -> (Option<usize>, Option<usize>) {
+    const OUTPUT: &[&str] = &["max_completion_tokens", "max_output_tokens"];
+    let context = read_usize(entry, &["context_length", "max_context_length", "context_window"]);
+    let output =
+        read_usize(entry, OUTPUT).or_else(|| read_usize(entry.get("top_provider")?, OUTPUT));
+    (context, output)
 }
 
 /// What a provider's `/models` listing says about one model.
@@ -407,23 +414,16 @@ impl ModelCard {
                 .map(|per_token| per_token * 1_000_000.0)
         };
         let modalities = entry.pointer("/architecture/input_modalities").and_then(Value::as_array);
+        let (context_length, max_output_tokens) = reported_limits(entry);
         Some(ModelCard {
             provider,
             name: entry["name"].as_str().map(str::to_owned),
             description: entry["description"]
                 .as_str()
-                .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+                .map(crate::text::squeeze)
                 .filter(|text| !text.is_empty()),
-            context_length: read_usize(
-                entry,
-                &["context_length", "max_context_length", "context_window"],
-            ),
-            max_output_tokens: read_usize(entry, &["max_completion_tokens", "max_output_tokens"])
-                .or_else(|| {
-                    entry.get("top_provider").and_then(|top| {
-                        read_usize(top, &["max_completion_tokens", "max_output_tokens"])
-                    })
-                }),
+            context_length,
+            max_output_tokens,
             input_cost: cost(&["prompt", "input"]),
             output_cost: cost(&["completion", "output"]),
             vision: modalities
@@ -440,12 +440,8 @@ impl ModelCard {
 
 /// Parse a whole `/models` payload into cards, sorted by id.
 pub fn parse_model_cards(value: &Value) -> Vec<ModelCard> {
-    let data = value["data"]
-        .as_array()
-        .or_else(|| value["models"].as_array())
-        .or_else(|| value.as_array());
     let mut cards: Vec<ModelCard> =
-        data.into_iter().flatten().filter_map(ModelCard::from_entry).collect();
+        entries(value).iter().filter_map(ModelCard::from_entry).collect();
     cards.sort_by_key(|card| card.id.to_ascii_lowercase());
     cards.dedup_by(|a, b| a.id == b.id);
     cards

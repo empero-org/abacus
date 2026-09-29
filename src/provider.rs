@@ -392,6 +392,19 @@ impl Provider {
         self.complete(messages, tools, deltas, cancel).await
     }
 
+    /// What a quiet completion said, or `None` when it failed, was cancelled,
+    /// or said nothing.
+    pub async fn answer(
+        &self,
+        messages: &[Value],
+        tools: &[Value],
+        cancel: &AtomicBool,
+    ) -> Option<String> {
+        let completion = self.ask(messages, tools, cancel).await.ok()?;
+        let text = completion.content.trim();
+        (!completion.cancelled && !text.is_empty()).then(|| text.to_owned())
+    }
+
     /// Send `body`, or give up with `None` when `cancel` is raised first.
     ///
     /// The request is raced as well as the stream: `post_stream` waits for

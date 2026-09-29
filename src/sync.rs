@@ -469,10 +469,8 @@ pub fn is_placeholder(session: &Session) -> bool {
 
 async fn push_one(client: &SyncClient, paths: &AbacusPaths, session: &Session) -> Result<u64> {
     if is_placeholder(session) {
-        return Ok(match client.revision(&session.id.to_string()).await.ok().flatten() {
-            Some(revision) => revision,
-            None => 0,
-        });
+        let revision = client.revision(&session.id.to_string()).await.ok().flatten();
+        return Ok(revision.unwrap_or_default());
     }
     let trace =
         std::fs::read(paths.traces_dir.join(format!("{}.jsonl", session.id))).unwrap_or_default();

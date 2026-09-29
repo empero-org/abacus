@@ -201,18 +201,6 @@ pub fn compact_history(messages: &[Value]) -> String {
     kept.join("\n")
 }
 
-async fn quick_call(
-    provider: &Provider,
-    conversation: Vec<Value>,
-    cancel: &AtomicBool,
-) -> Option<String> {
-    let completion = provider.ask(&conversation, &[], cancel).await.ok()?;
-    if completion.cancelled || completion.content.trim().is_empty() {
-        return None;
-    }
-    Some(completion.content.trim().to_owned())
-}
-
 /// Snapshot (or refresh) the session intent from the conversation so far.
 pub async fn capture_intent(
     provider: &Provider,
@@ -235,7 +223,7 @@ pub async fn capture_intent(
         serde_json::json!({"role": "system", "content": "You summarise coding-agent sessions precisely."}),
         serde_json::json!({"role": "user", "content": format!("Conversation so far:\n{}\n\n{directive}", compact_history(messages))}),
     ];
-    quick_call(provider, conversation, cancel).await
+    provider.answer(&conversation, &[], cancel).await
 }
 
 /// The plan the user has already agreed to: the active goal and task list.
@@ -288,7 +276,7 @@ pub async fn check_drift(
             compact_history(messages)
         )}),
     ];
-    let reply = quick_call(provider, conversation, cancel).await?;
+    let reply = provider.answer(&conversation, &[], cancel).await?;
     parse_verdict(&reply)
 }
 

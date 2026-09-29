@@ -169,6 +169,16 @@ impl<'a> Reflector<'a> {
         Self { provider, in_context: false, tools: &[] }
     }
 
+    /// What the reflector is shown: the harness as it stands, and — when it is
+    /// not already looking at the conversation — a rendering of the turn.
+    fn evidence(&self, messages: &[Value], harness: &HarnessStore, budget: usize) -> String {
+        let state = format!("<harness_state>\n{}\n</harness_state>", harness.overview());
+        if self.in_context {
+            return state;
+        }
+        format!("{state}\n\n<trajectory>\n{}\n</trajectory>", trajectory(messages, budget))
+    }
+
     /// Ask for one JSON answer, in the live context when that is possible.
     async fn ask(
         &self,
@@ -184,7 +194,7 @@ impl<'a> Reflector<'a> {
                 "role": "user",
                 "content": format!("{in_context_prompt}\n\n{detail}"),
             }));
-            if let Some(reply) = complete(self.provider, &messages, self.tools, cancel).await {
+            if let Some(reply) = self.provider.answer(&messages, self.tools, cancel).await {
                 return Some(reply);
             }
             // Fall through: a refinement is optional, but if the cheap call
@@ -194,7 +204,7 @@ impl<'a> Reflector<'a> {
             json!({"role": "system", "content": system}),
             json!({"role": "user", "content": detail}),
         ];
-        complete(self.provider, &messages, &[], cancel).await
+        self.provider.answer(&messages, &[], cancel).await
     }
 }
 
@@ -205,15 +215,7 @@ pub async fn should_refine(
     harness: &HarnessStore,
     cancel: &AtomicBool,
 ) -> Option<(bool, Option<String>)> {
-    let detail = if reflector.in_context {
-        format!("<harness_state>\n{}\n</harness_state>", harness.overview())
-    } else {
-        format!(
-            "<harness_state>\n{}\n</harness_state>\n\n<trajectory>\n{}\n</trajectory>",
-            harness.overview(),
-            trajectory(messages, REVIEW_TRAJECTORY_CHARS)
-        )
-    };
+    let detail = reflector.evidence(messages, harness, REVIEW_TRAJECTORY_CHARS);
     let reply =
         reflector.ask(REVIEW_PROMPT, IN_CONTEXT_REVIEW_PROMPT, &detail, messages, cancel).await?;
     let value = extract_json(&reply).ok()?;
@@ -229,7 +231,6 @@ pub async fn should_refine(
 
 /// Plan and apply a refinement. `lifetime` decides whether the edits persist
 /// beyond this session.
-#[allow(clippy::too_many_arguments)]
 pub async fn run(
     reflector: &Reflector<'_>,
     messages: &[Value],
@@ -244,15 +245,7 @@ pub async fn run(
     // touched it, rather than being silently overwritten.
     let baseline = harness.baseline(lifetime);
 
-    let mut detail = if reflector.in_context {
-        format!("<harness_state>\n{}\n</harness_state>", harness.overview())
-    } else {
-        format!(
-            "<harness_state>\n{}\n</harness_state>\n\n<trajectory>\n{}\n</trajectory>",
-            harness.overview(),
-            trajectory(messages, PLAN_TRAJECTORY_CHARS)
-        )
-    };
+    let mut detail = reflector.evidence(messages, harness, PLAN_TRAJECTORY_CHARS);
     if let Some(instructions) = instructions {
         detail.push_str(&format!("\n\n<focus>\n{instructions}\n</focus>"));
     }
@@ -294,19 +287,6 @@ pub async fn run(
         },
         result,
     })
-}
-
-async fn complete(
-    provider: &Provider,
-    messages: &[Value],
-    tools: &[Value],
-    cancel: &AtomicBool,
-) -> Option<String> {
-    let completion = provider.ask(messages, tools, cancel).await.ok()?;
-    if completion.cancelled || completion.content.trim().is_empty() {
-        return None;
-    }
-    Some(completion.content)
 }
 
 /// A compact view of the finished turn: what the model said and which tools it

@@ -42,6 +42,16 @@ pub enum AgentMode {
 }
 
 impl AgentMode {
+    /// The mode `name` spells, in any case.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "plan" => Some(Self::Plan),
+            "build" => Some(Self::Build),
+            _ => None,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Auto => "AUTO",
@@ -1282,16 +1292,8 @@ pub async fn draft_reply(provider: &Provider, messages: &[Value]) -> Option<Stri
         json!({"role": "system", "content": PROMPT}),
         json!({"role": "user", "content": format!("Assistant's last reply:\n{tail}")}),
     ];
-    let completion = provider.ask(&request, &[], &AtomicBool::new(false)).await.ok()?;
-    let draft = completion
-        .content
-        .trim()
-        .trim_matches('"')
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
+    let reply = provider.answer(&request, &[], &AtomicBool::new(false)).await?;
+    let draft = reply.trim_matches('"').lines().next().unwrap_or_default().trim().to_owned();
     if draft.is_empty() || draft.eq_ignore_ascii_case("NONE") || draft.chars().count() > 160 {
         return None;
     }
@@ -1353,10 +1355,9 @@ fn set_auto_mode(
         anyhow::bail!("mode is pinned to {}; AUTO is not active", configured.label());
     }
     let value: Value = serde_json::from_str(arguments)?;
-    let mode = match value["mode"].as_str() {
-        Some("plan") => AgentMode::Plan,
-        Some("build") => AgentMode::Build,
-        _ => anyhow::bail!("mode must be plan or build"),
+    let mode = value["mode"].as_str().and_then(AgentMode::parse);
+    let Some(mode) = mode.filter(|mode| *mode != AgentMode::Auto) else {
+        anyhow::bail!("mode must be plan or build");
     };
     let reason = value["reason"]
         .as_str()
