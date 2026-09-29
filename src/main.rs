@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
 use serde_json::json;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use abacus_agent::{
@@ -29,165 +29,51 @@ async fn main() -> Result<()> {
     }
     let paths = AbacusPaths::discover()?;
 
-    if let Some(Command::Setup { force }) = &cli.command {
-        return setup::run(&paths, *force).await;
-    }
-    if let Some(Command::Completions { shell }) = &cli.command {
-        clap_complete::generate(*shell, &mut Cli::command(), "abacus", &mut std::io::stdout());
-        return Ok(());
-    }
-
-    if let Some(Command::Cron { action }) = cli.command.clone() {
-        let workspace = workspace_from_cli(&cli)?;
-        return cron::handle(action, &paths, workspace).await;
+    // Commands that need no provider: copying files or listing sessions must
+    // work on a machine that is not, or is no longer, configured.
+    match &cli.command {
+        Some(Command::Setup { force }) => return setup::run(&paths, *force).await,
+        Some(Command::Completions { shell }) => {
+            let out = &mut std::io::stdout();
+            clap_complete::generate(*shell, &mut Cli::command(), "abacus", out);
+            return Ok(());
+        }
+        Some(Command::Cron { action }) => {
+            return cron::handle(action.clone(), &paths, workspace_from_cli(&cli)?).await;
+        }
+        Some(Command::Sync { action }) => {
+            let workspace = workspace_from_cli(&cli)?;
+            return abacus_agent::sync::handle(action.clone(), &paths, workspace).await;
+        }
+        Some(Command::Sessions) => {
+            return print_session_list(&SessionStore::new(&paths, workspace_from_cli(&cli)?));
+        }
+        Some(Command::Pull { destination, all }) => {
+            // `abacus pull all` reads as a word, not a path. A directory
+            // genuinely named `all` is still reachable as `--all ./all`.
+            let keyword = destination.as_deref().is_some_and(|path| path.as_os_str() == "all");
+            let destination =
+                destination.clone().filter(|_| !keyword).unwrap_or_else(|| ".".into());
+            return pull_traces(&paths, &destination, *all || keyword);
+        }
+        Some(
+            Command::Skills { .. }
+            | Command::Plugins { .. }
+            | Command::Mcp
+            | Command::Trust
+            | Command::Untrust,
+        ) => return extension_command(&cli, &paths).await,
+        _ => {}
     }
 
     let mut settings = Settings::load(&paths)?;
-    if matches!(
-        cli.command,
-        Some(Command::Skills { .. })
-            | Some(Command::Plugins { .. })
-            | Some(Command::Mcp)
-            | Some(Command::Trust)
-            | Some(Command::Untrust)
-    ) {
-        let workspace = workspace_from_cli(&cli)?;
-        match &cli.command {
-            Some(Command::Trust) => {
-                settings.trust.set(&workspace, true);
-                settings.save(&paths)?;
-                println!("Trusted project extensions in {}", workspace.display());
-            }
-            Some(Command::Untrust) => {
-                settings.trust.set(&workspace, false);
-                settings.save(&paths)?;
-                println!("Revoked project extension trust for {}", workspace.display());
-            }
-            Some(Command::Plugins { action: Some(PluginsCommand::Install { path, force }) }) => {
-                let plugin = PluginRegistry::install(path, &paths, *force)?;
-                settings.plugins.disabled.remove(&plugin.name);
-                settings.save(&paths)?;
-                println!("Installed {} {}", plugin.name, plugin.version);
-            }
-            Some(Command::Plugins { action: Some(PluginsCommand::Remove { name }) }) => {
-                PluginRegistry::remove(name, &paths)?;
-                settings.plugins.disabled.remove(name);
-                settings.save(&paths)?;
-                println!("Removed {name}");
-            }
-            Some(Command::Plugins { action: Some(PluginsCommand::Enable { name }) }) => {
-                settings.plugins.disabled.remove(name);
-                settings.save(&paths)?;
-                println!("Enabled {name}");
-            }
-            Some(Command::Plugins { action: Some(PluginsCommand::Disable { name }) }) => {
-                settings.plugins.disabled.insert(name.clone());
-                settings.save(&paths)?;
-                println!("Disabled {name}");
-            }
-            command => {
-                let services = AgentServices::discover(&workspace, &paths, &settings).await?;
-                match command {
-                    Some(Command::Skills { action }) => match action {
-                        Some(SkillsCommand::Inspect { name }) => {
-                            let output = services
-                                .skills
-                                .read()
-                                .expect("skill registry lock")
-                                .execute("skill_load", &json!({"name":name}).to_string())
-                                .context("skill tool unavailable")?;
-                            println!("{output}");
-                        }
-                        _ => {
-                            for skill in services.skills.read().expect("skill registry lock").list()
-                            {
-                                println!("{}\t{}\t{}", skill.name, skill.source, skill.description);
-                            }
-                        }
-                    },
-                    Some(Command::Plugins { action }) => match action {
-                        Some(PluginsCommand::Inspect { name }) => {
-                            let plugin = services
-                                .plugins
-                                .list()
-                                .find(|plugin| plugin.name == *name)
-                                .with_context(|| format!("plugin `{name}` is not enabled"))?;
-                            println!(
-                                "{} {}\n{}\nroot: {}",
-                                plugin.name,
-                                plugin.version,
-                                plugin.description,
-                                plugin.root.display()
-                            );
-                            for command in &plugin.commands {
-                                println!("command: /{} — {}", command.name, command.description);
-                            }
-                            for hook in &plugin.hooks {
-                                println!("hook: {} — {}", hook.event, hook.command);
-                            }
-                            for name in plugin.mcp.keys() {
-                                println!("mcp: {name}");
-                            }
-                        }
-                        _ => {
-                            for plugin in services.plugins.list() {
-                                println!(
-                                    "{}\t{}\t{}\t{}",
-                                    plugin.name, plugin.version, plugin.source, plugin.description
-                                );
-                            }
-                        }
-                    },
-                    Some(Command::Mcp) => {
-                        for tool in services.mcp.tools() {
-                            println!(
-                                "{}\t{}\t{}",
-                                tool.server, tool.exposed_name, tool.description
-                            );
-                        }
-                    }
-                    _ => {}
-                }
-                for diagnostic in services.diagnostics() {
-                    eprintln!("warning: {diagnostic}");
-                }
-            }
-        }
-        return Ok(());
-    }
-    // Handled before the provider is resolved: copying files needs no model,
-    // and a machine with traces worth collecting may no longer be configured.
-    if let Some(Command::Pull { destination, all }) = &cli.command {
-        // `abacus pull all` reads as a word, not a path. A directory genuinely
-        // named `all` is still reachable as `--all ./all` or `./all`.
-        let keyword = destination.as_deref().is_some_and(|path| path.as_os_str() == "all");
-        let destination = if keyword {
-            PathBuf::from(".")
-        } else {
-            destination.clone().unwrap_or_else(|| PathBuf::from("."))
-        };
-        return pull_traces(&paths, &destination, *all || keyword);
-    }
-    if matches!(cli.command, Some(Command::Sessions)) {
-        let workspace = workspace_from_cli(&cli)?;
-        let store = SessionStore::new(&paths, workspace);
-        print_session_list(&store)?;
-        return Ok(());
-    }
-    if let Some(Command::Sync { action }) = cli.command.clone() {
-        let workspace = workspace_from_cli(&cli)?;
-        return abacus_agent::sync::handle(action, &paths, workspace).await;
-    }
-    if matches!(cli.command, Some(Command::Doctor))
-        && !settings.is_configured()
-        && !cli.has_inline_provider()
-    {
-        println!("Abacus {}", env!("CARGO_PKG_VERSION"));
-        println!("home       {}", paths.root.display());
-        println!("config     missing (run `abacus setup`)");
-        return Ok(());
-    }
     if !settings.is_configured() && !cli.has_inline_provider() {
+        if matches!(cli.command, Some(Command::Doctor)) {
+            println!("Abacus {}", env!("CARGO_PKG_VERSION"));
+            println!("home       {}", paths.root.display());
+            println!("config     missing (run `abacus setup`)");
+            return Ok(());
+        }
         eprintln!("Abacus needs a provider before its first run. Starting setup…\n");
         setup::run(&paths, false).await?;
         settings = Settings::load(&paths)?;
@@ -195,189 +81,258 @@ async fn main() -> Result<()> {
     let credentials = Credentials::load(&paths)?;
     let mut config = Config::resolve(&cli, &settings, &credentials, paths.clone())?;
 
+    // Commands that talk to the provider but open no session.
     match cli.command {
         Some(Command::Eval { tasks, repeat, state, model, json }) => {
-            return abacus_agent::eval::run(
-                config,
-                settings,
-                abacus_agent::eval::EvalOptions { filter: tasks, repeat, state, model, json },
-            )
-            .await;
+            let options =
+                abacus_agent::eval::EvalOptions { filter: tasks, repeat, state, model, json };
+            return abacus_agent::eval::run(config, settings, options).await;
         }
         Some(Command::Models) => {
-            let models =
-                setup::discover_models(&config.base_url, config.api_key.as_deref()).await?;
-            for model in models {
-                let marker = if model == config.model { "*" } else { " " };
-                println!("{marker} {model}");
+            for model in setup::discover_models(&config.base_url, config.api_key.as_deref()).await?
+            {
+                println!("{} {model}", if model == config.model { "*" } else { " " });
             }
             return Ok(());
         }
-        Some(Command::Providers) => {
-            use abacus_agent::console;
-            let endpoints = setup::discover_endpoints(
-                &config.base_url,
-                config.api_key.as_deref(),
-                &config.model,
-            )
-            .await?;
-            console::banner(&format!("providers for {}", config.model));
-            console::blank();
-            if endpoints.is_empty() {
-                console::note("The endpoint reported no upstream providers for this model.");
-                console::blank();
-                return Ok(());
-            }
-            let pinned = &config.routing.order;
-            let width = endpoints.iter().map(|endpoint| endpoint.name.len()).max().unwrap_or(16);
-            for endpoint in &endpoints {
-                // Mark what the active profile already pins, so the list doubles
-                // as a view of the current routing.
-                let marker = if pinned.iter().any(|entry| {
-                    entry.eq_ignore_ascii_case(&endpoint.name) || *entry == endpoint.tag
-                }) {
-                    console::ok(console::marks().pass)
-                } else {
-                    " ".to_owned()
-                };
-                println!(
-                    "  {marker} {}  {}  {}",
-                    console::pad(&endpoint.name, width),
-                    console::dim(&console::pad(&endpoint.tag, 22)),
-                    console::dim(&format!(
-                        "{:>9} ctx  {}",
-                        abacus_agent::ui::format_count(endpoint.context_length),
-                        endpoint.quantization
-                    )),
-                );
-            }
-            console::blank();
-            if pinned.is_empty() {
-                console::note(
-                    "Nothing pinned — the endpoint chooses. Pin with /providers <name, name>.",
-                );
-            } else {
-                console::note(&format!(
-                    "Pinned: {}  ·  fallbacks {}",
-                    pinned.join(", "),
-                    if config.routing.allow_fallbacks { "allowed" } else { "off" }
-                ));
-            }
-            console::blank();
-            return Ok(());
-        }
-        Some(Command::Sessions) | Some(Command::Sync { .. }) => {
-            unreachable!()
-        }
-        Some(Command::Doctor) => {
-            return doctor(&config, &settings).await;
-        }
-        Some(Command::Setup { .. }) => unreachable!(),
-        Some(Command::Pull { .. }) => unreachable!(),
-        Some(Command::Completions { .. }) => unreachable!(),
-        Some(Command::Skills { .. })
-        | Some(Command::Plugins { .. })
-        | Some(Command::Mcp)
-        | Some(Command::Trust)
-        | Some(Command::Untrust)
-        | Some(Command::Cron { .. }) => unreachable!(),
-        // Falls through: the app server wants the same resolved config,
-        // session store, and services the TUI gets.
-        Some(Command::AppServer) | None => {}
+        Some(Command::Providers) => return list_providers(&config).await,
+        Some(Command::Doctor) => return doctor(&config, &settings).await,
+        // Everything else returned above; the app server wants the same
+        // resolved config, session store, and services the TUI gets.
+        _ => {}
     }
 
     // Best-effort: ask the provider for the model's real context window and
     // output cap so compaction thresholds and output limits scale with the
     // model. Non-fatal — we fall back to the heuristic/default estimates.
-    if config.model_limits.source != model_info::LimitSource::Override
-        && let Some(models_url) = config.models_endpoint()
-        && let Some((context, output)) =
-            model_info::detect_limits(&models_url, config.api_key.as_deref(), &config.model).await
-    {
-        config.model_limits.apply_detected(context, output);
+    if let Some(limits) = detect_limits(&config, config.model_limits).await {
+        config.model_limits = limits;
     }
 
     let store = SessionStore::new(&paths, config.workspace.clone());
     let services =
         Arc::new(AgentServices::discover(&config.workspace, &config.paths, &settings).await?);
-    if cli.prompt.is_some() {
-        for diagnostic in services.diagnostics() {
-            eprintln!("warning: {diagnostic}");
-        }
+    // Session creation is otherwise deferred until the first message is sent,
+    // which avoids littering the store with empty sessions on every startup.
+    let mut session = match (&cli.resume, cli.continue_last, config.no_session) {
+        (_, _, true) => None,
+        (Some(id), _, _) => Some(store.load(id)?),
+        (None, true, _) => Some(store.latest()?),
+        (None, false, _) => None,
+    };
+    let store = (!cli.no_session).then_some(store);
+
+    let Some(prompt) = cli.prompt else {
+        return if matches!(cli.command, Some(Command::AppServer)) {
+            app_server::run(config, settings, credentials, session, store, services).await
+        } else {
+            tui::run(config, settings, credentials, session, store, services).await
+        };
+    };
+    for diagnostic in services.diagnostics() {
+        eprintln!("warning: {diagnostic}");
     }
-    let mut session = if config.no_session {
-        None
-    } else if let Some(id) = &cli.resume {
-        Some(store.load(id)?)
-    } else if cli.continue_last {
-        Some(store.latest()?)
+    let mut messages = session
+        .as_ref()
+        .map(|value| value.messages.clone())
+        .unwrap_or_else(|| initial_messages(&config.workspace));
+    // A loop replays its own prompt each iteration; a plain run sends it once.
+    let loop_config = if cli.loop_run {
+        let promise = cli
+            .completion_promise
+            .clone()
+            .unwrap_or_else(|| abacus_agent::ralph::DEFAULT_COMPLETION_PROMISE.to_owned());
+        Some(abacus_agent::ralph::RalphLoop::new(prompt, promise, cli.max_iterations)?)
     } else {
-        // Defer session creation until the first message is sent — avoids
-        // littering the store with empty sessions on every startup.
+        let prompt = expand_file_references(&config.workspace, &prompt)?;
+        messages.push(json!({"role": "user", "content": prompt}));
         None
     };
-
-    if let Some(prompt) = cli.prompt {
-        let mut messages = session
-            .as_ref()
-            .map(|value| value.messages.clone())
-            .unwrap_or_else(|| initial_messages(&config.workspace));
-        let mut loop_config = None;
-        if cli.loop_run {
-            let promise = cli
-                .completion_promise
-                .clone()
-                .unwrap_or_else(|| abacus_agent::ralph::DEFAULT_COMPLETION_PROMISE.to_owned());
-            loop_config = Some(abacus_agent::ralph::RalphLoop::new(
-                prompt.clone(),
-                promise,
-                cli.max_iterations,
-            )?);
-        } else {
-            let prompt = expand_file_references(&config.workspace, &prompt)?;
-            messages.push(json!({"role": "user", "content": prompt}));
+    if let (Some(session), Some(store)) = (session.as_mut(), &store) {
+        session.update_messages(messages.clone());
+        if loop_config.is_some() {
+            session.ralph_loop.clone_from(&loop_config);
         }
-        if let Some(value) = session.as_mut() {
-            value.update_messages(messages.clone());
-            if let Some(ralph) = &loop_config {
-                value.ralph_loop = Some(ralph.clone());
-            }
-            store.save(value)?;
-        }
-        let reporter = ActivityReporter::new(
-            settings.activity.enabled,
-            &settings.activity.endpoint,
-            &config.paths,
-        );
-        return headless::run(
-            config,
-            cli.output_format,
-            messages,
-            session,
-            (!cli.no_session).then_some(store),
-            services,
-            loop_config,
-            reporter,
-        )
-        .await;
+        store.save(session)?;
     }
-
-    if matches!(cli.command, Some(Command::AppServer)) {
-        return app_server::run(
-            config,
-            settings,
-            credentials,
-            session,
-            (!cli.no_session).then_some(store),
-            services,
-        )
-        .await;
-    }
-
-    tui::run(config, settings, credentials, session, (!cli.no_session).then_some(store), services)
-        .await
+    let reporter = ActivityReporter::new(
+        settings.activity.enabled,
+        &settings.activity.endpoint,
+        &config.paths,
+    );
+    headless::run(
+        config,
+        cli.output_format,
+        messages,
+        session,
+        store,
+        services,
+        loop_config,
+        reporter,
+    )
+    .await
 }
 
+/// The model's limits as the provider reports them, unless the user pinned
+/// them. `None` when there is nothing to improve on.
+async fn detect_limits(
+    config: &Config,
+    mut limits: model_info::ModelLimits,
+) -> Option<model_info::ModelLimits> {
+    if limits.source == model_info::LimitSource::Override {
+        return None;
+    }
+    let (context, output) = model_info::detect_limits(
+        &config.models_endpoint()?,
+        config.api_key.as_deref(),
+        &config.model,
+    )
+    .await?;
+    limits.apply_detected(context, output);
+    Some(limits)
+}
+
+/// `abacus skills | plugins | mcp | trust | untrust`.
+async fn extension_command(cli: &Cli, paths: &AbacusPaths) -> Result<()> {
+    let mut settings = Settings::load(paths)?;
+    let workspace = workspace_from_cli(cli)?;
+    // The commands that only edit settings, and what they report.
+    let changed = match &cli.command {
+        Some(Command::Trust) => {
+            settings.trust.set(&workspace, true);
+            format!("Trusted project extensions in {}", workspace.display())
+        }
+        Some(Command::Untrust) => {
+            settings.trust.set(&workspace, false);
+            format!("Revoked project extension trust for {}", workspace.display())
+        }
+        Some(Command::Plugins { action: Some(PluginsCommand::Install { path, force }) }) => {
+            let plugin = PluginRegistry::install(path, paths, *force)?;
+            settings.plugins.disabled.remove(&plugin.name);
+            format!("Installed {} {}", plugin.name, plugin.version)
+        }
+        Some(Command::Plugins { action: Some(PluginsCommand::Remove { name }) }) => {
+            PluginRegistry::remove(name, paths)?;
+            settings.plugins.disabled.remove(name);
+            format!("Removed {name}")
+        }
+        Some(Command::Plugins { action: Some(PluginsCommand::Enable { name }) }) => {
+            settings.plugins.disabled.remove(name);
+            format!("Enabled {name}")
+        }
+        Some(Command::Plugins { action: Some(PluginsCommand::Disable { name }) }) => {
+            settings.plugins.disabled.insert(name.clone());
+            format!("Disabled {name}")
+        }
+        _ => String::new(),
+    };
+    if !changed.is_empty() {
+        settings.save(paths)?;
+        println!("{changed}");
+        return Ok(());
+    }
+
+    let services = AgentServices::discover(&workspace, paths, &settings).await?;
+    match &cli.command {
+        Some(Command::Skills { action: Some(SkillsCommand::Inspect { name }) }) => {
+            let skills = services.skills.read().expect("skill registry lock");
+            let output = skills.execute("skill_load", &json!({"name":name}).to_string());
+            println!("{}", output.context("skill tool unavailable")?);
+        }
+        Some(Command::Skills { .. }) => {
+            for skill in services.skills.read().expect("skill registry lock").list() {
+                println!("{}\t{}\t{}", skill.name, skill.source, skill.description);
+            }
+        }
+        Some(Command::Plugins { action: Some(PluginsCommand::Inspect { name }) }) => {
+            let plugin = services
+                .plugins
+                .list()
+                .find(|plugin| plugin.name == *name)
+                .with_context(|| format!("plugin `{name}` is not enabled"))?;
+            println!(
+                "{} {}\n{}\nroot: {}",
+                plugin.name,
+                plugin.version,
+                plugin.description,
+                plugin.root.display()
+            );
+            for command in &plugin.commands {
+                println!("command: /{} — {}", command.name, command.description);
+            }
+            for hook in &plugin.hooks {
+                println!("hook: {} — {}", hook.event, hook.command);
+            }
+            for name in plugin.mcp.keys() {
+                println!("mcp: {name}");
+            }
+        }
+        Some(Command::Plugins { .. }) => {
+            for plugin in services.plugins.list() {
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    plugin.name, plugin.version, plugin.source, plugin.description
+                );
+            }
+        }
+        _ => {
+            for tool in services.mcp.tools() {
+                println!("{}\t{}\t{}", tool.server, tool.exposed_name, tool.description);
+            }
+        }
+    }
+    for diagnostic in services.diagnostics() {
+        eprintln!("warning: {diagnostic}");
+    }
+    Ok(())
+}
+
+/// `abacus providers`: the upstreams that can serve the active model, with the
+/// ones the profile already pins marked — so the list doubles as a view of the
+/// current routing.
+async fn list_providers(config: &Config) -> Result<()> {
+    use abacus_agent::console;
+    let endpoints =
+        setup::discover_endpoints(&config.base_url, config.api_key.as_deref(), &config.model)
+            .await?;
+    console::banner(&format!("providers for {}", config.model));
+    console::blank();
+    if endpoints.is_empty() {
+        console::note("The endpoint reported no upstream providers for this model.");
+        console::blank();
+        return Ok(());
+    }
+    let pinned = &config.routing.order;
+    let width = endpoints.iter().map(|endpoint| endpoint.name.len()).max().unwrap_or(16);
+    for endpoint in &endpoints {
+        let is_pinned = pinned
+            .iter()
+            .any(|entry| entry.eq_ignore_ascii_case(&endpoint.name) || *entry == endpoint.tag);
+        let marker = if is_pinned { console::ok(console::marks().pass) } else { " ".to_owned() };
+        println!(
+            "  {marker} {}  {}  {}",
+            console::pad(&endpoint.name, width),
+            console::dim(&console::pad(&endpoint.tag, 22)),
+            console::dim(&format!(
+                "{:>9} ctx  {}",
+                abacus_agent::ui::format_count(endpoint.context_length),
+                endpoint.quantization
+            )),
+        );
+    }
+    console::blank();
+    if pinned.is_empty() {
+        console::note("Nothing pinned — the endpoint chooses. Pin with /providers <name, name>.");
+    } else {
+        console::note(&format!(
+            "Pinned: {}  ·  fallbacks {}",
+            pinned.join(", "),
+            if config.routing.allow_fallbacks { "allowed" } else { "off" }
+        ));
+    }
+    console::blank();
+    Ok(())
+}
 fn print_session_list(store: &SessionStore) -> Result<()> {
     let sessions = store.list()?;
     if sessions.is_empty() {
@@ -599,14 +554,7 @@ async fn doctor(config: &Config, settings: &Settings) -> Result<()> {
     // command, so a best-effort /models probe is acceptable here and lets the
     // reported limits reflect the detected values rather than just the
     // heuristic/default estimate.
-    let mut limits = config.model_limits;
-    if limits.source != model_info::LimitSource::Override
-        && let Some(models_url) = config.models_endpoint()
-        && let Some((context, output)) =
-            model_info::detect_limits(&models_url, config.api_key.as_deref(), &config.model).await
-    {
-        limits.apply_detected(context, output);
-    }
+    let limits = detect_limits(config, config.model_limits).await.unwrap_or(config.model_limits);
     let output_cap = limits
         .configured_output_tokens
         .map(|tokens| tokens.to_string())
