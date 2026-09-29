@@ -113,7 +113,13 @@ pub fn compact_history(messages: &[Value]) -> String {
         match message.get("role").and_then(Value::as_str) {
             Some("user") => {
                 if let Some(text) = message.get("content").and_then(Value::as_str) {
-                    lines.push((true, format!("user: {}", clip(text, EXCERPT_CHARS))));
+                    lines.push((
+                        true,
+                        format!(
+                            "user: {}",
+                            crate::text::clip(&crate::text::flat(text.trim()), EXCERPT_CHARS, "…")
+                        ),
+                    ));
                 }
             }
             Some("assistant") => {
@@ -122,13 +128,20 @@ pub fn compact_history(messages: &[Value]) -> String {
                 if let Some(thinking) = message.get("reasoning_content").and_then(Value::as_str)
                     && !thinking.trim().is_empty()
                 {
-                    line.push_str(&format!(" (thinking: {})", clip(thinking, EXCERPT_CHARS)));
+                    line.push_str(&format!(
+                        " (thinking: {})",
+                        crate::text::clip(&crate::text::flat(thinking.trim()), EXCERPT_CHARS, "…")
+                    ));
                 }
                 if let Some(text) = message.get("content").and_then(Value::as_str)
                     && !text.trim().is_empty()
                 {
                     line.push(' ');
-                    line.push_str(&clip(text, EXCERPT_CHARS));
+                    line.push_str(&crate::text::clip(
+                        &crate::text::flat(text.trim()),
+                        EXCERPT_CHARS,
+                        "…",
+                    ));
                 }
                 if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
                     for call in calls {
@@ -137,7 +150,11 @@ pub fn compact_history(messages: &[Value]) -> String {
                                 .pointer("/function/arguments")
                                 .and_then(Value::as_str)
                                 .unwrap_or("");
-                            line.push_str(&format!(" [{} {}]", name, clip(arguments, 80)));
+                            line.push_str(&format!(
+                                " [{} {}]",
+                                name,
+                                crate::text::clip(&crate::text::flat(arguments.trim()), 80, "…")
+                            ));
                         }
                     }
                 }
@@ -183,15 +200,6 @@ pub fn compact_history(messages: &[Value]) -> String {
         }
     }
     kept.join("\n")
-}
-
-fn clip(text: &str, limit: usize) -> String {
-    let trimmed = text.trim().replace('\n', " ");
-    if trimmed.chars().count() <= limit {
-        return trimmed;
-    }
-    let clipped: String = trimmed.chars().take(limit).collect();
-    format!("{clipped}…")
 }
 
 async fn quick_call(

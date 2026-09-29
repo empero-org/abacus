@@ -547,7 +547,11 @@ async fn doctor(config: &Config, settings: &Settings) -> Result<()> {
             "reachable",
             &format!("{} models, but {} is not among them", models.len(), config.model),
         ),
-        Err(error) => record(Health::Fail, "reachable", &one_line(&format!("{error:#}"), 160)),
+        Err(error) => record(
+            Health::Fail,
+            "reachable",
+            &abacus_agent::text::clip(&abacus_agent::text::flat(&format!("{error:#}")), 160, "…"),
+        ),
     }
 
     // Show the context budget a real run would use. Doctor is a diagnostic
@@ -668,13 +672,4 @@ async fn doctor(config: &Config, settings: &Settings) -> Result<()> {
     console::blank();
 
     if failures == 0 { Ok(()) } else { anyhow::bail!("doctor found one or more problems") }
-}
-
-/// Collapse a multi-line error into something that fits on a diagnostic row.
-fn one_line(value: &str, max: usize) -> String {
-    let flat = value.replace(['\n', '\r'], " ");
-    if flat.chars().count() <= max {
-        return flat;
-    }
-    format!("{}…", flat.chars().take(max).collect::<String>())
 }

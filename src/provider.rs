@@ -724,7 +724,7 @@ impl Provider {
         let status = response.status();
         if !status.is_success() {
             let detail = response.text().await.unwrap_or_default();
-            bail!("provider returned {status}: {}", truncate_error(&detail));
+            bail!("provider returned {status}: {}", crate::text::clip_bytes(&detail, 2_000, "…"));
         }
         Ok(response)
     }
@@ -1790,18 +1790,6 @@ fn decode_sse_line(line: &[u8], output: &mut Vec<String>) -> Result<()> {
         output.push(data.trim_start().to_owned());
     }
     Ok(())
-}
-
-fn truncate_error(value: &str) -> String {
-    const LIMIT: usize = 2_000;
-    if value.len() <= LIMIT {
-        return value.to_owned();
-    }
-    let mut boundary = LIMIT;
-    while !value.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    format!("{}…", &value[..boundary])
 }
 
 #[cfg(test)]

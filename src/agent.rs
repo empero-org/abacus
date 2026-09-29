@@ -1065,7 +1065,7 @@ pub fn compaction_trace(messages: &[Value]) -> String {
         {
             let snippet = content.trim();
             if !snippet.is_empty() {
-                parts.push(single_line_trim(snippet, 100));
+                parts.push(crate::text::clip(&crate::text::squeeze(snippet), 100, "…"));
             }
         }
         if parts.is_empty() {
@@ -1096,17 +1096,10 @@ fn arg_preview(args: &str, name: &str) -> String {
         "git_commit" => "message",
         _ => return String::new(),
     };
-    if let Some(s) = value[key].as_str() { single_line_trim(s, 60) } else { String::new() }
-}
-
-fn single_line_trim(text: &str, limit: usize) -> String {
-    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let chars: Vec<char> = one_line.chars().collect();
-    if chars.len() <= limit {
-        one_line
+    if let Some(s) = value[key].as_str() {
+        crate::text::clip(&crate::text::squeeze(s), 60, "…")
     } else {
-        let head: String = chars[..limit].iter().collect();
-        format!("{head}…")
+        String::new()
     }
 }
 
@@ -1297,11 +1290,7 @@ pub fn tool_reads_only(name: &str) -> bool {
 /// which is the quiet way to fail — the composer just shows its normal hint.
 pub async fn draft_reply(provider: &Provider, messages: &[Value]) -> Option<String> {
     const PROMPT: &str = "You predict the user's next message to a coding agent.          Given the assistant's last reply, write the single most likely follow-up the user          would send. Write it as the user, in the first person, under 12 words, as an          instruction or question. No quotes, no preamble, no alternatives. If no follow-up is          likely, reply with exactly NONE.";
-    let last = messages
-        .iter()
-        .rev()
-        .find(|message| message["role"] == "assistant" && message["content"].is_string())
-        .and_then(|message| message["content"].as_str())?;
+    let last = crate::text::last_reply(messages);
     if last.trim().is_empty() {
         return None;
     }
@@ -1677,16 +1666,7 @@ fn system_prompt(workspace: &Path) -> String {
 
     let instructions = workspace.join("AGENTS.md");
     if let Ok(content) = fs::read_to_string(instructions) {
-        const MAX: usize = 24_000;
-        let content = if content.len() > MAX {
-            let mut boundary = MAX;
-            while !content.is_char_boundary(boundary) {
-                boundary -= 1;
-            }
-            format!("{}\n… AGENTS.md truncated", &content[..boundary])
-        } else {
-            content
-        };
+        let content = crate::text::clip_bytes(&content, 24_000, "\n… AGENTS.md truncated");
         prompt.push_str("\n\nProject instructions from AGENTS.md:\n");
         prompt.push_str(&content);
     }

@@ -319,7 +319,7 @@ pub(super) fn usage_model_lines(
         let marker = if model == current_model { "●" } else { " " };
         lines.push(Line::from(vec![
             fg(format!(" {marker} "), if model == current_model { primary() } else { muted() }),
-            bold(format!("{:<24}", single_line(&model, 23)), text()),
+            bold(format!("{:<24}", crate::text::clip(&crate::text::flat(&model), 23, "…")), text()),
             fg(format!("{sessions:>8}  "), muted()),
             fg(format!("{:>8}  ", format_count(tokens)), primary()),
             fg("█".repeat(filled.max(1)), secondary()),

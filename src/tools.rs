@@ -1537,17 +1537,8 @@ fn parse_args<T: for<'de> Deserialize<'de>>(arguments: &str) -> Result<T> {
     serde_json::from_str(arguments).context("invalid tool arguments")
 }
 
-fn truncate(mut value: String, max: usize) -> String {
-    if value.len() <= max {
-        return value;
-    }
-    let mut boundary = max;
-    while !value.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    value.truncate(boundary);
-    value.push_str("\n… output truncated");
-    value
+fn truncate(value: String, max: usize) -> String {
+    crate::text::clip_bytes(&value, max, "\n… output truncated")
 }
 
 fn unified_diff(path: &str, old: &str, new: &str) -> String {

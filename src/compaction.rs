@@ -382,26 +382,17 @@ fn call_subject(messages: &[Value], result: usize) -> String {
     };
     for key in ["path", "paths", "pattern", "query", "command"] {
         match &parsed[key] {
-            Value::String(value) => return truncate_subject(value),
+            Value::String(value) => return crate::text::clip(&crate::text::flat(value), 80, "…"),
             Value::Array(values) => {
                 let joined = values.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ");
                 if !joined.is_empty() {
-                    return truncate_subject(&joined);
+                    return crate::text::clip(&crate::text::flat(&joined), 80, "…");
                 }
             }
             _ => {}
         }
     }
     String::new()
-}
-
-fn truncate_subject(value: &str) -> String {
-    const MAX: usize = 80;
-    let flat = value.replace('\n', " ");
-    if flat.chars().count() <= MAX {
-        return flat;
-    }
-    format!("{}…", flat.chars().take(MAX).collect::<String>())
 }
 
 /// Replace a stale tool result with a placeholder that still says what it was.

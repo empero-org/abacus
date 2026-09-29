@@ -218,8 +218,9 @@ pub async fn run(
                     AgentEvent::Done { messages, .. } => {
                         final_messages = messages;
                         if let Some(state) = ralph.as_mut() {
-                            let completed =
-                                state.observe_output(&latest_assistant_text(&final_messages));
+                            let completed = state.observe_output(
+                                &crate::text::last_reply(&final_messages).to_owned(),
+                            );
                             if format == OutputFormat::Plain {
                                 if completed {
                                     eprintln!(
@@ -429,16 +430,6 @@ fn turn_options(
         session_id,
         ..state.turn(config, services.clone()).with_workspace_stores(config)
     }
-}
-
-fn latest_assistant_text(messages: &[Value]) -> String {
-    messages
-        .iter()
-        .rev()
-        .find(|message| message["role"] == "assistant" && message["content"].is_string())
-        .and_then(|message| message["content"].as_str())
-        .unwrap_or_default()
-        .to_owned()
 }
 
 fn emit(value: Value) -> Result<()> {

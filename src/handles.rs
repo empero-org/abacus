@@ -292,8 +292,8 @@ impl HandleStore {
             handle.lines(),
             handle.shape(),
             handle.source,
-            clip(&head.join("\n"), 1_500),
-            clip(&tail.join("\n"), 800),
+            crate::text::clip(&head.join("\n"), 1_500, "\n… truncated"),
+            crate::text::clip(&tail.join("\n"), 800, "\n… truncated"),
         ))
     }
 
@@ -328,7 +328,7 @@ impl HandleStore {
             "${} lines {start}-{end} of {}:\n{}",
             handle.id,
             lines.len(),
-            clip(&body, MAX_SLICE_CHARS)
+            crate::text::clip(&body, MAX_SLICE_CHARS, "\n… truncated")
         ))
     }
 
@@ -379,7 +379,7 @@ impl HandleStore {
             "{total} for `{}` in ${}:\n{}",
             args.pattern,
             handle.id,
-            clip(&out.join("\n"), MAX_SLICE_CHARS)
+            crate::text::clip(&out.join("\n"), MAX_SLICE_CHARS, "\n… truncated")
         ))
     }
 
@@ -392,7 +392,10 @@ impl HandleStore {
         }
         let chunks = chunks.clamp(1, MAX_CHUNKS).min(lines.len());
         let per = lines.len().div_ceil(chunks);
-        lines.chunks(per).map(|group| clip(&group.join("\n"), MAX_CHUNK_CHARS)).collect()
+        lines
+            .chunks(per)
+            .map(|group| crate::text::clip(&group.join("\n"), MAX_CHUNK_CHARS, "\n… truncated"))
+            .collect()
     }
 
     fn spend(&self, calls: usize) -> Result<()> {
@@ -413,14 +416,6 @@ fn spec(name: &str, description: &str, parameters: Value) -> Value {
         "type":"function",
         "function":{"name":name,"description":description,"parameters":parameters}
     })
-}
-
-fn clip(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_owned();
-    }
-    let kept: String = text.chars().take(limit).collect();
-    format!("{kept}\n… truncated")
 }
 
 /// Map a question over every chunk of a bound payload, concurrently.

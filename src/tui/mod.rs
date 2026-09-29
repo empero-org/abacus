@@ -1031,14 +1031,7 @@ async fn serve_remote(
 /// The slice of a tool result kept for expansion, bounded so one enormous
 /// result cannot grow the session's footprint without limit.
 fn retain_output(output: &str) -> String {
-    if output.len() <= ui::MAX_RETAINED_OUTPUT {
-        return output.to_owned();
-    }
-    let mut boundary = ui::MAX_RETAINED_OUTPUT;
-    while !output.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    format!("{}\n… truncated", &output[..boundary])
+    crate::text::clip_bytes(output, ui::MAX_RETAINED_OUTPUT, "\n… truncated")
 }
 
 /// Whether a tool result reports a failure. The agent surfaces errors and
@@ -1097,24 +1090,8 @@ fn tool_preview(output: &str) -> String {
     if output.lines().count() > 8 {
         preview.push_str("\n…");
     }
-    if preview.len() > 1_200 {
-        let mut boundary = 1_200;
-        while !preview.is_char_boundary(boundary) {
-            boundary -= 1;
-        }
-        preview.truncate(boundary);
-        preview.push('…');
-    }
+    let preview = crate::text::clip_bytes(&preview, 1_200, "…");
     preview
-}
-
-fn single_line(value: &str, max: usize) -> String {
-    let value = value.replace(['\n', '\r'], " ");
-    if value.chars().count() <= max {
-        value
-    } else {
-        format!("{}…", value.chars().take(max).collect::<String>())
-    }
 }
 
 fn entries_from_messages(messages: &[Value]) -> Vec<Entry> {
@@ -1170,16 +1147,6 @@ fn session_key(session: Option<&Session>) -> String {
 
 fn toggle(flag: &mut bool) {
     *flag = !*flag;
-}
-
-fn latest_assistant_text(messages: &[Value]) -> String {
-    messages
-        .iter()
-        .rev()
-        .find(|message| message["role"] == "assistant" && message["content"].is_string())
-        .and_then(|message| message["content"].as_str())
-        .unwrap_or_default()
-        .to_owned()
 }
 
 impl App {
@@ -1485,13 +1452,8 @@ impl App {
             current.summary,
             if current.full.is_empty() { "(no output)" } else { &current.full }
         ));
-        if target.full.len() > ui::MAX_RETAINED_OUTPUT {
-            let mut boundary = ui::MAX_RETAINED_OUTPUT;
-            while !target.full.is_char_boundary(boundary) {
-                boundary -= 1;
-            }
-            target.full.truncate(boundary);
-        }
+        let kept = crate::text::prefix(&target.full, ui::MAX_RETAINED_OUTPUT).len();
+        target.full.truncate(kept);
         target.duration_ms = match (target.duration_ms, current.duration_ms) {
             (Some(a), Some(b)) => Some(a + b),
             (a, b) => a.or(b),
@@ -1677,7 +1639,7 @@ impl App {
                     // Reported back, so there is no half-finished reply to
                     // recover on the way out.
                     crate::recovery::clear();
-                    let assistant_output = latest_assistant_text(&messages);
+                    let assistant_output = crate::text::last_reply(&messages).to_owned();
                     self.messages = messages;
                     // Resynthe live ctx estimate from the authoritative messages.
                     self.ctx_chars = message_chars(&self.messages);

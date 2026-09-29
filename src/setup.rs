@@ -316,7 +316,7 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
         }
         Err(error) => {
             println!("{}", console::err("unavailable"));
-            console::note(&one_line(&format!("{error:#}"), 200));
+            console::note(&crate::text::clip(&crate::text::flat(&format!("{error:#}")), 200, ""));
             console::note(
                 "You can save now and fix connectivity later with /config or `abacus doctor`.",
             );
@@ -501,7 +501,10 @@ pub async fn discover_endpoints(
     let status = response.status();
     if !status.is_success() {
         let detail = response.text().await.unwrap_or_default();
-        bail!("provider returned {status}: {}", one_line(&detail, 240));
+        bail!(
+            "provider returned {status}: {}",
+            crate::text::clip(&crate::text::flat(&detail), 240, "")
+        );
     }
     let value: Value = response.json().await.context("provider returned invalid JSON")?;
     Ok(value["data"]["endpoints"]
@@ -544,7 +547,10 @@ pub async fn discover_model_cards(
     let status = response.status();
     if !status.is_success() {
         let detail = response.text().await.unwrap_or_default();
-        bail!("provider returned {status}: {}", one_line(&detail, 240));
+        bail!(
+            "provider returned {status}: {}",
+            crate::text::clip(&crate::text::flat(&detail), 240, "")
+        );
     }
     let value: Value = response.json().await.context("provider returned invalid JSON")?;
     Ok(crate::model_info::parse_model_cards(&value))
@@ -565,7 +571,10 @@ pub async fn discover_models(base_url: &str, api_key: Option<&str>) -> Result<Ve
     let status = response.status();
     if !status.is_success() {
         let detail = response.text().await.unwrap_or_default();
-        bail!("provider returned {status}: {}", one_line(&detail, 240));
+        bail!(
+            "provider returned {status}: {}",
+            crate::text::clip(&crate::text::flat(&detail), 240, "")
+        );
     }
     let value: Value = response.json().await.context("provider returned invalid JSON")?;
     Ok(crate::model_info::parse_model_cards(&value).into_iter().map(|card| card.id).collect())
@@ -643,11 +652,6 @@ fn slug(value: &str) -> String {
         .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { '-' })
         .collect::<String>();
     value.trim_matches('-').to_owned()
-}
-
-fn one_line(value: &str, max: usize) -> String {
-    let value = value.replace(['\n', '\r'], " ");
-    value.chars().take(max).collect()
 }
 
 #[cfg(test)]

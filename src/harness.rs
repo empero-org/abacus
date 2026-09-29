@@ -342,21 +342,6 @@ pub fn slug(raw: &str, fallback: &str) -> String {
     if trimmed.is_empty() { fallback.to_owned() } else { trimmed }
 }
 
-fn truncate(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_owned();
-    }
-    let mut boundary = text.char_indices().nth(limit).map(|(index, _)| index).unwrap_or(text.len());
-    while !text.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    format!("{}…", &text[..boundary])
-}
-
-fn compact(text: &str, limit: usize) -> String {
-    truncate(&text.split_whitespace().collect::<Vec<_>>().join(" "), limit)
-}
-
 fn validate_edit(edit: &RefinementEdit, id: &str) -> Option<String> {
     if id.is_empty() {
         return Some("edit needs an id or a title to derive one from".to_owned());
@@ -470,13 +455,14 @@ pub fn apply_proposal(
                         .clone()
                         .or_else(|| before.as_ref().map(|entry| entry.title.clone()))
                         .unwrap_or_else(|| entry_id.clone()),
-                    content: truncate(
+                    content: crate::text::clip(
                         edit.content
                             .as_deref()
                             .or(before.as_ref().map(|entry| entry.content.as_str()))
                             .unwrap_or_default()
                             .trim(),
                         MAX_CONTENT_CHARS,
+                        "…",
                     ),
                     path: edit
                         .path
@@ -716,7 +702,7 @@ impl HarnessStore {
         if notes.is_empty() {
             return Ok(());
         }
-        write_notes_block(workspace, &truncate(&notes.join("\n"), MAX_NOTES_CHARS))
+        write_notes_block(workspace, &crate::text::clip(&notes.join("\n"), MAX_NOTES_CHARS, "…"))
     }
 
     /// Entries of one kind applying to this workspace, newest first.
@@ -907,7 +893,7 @@ impl HarnessStore {
             id: id.clone(),
             kind: EntryKind::Memory,
             title: title.clone(),
-            content: truncate(body, MAX_CONTENT_CHARS),
+            content: crate::text::clip(body, MAX_CONTENT_CHARS, "…"),
             path: existing.as_ref().map(|entry| entry.path.clone()).unwrap_or_else(default_path),
             lifetime: if durable_hit || promoted { Lifetime::Durable } else { Lifetime::Session },
             workspace,
@@ -1042,7 +1028,7 @@ impl HarnessStore {
                     entry.path,
                     entry.version,
                     entry.lifetime.label(),
-                    compact(&entry.content, 180)
+                    crate::text::clip(&crate::text::squeeze(&entry.content), 180, "…")
                 ));
             }
         }
@@ -1055,7 +1041,12 @@ impl HarnessStore {
             } else {
                 event.changes.join(", ")
             };
-            lines.push(format!("- [{}] {}: {}", event.id, compact(&event.trigger, 120), changes));
+            lines.push(format!(
+                "- [{}] {}: {}",
+                event.id,
+                crate::text::clip(&crate::text::squeeze(&event.trigger), 120, "…"),
+                changes
+            ));
         }
         lines.join("\n")
     }
@@ -1103,7 +1094,7 @@ impl HarnessStore {
                         id,
                         kind: EntryKind::Memory,
                         title: memory.title,
-                        content: truncate(memory.body.trim(), MAX_CONTENT_CHARS),
+                        content: crate::text::clip(memory.body.trim(), MAX_CONTENT_CHARS, "…"),
                         path: default_path(),
                         lifetime: Lifetime::Durable,
                         workspace: memory.workspace,
@@ -1126,7 +1117,7 @@ impl HarnessStore {
                     id: "working_notes".to_owned(),
                     kind: EntryKind::Prompt,
                     title: "Working notes".to_owned(),
-                    content: truncate(&notes, MAX_CONTENT_CHARS),
+                    content: crate::text::clip(&notes, MAX_CONTENT_CHARS, "…"),
                     path: default_path(),
                     lifetime: Lifetime::Durable,
                     workspace: Some(self.workspace.clone()),

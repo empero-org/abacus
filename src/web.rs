@@ -463,7 +463,7 @@ impl WebConfig {
             return Ok(format!("{final_url} returned no readable text."));
         }
         let mut out = format!("# {final_url}\n\n");
-        out.push_str(&truncate_chars(trimmed, max_chars));
+        out.push_str(&crate::text::clip(trimmed, max_chars, "\n… page truncated"));
         Ok(out)
     }
 }
@@ -904,14 +904,6 @@ fn decode_entities(input: &str) -> String {
         }
     }
     out
-}
-
-fn truncate_chars(value: &str, max: usize) -> String {
-    if value.chars().count() <= max {
-        return value.to_owned();
-    }
-    let truncated: String = value.chars().take(max).collect();
-    format!("{truncated}\n… page truncated")
 }
 
 #[cfg(test)]
