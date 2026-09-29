@@ -112,7 +112,7 @@ impl SubagentRole {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct SubagentResult {
     name: String,
     response: String,
@@ -145,69 +145,57 @@ struct ResolvedRole {
     read_only: bool,
 }
 
-impl SubagentRuntime {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        workspace: PathBuf,
-        provider: Provider,
-        services: Arc<AgentServices>,
-        max_steps: usize,
-        tool_output_limit: usize,
-        web_search: crate::web::WebConfig,
-        hive: crate::hive::HiveHandle,
-        harness: crate::harness::HarnessStore,
-        injections: crate::agent::InjectionQueue,
-    ) -> Self {
-        Self {
-            workspace,
-            provider,
-            services,
-            max_steps,
-            tool_output_limit,
-            web_search,
-            hive,
-            harness,
-            injections,
-        }
-    }
-
-    fn resolve_role(&self, task: &SubagentTask) -> ResolvedRole {
-        resolve_role(&self.harness, task)
-    }
-}
-
 /// Resolve a task's role, preferring an authored spec over the built-in.
 ///
 /// An unknown spec id falls back to the built-in role rather than failing the
 /// worker: the roster is advisory context in the prompt, and a stale id should
 /// cost fidelity, not the task.
 fn resolve_role(harness: &crate::harness::HarnessStore, task: &SubagentTask) -> ResolvedRole {
+    if let Some(id) = task.spec.as_deref().filter(|id| !id.trim().is_empty())
+        && let Some(entry) = harness
+            .snapshot_of(crate::harness::EntryKind::Subagent)
+            .into_iter()
+            .find(|entry| entry.id == id)
     {
-        if let Some(id) = task.spec.as_deref().filter(|id| !id.trim().is_empty())
-            && let Some(entry) = harness
-                .snapshot_of(crate::harness::EntryKind::Subagent)
-                .into_iter()
-                .find(|entry| entry.id == id)
-        {
-            return ResolvedRole {
-                label: entry.id.clone(),
-                system_prompt: entry.content.clone(),
-                read_only: entry
-                    .metadata
-                    .get("read_only")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-            };
-        }
-        ResolvedRole {
-            label: task.role.label().to_owned(),
-            system_prompt: task.role.system_prompt().to_owned(),
-            read_only: task.role == SubagentRole::Scout,
-        }
+        return ResolvedRole {
+            read_only: entry.metadata.get("read_only").and_then(Value::as_bool).unwrap_or(false),
+            label: entry.id,
+            system_prompt: entry.content,
+        };
+    }
+    ResolvedRole {
+        label: task.role.label().to_owned(),
+        system_prompt: task.role.system_prompt().to_owned(),
+        read_only: task.role == SubagentRole::Scout,
     }
 }
 
+/// The workers of a request as one line: name, role, and model where one was chosen.
+fn roster(tasks: &[SubagentTask]) -> String {
+    let worker = |task: &SubagentTask| match task.model.as_deref().filter(|m| !m.trim().is_empty())
+    {
+        Some(model) => format!("{} ({}, {model})", task.name, task.role.label()),
+        None => format!("{} ({})", task.name, task.role.label()),
+    };
+    tasks.iter().map(worker).collect::<Vec<_>>().join(", ")
+}
+
 impl SubagentRuntime {
+    /// A runtime whose workers run on `provider` under the turn's limits, services and stores.
+    pub fn for_turn(provider: Provider, options: &TurnOptions) -> Self {
+        Self {
+            workspace: options.workspace.clone(),
+            provider,
+            services: options.services.clone(),
+            max_steps: options.max_steps,
+            tool_output_limit: options.tool_output_limit,
+            web_search: options.web_search.clone(),
+            hive: options.hive.clone(),
+            harness: options.harness.clone(),
+            injections: options.injections.clone(),
+        }
+    }
+
     pub fn tool_spec() -> Value {
         json!({
             "type":"function",
@@ -347,24 +335,12 @@ impl SubagentRuntime {
 
     pub fn approval_details(arguments: &str) -> String {
         match parse_args(arguments) {
-            Ok(args) => {
-                let names = args
-                    .tasks
-                    .iter()
-                    .map(|task| match task.model.as_deref().filter(|m| !m.trim().is_empty()) {
-                        Some(model) => {
-                            format!("{} ({}, {model})", task.name, task.role.label())
-                        }
-                        None => format!("{} ({})", task.name, task.role.label()),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(
-                    "Run {} isolated worker(s): {names}\nApply patches to this workspace: {}",
-                    args.tasks.len(),
-                    args.apply
-                )
-            }
+            Ok(args) => format!(
+                "Run {} isolated worker(s): {}\nApply patches to this workspace: {}",
+                args.tasks.len(),
+                roster(&args.tasks),
+                args.apply
+            ),
             Err(error) => format!("Invalid subagent request: {error:#}"),
         }
     }
@@ -381,15 +357,7 @@ impl SubagentRuntime {
         let context = Arc::new(WorktreeContext::capture(&self.workspace).await?);
         let concurrency = args.max_concurrency.clamp(1, MAX_SUBAGENTS);
         let apply = args.apply;
-        let roster = args
-            .tasks
-            .iter()
-            .map(|task| match task.model.as_deref().filter(|m| !m.trim().is_empty()) {
-                Some(model) => format!("{} ({}, {model})", task.name, task.role.label()),
-                None => format!("{} ({})", task.name, task.role.label()),
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+        let roster = roster(&args.tasks);
         let count = args.tasks.len();
         let runtime = self.clone();
         let tasks = args.tasks;
@@ -506,7 +474,7 @@ impl SubagentRuntime {
         if let Some(model) = task.model.as_deref().filter(|model| !model.trim().is_empty()) {
             worker_provider = worker_provider.with_model(model);
         }
-        let role_label = self.resolve_role(&task).label;
+        let role_label = resolve_role(&self.harness, &task).label;
         let board_id = self.hive.board.begin(&name, &role_label, worker_tokens.clone());
         // Register before starting so a message addressed to this worker mid-run
         // reaches the turn that is about to begin.
@@ -522,43 +490,28 @@ impl SubagentRuntime {
                 // to fill in a shape while it is still investigating bends its
                 // reasoning toward the shape. This way the schema constrains the
                 // report and nothing else.
-                let structured = match &task.schema {
+                let coerced = match &task.schema {
                     Some(schema) => {
-                        match coerce_to_schema(&self.provider, &response, schema).await {
-                            Ok(value) => Some(value),
-                            Err(error) => {
-                                self.hive.board.finish(board_id, false);
-                                self.hive.workers.close(&name, transcript);
-                                return SubagentResult {
-                                    name,
-                                    response,
-                                    patch,
-                                    structured: None,
-                                    error: Some(format!(
-                                        "result did not match the schema: {error:#}"
-                                    )),
-                                };
-                            }
-                        }
+                        coerce_to_schema(&self.provider, &response, schema).await.map(Some)
                     }
-                    None => None,
+                    None => Ok(None),
                 };
-                self.hive.board.finish(board_id, true);
+                self.hive.board.finish(board_id, coerced.is_ok());
                 // Keep the conversation so the orchestrator can follow up with
                 // this worker and have it continue where it left off.
                 self.hive.workers.close(&name, transcript);
-                SubagentResult { name, response, patch, structured, error: None }
+                let (structured, error) = match coerced {
+                    Ok(value) => (value, None),
+                    Err(error) => {
+                        (None, Some(format!("result did not match the schema: {error:#}")))
+                    }
+                };
+                SubagentResult { name, response, patch, structured, error }
             }
             Err(error) => {
                 self.hive.board.finish(board_id, false);
                 self.hive.workers.close(&name, Vec::new());
-                SubagentResult {
-                    name,
-                    response: String::new(),
-                    patch: String::new(),
-                    structured: None,
-                    error: Some(format!("{error:#}")),
-                }
+                SubagentResult { name, error: Some(format!("{error:#}")), ..Default::default() }
             }
         }
     }
@@ -609,35 +562,25 @@ impl SubagentRuntime {
         provider: Provider,
         injections: crate::agent::InjectionQueue,
     ) -> Result<(String, String, Vec<Value>)> {
-        let role = self.resolve_role(task);
+        let role = resolve_role(&self.harness, task);
         let worker_workspace = worker_root.join(&context.workspace_relative);
         // A resumed worker keeps its own conversation; a fresh one starts from
         // the standard preamble. Either way the new prompt is the last word.
-        let mut messages = match &task.resume_from {
-            Some(prior) if !prior.is_empty() => {
-                let mut messages = prior.clone();
-                messages.push(json!({
-                    "role":"system",
-                    "content":"Continuing your earlier task in a fresh worktree seeded from the \
-                               current workspace. Your own file changes from before are not here \
-                               unless they were applied; re-read what you need. Everything you \
-                               learned above still stands."
-                }));
-                messages
-            }
-            _ => {
-                let mut messages = initial_messages(&worker_workspace);
-                messages.push(json!({
-                    "role":"system",
-                    "content": role.system_prompt
-                }));
-                messages
-            }
+        let (mut messages, briefing) = match &task.resume_from {
+            Some(prior) if !prior.is_empty() => (
+                prior.clone(),
+                "Continuing your earlier task in a fresh worktree seeded from the current \
+                 workspace. Your own file changes from before are not here unless they were \
+                 applied; re-read what you need. Everything you learned above still stands."
+                    .to_owned(),
+            ),
+            _ => (initial_messages(&worker_workspace), role.system_prompt),
         };
+        messages.push(json!({"role":"system","content":briefing}));
         messages.push(json!({"role":"user","content":task.prompt}));
         let (events, mut receiver) = mpsc::unbounded_channel();
         let services = Arc::new(self.services.for_workspace(worker_workspace.clone()));
-        let turn = run_turn(
+        let mut turn = run_turn(
             provider,
             messages,
             TurnOptions {
@@ -658,7 +601,6 @@ impl SubagentRuntime {
             },
             events,
         );
-        let mut turn = turn;
         let mut final_messages = None;
         let mut failure = None;
         loop {
@@ -683,9 +625,7 @@ impl SubagentRuntime {
         let patch = context.diff(worker_root).await?;
         Ok((response, patch, transcript))
     }
-}
 
-impl SubagentRuntime {
     /// Mirror a worker's visible activity onto the live board.
     fn note_activity(&self, board_id: u64, event: &AgentEvent) {
         match event {
@@ -810,9 +750,10 @@ struct WorktreeContext {
 
 impl WorktreeContext {
     async fn capture(workspace: &Path) -> Result<Self> {
-        let root = git_output(workspace, &["rev-parse", "--show-toplevel"])
+        let root = git(workspace, &["rev-parse", "--show-toplevel"], None)
             .await
             .context("subagents require a git workspace")?;
+        let root = String::from_utf8(root).context("git returned non-UTF-8 text")?;
         let repo_root = PathBuf::from(root.trim()).canonicalize()?;
         let workspace = workspace.canonicalize()?;
         let workspace_relative = workspace
@@ -821,9 +762,8 @@ impl WorktreeContext {
             .to_owned();
         let scope = git_scope(&workspace_relative);
         let baseline_patch =
-            git_output_bytes(&repo_root, &["diff", "--binary", "HEAD", "--", scope.as_str()], None)
-                .await?;
-        let untracked_raw = git_output_bytes(
+            git(&repo_root, &["diff", "--binary", "HEAD", "--", scope.as_str()], None).await?;
+        let untracked_raw = git(
             &repo_root,
             &["ls-files", "--others", "--exclude-standard", "-z", "--", scope.as_str()],
             None,
@@ -856,7 +796,7 @@ impl WorktreeContext {
     }
 
     async fn create(&self, worker_root: &Path) -> Result<()> {
-        run_git(
+        git(
             &self.repo_root,
             &["worktree", "add", "--detach", path_text(worker_root)?, "HEAD"],
             None,
@@ -864,7 +804,7 @@ impl WorktreeContext {
         .await
         .context("could not create isolated git worktree")?;
         if !self.baseline_patch.is_empty() {
-            run_git(worker_root, &["apply", "--binary", "-"], Some(&self.baseline_patch))
+            git(worker_root, &["apply", "--binary", "-"], Some(&self.baseline_patch))
                 .await
                 .context("could not seed worker with current tracked changes")?;
         }
@@ -874,7 +814,7 @@ impl WorktreeContext {
             copy_entry(&source, &destination)?;
         }
         let scope = git_scope(&self.workspace_relative);
-        run_git(worker_root, &["add", "-A", "--", scope.as_str()], None).await?;
+        git(worker_root, &["add", "-A", "--", scope.as_str()], None).await?;
         let status = Command::new("git")
             .args(["-C", path_text(worker_root)?, "diff", "--cached", "--quiet"])
             .status()
@@ -902,24 +842,16 @@ impl WorktreeContext {
 
     async fn diff(&self, worker_root: &Path) -> Result<String> {
         let scope = git_scope(&self.workspace_relative);
-        run_git(worker_root, &["add", "-N", "--", scope.as_str()], None).await?;
-        let bytes = git_output_bytes(
-            worker_root,
-            &["diff", "--binary", "HEAD", "--", scope.as_str()],
-            None,
-        )
-        .await?;
+        git(worker_root, &["add", "-N", "--", scope.as_str()], None).await?;
+        let bytes =
+            git(worker_root, &["diff", "--binary", "HEAD", "--", scope.as_str()], None).await?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     async fn remove(&self, worker_root: &Path) -> Result<()> {
         if worker_root.exists() {
-            run_git(
-                &self.repo_root,
-                &["worktree", "remove", "--force", path_text(worker_root)?],
-                None,
-            )
-            .await?;
+            let remove = ["worktree", "remove", "--force", path_text(worker_root)?];
+            git(&self.repo_root, &remove, None).await?;
         }
         Ok(())
     }
@@ -970,36 +902,8 @@ fn path_text(path: &Path) -> Result<&str> {
     path.to_str().ok_or_else(|| anyhow!("git path is not UTF-8"))
 }
 
-async fn git_output(directory: &Path, args: &[&str]) -> Result<String> {
-    let output = git_output_bytes(directory, args, None).await?;
-    String::from_utf8(output).context("git returned non-UTF-8 text")
-}
-
-async fn git_output_bytes(
-    directory: &Path,
-    args: &[&str],
-    stdin: Option<&[u8]>,
-) -> Result<Vec<u8>> {
-    let output = run_git_output(directory, args, stdin).await?;
-    if !output.status.success() {
-        bail!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim());
-    }
-    Ok(output.stdout)
-}
-
-async fn run_git(directory: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<()> {
-    let output = run_git_output(directory, args, stdin).await?;
-    if !output.status.success() {
-        bail!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim());
-    }
-    Ok(())
-}
-
-async fn run_git_output(
-    directory: &Path,
-    args: &[&str],
-    stdin: Option<&[u8]>,
-) -> Result<std::process::Output> {
+/// Runs git in `directory`, feeding it `stdin`, and returns what it printed.
+async fn git(directory: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<Vec<u8>> {
     let mut command = Command::new("git");
     command
         .arg("-C")
@@ -1016,12 +920,16 @@ async fn run_git_output(
     if let (Some(input), Some(mut child_stdin)) = (stdin, child.stdin.take()) {
         child_stdin.write_all(input).await?;
     }
-    Ok(child.wait_with_output().await?)
+    let output = child.wait_with_output().await?;
+    if !output.status.success() {
+        bail!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(output.stdout)
 }
 
 async fn apply_patch(repo_root: &Path, patch: &str) -> Result<()> {
-    run_git(repo_root, &["apply", "--check", "--binary", "-"], Some(patch.as_bytes())).await?;
-    run_git(repo_root, &["apply", "--binary", "-"], Some(patch.as_bytes())).await
+    git(repo_root, &["apply", "--check", "--binary", "-"], Some(patch.as_bytes())).await?;
+    git(repo_root, &["apply", "--binary", "-"], Some(patch.as_bytes())).await.map(drop)
 }
 
 fn copy_entry(source: &Path, destination: &Path) -> Result<()> {
@@ -1292,9 +1200,9 @@ mod tests {
         let directory = tempdir().unwrap();
         let repo = directory.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
-        run_git(&repo, &["init"], None).await.unwrap();
+        git(&repo, &["init"], None).await.unwrap();
         std::fs::write(repo.join("tracked.txt"), "base\n").unwrap();
-        run_git(&repo, &["add", "tracked.txt"], None).await.unwrap();
+        git(&repo, &["add", "tracked.txt"], None).await.unwrap();
         let output = Command::new("git")
             .args(["-C", path_text(&repo).unwrap(), "commit", "-m", "base"])
             .env("GIT_AUTHOR_NAME", "Test")

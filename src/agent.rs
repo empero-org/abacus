@@ -364,17 +364,7 @@ async fn run_turn_inner(
     if options.mode == AgentMode::Auto {
         specs.push(mode_tool_spec());
     }
-    let subagents = SubagentRuntime::new(
-        options.workspace.clone(),
-        delegate,
-        options.services.clone(),
-        options.max_steps,
-        options.tool_output_limit,
-        options.web_search.clone(),
-        options.hive.clone(),
-        options.harness.clone(),
-        options.injections.clone(),
-    );
+    let subagents = SubagentRuntime::for_turn(delegate, &options);
     let mut repeated_calls: HashMap<String, usize> = HashMap::new();
     // Consecutive failed tool results this turn — two in a row triggers a
     // forced papercut recall on the theory the model is stuck on a known snag.
