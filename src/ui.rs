@@ -1,6 +1,6 @@
 //! Presentation primitives for the TUI.
 //!
-//! `tui.rs` owns application state and event handling; this module owns how
+//! `tui` owns application state and event handling; this module owns how
 //! things *look*. Everything here is pure — it takes plain data and returns
 //! ratatui `Line`/`Span`/`Text` values — so the visual language can be reasoned
 //! about (and unit-tested) without standing up an `App`.

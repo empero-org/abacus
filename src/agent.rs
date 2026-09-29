@@ -648,184 +648,58 @@ async fn run_turn_inner(
                 interrupted = true;
                 break;
             }
-            if call.name == "mode_set" {
-                let output = match set_auto_mode(options.mode, &mut active_mode, &call.arguments) {
-                    Ok((mode, reason)) => {
-                        // Choosing a mode unprompted is the habit worth
-                        // reinforcing; it pays down earlier slips.
-                        options.modes.record_switch();
-                        let _ =
-                            events.send(AgentEvent::ModeChanged { mode, reason: reason.clone() });
-                        format!("Mode set to {}. Reason: {reason}", mode.label())
-                    }
+            // Two tools belong to the loop itself rather than to an executor.
+            // `ask_user` blocks the turn until the user answers, and neither
+            // counts under the repeat-call heuristic.
+            let settled = match call.name.as_str() {
+                "mode_set" => {
+                    Some(match set_auto_mode(options.mode, &mut active_mode, &call.arguments) {
+                        Ok((mode, reason)) => {
+                            // Choosing a mode unprompted is the habit worth
+                            // reinforcing; it pays down earlier slips.
+                            options.modes.record_switch();
+                            let output = format!("Mode set to {}. Reason: {reason}", mode.label());
+                            let _ = events.send(AgentEvent::ModeChanged { mode, reason });
+                            output
+                        }
+                        Err(error) => format!("Error: {error:#}"),
+                    })
+                }
+                "ask_user" => Some(match request_user_question(&call, &events).await {
+                    Ok(answer) => answer.describe(),
                     Err(error) => format!("Error: {error:#}"),
-                };
-                let _ = events.send(AgentEvent::ToolFinished {
-                    name: call.name.clone(),
-                    output: output.clone(),
-                });
-                messages.push(json!({
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "name": call.name,
-                    "content": output
-                }));
+                }),
+                _ => None,
+            };
+            if let Some(output) = settled {
+                finish_tool(&call, output, &mut messages, &events);
                 continue;
             }
-            if call.name == "ask_user" {
-                // ask_user blocks the turn until the user answers — the agent
-                // cannot proceed without the choice. Don't count it under the
-                // repeat-call heuristic; the user's deliberate answers will
-                // legitimately produce different next-model-call shapes.
-                let output = match request_user_question(&call, &events).await {
-                    Ok(answer) => {
-                        let mut parts = Vec::new();
-                        if !answer.selected_labels.is_empty() {
-                            parts.push(format!("Selected: {}", answer.selected_labels.join(", ")));
-                        }
-                        if let Some(custom) = &answer.custom_text
-                            && !custom.is_empty()
-                        {
-                            parts.push(format!("Custom answer: {custom}"));
-                        }
-                        if parts.is_empty() {
-                            "User skipped the question.".to_owned()
-                        } else {
-                            parts.join("\n")
-                        }
-                    }
-                    Err(error) => format!("Error: {error:#}"),
-                };
-                let _ = events.send(AgentEvent::ToolFinished {
-                    name: call.name.clone(),
-                    output: output.clone(),
-                });
-                messages.push(json!({
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "name": call.name,
-                    "content": output
-                }));
-                continue;
-            }
+
             // The repeat-blocker exists to break mutation loops. Inspection is
             // exempt: re-reading a file after editing it uses identical
-            // arguments and is exactly the right thing to do, so counting it as
-            // a loop punished correct behaviour. Runaway reads are still bounded
-            // by `max_steps`.
-            let signature = format!("{}\0{}", call.name, call.arguments);
-            let repeated = repeated_calls.entry(signature).or_default();
+            // arguments and is exactly the right thing to do. Runaway reads
+            // are still bounded by `max_steps`.
+            let repeated = repeated_calls.entry(format!("{}\0{}", call.name, call.arguments));
+            let repeated = repeated.or_default();
             *repeated += 1;
             let loop_blocked = *repeated >= 3 && !is_read_only(&call);
             let requires_approval = tool_requires_approval(&call, &options.services);
-            let mut mode_blocked = mode_blocks(active_mode, &call, requires_approval);
-            // PLAN and AUTO block shell outright only when the command actually
-            // changes something. Inspecting — building, linting, running tests —
-            // is exactly what a planning mode needs, so an unclear command costs
-            // one small classification call rather than a flat refusal.
-            // Set when a command has been affirmatively judged to have no side
-            // effects. PLAN uses it to skip the approval prompt: the mode
-            // exists to investigate, and asking permission for each `ls` is the
-            // same obstacle in a politer form. It is deliberately not enough on
-            // its own — the mode still has to be PLAN.
-            let mut judged_inspection = false;
-            if mode_blocked && call.name == "run_command" {
-                let command = serde_json::from_str::<Value>(&call.arguments)
-                    .ok()
-                    .and_then(|args| args["command"].as_str().map(str::to_owned))
-                    .unwrap_or_default();
-                if !command.is_empty() {
-                    mode_blocked = match crate::safety::command_verdict(&command) {
-                        // Recognisably pure inspection, and recognisable
-                        // destruction, are both settled here — no model call,
-                        // no latency, and no chance of being talked round.
-                        crate::safety::Verdict::Allow => {
-                            judged_inspection = true;
-                            false
-                        }
-                        crate::safety::Verdict::Deny => true,
-                        crate::safety::Verdict::Unclear => {
-                            judged_inspection =
-                                crate::safety::command_is_safe(&safety_model, &safety, &command)
-                                    .await;
-                            !judged_inspection
-                        }
-                    };
-                }
-            }
-            // Reads that leave the workspace are cleared here, before the
-            // executor resolves them: credentials are refused outright, plain
-            // reference material passes, and the rest is judged once and
-            // remembered. Writes never take this path — they stay confined.
-            let mut path_refusal = None;
-            for raw in crate::safety::read_paths(&call.name, &call.arguments) {
-                let candidate = std::path::Path::new(&raw);
-                let joined = if candidate.is_absolute() {
-                    candidate.to_path_buf()
-                } else {
-                    options.workspace.join(candidate)
-                };
-                let Ok(canonical) = joined.canonicalize() else {
-                    continue; // A missing path fails later, with a better message.
-                };
-                // Environment files are judged wherever they live: templates
-                // pass, production never does, and a real `.env` is cleared
-                // once rather than banned — a config question is often exactly
-                // what the plan needs answered.
-                let env_verdict = crate::safety::env_file_verdict(&canonical);
-                let env_cleared = match env_verdict {
-                    crate::safety::Verdict::Allow => true,
-                    crate::safety::Verdict::Deny => false,
-                    crate::safety::Verdict::Unclear => {
-                        crate::safety::env_file_is_readable(&safety_model, &safety, &canonical)
-                            .await
-                    }
-                };
-                if !env_cleared {
-                    path_refusal = Some(format!(
-                        "Refused to read {}: it looks like a live environment file rather than a \
-                         template. Ask the user for the values the plan needs.",
-                        canonical.display()
-                    ));
-                    break;
-                }
-                // A cleared-but-not-obvious env file is recorded, since the
-                // executor re-checks it and cannot ask a model itself.
-                if env_verdict == crate::safety::Verdict::Unclear
-                    && let Ok(mut approved) = outside_reads.write()
-                {
-                    approved.insert(canonical.clone());
-                }
-                if canonical.starts_with(&options.workspace) {
-                    continue;
-                }
-                let cleared = match crate::safety::read_path_verdict(&canonical) {
-                    crate::safety::Verdict::Allow => true,
-                    crate::safety::Verdict::Deny => false,
-                    crate::safety::Verdict::Unclear => {
-                        crate::safety::path_is_readable(&safety_model, &safety, &canonical).await
-                    }
-                };
-                if cleared {
-                    if let Ok(mut approved) = outside_reads.write() {
-                        approved.insert(canonical);
-                    }
-                } else {
-                    path_refusal = Some(format!(
-                        "Refused to read {}: it is outside the workspace and looks like private \
-                         data rather than project material. Ask the user for it if the plan \
-                         needs it.",
-                        canonical.display()
-                    ));
-                    break;
-                }
-            }
+            let judge =
+                Judge { model: &safety_model, cache: &safety, workspace: &options.workspace };
+            // PLAN and AUTO block a shell command only when it actually changes
+            // something. A command judged to have no side effects also skips
+            // the approval prompt in PLAN: the mode exists to investigate, and
+            // asking permission for each `ls` is the same obstacle in a politer
+            // form.
+            let changes_something = mode_blocks(active_mode, &call, requires_approval);
+            let judged_inspection = changes_something && judge.command_only_inspects(&call).await;
+            let mode_blocked = changes_something && !judged_inspection;
+            let path_refusal = judge.refuse_read(&call, &outside_reads).await;
 
             let approved = if loop_blocked || mode_blocked || path_refusal.is_some() {
                 false
             } else if active_mode == AgentMode::Plan && judged_inspection {
-                // Judged to change nothing, in the mode whose whole purpose is
-                // looking. Nothing to approve.
                 true
             } else if requires_approval && !options.allow_mutations.load(Ordering::Relaxed) {
                 let details = if call.name == "spawn_subagents" {
@@ -844,118 +718,31 @@ async fn run_turn_inner(
             if mode_blocked {
                 options.modes.record_block();
             }
-            let output = if let Some(refusal) = path_refusal {
+            let mut output = if let Some(refusal) = path_refusal {
                 refusal
             } else if loop_blocked {
                 "Blocked: the same tool call was requested three times. Change the approach before retrying."
                     .to_owned()
+            } else if mode_blocked && active_mode == AgentMode::Auto {
+                "Blocked by AUTO MODE: this would change something. Call mode_set with mode=build and a reason first.".to_owned()
             } else if mode_blocked {
-                match active_mode {
-                    AgentMode::Auto => "Blocked by AUTO MODE: this would change something. Call mode_set with mode=build and a reason first.".to_owned(),
-                    AgentMode::Plan => "Blocked by PLAN MODE: this changes something. Commands that only inspect run without asking — reading, searching, building, testing, printing. Rewrite this as an inspection, or switch to BUILD mode to make the change.".to_owned(),
-                    AgentMode::Build => unreachable!(),
-                }
+                "Blocked by PLAN MODE: this changes something. Commands that only inspect run without asking — reading, searching, building, testing, printing. Rewrite this as an inspection, or switch to BUILD mode to make the change.".to_owned()
             } else if approved {
                 let _ = events.send(AgentEvent::ToolStarted {
                     name: call.name.clone(),
                     summary: call.summary(),
                 });
-                let payload = json!({
-                    "tool":call.name,
-                    "arguments":serde_json::from_str::<Value>(&call.arguments).unwrap_or(Value::Null)
-                });
-                match options
-                    .services
-                    .run_hooks("before_tool", options.session_id.as_deref(), &payload)
-                    .await
-                {
-                    Err(error) => format!("Error: {error:#}"),
-                    Ok(_) => {
-                        let mut output =
-                            if call.name == "spawn_subagents" && options.allow_subagents {
-                                subagents.execute(&call.arguments).await
-                            } else if call.name == "message_subagent" && options.allow_subagents {
-                                subagents.message(&call.arguments).await
-                            } else if let Some(output) =
-                                options.goal.execute(&call.name, &call.arguments)
-                            {
-                                output
-                            } else if let Some(output) =
-                                options.tasks.execute(&call.name, &call.arguments)
-                            {
-                                output
-                            } else if let Some(output) =
-                                options.papercuts.execute(&call.name, &call.arguments)
-                            {
-                                output
-                            } else if let Some(output) =
-                                options.harness.execute(&call.name, &call.arguments)
-                            {
-                                output
-                            } else if call.name == "handle_recurse" {
-                                // Dispatched apart from the other handle tools
-                                // because it makes model calls. The aux model
-                                // reads the chunks; the main model is the one
-                                // deciding what to ask.
-                                crate::handles::recurse(
-                                    &aux,
-                                    &options.handles,
-                                    &call.arguments,
-                                    &options.cancel,
-                                )
-                                .await
-                            } else if let Some(output) =
-                                options.handles.execute(&call.name, &call.arguments)
-                            {
-                                output
-                            } else if let Some(output) = options.services.execute(&call).await {
-                                output
-                            } else {
-                                tools.execute(&call).await
-                            };
-                        if call.name == "tool_search" {
-                            let query = serde_json::from_str::<Value>(&call.arguments)
-                                .ok()
-                                .and_then(|value| value["query"].as_str().map(str::to_owned))
-                                .unwrap_or_default();
-                            let extensions = options.services.search_catalog(&query);
-                            if !extensions.is_empty() {
-                                output.push('\n');
-                                output.push_str(&extensions);
-                            }
-                        }
-                        let after_payload = json!({
-                            "tool":call.name,
-                            "arguments":payload["arguments"],
-                            "output":output
-                        });
-                        match options
-                            .services
-                            .run_hooks("after_tool", options.session_id.as_deref(), &after_payload)
-                            .await
-                        {
-                            Ok(hook_outputs) if !hook_outputs.is_empty() => {
-                                output.push_str("\nHook output:\n");
-                                output.push_str(&hook_outputs.join("\n"));
-                            }
-                            Err(error) => {
-                                output.push_str(&format!("\nAfter-tool hook error: {error:#}"))
-                            }
-                            _ => {}
-                        }
-                        output
-                    }
-                }
+                run_tool(&call, &options, &tools, &subagents, &aux).await
             } else {
                 "User rejected this tool call. Do not retry it without changing the approach."
                     .to_owned()
             };
+
             // Papercut recall. Every tool result is scanned against the
             // recorded tripwires; a failing streak or a blocked loop force-
             // recalls the strongest lessons even inside their cooldown. The
             // reminders are appended to the tool result itself — the one place
             // the model is guaranteed to be looking when the snag happens.
-            let mut output = output;
             if tool_result_failed(&output) || loop_blocked {
                 consecutive_failures += 1;
             } else {
@@ -978,43 +765,23 @@ async fn run_turn_inner(
                 }
             }
             if !reminders.is_empty() {
-                output.push_str("\n\nLessons from earlier snags that match this situation:");
-                for reminder in &reminders {
-                    output.push('\n');
-                    output.push_str(reminder);
-                }
+                output.push_str("\n\nLessons from earlier snags that match this situation:\n");
+                output.push_str(&reminders.join("\n"));
             }
-            // Bind an oversized result instead of spending the window on it.
-            // The model gets a description and the tools to interrogate it,
-            // The bet: reasoning about the shape of the data and then reading
-            // only the part that turns out to matter beats spending the whole
-            // window on all of it.
-            //
-            // Deliberately after the papercut scan above — tripwires match on
-            // the failure text, and a large output replaced by a summary first
-            // would stop recalling the lesson it should have triggered.
-            //
-            // Handle tools are exempt: binding a slice of $h1 to $h2 would give
-            // the model a handle to a handle and no way back to the content.
+            // Bind an oversized result instead of spending the window on it:
+            // the model gets a description and the tools to interrogate it.
+            // Deliberately after the papercut scan — tripwires match on the
+            // failure text. Handle tools are exempt: binding a slice of $h1 to
+            // $h2 would give the model a handle to a handle and no way back.
             if output.chars().count() >= crate::handles::BIND_THRESHOLD_CHARS
                 && !call.name.starts_with("handle_")
             {
-                let source = format!(
-                    "{}: {}",
-                    call.name,
-                    call.arguments.chars().take(120).collect::<String>()
-                );
+                let arguments: String = call.arguments.chars().take(120).collect();
+                let source = format!("{}: {arguments}", call.name);
                 output = options.handles.bind(&source, output).summary();
             }
             tool_calls_executed += 1;
-            let _ = events
-                .send(AgentEvent::ToolFinished { name: call.name.clone(), output: output.clone() });
-            messages.push(json!({
-                "role": "tool",
-                "tool_call_id": call.id,
-                "name": call.name,
-                "content": output
-            }));
+            finish_tool(&call, output, &mut messages, &events);
         }
         if interrupted {
             let _ = events.send(AgentEvent::Done { messages, reason: DoneReason::Interrupted });
@@ -1039,6 +806,196 @@ async fn run_turn_inner(
         run_refine(&reflector(&aux, &provider, &specs), &messages, &options, &events).await;
     }
     let _ = events.send(AgentEvent::Done { messages, reason: DoneReason::StepLimit });
+}
+
+/// Record a tool's result: tell the UI, and put it in the conversation.
+fn finish_tool(
+    call: &ToolCall,
+    output: String,
+    messages: &mut Vec<Value>,
+    events: &mpsc::UnboundedSender<AgentEvent>,
+) {
+    messages.push(json!({
+        "role": "tool",
+        "tool_call_id": call.id,
+        "name": call.name,
+        "content": output
+    }));
+    let _ = events.send(AgentEvent::ToolFinished { name: call.name.clone(), output });
+}
+
+/// One string argument of a tool call, if it has one by that name.
+fn argument(call: &ToolCall, name: &str) -> Option<String> {
+    let arguments = serde_json::from_str::<Value>(&call.arguments).ok()?;
+    arguments[name].as_str().map(str::to_owned)
+}
+
+/// Run an approved tool, between its `before_tool` and `after_tool` hooks.
+///
+/// Whoever owns the tool answers for it: delegation, then the session's own
+/// stores, then extensions, and the workspace executor last.
+async fn run_tool(
+    call: &ToolCall,
+    options: &TurnOptions,
+    tools: &ToolExecutor,
+    subagents: &SubagentRuntime,
+    aux: &Provider,
+) -> String {
+    let (name, arguments) = (call.name.as_str(), call.arguments.as_str());
+    let session = options.session_id.as_deref();
+    let parsed = serde_json::from_str::<Value>(arguments).unwrap_or(Value::Null);
+    let before = json!({"tool": name, "arguments": parsed});
+    if let Err(error) = options.services.run_hooks("before_tool", session, &before).await {
+        return format!("Error: {error:#}");
+    }
+    let mut output = if name == "spawn_subagents" && options.allow_subagents {
+        subagents.execute(arguments).await
+    } else if name == "message_subagent" && options.allow_subagents {
+        subagents.message(arguments).await
+    } else if name == "handle_recurse" {
+        // Apart from the other handle tools because it makes model calls: the
+        // aux model reads the chunks, the main model decides what to ask.
+        crate::handles::recurse(aux, &options.handles, arguments, &options.cancel).await
+    } else if let Some(output) = options
+        .goal
+        .execute(name, arguments)
+        .or_else(|| options.tasks.execute(name, arguments))
+        .or_else(|| options.papercuts.execute(name, arguments))
+        .or_else(|| options.harness.execute(name, arguments))
+        .or_else(|| options.handles.execute(name, arguments))
+    {
+        output
+    } else if let Some(output) = options.services.execute(call).await {
+        output
+    } else {
+        tools.execute(call).await
+    };
+    if name == "tool_search" {
+        let extensions =
+            options.services.search_catalog(&argument(call, "query").unwrap_or_default());
+        if !extensions.is_empty() {
+            output.push('\n');
+            output.push_str(&extensions);
+        }
+    }
+    let after = json!({"tool": name, "arguments": before["arguments"], "output": output});
+    match options.services.run_hooks("after_tool", session, &after).await {
+        Ok(hook_outputs) if !hook_outputs.is_empty() => {
+            output.push_str("\nHook output:\n");
+            output.push_str(&hook_outputs.join("\n"));
+        }
+        Err(error) => output.push_str(&format!("\nAfter-tool hook error: {error:#}")),
+        _ => {}
+    }
+    output
+}
+
+/// The safety layer as one turn consults it: settled by rule where a rule is
+/// clear — no model call, no latency, no chance of being talked round — and by
+/// a small classification call, remembered for the session, where it is not.
+struct Judge<'a> {
+    model: &'a Provider,
+    cache: &'a crate::safety::SafetyCache,
+    workspace: &'a Path,
+}
+
+impl Judge<'_> {
+    /// Whether a shell command has been affirmatively judged to change nothing.
+    /// Inspecting — building, linting, running tests — is exactly what a
+    /// planning mode needs.
+    async fn command_only_inspects(&self, call: &ToolCall) -> bool {
+        use crate::safety::Verdict;
+        let Some(command) = argument(call, "command").filter(|command| !command.is_empty()) else {
+            return false;
+        };
+        if call.name != "run_command" {
+            return false;
+        }
+        match crate::safety::command_verdict(&command) {
+            Verdict::Allow => true,
+            Verdict::Deny => false,
+            Verdict::Unclear => {
+                crate::safety::command_is_safe(self.model, self.cache, &command).await
+            }
+        }
+    }
+
+    /// Clear the paths a call wants to read, recording the ones that needed a
+    /// judgement so the executor — which cannot ask a model — lets them
+    /// through. Returns the refusal when one is not cleared.
+    ///
+    /// Credentials are refused outright, plain reference material passes, and
+    /// the rest is judged once. Environment files are judged wherever they
+    /// live: templates pass, production never does, and a real `.env` is
+    /// cleared once rather than banned. Writes never take this path.
+    async fn refuse_read(
+        &self,
+        call: &ToolCall,
+        approved: &crate::tools::OutsideReads,
+    ) -> Option<String> {
+        use crate::safety::{self, Verdict};
+        let approve = |path: std::path::PathBuf| {
+            if let Ok(mut approved) = approved.write() {
+                approved.insert(path);
+            }
+        };
+        for raw in safety::read_paths(&call.name, &call.arguments) {
+            // A missing path fails later, with a better message.
+            let Ok(path) = self.workspace.join(&raw).canonicalize() else {
+                continue;
+            };
+            let env = safety::env_file_verdict(&path);
+            let env_cleared = match env {
+                Verdict::Allow => true,
+                Verdict::Deny => false,
+                Verdict::Unclear => {
+                    safety::env_file_is_readable(self.model, self.cache, &path).await
+                }
+            };
+            if !env_cleared {
+                return Some(format!(
+                    "Refused to read {}: it looks like a live environment file rather than a \
+                     template. Ask the user for the values the plan needs.",
+                    path.display()
+                ));
+            }
+            if env == Verdict::Unclear {
+                approve(path.clone());
+            }
+            if path.starts_with(self.workspace) {
+                continue;
+            }
+            let cleared = match safety::read_path_verdict(&path) {
+                Verdict::Allow => true,
+                Verdict::Deny => false,
+                Verdict::Unclear => safety::path_is_readable(self.model, self.cache, &path).await,
+            };
+            if !cleared {
+                return Some(format!(
+                    "Refused to read {}: it is outside the workspace and looks like private \
+                     data rather than project material. Ask the user for it if the plan \
+                     needs it.",
+                    path.display()
+                ));
+            }
+            approve(path);
+        }
+        None
+    }
+}
+
+impl UserAnswer {
+    /// The answer as the model reads it.
+    fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.selected_labels.is_empty() {
+            parts.push(format!("Selected: {}", self.selected_labels.join(", ")));
+        }
+        if let Some(custom) = self.custom_text.as_deref().filter(|custom| !custom.is_empty()) {
+            parts.push(format!("Custom answer: {custom}"));
+        }
+        if parts.is_empty() { "User skipped the question.".to_owned() } else { parts.join("\n") }
+    }
 }
 
 pub fn compact_messages(messages: &[Value], max_chars: usize) -> Vec<Value> {
