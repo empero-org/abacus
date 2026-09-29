@@ -94,12 +94,12 @@ fn remove(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `output`, or `note` when there was none.
 /// What a tool hands back to the model: its output, or the failure to react to.
 pub fn reply(result: Result<String>) -> String {
     result.unwrap_or_else(|error| format!("Error: {error:#}"))
 }
 
+/// `output`, or `note` when there was none.
 fn or_note(output: String, note: &str) -> String {
     if output.trim().is_empty() { note.to_owned() } else { output }
 }

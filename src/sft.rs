@@ -149,17 +149,6 @@ impl TraceWriter {
     /// Append one model call. Returns the error only the first time, so a
     /// caller can surface it once; later failures are silent.
     pub fn record(&self, sample: Sample<'_>) -> Result<()> {
-        let Sample {
-            session,
-            model,
-            mode,
-            messages,
-            tools,
-            content,
-            reasoning,
-            tool_calls,
-            cancelled,
-        } = sample;
         let mut inner = self.lock();
         if inner.broken {
             return Ok(());
@@ -168,13 +157,14 @@ impl TraceWriter {
         let record = Record {
             version: TRACE_VERSION,
             timestamp: chrono::Utc::now().to_rfc3339(),
-            session,
-            model,
+            session: sample.session,
+            model: sample.model,
             source: "live",
             step: inner.step,
-            mode,
-            messages,
-            tools: tools
+            mode: sample.mode,
+            messages: sample.messages,
+            tools: sample
+                .tools
                 .iter()
                 .filter_map(|tool| {
                     tool.pointer("/function/name")
@@ -183,9 +173,10 @@ impl TraceWriter {
                 })
                 .collect(),
             completion: Completion {
-                content,
-                reasoning,
-                tool_calls: tool_calls
+                content: sample.content,
+                reasoning: sample.reasoning,
+                tool_calls: sample
+                    .tool_calls
                     .iter()
                     .map(|call| {
                         json!({
@@ -198,7 +189,7 @@ impl TraceWriter {
                         })
                     })
                     .collect(),
-                cancelled,
+                cancelled: sample.cancelled,
             },
         };
         let mut line = serde_json::to_vec(&record).context("could not encode trace record")?;
@@ -330,31 +321,12 @@ pub fn pull_sessions(
                 continue;
             }
             let records = records_from_session(&session);
-            if records.is_empty() {
-                pulled.push(PullEntry { name, records: 0, bytes: 0, outcome: Pulled::Empty });
-                continue;
-            }
             let mut body = Vec::new();
             for record in &records {
                 body.extend_from_slice(&serde_json::to_vec(record)?);
                 body.push(b'\n');
             }
-            let into = destination.join(&name);
-            let outcome = match std::fs::read(&into) {
-                Ok(existing) if existing == body => Pulled::Unchanged,
-                Ok(_) => Pulled::Updated,
-                Err(_) => Pulled::Copied,
-            };
-            if outcome != Pulled::Unchanged {
-                std::fs::write(&into, &body)
-                    .with_context(|| format!("could not write {}", into.display()))?;
-            }
-            pulled.push(PullEntry {
-                name,
-                records: records.len(),
-                bytes: body.len() as u64,
-                outcome,
-            });
+            pulled.push(place(destination, name, records.len(), &body)?);
         }
     }
     pulled.sort_by(|a, b| a.name.cmp(&b.name));
@@ -381,6 +353,24 @@ pub struct PullEntry {
     pub records: usize,
     pub bytes: u64,
     pub outcome: Pulled,
+}
+
+/// Put a trace of `records` records at `directory/name` unless the same bytes
+/// are already there, and say what that took. One that records nothing is not
+/// written: it is not useful as training data.
+fn place(directory: &Path, name: String, records: usize, body: &[u8]) -> Result<PullEntry> {
+    let into = directory.join(&name);
+    let outcome = match std::fs::read(&into) {
+        _ if records == 0 => Pulled::Empty,
+        Ok(existing) if existing == body => Pulled::Unchanged,
+        Ok(_) => Pulled::Updated,
+        Err(_) => Pulled::Copied,
+    };
+    if matches!(outcome, Pulled::Updated | Pulled::Copied) {
+        std::fs::write(&into, body)
+            .with_context(|| format!("could not write {}", into.display()))?;
+    }
+    Ok(PullEntry { name, records, bytes: body.len() as u64, outcome })
 }
 
 /// Copy every trace from `source` into `destination`, leaving the originals
@@ -434,27 +424,7 @@ pub fn pull(source: &Path, destination: &Path) -> Result<Vec<PullEntry>> {
             .split(|byte| *byte == b'\n')
             .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
             .count();
-        let bytes = contents.len() as u64;
-        if records == 0 {
-            pulled.push(PullEntry {
-                name: name.to_owned(),
-                records,
-                bytes,
-                outcome: Pulled::Empty,
-            });
-            continue;
-        }
-        let into = target.join(name);
-        let outcome = match std::fs::read(&into) {
-            Ok(existing) if existing == contents => Pulled::Unchanged,
-            Ok(_) => Pulled::Updated,
-            Err(_) => Pulled::Copied,
-        };
-        if outcome != Pulled::Unchanged {
-            std::fs::write(&into, &contents)
-                .with_context(|| format!("could not write {}", into.display()))?;
-        }
-        pulled.push(PullEntry { name: name.to_owned(), records, bytes, outcome });
+        pulled.push(place(&target, name.to_owned(), records, &contents)?);
     }
     pulled.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(pulled)

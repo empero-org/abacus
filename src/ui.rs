@@ -1300,8 +1300,6 @@ fn tool_block(call: &ToolCall, width: usize, spinner: &str, selected: bool) -> V
     lines
 }
 
-/// System notices and errors: a coloured glyph in the gutter and body text that
-/// hangs under the content column.
 /// A full-width dim rule with the label embedded near its left end:
 /// `─ Worked for 2m 03s ───────────…`. The label doubles as the information —
 /// the rule only appears where real work happened.
@@ -1313,6 +1311,8 @@ fn rule_line(label: &str, width: usize) -> Line<'static> {
     Line::from(fg(text, muted()))
 }
 
+/// System notices and errors: a coloured glyph in the gutter and body text that
+/// hangs under the content column.
 fn notice_block(body: &str, width: usize, color: Color, glyph: &str) -> Vec<Line<'static>> {
     let first = vec![Span::raw(" ".repeat(GUTTER)), bold(format!("{glyph} "), color)];
     let cont = vec![Span::raw(" ".repeat(GUTTER + 2))];

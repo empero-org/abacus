@@ -1509,8 +1509,6 @@ pub fn initial_messages(workspace: &Path) -> Vec<Value> {
     })]
 }
 
-/// Run the reflection pass and surface its outcome. Workspace notes are only
-/// writable when the turn itself was allowed to mutate.
 /// Drop a background intent snapshot whose turn ended without it.
 fn abort_capture(handle: Option<tokio::task::JoinHandle<Option<String>>>) {
     if let Some(handle) = handle {

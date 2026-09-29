@@ -333,6 +333,7 @@ async fn list_providers(config: &Config) -> Result<()> {
     console::blank();
     Ok(())
 }
+
 fn print_session_list(store: &SessionStore) -> Result<()> {
     let sessions = store.list()?;
     if sessions.is_empty() {
@@ -351,12 +352,6 @@ fn print_session_list(store: &SessionStore) -> Result<()> {
     Ok(())
 }
 
-/// Environment and configuration diagnostics.
-///
-/// Grouped so the output can be read top to bottom as an answer to "why isn't
-/// this working": identity first, then the provider round-trip, then the local
-/// state. Anything that is merely worth knowing is a warning; only a genuine
-/// failure sets the non-zero exit.
 /// `abacus pull` — copy this machine's training traces into a directory.
 fn pull_traces(paths: &AbacusPaths, destination: &Path, all: bool) -> Result<()> {
     use abacus_agent::console::{self, Health};
@@ -466,6 +461,12 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// Environment and configuration diagnostics.
+///
+/// Grouped so the output can be read top to bottom as an answer to "why isn't
+/// this working": identity first, then the provider round-trip, then the local
+/// state. Anything that is merely worth knowing is a warning; only a genuine
+/// failure sets the non-zero exit.
 async fn doctor(config: &Config, settings: &Settings) -> Result<()> {
     use abacus_agent::console::{self, Health};
 

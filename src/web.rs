@@ -194,7 +194,6 @@ impl WebConfig {
             .map_err(|error| anyhow!("could not build HTTP client: {error}"))
     }
 
-    /// Run a web search and render results as compact text.
     /// Search, and with `extract` also open the top results and answer from
     /// them. Without it the behaviour is unchanged: a list to follow up on.
     ///
@@ -386,7 +385,6 @@ impl WebConfig {
         report
     }
 
-    /// Fetch a URL and return its readable text content.
     /// Fetch a page and, when `extract` is given, answer that request from it
     /// with the auxiliary model instead of returning the whole document.
     ///
@@ -455,8 +453,6 @@ impl WebConfig {
     }
 }
 
-/// JSON tool specs for `web_search` and `read_page`, added to the registry when
-/// `[search] enabled` is true.
 /// Answer an extraction request from fetched page text.
 ///
 /// The page is hostile input: anything on the open web can contain text aimed
@@ -485,6 +481,8 @@ async fn extract_from(
     provider.answer(&conversation, &[], &std::sync::atomic::AtomicBool::new(false)).await
 }
 
+/// JSON tool specs for `web_search` and `read_page`, added to the registry when
+/// `[search] enabled` is true.
 pub fn tool_specs() -> Vec<Value> {
     vec![
         tool(
