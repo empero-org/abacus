@@ -779,15 +779,7 @@ impl App {
                     base_url: config.base_url.clone(),
                     model: config.model.clone(),
                     protocol: config.protocol,
-                    api_key_env: None,
-                    aux_model: None,
-                    reasoning_effort: None,
-                    endpoint: None,
-                    providers: Vec::new(),
-                    allow_fallbacks: true,
-                    context_window: None,
-                    max_output_tokens: None,
-                    roles: Default::default(),
+                    ..Default::default()
                 },
             );
         }
@@ -3623,15 +3615,8 @@ impl App {
                 base_url: endpoint.url.clone(),
                 model: model.clone(),
                 protocol: endpoint.protocol,
-                api_key_env: None,
-                aux_model: None,
-                reasoning_effort: None,
                 endpoint: Some(name.to_owned()),
-                providers: Vec::new(),
-                allow_fallbacks: true,
-                context_window: None,
-                max_output_tokens: None,
-                roles: Default::default(),
+                ..Default::default()
             },
         );
         let previous = self.settings.default_profile.clone();
@@ -3907,17 +3892,9 @@ impl App {
             crate::config::ProviderProfile {
                 name,
                 base_url,
-                model: String::new(),
                 protocol,
                 api_key_env: env_key.clone(),
-                aux_model: None,
-                reasoning_effort: None,
-                endpoint: None,
-                providers: Vec::new(),
-                allow_fallbacks: true,
-                context_window: None,
-                max_output_tokens: None,
-                roles: Default::default(),
+                ..Default::default()
             },
         );
         // Deliberately persisted but *not* applied: a profile with no model
@@ -9110,15 +9087,8 @@ mod tests {
                 base_url: "https://api.anthropic.com/v1/messages".into(),
                 model: "claude-opus-4-8".into(),
                 protocol: ProviderProtocol::Anthropic,
-                api_key_env: None,
-                aux_model: None,
-                reasoning_effort: None,
                 endpoint: Some("claude".into()),
-                providers: Vec::new(),
-                allow_fallbacks: true,
-                context_window: None,
-                max_output_tokens: None,
-                roles: Default::default(),
+                ..Default::default()
             },
         );
         app.settings.profiles.insert(
@@ -9128,15 +9098,7 @@ mod tests {
                 base_url: "https://openrouter.ai/api/v1".into(),
                 model: "some/model".into(),
                 protocol: ProviderProtocol::ChatCompletions,
-                api_key_env: None,
-                aux_model: None,
-                reasoning_effort: None,
-                endpoint: None,
-                providers: Vec::new(),
-                allow_fallbacks: true,
-                context_window: None,
-                max_output_tokens: None,
-                roles: Default::default(),
+                ..Default::default()
             },
         );
 
@@ -9316,15 +9278,7 @@ mod tests {
                 base_url: "http://127.0.0.1:9/v1".into(),
                 model: "other-model".into(),
                 protocol: ProviderProtocol::ChatCompletions,
-                api_key_env: None,
-                aux_model: None,
-                reasoning_effort: None,
-                endpoint: None,
-                providers: Vec::new(),
-                allow_fallbacks: true,
-                context_window: None,
-                max_output_tokens: None,
-                roles: Default::default(),
+                ..Default::default()
             },
         );
         app.open_profile_picker();
@@ -9361,15 +9315,9 @@ mod tests {
                 base_url: "http://127.0.0.1:9/v1".into(),
                 model: model.into(),
                 protocol: ProviderProtocol::ChatCompletions,
-                api_key_env: None,
-                aux_model: None,
-                reasoning_effort: None,
-                endpoint: None,
-                providers: Vec::new(),
-                allow_fallbacks: true,
                 context_window,
                 max_output_tokens,
-                roles: Default::default(),
+                ..Default::default()
             },
         );
     }
@@ -9623,15 +9571,7 @@ mod tests {
                 base_url: "http://127.0.0.1:9/v1".into(),
                 model: "other".into(),
                 protocol: ProviderProtocol::ChatCompletions,
-                api_key_env: None,
-                aux_model: None,
-                reasoning_effort: None,
-                endpoint: None,
-                providers: Vec::new(),
-                allow_fallbacks: true,
-                context_window: None,
-                max_output_tokens: None,
-                roles: Default::default(),
+                ..Default::default()
             },
         );
         app.config_panel = Some(ConfigPanel { selected: 0, editing: None });
@@ -11362,43 +11302,14 @@ mod tests {
                 base_url: base_url.into(),
                 model: "test-model".into(),
                 protocol: ProviderProtocol::ChatCompletions,
-                api_key_env: None,
-                aux_model: None,
-                reasoning_effort: None,
-                endpoint: None,
-                providers: Vec::new(),
-                allow_fallbacks: true,
-                context_window: None,
-                max_output_tokens: None,
-                roles: Default::default(),
+                ..Default::default()
             },
         );
         let config = Config {
-            workspace: workspace.clone(),
             profile: "test".into(),
-            model: "test-model".into(),
-            base_url: base_url.into(),
-            protocol: ProviderProtocol::ChatCompletions,
-            api_key: None,
             max_steps: 8,
-            tool_output_limit: 30_000,
-            yes: false,
             no_session: true,
-            model_limits: crate::model_info::ModelLimits::default(),
-            tool_format: crate::tool_format::ToolFormat::default(),
-            mode: None,
-            trace_enabled: false,
-            routing: Default::default(),
-            web_search: crate::web::WebConfig::default(),
-            endpoint: None,
-            aux_model: None,
-            subagent_model: None,
-            compaction_model: None,
-            reasoning_effort: None,
-            token_compression: false,
-            one_stream: false,
-            prompt_cache: true,
-            paths,
+            ..Config::for_endpoint(workspace.clone(), base_url.into(), "test-model".into(), paths)
         };
         let app = App::new(
             config,

@@ -404,6 +404,43 @@ pub struct Config {
 }
 
 impl Config {
+    /// A configuration pointed at one endpoint, with every option at its
+    /// default. What an embedder or a test starts from.
+    pub fn for_endpoint(
+        workspace: PathBuf,
+        base_url: String,
+        model: String,
+        paths: AbacusPaths,
+    ) -> Self {
+        Self {
+            workspace,
+            profile: "default".to_owned(),
+            model,
+            base_url,
+            protocol: ProviderProtocol::default(),
+            api_key: None,
+            max_steps: 32,
+            tool_output_limit: 30_000,
+            yes: false,
+            no_session: false,
+            model_limits: ModelLimits::default(),
+            tool_format: ToolFormat::default(),
+            mode: None,
+            trace_enabled: false,
+            routing: Routing::default(),
+            web_search: Default::default(),
+            endpoint: None,
+            aux_model: None,
+            subagent_model: None,
+            compaction_model: None,
+            reasoning_effort: None,
+            token_compression: false,
+            one_stream: false,
+            prompt_cache: true,
+            paths,
+        }
+    }
+
     pub fn resolve(
         cli: &Cli,
         settings: &Settings,
@@ -746,6 +783,26 @@ pub struct ProviderProfile {
     /// profile that only uses the two slots that always existed.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub roles: BTreeMap<String, String>,
+}
+
+impl Default for ProviderProfile {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            base_url: String::new(),
+            model: String::new(),
+            protocol: ProviderProtocol::default(),
+            api_key_env: None,
+            aux_model: None,
+            reasoning_effort: None,
+            endpoint: None,
+            providers: Vec::new(),
+            allow_fallbacks: true,
+            context_window: None,
+            max_output_tokens: None,
+            roles: Default::default(),
+        }
+    }
 }
 
 impl ProviderProfile {
@@ -1292,15 +1349,7 @@ mod tests {
                 base_url: "http://localhost:11434/v1".into(),
                 model: "codestral".into(),
                 protocol: ProviderProtocol::ChatCompletions,
-                api_key_env: None,
-                aux_model: None,
-                reasoning_effort: None,
-                endpoint: None,
-                providers: Vec::new(),
-                allow_fallbacks: true,
-                context_window: None,
-                max_output_tokens: None,
-                roles: Default::default(),
+                ..Default::default()
             },
         );
         settings.profiles.get_mut("local").unwrap().context_window = Some(1_000_000);
@@ -1332,15 +1381,9 @@ mod tests {
                 base_url: "https://api.anthropic.com".into(),
                 model: "claude".into(),
                 protocol: ProviderProtocol::Anthropic,
-                api_key_env: None,
-                aux_model: None,
-                reasoning_effort: None,
-                endpoint: None,
-                providers: Vec::new(),
-                allow_fallbacks: true,
                 context_window: Some(1_000_000),
                 max_output_tokens: Some(64_000),
-                roles: Default::default(),
+                ..Default::default()
             },
         );
         settings.profiles.insert(
@@ -1350,15 +1393,7 @@ mod tests {
                 base_url: "http://localhost:11434/v1".into(),
                 model: "codestral".into(),
                 protocol: ProviderProtocol::ChatCompletions,
-                api_key_env: None,
-                aux_model: None,
-                reasoning_effort: None,
-                endpoint: None,
-                providers: Vec::new(),
-                allow_fallbacks: true,
-                context_window: None,
-                max_output_tokens: None,
-                roles: Default::default(),
+                ..Default::default()
             },
         );
         assert_eq!(settings.profile_limits("claude"), (Some(1_000_000), Some(64_000)));
@@ -1390,15 +1425,9 @@ mod tests {
                 base_url: "https://api.anthropic.com".into(),
                 model: "claude".into(),
                 protocol: ProviderProtocol::Anthropic,
-                api_key_env: None,
-                aux_model: None,
-                reasoning_effort: None,
-                endpoint: None,
-                providers: Vec::new(),
-                allow_fallbacks: true,
                 context_window: Some(1_000_000),
                 max_output_tokens: Some(64_000),
-                roles: Default::default(),
+                ..Default::default()
             },
         );
         settings.profiles.insert(
@@ -1408,15 +1437,7 @@ mod tests {
                 base_url: "http://localhost:11434/v1".into(),
                 model: "codestral".into(),
                 protocol: ProviderProtocol::ChatCompletions,
-                api_key_env: None,
-                aux_model: None,
-                reasoning_effort: None,
-                endpoint: None,
-                providers: Vec::new(),
-                allow_fallbacks: true,
-                context_window: None,
-                max_output_tokens: None,
-                roles: Default::default(),
+                ..Default::default()
             },
         );
         let credentials = Credentials::default();

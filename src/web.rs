@@ -1073,31 +1073,17 @@ mod tests {
 
     fn test_provider(base_url: &str) -> crate::provider::Provider {
         let config = crate::config::Config {
-            workspace: std::env::temp_dir(),
             profile: "test".into(),
-            model: "test-model".into(),
-            base_url: base_url.to_owned(),
             protocol: crate::config::ProviderProtocol::ChatCompletions,
-            api_key: None,
             max_steps: 4,
-            tool_output_limit: 30_000,
             yes: true,
             no_session: true,
-            model_limits: Default::default(),
-            tool_format: Default::default(),
-            mode: None,
-            trace_enabled: false,
-            routing: Default::default(),
-            web_search: Default::default(),
-            endpoint: None,
-            aux_model: None,
-            subagent_model: None,
-            compaction_model: None,
-            reasoning_effort: None,
-            token_compression: false,
-            one_stream: false,
-            prompt_cache: true,
-            paths: crate::config::AbacusPaths::under(std::env::temp_dir().join("abacus-web-test")),
+            ..crate::config::Config::for_endpoint(
+                std::env::temp_dir(),
+                base_url.to_owned(),
+                "test-model".into(),
+                crate::config::AbacusPaths::under(std::env::temp_dir().join("abacus-web-test")),
+            )
         };
         crate::provider::Provider::new(&config).expect("provider")
     }

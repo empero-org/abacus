@@ -9,7 +9,6 @@ use abacus_agent::{
         run_turn,
     },
     config::{AbacusPaths, Config, ProviderProtocol},
-    model_info::ModelLimits,
     provider::Provider,
     services::AgentServices,
     tools::tool_specs,
@@ -55,31 +54,16 @@ async fn streamed_agent_searches_workspace_and_finishes() {
 
     let workspace = workspace.canonicalize().unwrap();
     let config = Config {
-        workspace: workspace.clone(),
         profile: "test".into(),
-        model: "test-model".into(),
-        base_url: format!("http://{address}/v1"),
-        protocol: ProviderProtocol::ChatCompletions,
-        api_key: None,
         max_steps: 4,
-        tool_output_limit: 30_000,
         yes: true,
         no_session: true,
-        model_limits: ModelLimits::default(),
-        tool_format: abacus_agent::tool_format::ToolFormat::default(),
-        mode: None,
-        trace_enabled: false,
-        routing: Default::default(),
-        web_search: abacus_agent::web::WebConfig::default(),
-        endpoint: None,
-        aux_model: None,
-        subagent_model: None,
-        compaction_model: None,
-        reasoning_effort: None,
-        token_compression: false,
-        one_stream: false,
-        prompt_cache: true,
-        paths: AbacusPaths::under(directory.path().join("home")),
+        ..Config::for_endpoint(
+            workspace.clone(),
+            format!("http://{address}/v1"),
+            "test-model".into(),
+            AbacusPaths::under(directory.path().join("home")),
+        )
     };
     let provider = Provider::new(&config).unwrap();
     let mut messages = initial_messages(&workspace);
@@ -155,31 +139,16 @@ async fn a_cancelled_turn_keeps_the_work_it_already_did() {
 
     let workspace = workspace.canonicalize().unwrap();
     let config = Config {
-        workspace: workspace.clone(),
         profile: "test".into(),
-        model: "test-model".into(),
-        base_url: format!("http://{address}/v1"),
-        protocol: ProviderProtocol::ChatCompletions,
-        api_key: None,
         max_steps: 4,
-        tool_output_limit: 30_000,
         yes: true,
         no_session: true,
-        model_limits: ModelLimits::default(),
-        tool_format: abacus_agent::tool_format::ToolFormat::default(),
-        mode: None,
-        trace_enabled: false,
-        routing: Default::default(),
-        web_search: abacus_agent::web::WebConfig::default(),
-        endpoint: None,
-        aux_model: None,
-        subagent_model: None,
-        compaction_model: None,
-        reasoning_effort: None,
-        token_compression: false,
-        one_stream: false,
-        prompt_cache: true,
-        paths: AbacusPaths::under(directory.path().join("home")),
+        ..Config::for_endpoint(
+            workspace.clone(),
+            format!("http://{address}/v1"),
+            "test-model".into(),
+            AbacusPaths::under(directory.path().join("home")),
+        )
     };
     let provider = Provider::new(&config).unwrap();
     let mut messages = initial_messages(&workspace);
@@ -253,31 +222,17 @@ async fn responses_protocol_uses_responses_endpoint_and_stream_format() {
     });
     let workspace = directory.path().canonicalize().unwrap();
     let config = Config {
-        workspace,
         profile: "test".into(),
-        model: "test-model".into(),
-        base_url: format!("http://{address}/v1"),
         protocol: ProviderProtocol::Responses,
-        api_key: None,
         max_steps: 2,
-        tool_output_limit: 30_000,
         yes: true,
         no_session: true,
-        model_limits: ModelLimits::default(),
-        tool_format: abacus_agent::tool_format::ToolFormat::default(),
-        mode: None,
-        trace_enabled: false,
-        routing: Default::default(),
-        web_search: abacus_agent::web::WebConfig::default(),
-        endpoint: None,
-        aux_model: None,
-        subagent_model: None,
-        compaction_model: None,
-        reasoning_effort: None,
-        token_compression: false,
-        one_stream: false,
-        prompt_cache: true,
-        paths: AbacusPaths::under(directory.path().join("home")),
+        ..Config::for_endpoint(
+            workspace,
+            format!("http://{address}/v1"),
+            "test-model".into(),
+            AbacusPaths::under(directory.path().join("home")),
+        )
     };
     let provider = Provider::new(&config).unwrap();
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -325,31 +280,15 @@ async fn edit_requires_reviewable_approval_before_atomic_write() {
     });
     let workspace = workspace.canonicalize().unwrap();
     let config = Config {
-        workspace: workspace.clone(),
         profile: "test".into(),
-        model: "test-model".into(),
-        base_url: format!("http://{address}/v1"),
-        protocol: ProviderProtocol::ChatCompletions,
-        api_key: None,
         max_steps: 4,
-        tool_output_limit: 30_000,
-        yes: false,
         no_session: true,
-        model_limits: ModelLimits::default(),
-        tool_format: abacus_agent::tool_format::ToolFormat::default(),
-        mode: None,
-        trace_enabled: false,
-        routing: Default::default(),
-        web_search: abacus_agent::web::WebConfig::default(),
-        endpoint: None,
-        aux_model: None,
-        subagent_model: None,
-        compaction_model: None,
-        reasoning_effort: None,
-        token_compression: false,
-        one_stream: false,
-        prompt_cache: true,
-        paths: AbacusPaths::under(directory.path().join("home")),
+        ..Config::for_endpoint(
+            workspace.clone(),
+            format!("http://{address}/v1"),
+            "test-model".into(),
+            AbacusPaths::under(directory.path().join("home")),
+        )
     };
     let provider = Provider::new(&config).unwrap();
     let mut messages = initial_messages(&workspace);
@@ -1457,31 +1396,16 @@ fn test_config(
     address: std::net::SocketAddr,
 ) -> Config {
     Config {
-        workspace: workspace.to_owned(),
         profile: "test".into(),
-        model: "test-model".into(),
-        base_url: format!("http://{address}/v1"),
-        protocol: ProviderProtocol::ChatCompletions,
-        api_key: None,
         max_steps: 4,
-        tool_output_limit: 30_000,
         yes: true,
         no_session: true,
-        model_limits: ModelLimits::default(),
-        tool_format: abacus_agent::tool_format::ToolFormat::default(),
-        mode: None,
-        trace_enabled: false,
-        routing: Default::default(),
-        web_search: abacus_agent::web::WebConfig::default(),
-        endpoint: None,
-        aux_model: None,
-        subagent_model: None,
-        compaction_model: None,
-        reasoning_effort: None,
-        token_compression: false,
-        one_stream: false,
-        prompt_cache: true,
-        paths: AbacusPaths::under(directory.path().join("home")),
+        ..Config::for_endpoint(
+            workspace.to_owned(),
+            format!("http://{address}/v1"),
+            "test-model".into(),
+            AbacusPaths::under(directory.path().join("home")),
+        )
     }
 }
 

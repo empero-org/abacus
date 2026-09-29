@@ -2180,31 +2180,16 @@ mod tests {
     fn detached_subagents_bypass_one_stream_gate() {
         let directory = tempfile::tempdir().unwrap();
         let mut config = Config {
-            workspace: directory.path().to_path_buf(),
             profile: "test".into(),
-            model: "test".into(),
-            base_url: "http://127.0.0.1:9".into(),
-            protocol: ProviderProtocol::ChatCompletions,
-            api_key: None,
             max_steps: 8,
-            tool_output_limit: 30_000,
-            yes: false,
             no_session: true,
-            model_limits: crate::model_info::ModelLimits::default(),
-            tool_format: ToolFormat::default(),
-            mode: None,
-            trace_enabled: false,
-            routing: Default::default(),
-            web_search: crate::web::WebConfig::default(),
-            endpoint: None,
-            aux_model: None,
-            subagent_model: None,
-            compaction_model: None,
-            reasoning_effort: None,
-            token_compression: false,
             one_stream: true,
-            prompt_cache: true,
-            paths: crate::config::AbacusPaths::under(directory.path().join("home")),
+            ..Config::for_endpoint(
+                directory.path().to_path_buf(),
+                "http://127.0.0.1:9".into(),
+                "test".into(),
+                crate::config::AbacusPaths::under(directory.path().join("home")),
+            )
         };
         let provider = Provider::new(&config).unwrap();
         assert!(provider.stream_gate.is_some());
@@ -2223,31 +2208,15 @@ mod tests {
         fn provider_for(base_url: &str) -> Provider {
             let directory = tempfile::tempdir().unwrap();
             let config = Config {
-                workspace: directory.path().to_path_buf(),
                 profile: "test".into(),
-                model: "test".into(),
-                base_url: base_url.into(),
-                protocol: ProviderProtocol::ChatCompletions,
-                api_key: None,
                 max_steps: 8,
-                tool_output_limit: 30_000,
-                yes: false,
                 no_session: true,
-                model_limits: crate::model_info::ModelLimits::default(),
-                tool_format: ToolFormat::default(),
-                mode: None,
-                trace_enabled: false,
-                routing: Default::default(),
-                web_search: crate::web::WebConfig::default(),
-                endpoint: None,
-                aux_model: None,
-                subagent_model: None,
-                compaction_model: None,
-                reasoning_effort: None,
-                token_compression: false,
-                one_stream: false,
-                prompt_cache: true,
-                paths: crate::config::AbacusPaths::under(directory.path().join("home")),
+                ..Config::for_endpoint(
+                    directory.path().to_path_buf(),
+                    base_url.into(),
+                    "test".into(),
+                    crate::config::AbacusPaths::under(directory.path().join("home")),
+                )
             };
             Provider::new(&config).unwrap()
         }
@@ -2293,31 +2262,16 @@ mod tests {
         fn provider_for(model: &str) -> Provider {
             let directory = tempfile::tempdir().unwrap();
             let config = Config {
-                workspace: directory.path().to_path_buf(),
                 profile: "test".into(),
-                model: model.into(),
-                base_url: "https://api.anthropic.com".into(),
                 protocol: ProviderProtocol::Anthropic,
-                api_key: None,
                 max_steps: 8,
-                tool_output_limit: 30_000,
-                yes: false,
                 no_session: true,
-                model_limits: crate::model_info::ModelLimits::default(),
-                tool_format: ToolFormat::default(),
-                mode: None,
-                trace_enabled: false,
-                routing: Default::default(),
-                web_search: crate::web::WebConfig::default(),
-                endpoint: None,
-                aux_model: None,
-                subagent_model: None,
-                compaction_model: None,
-                reasoning_effort: None,
-                token_compression: false,
-                one_stream: false,
-                prompt_cache: true,
-                paths: crate::config::AbacusPaths::under(directory.path().join("home")),
+                ..Config::for_endpoint(
+                    directory.path().to_path_buf(),
+                    "https://api.anthropic.com".into(),
+                    model.into(),
+                    crate::config::AbacusPaths::under(directory.path().join("home")),
+                )
             };
             Provider::new(&config).unwrap()
         }

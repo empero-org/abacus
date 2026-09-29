@@ -332,14 +332,7 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
             model: model.clone(),
             protocol,
             api_key_env: env_key.clone(),
-            aux_model: None,
-            reasoning_effort: None,
-            endpoint: None,
-            providers: Vec::new(),
-            allow_fallbacks: true,
-            context_window: None,
-            max_output_tokens: None,
-            roles: Default::default(),
+            ..Default::default()
         },
     );
     settings.default_profile = profile_id.clone();
