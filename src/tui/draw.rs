@@ -342,14 +342,7 @@ pub(super) fn draw_task_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
         let set = ui::glyphs();
         if workers.len() <= crate::hive::CLUSTER_THRESHOLD {
             for worker in &workers {
-                let (glyph, color) = match worker.state {
-                    crate::hive::WorkerState::Running => (
-                        ui::spinner_frame(worker.started.elapsed(), app.settings.ui.animations),
-                        primary(),
-                    ),
-                    crate::hive::WorkerState::Done => (set.ok, success()),
-                    crate::hive::WorkerState::Failed => (set.failed, danger()),
-                };
+                let (glyph, color, _) = worker_mark(worker, app.settings.ui.animations);
                 lines.push(Line::from(vec![
                     bold(format!(" {glyph} "), color),
                     bold(format!("{} {}  ", worker.role, worker.name), text()),
@@ -398,6 +391,21 @@ pub(super) fn draw_task_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
     );
 }
 
+/// How a worker's state is drawn: its glyph, its colour, and the word for it.
+fn worker_mark(
+    worker: &crate::hive::WorkerStatus,
+    animated: bool,
+) -> (&'static str, Color, &'static str) {
+    let set = ui::glyphs();
+    match worker.state {
+        crate::hive::WorkerState::Running => {
+            (ui::spinner_frame(worker.started.elapsed(), animated), primary(), "running")
+        }
+        crate::hive::WorkerState::Done => (set.ok, success(), "done"),
+        crate::hive::WorkerState::Failed => (set.failed, danger(), "failed"),
+    }
+}
+
 /// The Ctrl+P overlay: every worker in the current swarm with role, state,
 /// elapsed time, and latest activity, plus the workspace's delegation record.
 pub(super) fn draw_hive(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -410,7 +418,6 @@ pub(super) fn draw_hive(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let inner = open_overlay(frame, popup, "SUBAGENTS", primary(), hints);
 
     let workers = app.hive.board.snapshot();
-    let set = ui::glyphs();
     let mut lines: Vec<Line<'static>> = Vec::new();
     if workers.is_empty() {
         lines.push(Line::from(fg(
@@ -419,15 +426,7 @@ pub(super) fn draw_hive(frame: &mut Frame<'_>, area: Rect, app: &App) {
         )));
     }
     for worker in &workers {
-        let (glyph, color, state) = match worker.state {
-            crate::hive::WorkerState::Running => (
-                ui::spinner_frame(worker.started.elapsed(), app.settings.ui.animations),
-                primary(),
-                "running",
-            ),
-            crate::hive::WorkerState::Done => (set.ok, success(), "done"),
-            crate::hive::WorkerState::Failed => (set.failed, danger(), "failed"),
-        };
+        let (glyph, color, state) = worker_mark(worker, app.settings.ui.animations);
         lines.push(Line::from(vec![
             bold(format!("{glyph} "), color),
             bold(format!("{} ", worker.role), secondary()),
@@ -534,16 +533,10 @@ pub(super) fn draw_completion_popup(frame: &mut Frame<'_>, input_area: Rect, app
     }
 
     let hidden = suggestions.len() - visible;
-    let footer = if hidden > 0 {
-        ui::overlay_hints(&[("↑↓", "select"), ("⇥", "insert"), ("esc", "dismiss")])
-            .spans
-            .into_iter()
-            .chain(std::iter::once(fg(format!("   +{hidden} more"), rail())))
-            .collect::<Vec<_>>()
-            .into()
-    } else {
-        ui::overlay_hints(&[("↑↓", "select"), ("⇥", "insert"), ("esc", "dismiss")])
-    };
+    let mut footer = ui::overlay_hints(&[("↑↓", "select"), ("⇥", "insert"), ("esc", "dismiss")]);
+    if hidden > 0 {
+        footer.spans.push(fg(format!("   +{hidden} more"), rail()));
+    }
 
     let height = lines.len() as u16 + 2;
     let area = Rect { x: input_area.x, y: input_area.y.saturating_sub(height), width, height };

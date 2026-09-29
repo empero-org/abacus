@@ -222,7 +222,7 @@ pub(super) fn usage_stats_wide(stats: &UsageStats, width: usize) -> Vec<Line<'st
             &format!(
                 "{}{}",
                 if stats.tokens_estimated { "~" } else { "" },
-                format_count(stats.total_tokens)
+                ui::format_count(stats.total_tokens)
             ),
             left_width,
         ),
@@ -279,7 +279,7 @@ pub(super) fn usage_stats_compact(stats: &UsageStats) -> Vec<Line<'static>> {
             &format!(
                 "{}{}",
                 if stats.tokens_estimated { "~" } else { "" },
-                format_count(stats.total_tokens)
+                ui::format_count(stats.total_tokens)
             ),
         ),
         usage_stat_line("Favorite model", stats.favorite_model.as_deref().unwrap_or("—")),
@@ -321,7 +321,7 @@ pub(super) fn usage_model_lines(
             fg(format!(" {marker} "), if model == current_model { primary() } else { muted() }),
             bold(format!("{:<24}", crate::text::clip(&crate::text::flat(&model), 23, "…")), text()),
             fg(format!("{sessions:>8}  "), muted()),
-            fg(format!("{:>8}  ", format_count(tokens)), primary()),
+            fg(format!("{:>8}  ", ui::format_count(tokens)), primary()),
             fg("█".repeat(filled.max(1)), secondary()),
             fg("░".repeat(bar_width - filled.max(1)), border()),
             fg(format!("  {}", format_duration(duration)), muted()),
@@ -332,18 +332,6 @@ pub(super) fn usage_model_lines(
 
 pub(super) fn usage_date(record: &SessionUsage) -> NaiveDate {
     record.created_at.with_timezone(&Local).date_naive()
-}
-
-pub(super) fn format_count(value: u64) -> String {
-    if value >= 1_000_000_000 {
-        format!("{:.1}b", value as f64 / 1_000_000_000.0)
-    } else if value >= 1_000_000 {
-        format!("{:.1}m", value as f64 / 1_000_000.0)
-    } else if value >= 1_000 {
-        format!("{:.1}k", value as f64 / 1_000.0)
-    } else {
-        value.to_string()
-    }
 }
 
 pub(super) fn format_duration(seconds: u64) -> String {

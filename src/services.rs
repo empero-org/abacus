@@ -108,14 +108,7 @@ impl AgentServices {
     }
 
     pub fn for_workspace(&self, workspace: PathBuf) -> Self {
-        Self {
-            skills: self.skills.clone(),
-            skill_discovery: self.skill_discovery.clone(),
-            plugins: self.plugins.clone(),
-            mcp: self.mcp.clone(),
-            workspace,
-            project_trusted: self.project_trusted,
-        }
+        Self { workspace, ..self.clone() }
     }
 
     /// Rediscover skills in place, so a skill the agent just wrote is callable
@@ -320,25 +313,22 @@ impl AgentServices {
 
     pub fn search_catalog(&self, query: &str) -> String {
         let query = query.to_ascii_lowercase();
+        let matches = |name: &str, description: &str| {
+            query.is_empty()
+                || name.to_ascii_lowercase().contains(&query)
+                || description.to_ascii_lowercase().contains(&query)
+        };
         let mut output = Vec::new();
         for skill in self.skills.read().expect("skill registry lock").search(&query) {
             output.push(format!("skill/{}: {}", skill.name, skill.description));
         }
-        for tool in self.mcp.tools() {
-            if query.is_empty()
-                || tool.exposed_name.to_ascii_lowercase().contains(&query)
-                || tool.description.to_ascii_lowercase().contains(&query)
-            {
-                output.push(format!("{}: {}", tool.exposed_name, tool.description));
-            }
+        for tool in self.mcp.tools().filter(|tool| matches(&tool.exposed_name, &tool.description)) {
+            output.push(format!("{}: {}", tool.exposed_name, tool.description));
         }
-        for plugin in self.plugins.list() {
-            if query.is_empty()
-                || plugin.name.to_ascii_lowercase().contains(&query)
-                || plugin.description.to_ascii_lowercase().contains(&query)
-            {
-                output.push(format!("plugin/{}: {}", plugin.name, plugin.description));
-            }
+        for plugin in
+            self.plugins.list().filter(|plugin| matches(&plugin.name, &plugin.description))
+        {
+            output.push(format!("plugin/{}: {}", plugin.name, plugin.description));
         }
         output.join("\n")
     }

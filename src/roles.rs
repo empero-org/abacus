@@ -143,7 +143,7 @@ mod tests {
             name: "test".to_owned(),
             base_url: "https://example.invalid/v1".to_owned(),
             model: "big/model".to_owned(),
-            ..ProviderProfile::empty()
+            ..Default::default()
         }
     }
 

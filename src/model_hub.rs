@@ -270,7 +270,7 @@ mod tests {
             ProviderProfile {
                 name: "OpenRouter".to_owned(),
                 model: "big/model".to_owned(),
-                ..ProviderProfile::empty()
+                ..Default::default()
             },
         );
         settings.default_profile = "main".to_owned();

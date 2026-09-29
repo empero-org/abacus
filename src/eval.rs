@@ -458,18 +458,10 @@ async fn run_check(task: &EvalTask, workspace: &Path) -> Result<(bool, String)> 
     let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
     combined.push_str(&String::from_utf8_lossy(&output.stderr));
     let passed = output.status.success();
-    Ok((passed, if passed { String::new() } else { truncate(&combined, 2_000) }))
-}
-
-fn truncate(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.trim().to_owned();
-    }
-    let mut boundary = text.char_indices().nth(limit).map(|(index, _)| index).unwrap_or(text.len());
-    while !text.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    format!("{}…", &text[..boundary])
+    Ok((
+        passed,
+        if passed { String::new() } else { crate::text::clip(combined.trim(), 2_000, "…") },
+    ))
 }
 
 /// A fresh git repository, so `git_diff` and `git_status` work and the model
@@ -732,14 +724,5 @@ mod tests {
         assert_eq!(median(vec![5]), 5);
         assert_eq!(median(vec![9, 1, 5]), 5);
         assert_eq!(median(vec![4, 1]), 4);
-    }
-
-    #[test]
-    fn truncate_keeps_a_char_boundary() {
-        let text = "é".repeat(50);
-        let cut = truncate(&text, 10);
-        assert!(cut.chars().count() <= 11);
-        assert!(cut.ends_with('…'));
-        assert_eq!(truncate("short", 100), "short");
     }
 }

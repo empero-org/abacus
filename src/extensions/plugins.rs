@@ -178,7 +178,7 @@ impl PluginRegistry {
     }
 
     pub fn remove(name: &str, paths: &AbacusPaths) -> Result<()> {
-        validate_name(name)?;
+        super::validate_name("name", name)?;
         let root = paths.root.join("plugins");
         let path = root.join(name);
         if !path.exists() {
@@ -251,7 +251,7 @@ fn load_plugin(root: &Path, source: &str) -> Result<Plugin> {
     if manifest.manifest_version != 1 {
         bail!("unsupported plugin manifest version {}", manifest.manifest_version);
     }
-    validate_name(&manifest.name)?;
+    super::validate_name("name", &manifest.name)?;
     if manifest.version.trim().is_empty() || manifest.description.trim().is_empty() {
         bail!("plugin version and description are required");
     }
@@ -265,7 +265,7 @@ fn load_plugin(root: &Path, source: &str) -> Result<Plugin> {
         .map(|path| confined_path(&root, path))
         .collect::<Result<Vec<_>>>()?;
     for command in &manifest.commands {
-        validate_name(&command.name)?;
+        super::validate_name("name", &command.name)?;
         if command.description.trim().is_empty() || command.prompt.trim().is_empty() {
             bail!("plugin command /{} needs description and prompt", command.name);
         }
@@ -332,18 +332,6 @@ fn copy_tree(source: &Path, destination: &Path, depth: usize) -> Result<()> {
             }
             fs::copy(entry.path(), target)?;
         }
-    }
-    Ok(())
-}
-
-fn validate_name(name: &str) -> Result<()> {
-    if name.is_empty()
-        || name.len() > 64
-        || name.starts_with('-')
-        || name.ends_with('-')
-        || !name.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
-    {
-        bail!("name must use 1-64 lowercase letters, digits, or hyphens");
     }
     Ok(())
 }

@@ -311,23 +311,23 @@ impl InputBuffer {
     /// Restore the buffer to before the last edit. Runs of typed characters
     /// collapse into one step, so undo moves in words rather than keystrokes.
     pub fn undo(&mut self) -> bool {
-        let Some((chars, cursor)) = self.undo_stack.pop() else {
-            return false;
-        };
-        self.redo_stack.push((std::mem::take(&mut self.chars), self.cursor));
-        self.chars = chars;
-        self.cursor = cursor.min(self.chars.len());
-        self.selection = None;
-        self.coalescing = false;
-        true
+        self.step(true)
     }
 
     pub fn redo(&mut self) -> bool {
-        let Some((chars, cursor)) = self.redo_stack.pop() else {
+        self.step(false)
+    }
+
+    /// Trade the buffer for the top of one history, keeping it on the other.
+    fn step(&mut self, back: bool) -> bool {
+        let (from, onto) = match back {
+            true => (&mut self.undo_stack, &mut self.redo_stack),
+            false => (&mut self.redo_stack, &mut self.undo_stack),
+        };
+        let Some((chars, cursor)) = from.pop() else {
             return false;
         };
-        self.undo_stack.push((std::mem::take(&mut self.chars), self.cursor));
-        self.chars = chars;
+        onto.push((std::mem::replace(&mut self.chars, chars), self.cursor));
         self.cursor = cursor.min(self.chars.len());
         self.selection = None;
         self.coalescing = false;

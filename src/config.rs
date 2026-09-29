@@ -805,28 +805,6 @@ impl Default for ProviderProfile {
     }
 }
 
-impl ProviderProfile {
-    /// A profile with nothing filled in, for `..ProviderProfile::empty()` at
-    /// the several call sites that only care about a few fields.
-    pub fn empty() -> Self {
-        Self {
-            name: String::new(),
-            base_url: String::new(),
-            model: String::new(),
-            protocol: ProviderProtocol::default(),
-            api_key_env: None,
-            aux_model: None,
-            reasoning_effort: None,
-            endpoint: None,
-            providers: Vec::new(),
-            allow_fallbacks: true,
-            context_window: None,
-            max_output_tokens: None,
-            roles: BTreeMap::new(),
-        }
-    }
-}
-
 fn is_profile_id_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')
 }

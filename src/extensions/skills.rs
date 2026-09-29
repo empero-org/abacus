@@ -329,7 +329,7 @@ fn load_skill(root: &Path, source: &str) -> Result<Skill> {
     let content = fs::read_to_string(&path).context("SKILL.md is not UTF-8")?;
     let (frontmatter, instructions) = split_frontmatter(&content)?;
     let metadata: Frontmatter = serde_yaml::from_str(frontmatter).context("invalid frontmatter")?;
-    validate_name(&metadata.name)?;
+    super::validate_name("skill name", &metadata.name)?;
     let directory = root.file_name().and_then(|name| name.to_str()).unwrap_or_default();
     if directory != metadata.name {
         bail!("skill name `{}` must match directory `{directory}`", metadata.name);
@@ -361,18 +361,6 @@ fn split_frontmatter(content: &str) -> Result<(&str, &str)> {
     Ok((frontmatter, body))
 }
 
-fn validate_name(name: &str) -> Result<()> {
-    if name.is_empty()
-        || name.len() > 64
-        || name.starts_with('-')
-        || name.ends_with('-')
-        || !name.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
-    {
-        bail!("skill name must use 1-64 lowercase letters, digits, or hyphens");
-    }
-    Ok(())
-}
-
 /// Write `<root>/<name>/SKILL.md`, creating the directory.
 ///
 /// `load_skill` is the reader for this format and enforces the same rules, so
@@ -384,7 +372,7 @@ pub fn write_skill(
     description: &str,
     instructions: &str,
 ) -> Result<PathBuf> {
-    validate_name(name)?;
+    super::validate_name("skill name", name)?;
     let description = description.trim();
     if description.is_empty() || description.len() > 1_024 {
         bail!("skill description must contain 1-1024 bytes");

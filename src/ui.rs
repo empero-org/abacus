@@ -535,14 +535,13 @@ pub fn format_elapsed(ms: u64) -> String {
     }
 }
 
-/// Thousands-scaled counts for the token readout — `938`, `12.4k`, `3.1M`.
+/// Scaled counts for the token readouts — `938`, `12.4k`, `3.1M`, `1.2B`.
 pub fn format_count(value: u64) -> String {
-    if value < 1_000 {
-        value.to_string()
-    } else if value < 1_000_000 {
-        format!("{:.1}k", value as f64 / 1_000.0)
-    } else {
-        format!("{:.1}M", value as f64 / 1_000_000.0)
+    match value {
+        0..1_000 => value.to_string(),
+        1_000..1_000_000 => format!("{:.1}k", value as f64 / 1e3),
+        1_000_000..1_000_000_000 => format!("{:.1}M", value as f64 / 1e6),
+        _ => format!("{:.1}B", value as f64 / 1e9),
     }
 }
 
