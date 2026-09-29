@@ -364,10 +364,7 @@ impl ThemeFile {
         for (role, value) in &self.colors {
             let color = self.resolve_value(value, &mut Vec::new())?;
             if !set_role(&mut theme, role, color) {
-                return Err(format!(
-                    "unknown colour role `{role}` — expected one of {}",
-                    THEME_ROLES.join(", ")
-                ));
+                return Err(format!("unknown colour role `{role}` — expected one of {}", THEME_ROLES.join(", ")));
             }
         }
         Ok(theme.adapt(mode, depth))
@@ -379,11 +376,7 @@ impl ThemeFile {
     /// `b: "a"` would otherwise recurse until the stack runs out, and a stack
     /// overflow is a much worse way to learn about a typo than a message
     /// naming the loop.
-    fn resolve_value(
-        &self,
-        value: &ColorValue,
-        visited: &mut Vec<String>,
-    ) -> Result<Color, String> {
+    fn resolve_value(&self, value: &ColorValue, visited: &mut Vec<String>) -> Result<Color, String> {
         let text = match value {
             ColorValue::Index(index) => return Ok(Color::Indexed(*index)),
             ColorValue::Text(text) => text.trim(),
@@ -463,9 +456,7 @@ pub fn available(themes_dir: &std::path::Path) -> Vec<String> {
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
-            (path.extension()? == "json")
-                .then(|| path.file_stem()?.to_str().map(str::to_owned))
-                .flatten()
+            (path.extension()? == "json").then(|| path.file_stem()?.to_str().map(str::to_owned)).flatten()
         })
         .collect();
     names.sort();
@@ -476,10 +467,9 @@ pub fn available(themes_dir: &std::path::Path) -> Vec<String> {
 /// Read and build a named theme.
 pub fn load(themes_dir: &std::path::Path, name: &str, depth: ColorDepth) -> Result<Theme, String> {
     let path = themes_dir.join(format!("{name}.json"));
-    let content = std::fs::read_to_string(&path)
-        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-    let file: ThemeFile =
-        serde_json::from_str(&content).map_err(|error| format!("{}: {error}", path.display()))?;
+    let content =
+        std::fs::read_to_string(&path).map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    let file: ThemeFile = serde_json::from_str(&content).map_err(|error| format!("{}: {error}", path.display()))?;
     file.to_theme(depth).map_err(|error| format!("{}: {error}", path.display()))
 }
 
@@ -572,11 +562,7 @@ fn quantize_256(color: Color) -> Color {
     let grey = 8 + level * 10;
     let grey_distance = distance((r, g, b), (grey, grey, grey));
 
-    if grey_distance < cube_distance {
-        Color::Indexed(232 + level)
-    } else {
-        Color::Indexed(cube_index)
-    }
+    if grey_distance < cube_distance { Color::Indexed(232 + level) } else { Color::Indexed(cube_index) }
 }
 
 fn distance(a: (u8, u8, u8), b: (u8, u8, u8)) -> i32 {
@@ -640,10 +626,7 @@ fn mode_from_colorfgbg() -> Option<ThemeMode> {
 fn mode_from_macos_appearance() -> Option<ThemeMode> {
     // `defaults read -g AppleInterfaceStyle` prints "Dark" in dark mode and
     // exits non-zero (key absent) in light mode. Safe, fast, no TTY probing.
-    let output = std::process::Command::new("defaults")
-        .args(["read", "-g", "AppleInterfaceStyle"])
-        .output()
-        .ok()?;
+    let output = std::process::Command::new("defaults").args(["read", "-g", "AppleInterfaceStyle"]).output().ok()?;
     if !output.status.success() {
         return Some(ThemeMode::Light);
     }
@@ -697,8 +680,7 @@ mod tests {
         for role in [theme.primary, theme.success, theme.warning, theme.danger, theme.text] {
             assert!(matches!(role, Color::Indexed(_)), "{role:?} not quantized");
         }
-        let distinct =
-            [theme.primary, theme.success, theme.warning, theme.danger, theme.muted, theme.text];
+        let distinct = [theme.primary, theme.success, theme.warning, theme.danger, theme.muted, theme.text];
         for (index, first) in distinct.iter().enumerate() {
             for second in &distinct[index + 1..] {
                 assert_ne!(first, second, "roles collapsed onto the same index");
@@ -748,24 +730,9 @@ mod tests {
         for mode in [ThemeMode::Dark, ThemeMode::Light] {
             let theme = Theme::for_mode(mode);
             for role in [
-                theme.primary,
-                theme.secondary,
-                theme.success,
-                theme.warning,
-                theme.danger,
-                theme.muted,
-                theme.border,
-                theme.surface,
-                theme.text,
-                theme.inverse,
-                theme.code_bg,
-                theme.add_fg,
-                theme.add_bg,
-                theme.del_fg,
-                theme.del_bg,
-                theme.rail,
-                theme.selection,
-                theme.overlay,
+                theme.primary, theme.secondary, theme.success, theme.warning, theme.danger, theme.muted, theme.border,
+                theme.surface, theme.text, theme.inverse, theme.code_bg, theme.add_fg, theme.add_bg, theme.del_fg,
+                theme.del_bg, theme.rail, theme.selection, theme.overlay,
             ] {
                 assert_eq!(role, Color::Reset);
             }
@@ -803,8 +770,7 @@ mod tests {
     #[test]
     fn a_theme_file_reports_what_is_wrong_with_it() {
         // A cycle names the loop rather than overflowing the stack.
-        let cyclic =
-            theme_file(r##"{ "vars": { "a": "b", "b": "a" }, "colors": { "primary": "a" } }"##);
+        let cyclic = theme_file(r##"{ "vars": { "a": "b", "b": "a" }, "colors": { "primary": "a" } }"##);
         let error = cyclic.to_theme(ColorDepth::TrueColor).unwrap_err();
         assert!(error.contains("circular"), "{error}");
 
@@ -847,10 +813,7 @@ mod tests {
     #[test]
     fn shorthand_hex_is_accepted() {
         let file = theme_file(r##"{ "colors": { "primary": "#f0a" } }"##);
-        assert_eq!(
-            file.to_theme(ColorDepth::TrueColor).unwrap().primary,
-            Color::Rgb(0xff, 0x00, 0xaa)
-        );
+        assert_eq!(file.to_theme(ColorDepth::TrueColor).unwrap().primary, Color::Rgb(0xff, 0x00, 0xaa));
     }
 
     #[test]
@@ -873,8 +836,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("abacus-theme-{}", std::process::id()));
         std::fs::create_dir_all(&directory).expect("temp dir");
         std::fs::write(directory.join("broken.json"), "{ not json").expect("write");
-        std::fs::write(directory.join("good.json"), r##"{ "colors": { "primary": "#123456" } }"##)
-            .expect("write");
+        std::fs::write(directory.join("good.json"), r##"{ "colors": { "primary": "#123456" } }"##).expect("write");
 
         assert_eq!(available(&directory), vec!["broken", "good"]);
         let (_, error) = resolve(&ThemeChoice::Named("broken".to_owned()), &directory);

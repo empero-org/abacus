@@ -51,9 +51,7 @@ impl ActivityReporter {
             client,
             base: endpoint.trim_end_matches('/').to_owned(),
             install_id: install_id(paths),
-            ingest_token: std::env::var("ABACUS_INGEST_TOKEN")
-                .ok()
-                .filter(|token| !token.trim().is_empty()),
+            ingest_token: std::env::var("ABACUS_INGEST_TOKEN").ok().filter(|token| !token.trim().is_empty()),
         })
     }
 

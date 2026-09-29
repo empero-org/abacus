@@ -72,11 +72,7 @@ impl ModelLimits {
     /// Synchronous resolution from the model name plus optional overrides. This
     /// covers the common case without a network call; detection can upgrade it
     /// afterward via [`Self::apply_detected`].
-    pub fn resolve_from_name(
-        model: &str,
-        context_override: Option<usize>,
-        output_override: Option<usize>,
-    ) -> Self {
+    pub fn resolve_from_name(model: &str, context_override: Option<usize>, output_override: Option<usize>) -> Self {
         let (mut context, mut output, mut source) = match known_limits(model) {
             Some((context, output)) => (context, output, LimitSource::Heuristic),
             None => (DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, LimitSource::Default),
@@ -91,12 +87,7 @@ impl ModelLimits {
             source = LimitSource::Override;
             configured = Some(value);
         }
-        Self {
-            context_window: context,
-            max_output_tokens: output,
-            configured_output_tokens: configured,
-            source,
-        }
+        Self { context_window: context, max_output_tokens: output, configured_output_tokens: configured, source }
     }
 
     /// Fold in server-detected limits. Never overrides an explicit user override,
@@ -181,8 +172,7 @@ impl CompactionBudget {
 /// user prompt, so every later request replayed the opening turn.
 fn usable_input_tokens(limits: ModelLimits) -> usize {
     let reserved_output = reserved_output_tokens(limits);
-    let usable =
-        limits.context_window.saturating_sub(reserved_output).saturating_sub(RESERVED_TOKENS);
+    let usable = limits.context_window.saturating_sub(reserved_output).saturating_sub(RESERVED_TOKENS);
     let floor = min_usable_input_tokens(limits.context_window);
     usable.max(floor)
 }
@@ -290,11 +280,7 @@ fn known_limits(model: &str) -> Option<(usize, usize)> {
 /// OpenRouter (`data`), servers that key the list under `models`, a bare root
 /// array, and per-model `context_length` as either a number or a `k`/`m`-
 /// suffixed string.
-pub async fn detect_limits(
-    models_url: &str,
-    api_key: Option<&str>,
-    model: &str,
-) -> Option<(usize, Option<usize>)> {
+pub async fn detect_limits(models_url: &str, api_key: Option<&str>, model: &str) -> Option<(usize, Option<usize>)> {
     // Short timeout: this is a non-blocking best-effort pre-flight, and a server
     // that doesn't implement /models would otherwise stall every launch.
     let timeout = Duration::from_secs(2);
@@ -308,14 +294,9 @@ pub async fn detect_limits(
 fn extract_limits_from_models(value: &Value, model: &str) -> Option<(usize, Option<usize>)> {
     let data = entries(value);
     let target = model.to_ascii_lowercase();
-    let entry = data
-        .iter()
-        .find(|item| item["id"].as_str().is_some_and(|id| id.eq_ignore_ascii_case(model)))
-        .or_else(|| {
-            data.iter().find(|item| {
-                item["id"].as_str().is_some_and(|id| id.to_ascii_lowercase().ends_with(&target))
-            })
-        })?;
+    let entry = data.iter().find(|item| item["id"].as_str().is_some_and(|id| id.eq_ignore_ascii_case(model))).or_else(
+        || data.iter().find(|item| item["id"].as_str().is_some_and(|id| id.to_ascii_lowercase().ends_with(&target))),
+    )?;
     let (context, output) = reported_limits(entry);
     Some((context?, output))
 }
@@ -330,8 +311,7 @@ fn entries(value: &Value) -> &[Value] {
 fn reported_limits(entry: &Value) -> (Option<usize>, Option<usize>) {
     const OUTPUT: &[&str] = &["max_completion_tokens", "max_output_tokens"];
     let context = read_usize(entry, &["context_length", "max_context_length", "context_window"]);
-    let output =
-        read_usize(entry, OUTPUT).or_else(|| read_usize(entry.get("top_provider")?, OUTPUT));
+    let output = read_usize(entry, OUTPUT).or_else(|| read_usize(entry.get("top_provider")?, OUTPUT));
     (context, output)
 }
 
@@ -399,10 +379,8 @@ impl ModelCard {
     /// Parse one entry of a `/models` payload.
     pub fn from_entry(entry: &Value) -> Option<Self> {
         let id = entry["id"].as_str()?.to_owned();
-        let provider = id
-            .split_once('/')
-            .map(|(provider, _)| provider.to_owned())
-            .filter(|provider| !provider.is_empty());
+        let provider =
+            id.split_once('/').map(|(provider, _)| provider.to_owned()).filter(|provider| !provider.is_empty());
         let pricing = entry.get("pricing");
         // Pricing is quoted per *token* by OpenRouter-shaped endpoints and is
         // unreadable at that scale — every model is `$0.000003`. Scale to the
@@ -418,20 +396,14 @@ impl ModelCard {
         Some(ModelCard {
             provider,
             name: entry["name"].as_str().map(str::to_owned),
-            description: entry["description"]
-                .as_str()
-                .map(crate::text::squeeze)
-                .filter(|text| !text.is_empty()),
+            description: entry["description"].as_str().map(crate::text::squeeze).filter(|text| !text.is_empty()),
             context_length,
             max_output_tokens,
             input_cost: cost(&["prompt", "input"]),
             output_cost: cost(&["completion", "output"]),
-            vision: modalities
-                .is_some_and(|list| list.iter().any(|value| value.as_str() == Some("image"))),
+            vision: modalities.is_some_and(|list| list.iter().any(|value| value.as_str() == Some("image"))),
             reasoning: entry["supported_parameters"].as_array().is_some_and(|list| {
-                list.iter().any(|value| {
-                    matches!(value.as_str(), Some("reasoning") | Some("include_reasoning"))
-                })
+                list.iter().any(|value| matches!(value.as_str(), Some("reasoning") | Some("include_reasoning")))
             }),
             id,
         })
@@ -440,8 +412,7 @@ impl ModelCard {
 
 /// Parse a whole `/models` payload into cards, sorted by id.
 pub fn parse_model_cards(value: &Value) -> Vec<ModelCard> {
-    let mut cards: Vec<ModelCard> =
-        entries(value).iter().filter_map(ModelCard::from_entry).collect();
+    let mut cards: Vec<ModelCard> = entries(value).iter().filter_map(ModelCard::from_entry).collect();
     cards.sort_by_key(|card| card.id.to_ascii_lowercase());
     cards.dedup_by(|a, b| a.id == b.id);
     cards
@@ -507,9 +478,8 @@ pub fn parse_tokens(input: &str) -> Result<usize> {
         Some('m') => (&trimmed[..trimmed.len() - 1], 1_000_000),
         _ => (trimmed.as_str(), 1),
     };
-    let value: usize = digits
-        .parse()
-        .map_err(|_| anyhow::anyhow!("invalid token count `{input}` (try `128k` or `200000`)"))?;
+    let value: usize =
+        digits.parse().map_err(|_| anyhow::anyhow!("invalid token count `{input}` (try `128k` or `200000`)"))?;
     Ok(value.saturating_mul(multiplier))
 }
 
@@ -588,10 +558,7 @@ mod tests {
         limits.apply_detected(262_144, Some(262_144));
         assert_eq!(limits.context_window, 262_144);
         assert_eq!(limits.max_output_tokens, 262_144, "estimate still informed");
-        assert_eq!(
-            limits.configured_output_tokens, None,
-            "an echoed cap must not be sent to the provider"
-        );
+        assert_eq!(limits.configured_output_tokens, None, "an echoed cap must not be sent to the provider");
         // A genuinely smaller cap is still configured.
         let mut limits = ModelLimits::resolve_from_name("unknown-via-proxy", None, None);
         limits.apply_detected(262_144, Some(131_072));
@@ -637,11 +604,7 @@ mod tests {
         }
         .compaction_budget();
         let default = CompactionBudget::default();
-        assert!(
-            budget.compact_at_chars > 300_000,
-            "must still have a real trigger, got {}",
-            budget.compact_at_chars
-        );
+        assert!(budget.compact_at_chars > 300_000, "must still have a real trigger, got {}", budget.compact_at_chars);
         assert!(
             budget.recent_budget_chars > 100_000,
             "must still keep a recent window, got {}",
@@ -832,9 +795,6 @@ mod tests {
         assert_eq!(card(2.0, 6.0).cost_label(), "$2/6");
         assert_eq!(card(0.15, 0.6).cost_label(), "$0.15/0.6");
         assert_eq!(card(150.0, 3.5).cost_label(), "$150/3.5");
-        assert_eq!(
-            ModelCard { context_length: Some(1_000_000), ..ModelCard::default() }.context_label(),
-            "1m ctx"
-        );
+        assert_eq!(ModelCard { context_length: Some(1_000_000), ..ModelCard::default() }.context_label(), "1m ctx");
     }
 }

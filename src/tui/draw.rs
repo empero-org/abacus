@@ -15,8 +15,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let composer_text_width = area.width.min(CONTENT_COLUMNS).saturating_sub(6).max(1) as usize;
     app.composer_width = composer_text_width as u16;
     let input_height = (app.input.wrapped_line_count(composer_text_width) as u16 + 2).clamp(3, 12);
-    let task_height = u16::from(app.state.goal.snapshot().is_some() || app.ralph_loop.is_some())
-        * 2
+    let task_height = u16::from(app.state.goal.snapshot().is_some() || app.ralph_loop.is_some()) * 2
         + u16::from(!app.state.tasks.is_empty())
         + app.hive.board.strip_rows();
     let chunks = Layout::default()
@@ -81,10 +80,7 @@ pub(super) fn mode_color(mode: AgentMode) -> Color {
 pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let mode = app.resolved_agent_mode.unwrap_or(app.agent_mode);
 
-    let mut left = vec![
-        ui::badge("ABACUS", secondary()),
-        bold(format!("  {}", app.config.workspace_name()), text()),
-    ];
+    let mut left = vec![ui::badge("ABACUS", secondary()), bold(format!("  {}", app.config.workspace_name()), text())];
     if let Some(branch) = &app.git_branch {
         left.push(fg(format!("  {} {}", ui::glyphs().branch, ui::truncate(branch, 24)), muted()));
     }
@@ -104,15 +100,9 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     // mid-word on a narrow terminal; clipping ends it cleanly instead.
     let row = Rect { height: 1, ..area };
     let reserved = ui::spans_width(&right) as u16 + 2;
-    frame.render_widget(
-        Paragraph::new(Line::from(left)),
-        Rect { width: row.width.saturating_sub(reserved), ..row },
-    );
+    frame.render_widget(Paragraph::new(Line::from(left)), Rect { width: row.width.saturating_sub(reserved), ..row });
     frame.render_widget(Paragraph::new(Line::from(right)).alignment(Alignment::Right), row);
-    frame.render_widget(
-        Paragraph::new(ui::rule(area.width)),
-        Rect { y: area.y.saturating_add(1), height: 1, ..area },
-    );
+    frame.render_widget(Paragraph::new(ui::rule(area.width)), Rect { y: area.y.saturating_add(1), height: 1, ..area });
 }
 
 pub(super) fn draw_transcript(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
@@ -132,22 +122,15 @@ pub(super) fn draw_transcript(frame: &mut Frame<'_>, area: Rect, app: &mut App) 
     let body = Rect { width: area.width.saturating_sub(SCROLLBAR_COLUMNS), ..area };
     // A running tool animates, so the spinner phase joins the cache key; when
     // nothing is running the phase is pinned and the wrap is reused verbatim.
-    let running = app
-        .entries
-        .last()
-        .and_then(|entry| entry.tool.as_ref())
-        .is_some_and(|call| call.status == ToolStatus::Running);
+    let running =
+        app.entries.last().and_then(|entry| entry.tool.as_ref()).is_some_and(|call| call.status == ToolStatus::Running);
     let animated = app.settings.ui.animations;
     let phase = if running && animated {
         (app.started.elapsed().as_millis() / 90) as usize % ui::SPINNER_FRAMES
     } else {
         usize::MAX
     };
-    let spinner = if running {
-        ui::spinner_frame(app.started.elapsed(), animated)
-    } else {
-        ui::glyphs().still
-    };
+    let spinner = if running { ui::spinner_frame(app.started.elapsed(), animated) } else { ui::glyphs().still };
 
     let height = body.height as usize;
     let total = app.wrapped_transcript(body.width.max(1), spinner, phase).lines.len();
@@ -171,9 +154,7 @@ pub(super) fn draw_transcript(frame: &mut Frame<'_>, area: Rect, app: &mut App) 
     let visible = app
         .transcript_cache
         .as_ref()
-        .map(|(_, rendered)| {
-            rendered.lines.iter().skip(start).take(height).cloned().collect::<Vec<_>>()
-        })
+        .map(|(_, rendered)| rendered.lines.iter().skip(start).take(height).cloned().collect::<Vec<_>>())
         .unwrap_or_default();
     frame.render_widget(Paragraph::new(Text::from(visible)), body);
 
@@ -188,12 +169,7 @@ pub(super) fn draw_transcript(frame: &mut Frame<'_>, area: Rect, app: &mut App) 
                 continue;
             }
             hits.transcript.push((
-                Rect {
-                    x: body.x,
-                    y: body.y + (top - start) as u16,
-                    width: body.width,
-                    height: (bottom - top) as u16,
-                },
+                Rect { x: body.x, y: body.y + (top - start) as u16, width: body.width, height: (bottom - top) as u16 },
                 index,
             ));
         }
@@ -212,13 +188,7 @@ pub(super) fn draw_transcript(frame: &mut Frame<'_>, area: Rect, app: &mut App) 
 
 /// A hairline scrollbar on the right edge of the transcript. Drawn only when
 /// the content actually overflows, so a short session has no chrome at all.
-pub(super) fn draw_scrollbar(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    total: usize,
-    position: usize,
-    height: usize,
-) {
+pub(super) fn draw_scrollbar(frame: &mut Frame<'_>, area: Rect, total: usize, position: usize, height: usize) {
     if area.width < 2 || height == 0 {
         return;
     }
@@ -252,10 +222,7 @@ pub(super) fn draw_follow_pill(frame: &mut Frame<'_>, area: Rect) {
         height: 1,
     };
     frame.render_widget(Clear, pill);
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(label, ui::fill_style(primary())))),
-        pill,
-    );
+    frame.render_widget(Paragraph::new(Line::from(Span::styled(label, ui::fill_style(primary())))), pill);
 }
 
 /// The empty-transcript splash. Vertically centred, left-aligned inside a
@@ -310,8 +277,7 @@ pub(super) fn draw_task_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
             RalphStatus::Completed => success(),
             RalphStatus::Cancelled | RalphStatus::MaxIterations => muted(),
         };
-        let limit =
-            state.max_iterations.map(|value| value.to_string()).unwrap_or_else(|| "∞".to_owned());
+        let limit = state.max_iterations.map(|value| value.to_string()).unwrap_or_else(|| "∞".to_owned());
         lines.push(Line::from(vec![
             bold(format!(" {} LOOP  ", ui::glyphs().repeat), color),
             fg(format!("{} / {limit}", state.iteration), text()),
@@ -349,8 +315,7 @@ pub(super) fn draw_task_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     fg(
                         ui::truncate(
                             &worker.activity,
-                            (area.width as usize)
-                                .saturating_sub(worker.role.len() + worker.name.len() + 20),
+                            (area.width as usize).saturating_sub(worker.role.len() + worker.name.len() + 20),
                         ),
                         muted(),
                     ),
@@ -358,14 +323,8 @@ pub(super) fn draw_task_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 ]));
             }
         } else {
-            let running = workers
-                .iter()
-                .filter(|worker| worker.state == crate::hive::WorkerState::Running)
-                .count();
-            let failed = workers
-                .iter()
-                .filter(|worker| worker.state == crate::hive::WorkerState::Failed)
-                .count();
+            let running = workers.iter().filter(|worker| worker.state == crate::hive::WorkerState::Running).count();
+            let failed = workers.iter().filter(|worker| worker.state == crate::hive::WorkerState::Failed).count();
             let done = workers.len() - running - failed;
             let swarm_tokens: u64 = workers.iter().map(|worker| worker.tokens_used()).sum();
             lines.push(Line::from(vec![
@@ -385,17 +344,11 @@ pub(super) fn draw_task_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
     while lines.len() < area.height as usize {
         lines.push(Line::from(""));
     }
-    frame.render_widget(
-        Paragraph::new(Text::from(lines)).style(Style::default().bg(surface())),
-        area,
-    );
+    frame.render_widget(Paragraph::new(Text::from(lines)).style(Style::default().bg(surface())), area);
 }
 
 /// How a worker's state is drawn: its glyph, its colour, and the word for it.
-fn worker_mark(
-    worker: &crate::hive::WorkerStatus,
-    animated: bool,
-) -> (&'static str, Color, &'static str) {
+fn worker_mark(worker: &crate::hive::WorkerStatus, animated: bool) -> (&'static str, Color, &'static str) {
     let set = ui::glyphs();
     match worker.state {
         crate::hive::WorkerState::Running => {
@@ -409,11 +362,7 @@ fn worker_mark(
 /// The Ctrl+P overlay: every worker in the current swarm with role, state,
 /// elapsed time, and latest activity, plus the workspace's delegation record.
 pub(super) fn draw_hive(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let popup = ui::centered(
-        area.width.saturating_sub(6).min(100),
-        area.height.saturating_sub(4).max(8),
-        area,
-    );
+    let popup = ui::centered(area.width.saturating_sub(6).min(100), area.height.saturating_sub(4).max(8), area);
     let hints: &[(&str, &str)] = &[("j/k", "scroll"), ("esc", "close")];
     let inner = open_overlay(frame, popup, "SUBAGENTS", primary(), hints);
 
@@ -478,41 +427,26 @@ pub(super) fn draw_completion_popup(frame: &mut Frame<'_>, input_area: Rect, app
     // in view by scrolling the window rather than the list.
     let room = (input_area.y as usize).saturating_sub(3).clamp(1, 12);
     let visible = suggestions.len().min(room);
-    let first = app
-        .completion_index
-        .saturating_sub(visible.saturating_sub(1))
-        .min(suggestions.len().saturating_sub(visible));
+    let first =
+        app.completion_index.saturating_sub(visible.saturating_sub(1)).min(suggestions.len().saturating_sub(visible));
 
     let width = input_area.width.min(76);
     let inner = width.saturating_sub(4) as usize;
     let mut lines = Vec::with_capacity(visible);
     for (index, (value, description)) in suggestions.iter().enumerate().skip(first).take(visible) {
         let selected = index == app.completion_index;
-        let fill = if selected {
-            crate::theme::active().selection
-        } else {
-            crate::theme::active().overlay
-        };
+        let fill = if selected { crate::theme::active().selection } else { crate::theme::active().overlay };
         let label_width = 22.min(inner.saturating_sub(4));
         let mut spans = vec![
-            Span::styled(
-                if selected { ui::glyphs().bar } else { " " },
-                Style::default().fg(primary()).bg(fill),
-            ),
+            Span::styled(if selected { ui::glyphs().bar } else { " " }, Style::default().fg(primary()).bg(fill)),
             Span::styled(
                 format!(" {:<label_width$}", ui::truncate(value, label_width)),
-                Style::default()
-                    .fg(if selected { text() } else { primary() })
-                    .bg(fill)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(if selected { text() } else { primary() }).bg(fill).add_modifier(Modifier::BOLD),
             ),
         ];
         if !description.is_empty() {
             let room = inner.saturating_sub(label_width + 2);
-            spans.push(Span::styled(
-                ui::truncate(description, room),
-                Style::default().fg(muted()).bg(fill),
-            ));
+            spans.push(Span::styled(ui::truncate(description, room), Style::default().fg(muted()).bg(fill)));
         }
         // Pad the row to the full width so the selection highlight is a solid
         // band instead of stopping at the end of the text.
@@ -566,15 +500,10 @@ pub(super) fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let mut top_right = vec![fg(if running { " ⏎ steer" } else { " ⏎ send" }, rail())];
     // Count `@file` mentions so the composer can say what will be attached
     // before the prompt is sent.
-    let mentions = app
-        .input
-        .text()
-        .split_whitespace()
-        .filter(|token| token.len() > 1 && token.starts_with('@'))
-        .count();
+    let mentions =
+        app.input.text().split_whitespace().filter(|token| token.len() > 1 && token.starts_with('@')).count();
     if mentions > 0 {
-        top_right
-            .insert(0, fg(format!(" {} {mentions} attached ", ui::glyphs().attached), primary()));
+        top_right.insert(0, fg(format!(" {} {mentions} attached ", ui::glyphs().attached), primary()));
     }
     top_right.push(Span::raw(" "));
 
@@ -583,11 +512,7 @@ pub(super) fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(frame_color))
         .padding(Padding::horizontal(1))
-        .title_top(Line::from(vec![
-            Span::raw(" "),
-            ui::badge(app.mode.label(), frame_color),
-            Span::raw(" "),
-        ]))
+        .title_top(Line::from(vec![Span::raw(" "), ui::badge(app.mode.label(), frame_color), Span::raw(" ")]))
         .title_top(Line::from(top_right).right_aligned());
 
     let inner = block.inner(area);
@@ -616,8 +541,7 @@ pub(super) fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let selection = app.input.selection();
     let display_col = {
         let row = rows.get(cursor_row).copied().unwrap_or((0, 0));
-        let prefix: String =
-            characters[row.0..(row.0 + cursor_col).min(characters.len())].iter().collect();
+        let prefix: String = characters[row.0..(row.0 + cursor_col).min(characters.len())].iter().collect();
         UnicodeWidthStr::width(prefix.as_str())
     };
 
@@ -633,12 +557,8 @@ pub(super) fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 ),
                 fg("  ⇥ use", rail()),
             ])),
-            (_, true) => {
-                Paragraph::new(fg("Type to steer — delivered after the current step…", rail()))
-            }
-            (None, false) => {
-                Paragraph::new(fg("Ask Abacus to inspect, explain, or change the code…", rail()))
-            }
+            (_, true) => Paragraph::new(fg("Type to steer — delivered after the current step…", rail())),
+            (None, false) => Paragraph::new(fg("Ask Abacus to inspect, explain, or change the code…", rail())),
         }
     } else {
         // One rendered line per wrapped row, with any selection tinted so
@@ -689,10 +609,7 @@ pub(super) fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Paragraph::new(Line::from(vec![
                 ui::badge("APPROVAL", warning()),
                 bold(format!(" {}  ", approval.tool), warning()),
-                fg(
-                    ui::truncate(&approval.summary, area.width.saturating_sub(46) as usize),
-                    muted(),
-                ),
+                fg(ui::truncate(&approval.summary, area.width.saturating_sub(46) as usize), muted()),
                 bold("  y", success()),
                 fg(" once ", muted()),
                 bold("a", primary()),
@@ -715,8 +632,7 @@ pub(super) fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let ctx_window = app.config.model_limits.context_window.max(1) as u64;
     let percent = ((ctx_tokens * 100) / ctx_window).min(100) as u16;
     let compact_at = (app.config.model_limits.compaction_budget().compact_at_chars / 4).max(1);
-    let ctx_color =
-        if ctx_tokens >= compact_at as u64 || percent >= 75 { warning() } else { muted() };
+    let ctx_color = if ctx_tokens >= compact_at as u64 || percent >= 75 { warning() } else { muted() };
 
     // Two different quantities, so they are labelled as such. Side by side and
     // both called "tokens", the running session total reads as the size of the
@@ -734,10 +650,7 @@ pub(super) fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         fg(format!("↑ {}", ui::format_count(usage.input)), if cached { rail() } else { muted() }),
         fg(format!("  ↓ {}", ui::format_count(usage.output)), muted()),
         ui::dot(),
-        fg(
-            format!("ctx {}/{} ", ui::format_count(ctx_tokens), ui::format_count(ctx_window)),
-            ctx_color,
-        ),
+        fg(format!("ctx {}/{} ", ui::format_count(ctx_tokens), ui::format_count(ctx_window)), ctx_color),
     ];
     right.extend(ui::meter(percent, 8, ctx_color));
     let right_width = ui::spans_width(&right) as u16;
@@ -745,24 +658,17 @@ pub(super) fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     // breakdown. Measured from the right edge because the row is right-aligned.
     let arrows_width = ui::spans_width(&right[..2]) as u16;
     let arrows_x = area.x + area.width.saturating_sub(right_width);
-    let hovering_tokens = app.pointer.is_some_and(|(column, row)| {
-        row == area.y && column >= arrows_x && column < arrows_x + arrows_width
-    });
+    let hovering_tokens = app
+        .pointer
+        .is_some_and(|(column, row)| row == area.y && column >= arrows_x && column < arrows_x + arrows_width);
 
     let running = app.running.is_some();
     let mut left = if running {
         let elapsed = app.turn_started.map(|started| started.elapsed()).unwrap_or_default();
-        let mut spans = vec![bold(
-            format!(" {} ", ui::spinner_frame(elapsed, app.settings.ui.animations)),
-            primary(),
-        )];
+        let mut spans = vec![bold(format!(" {} ", ui::spinner_frame(elapsed, app.settings.ui.animations)), primary())];
         // Wide enough for a reasoning-derived header, which carries real
         // information; hints yield first when the row runs out of room.
-        spans.extend(ui::shimmer(
-            &ui::truncate(&app.status, 44),
-            elapsed,
-            app.settings.ui.animations,
-        ));
+        spans.extend(ui::shimmer(&ui::truncate(&app.status, 44), elapsed, app.settings.ui.animations));
         spans.push(fg(format!("  {}", ui::format_elapsed(elapsed.as_millis() as u64)), muted()));
         if app.settings.ui.show_token_rate
             && let Some(rate) = app.token_rate()
@@ -837,17 +743,11 @@ pub(super) fn draw_usage_tooltip(
     anchor: u16,
     usage: &crate::provider::TokenUsage,
 ) {
-    let mut rows: Vec<(&str, String, Color)> = vec![
-        ("input", ui::format_count(usage.input), text()),
-        ("output", ui::format_count(usage.output), text()),
-    ];
+    let mut rows: Vec<(&str, String, Color)> =
+        vec![("input", ui::format_count(usage.input), text()), ("output", ui::format_count(usage.output), text())];
     match usage.cache_rate() {
         Some(rate) => {
-            rows.push((
-                "cached",
-                format!("{} · {rate}%", ui::format_count(usage.cache_read)),
-                success(),
-            ));
+            rows.push(("cached", format!("{} · {rate}%", ui::format_count(usage.cache_read)), success()));
             rows.push(("uncached", ui::format_count(usage.uncached_input()), muted()));
             if usage.cache_write > 0 {
                 rows.push(("written", ui::format_count(usage.cache_write), muted()));
@@ -879,10 +779,7 @@ pub(super) fn draw_usage_tooltip(
     let x = anchor.min(footer.x + footer.width.saturating_sub(width)).max(footer.x);
     let area = Rect { x, y: footer.y.saturating_sub(height), width, height };
     frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(Text::from(lines)).block(ui::overlay_block("TOKENS", rail(), None)),
-        area,
-    );
+    frame.render_widget(Paragraph::new(Text::from(lines)).block(ui::overlay_block("TOKENS", rail(), None)), area);
 }
 
 /// Frame an overlay and hand back its inner area, already cleared.
@@ -959,30 +856,21 @@ pub(super) fn draw_help(frame: &mut Frame<'_>, area: Rect) {
     for (heading, keys) in SECTIONS {
         lines.push(Line::from(bold(*heading, muted())));
         for (key, description) in *keys {
-            lines.push(Line::from(vec![
-                bold(format!("  {key:<30}"), primary()),
-                fg((*description).to_owned(), text()),
-            ]));
+            lines
+                .push(Line::from(vec![bold(format!("  {key:<30}"), primary()), fg((*description).to_owned(), text())]));
         }
         lines.push(Line::from(""));
     }
     lines.push(Line::from(bold("COMMANDS", muted())));
     // Built from the same table that drives the palette, so the two can never
     // drift apart.
-    let commands =
-        SLASH_COMMANDS.iter().map(|(command, _)| *command).collect::<Vec<_>>().join("  ");
-    lines.extend(ui::wrap(
-        &[fg(commands, primary())],
-        measure,
-        &[Span::raw("  ")],
-        &[Span::raw("  ")],
-    ));
+    let commands = SLASH_COMMANDS.iter().map(|(command, _)| *command).collect::<Vec<_>>().join("  ");
+    lines.extend(ui::wrap(&[fg(commands, primary())], measure, &[Span::raw("  ")], &[Span::raw("  ")]));
 
     // Size the frame to the content rather than to a guess, so nothing is
     // silently clipped when a section grows.
     let popup = ui::centered(width, lines.len() as u16 + 2, area);
-    let inner =
-        open_overlay(frame, popup, "KEYS", secondary(), &[("esc", "close"), ("?", "toggle")]);
+    let inner = open_overlay(frame, popup, "KEYS", secondary(), &[("esc", "close"), ("?", "toggle")]);
     lines.truncate(inner.height as usize);
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
@@ -1019,8 +907,7 @@ pub(super) fn draw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
             if selected {
                 selected_row = rows.len();
             }
-            let mut content =
-                vec![Span::styled(format!("{:<26}", setting.label), emphasis(selected))];
+            let mut content = vec![Span::styled(format!("{:<26}", setting.label), emphasis(selected))];
             let value = app.config_value(setting.key);
             content.extend(config_value_spans(&value, width.saturating_sub(30), selected));
             rows.push((Some(index), content));
@@ -1028,9 +915,8 @@ pub(super) fn draw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
         }
     }
     let visible = list.height as usize;
-    let first = selected_row
-        .saturating_sub(visible.saturating_sub(1))
-        .min(rows.len().saturating_sub(visible.min(rows.len())));
+    let first =
+        selected_row.saturating_sub(visible.saturating_sub(1)).min(rows.len().saturating_sub(visible.min(rows.len())));
     let mut lines: Vec<Line<'static>> = Vec::new();
     for (offset, (index, content)) in rows.into_iter().skip(first).take(visible).enumerate() {
         let rect = Rect { y: list.y + offset as u16, height: 1, ..list };
@@ -1059,17 +945,10 @@ pub(super) fn draw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
         let field = block.inner(editor);
         frame.render_widget(block, editor);
         let value = input.text();
-        let shown = if *key == ConfigKey::ApiKey {
-            "•".repeat(value.chars().count())
-        } else {
-            value.clone()
-        };
+        let shown = if *key == ConfigKey::ApiKey { "•".repeat(value.chars().count()) } else { value.clone() };
         frame.render_widget(Paragraph::new(shown.as_str()), field);
         let (_, column) = input.cursor_position();
-        frame.set_cursor_position((
-            (field.x + column as u16).min(field.right().saturating_sub(1)),
-            field.y,
-        ));
+        frame.set_cursor_position(((field.x + column as u16).min(field.right().saturating_sub(1)), field.y));
     }
 }
 
@@ -1077,18 +956,11 @@ pub(super) fn draw_raw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let Some(editor) = &app.raw_config else {
         return;
     };
-    let popup =
-        ui::centered(area.width.saturating_sub(6).min(112), area.height.saturating_sub(4), area);
+    let popup = ui::centered(area.width.saturating_sub(6).min(112), area.height.saturating_sub(4), area);
     // A parse error takes over the accent so the panel itself reports that the
     // document will not save in its current state.
     let accent = if editor.error.is_some() { danger() } else { secondary() };
-    let inner = open_overlay(
-        frame,
-        popup,
-        "ADVANCED · TOML",
-        accent,
-        &[("^S", "save & apply"), ("esc", "discard")],
-    );
+    let inner = open_overlay(frame, popup, "ADVANCED · TOML", accent, &[("^S", "save & apply"), ("esc", "discard")]);
 
     let mut body = inner;
     if let Some(error) = &editor.error {
@@ -1106,10 +978,7 @@ pub(super) fn draw_raw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let (row, column) = editor.input.cursor_position();
     let visible = body.height.max(1) as usize;
     let scroll = row.saturating_sub(visible.saturating_sub(1));
-    frame.render_widget(
-        Paragraph::new(text.as_str()).scroll((scroll as u16, 0)).wrap(Wrap { trim: false }),
-        body,
-    );
+    frame.render_widget(Paragraph::new(text.as_str()).scroll((scroll as u16, 0)).wrap(Wrap { trim: false }), body);
     let visible_row = row.saturating_sub(scroll) as u16;
     frame.set_cursor_position((
         (body.x + column as u16).min(body.right().saturating_sub(1)),
@@ -1124,21 +993,13 @@ pub(super) fn draw_feedback(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let popup = ui::centered(area.width.saturating_sub(10).min(88), 18, area);
     // The hint strip doubles as the status line: while a send is in flight or
     // has failed, that is the only thing worth saying down there.
-    let hints: &[(&str, &str)] = if form.sending {
-        &[("", "sending…")]
-    } else {
-        &[("^S", "send"), ("^D", "diagnostics"), ("esc", "cancel")]
-    };
+    let hints: &[(&str, &str)] =
+        if form.sending { &[("", "sending…")] } else { &[("^S", "send"), ("^D", "diagnostics"), ("esc", "cancel")] };
     let inner = open_overlay(frame, popup, "FEEDBACK", secondary(), hints);
 
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(4),
-            Constraint::Length(2),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Length(2), Constraint::Min(4), Constraint::Length(2), Constraint::Length(1)])
         .split(inner);
 
     frame.render_widget(
@@ -1160,10 +1021,7 @@ pub(super) fn draw_feedback(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(field, sections[1]);
     frame.render_widget(
         Paragraph::new(if body.is_empty() {
-            Text::from(fg(
-                "What should we improve? Please avoid secrets or sensitive source code.",
-                rail(),
-            ))
+            Text::from(fg("What should we improve? Please avoid secrets or sensitive source code.", rail()))
         } else {
             Text::from(body.as_str())
         })
@@ -1186,10 +1044,7 @@ pub(super) fn draw_feedback(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     if let Some(error) = &form.error {
         frame.render_widget(
-            Paragraph::new(Line::from(fg(
-                ui::truncate(error, sections[3].width as usize),
-                danger(),
-            ))),
+            Paragraph::new(Line::from(fg(ui::truncate(error, sections[3].width as usize), danger()))),
             sections[3],
         );
     }
@@ -1216,27 +1071,11 @@ pub(super) fn draw_user_question(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let hints: &[(&str, &str)] = if question.editing_custom {
         &[("esc", "leave field"), ("enter", "submit")]
     } else if question.multi_select {
-        &[
-            ("↑↓", "move"),
-            ("space", "toggle"),
-            ("t", "type"),
-            ("enter", "submit"),
-            ("^O", "open latest output"),
-        ]
+        &[("↑↓", "move"), ("space", "toggle"), ("t", "type"), ("enter", "submit"), ("^O", "open latest output")]
     } else {
-        &[
-            ("↑↓", "move"),
-            ("x", "choose"),
-            ("t", "type"),
-            ("esc", "skip"),
-            ("^O", "open latest output"),
-        ]
+        &[("↑↓", "move"), ("x", "choose"), ("t", "type"), ("esc", "skip"), ("^O", "open latest output")]
     };
-    let title = if question.header.is_empty() {
-        "QUESTION".to_owned()
-    } else {
-        question.header.to_uppercase()
-    };
+    let title = if question.header.is_empty() { "QUESTION".to_owned() } else { question.header.to_uppercase() };
     let inner = open_overlay(frame, popup, &title, secondary(), hints);
 
     // Every section gets its own row budget up front; the options list takes
@@ -1339,11 +1178,7 @@ pub(super) fn draw_approval(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let Some(approval) = &app.approval else {
         return;
     };
-    let popup = ui::centered(
-        area.width.saturating_sub(4).min(120),
-        area.height.saturating_sub(2).max(10),
-        area,
-    );
+    let popup = ui::centered(area.width.saturating_sub(4).min(120), area.height.saturating_sub(2).max(10), area);
     let mut hints: Vec<(&str, &str)> = vec![
         ("y", "allow once"),
         ("a", "allow session"),
@@ -1367,14 +1202,7 @@ pub(super) fn draw_approval(frame: &mut Frame<'_>, area: Rect, app: &App) {
     ])];
     if let Some(diff) = &approval.diff {
         header.push(Line::from(vec![
-            fg(
-                format!(
-                    "{} file{}",
-                    diff.file_count(),
-                    if diff.file_count() == 1 { "" } else { "s" }
-                ),
-                muted(),
-            ),
+            fg(format!("{} file{}", diff.file_count(), if diff.file_count() == 1 { "" } else { "s" }), muted()),
             bold(format!("   +{}", diff.additions), success()),
             bold(format!("  -{}", diff.deletions), danger()),
             ui::dot(),
@@ -1387,17 +1215,12 @@ pub(super) fn draw_approval(frame: &mut Frame<'_>, area: Rect, app: &App) {
             ),
         ]));
     } else {
-        header
-            .push(Line::from(fg("Review the operation below before allowing it to run.", muted())));
+        header.push(Line::from(fg("Review the operation below before allowing it to run.", muted())));
     }
     frame.render_widget(Paragraph::new(Text::from(header)), sections[0]);
 
     let body = if approval.view == ApprovalView::Unified {
-        approval
-            .diff
-            .as_ref()
-            .map(diff_text)
-            .unwrap_or_else(|| raw_approval_text(&approval.details))
+        approval.diff.as_ref().map(diff_text).unwrap_or_else(|| raw_approval_text(&approval.details))
     } else {
         raw_approval_text(&approval.details)
     };
@@ -1407,10 +1230,7 @@ pub(super) fn draw_approval(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(rail()))
-                .title_top(Line::from(fg(
-                    if approval.diff.is_some() { " changes " } else { " operation " },
-                    muted(),
-                ))),
+                .title_top(Line::from(fg(if approval.diff.is_some() { " changes " } else { " operation " }, muted()))),
         ),
         sections[1],
     );
@@ -1475,19 +1295,11 @@ pub(super) fn diff_text(diff: &DiffDocument) -> Text<'static> {
                         Span::styled(format_line_number(line.old_line), number_style),
                         Span::styled(" ", number_style),
                         Span::styled(format_line_number(line.new_line), number_style),
-                        Span::styled(
-                            format!(" {marker} "),
-                            Style::default().fg(foreground).bg(background),
-                        ),
-                        Span::styled(
-                            line.text.clone(),
-                            Style::default().fg(foreground).bg(background),
-                        ),
+                        Span::styled(format!(" {marker} "), Style::default().fg(foreground).bg(background)),
+                        Span::styled(line.text.clone(), Style::default().fg(foreground).bg(background)),
                     ]));
                 }
-                DiffLineKind::Metadata => {
-                    lines.push(Line::from(fg(format!("     {}", line.text), muted())))
-                }
+                DiffLineKind::Metadata => lines.push(Line::from(fg(format!("     {}", line.text), muted()))),
             }
         }
     }
@@ -1521,20 +1333,12 @@ pub(super) fn draw_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let hints: &[(&str, &str)] = if picker.prompt.is_some() {
         &[("enter", "confirm"), ("esc", "cancel")]
     } else if picker.action == PickerAction::SwitchProfile {
-        &[
-            ("↑↓", "select"),
-            ("enter", "switch"),
-            ("r", "rename"),
-            ("d", "delete"),
-            ("n", "add"),
-            ("esc", "close"),
-        ]
+        &[("↑↓", "select"), ("enter", "switch"), ("r", "rename"), ("d", "delete"), ("n", "add"), ("esc", "close")]
     } else {
         &[("↑↓", "select"), ("enter", "open"), ("esc", "close")]
     };
     let extra = if picker.prompt.is_some() { 3 } else { 0 };
-    let height =
-        (picker.items.len() as u16 + 2 + extra).min(area.height.saturating_sub(4)).max(3 + extra);
+    let height = (picker.items.len() as u16 + 2 + extra).min(area.height.saturating_sub(4)).max(3 + extra);
     let popup = ui::centered(area.width.saturating_sub(12).min(100), height, area);
     let inner = open_overlay(frame, popup, &picker.title.to_uppercase(), primary(), hints);
 
@@ -1548,8 +1352,7 @@ pub(super) fn draw_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
     for (index, (label, _)) in picker.items.iter().enumerate().skip(start).take(rows) {
         let selected = index == picker.selected;
-        let rect =
-            Rect { x: inner.x, y: inner.y + lines.len() as u16, width: inner.width, height: 1 };
+        let rect = Rect { x: inner.x, y: inner.y + lines.len() as u16, width: inner.width, height: 1 };
         app.hits.borrow_mut().picker.push((rect, index));
         lines.push(ui::list_row(
             app.row_state(rect, selected),
@@ -1599,10 +1402,9 @@ pub(super) fn draw_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
 pub(super) fn config_value_spans(value: &str, width: usize, selected: bool) -> Vec<Span<'static>> {
     let style = Style::default().fg(if selected { primary() } else { text() });
     match value {
-        "On" | "Off" => vec![
-            ui::state_mark(value == "On"),
-            Span::styled(format!(" {}", value.to_ascii_lowercase()), style),
-        ],
+        "On" | "Off" => {
+            vec![ui::state_mark(value == "On"), Span::styled(format!(" {}", value.to_ascii_lowercase()), style)]
+        }
         _ => vec![Span::styled(ui::truncate(value, width), style)],
     }
 }
@@ -1621,23 +1423,12 @@ impl App {
 
     /// Ensure the wrapped transcript matches `width` and the current content,
     /// re-wrapping only when the fingerprint moves.
-    pub(super) fn wrapped_transcript(
-        &mut self,
-        width: u16,
-        spinner: &str,
-        phase: usize,
-    ) -> &ui::Transcript {
-        let key: TranscriptKey =
-            (self.entries_rev, width, phase, self.cursor, self.settings.ui.show_thinking);
+    pub(super) fn wrapped_transcript(&mut self, width: u16, spinner: &str, phase: usize) -> &ui::Transcript {
+        let key: TranscriptKey = (self.entries_rev, width, phase, self.cursor, self.settings.ui.show_thinking);
         let stale = self.transcript_cache.as_ref().is_none_or(|(cached, _)| *cached != key);
         if stale {
-            let rendered = ui::transcript(
-                &self.entries,
-                width as usize,
-                spinner,
-                self.cursor,
-                self.settings.ui.show_thinking,
-            );
+            let rendered =
+                ui::transcript(&self.entries, width as usize, spinner, self.cursor, self.settings.ui.show_thinking);
             self.transcript_cache = Some((key, rendered));
         }
         &self.transcript_cache.as_ref().expect("just populated").1
@@ -1653,10 +1444,8 @@ impl App {
         let Some(index) = self.cursor else {
             return;
         };
-        let Some((start, len)) = self
-            .transcript_cache
-            .as_ref()
-            .and_then(|(_, rendered)| rendered.spans.get(index).copied())
+        let Some((start, len)) =
+            self.transcript_cache.as_ref().and_then(|(_, rendered)| rendered.spans.get(index).copied())
         else {
             return;
         };

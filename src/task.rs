@@ -56,8 +56,7 @@ impl TaskList {
 
     fn update(&self, index: usize, done: bool) -> Result<Task> {
         let mut state = self.0.write().map_err(|_| anyhow::anyhow!("task lock poisoned"))?;
-        let position =
-            index.checked_sub(1).context("task index is 1-based and must be at least 1")?;
+        let position = index.checked_sub(1).context("task index is 1-based and must be at least 1")?;
         let task = state.get_mut(position).context("no task at that index")?;
         task.done = done;
         Ok(task.clone())
@@ -97,12 +96,7 @@ impl TaskList {
                 "Mark a task complete or pending by its 1-based index in the task list. Mark a task done only after its outcome is verified (test passed, file written, build green, etc.).",
                 [
                     req("index", integer("1-based position from task_list")),
-                    req(
-                        "done",
-                        boolean(
-                            "true to mark complete after verifying the outcome, false to reopen",
-                        ),
-                    ),
+                    req("done", boolean("true to mark complete after verifying the outcome, false to reopen")),
                 ],
             ),
             tool("task_list", "Read the current session task list with completion state.", []),
@@ -145,11 +139,7 @@ impl TaskList {
         }
         let args: Args = serde_json::from_str(arguments)?;
         let task = self.update(args.index, args.done)?;
-        Ok(format!(
-            "Task {} marked {}.",
-            args.index,
-            if task.done { "complete" } else { "pending" }
-        ))
+        Ok(format!("Task {} marked {}.", args.index, if task.done { "complete" } else { "pending" }))
     }
 }
 
@@ -157,9 +147,7 @@ fn render_tasks(tasks: &[Task]) -> String {
     tasks
         .iter()
         .enumerate()
-        .map(|(index, task)| {
-            format!("{}. [{}] {}", index + 1, if task.done { 'x' } else { ' ' }, task.text)
-        })
+        .map(|(index, task)| format!("{}. [{}] {}", index + 1, if task.done { 'x' } else { ' ' }, task.text))
         .collect::<Vec<_>>()
         .join("\n")
 }

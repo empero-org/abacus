@@ -137,10 +137,7 @@ impl GoalState {
                 "goal_update",
                 "Update the active persistent goal. Mark complete only after verifying the objective.",
                 [
-                    req(
-                        "status",
-                        json!({"type": "string", "enum": ["active", "paused", "complete", "cancelled"]}),
-                    ),
+                    req("status", json!({"type": "string", "enum": ["active", "paused", "complete", "cancelled"]})),
                     opt("note", json!({"type": "string"})),
                 ],
             ),
@@ -198,8 +195,7 @@ mod tests {
         let state = GoalState::default();
         state.create("Ship the parser").unwrap();
         state.increment_iteration().unwrap();
-        let output =
-            state.execute("goal_update", r#"{"status":"complete","note":"tests passed"}"#).unwrap();
+        let output = state.execute("goal_update", r#"{"status":"complete","note":"tests passed"}"#).unwrap();
         assert!(output.contains("Complete"));
         let goal = state.snapshot().unwrap();
         assert_eq!(goal.iterations, 1);
@@ -211,10 +207,7 @@ mod tests {
         let state = GoalState::default();
         state.create("Ship the parser").unwrap();
         assert_eq!(state.pause().unwrap().status, GoalStatus::Paused);
-        assert_eq!(
-            state.edit("Ship the parser with tests").unwrap().objective,
-            "Ship the parser with tests"
-        );
+        assert_eq!(state.edit("Ship the parser with tests").unwrap().objective, "Ship the parser with tests");
         assert_eq!(state.resume().unwrap().status, GoalStatus::Active);
         assert!(state.edit(&"x".repeat(4_001)).is_err());
     }

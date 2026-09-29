@@ -259,9 +259,7 @@ impl InputBuffer {
                 return (index, self.cursor - start);
             }
         }
-        rows.last()
-            .map(|&(start, end)| (rows.len().saturating_sub(1), end - start))
-            .unwrap_or((0, 0))
+        rows.last().map(|&(start, end)| (rows.len().saturating_sub(1), end - start)).unwrap_or((0, 0))
     }
 
     /// Move a visual row up/down, honouring wrapping. Returns false when the
@@ -380,8 +378,7 @@ mod tests {
         let rows = buffer.wrapped_rows(10);
         assert!(rows.len() >= 3, "{rows:?}");
         assert_eq!(buffer.wrapped_line_count(10), rows.len());
-        let text: Vec<String> =
-            rows.iter().map(|&(start, end)| buffer.chars[start..end].iter().collect()).collect();
+        let text: Vec<String> = rows.iter().map(|&(start, end)| buffer.chars[start..end].iter().collect()).collect();
         assert!(text.iter().all(|row| row.len() <= 10), "no row exceeds the width: {text:?}");
         assert!(text[0].starts_with("the"), "{text:?}");
 

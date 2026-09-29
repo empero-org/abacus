@@ -9,8 +9,7 @@ use abacus_agent::{
     agent::initial_messages,
     app_server,
     config::{
-        AbacusPaths, Cli, Command, Config, Credentials, PluginsCommand, Settings, SkillsCommand,
-        workspace_from_cli,
+        AbacusPaths, Cli, Command, Config, Credentials, PluginsCommand, Settings, SkillsCommand, workspace_from_cli,
     },
     context::expand_file_references,
     cron,
@@ -52,17 +51,12 @@ async fn main() -> Result<()> {
             // `abacus pull all` reads as a word, not a path. A directory
             // genuinely named `all` is still reachable as `--all ./all`.
             let keyword = destination.as_deref().is_some_and(|path| path.as_os_str() == "all");
-            let destination =
-                destination.clone().filter(|_| !keyword).unwrap_or_else(|| ".".into());
+            let destination = destination.clone().filter(|_| !keyword).unwrap_or_else(|| ".".into());
             return pull_traces(&paths, &destination, *all || keyword);
         }
-        Some(
-            Command::Skills { .. }
-            | Command::Plugins { .. }
-            | Command::Mcp
-            | Command::Trust
-            | Command::Untrust,
-        ) => return extension_command(&cli, &paths).await,
+        Some(Command::Skills { .. } | Command::Plugins { .. } | Command::Mcp | Command::Trust | Command::Untrust) => {
+            return extension_command(&cli, &paths).await;
+        }
         _ => {}
     }
 
@@ -84,13 +78,11 @@ async fn main() -> Result<()> {
     // Commands that talk to the provider but open no session.
     match cli.command {
         Some(Command::Eval { tasks, repeat, state, model, json }) => {
-            let options =
-                abacus_agent::eval::EvalOptions { filter: tasks, repeat, state, model, json };
+            let options = abacus_agent::eval::EvalOptions { filter: tasks, repeat, state, model, json };
             return abacus_agent::eval::run(config, settings, options).await;
         }
         Some(Command::Models) => {
-            for model in setup::discover_models(&config.base_url, config.api_key.as_deref()).await?
-            {
+            for model in setup::discover_models(&config.base_url, config.api_key.as_deref()).await? {
                 println!("{} {model}", if model == config.model { "*" } else { " " });
             }
             return Ok(());
@@ -110,8 +102,7 @@ async fn main() -> Result<()> {
     }
 
     let store = SessionStore::new(&paths, config.workspace.clone());
-    let services =
-        Arc::new(AgentServices::discover(&config.workspace, &config.paths, &settings).await?);
+    let services = Arc::new(AgentServices::discover(&config.workspace, &config.paths, &settings).await?);
     // Session creation is otherwise deferred until the first message is sent,
     // which avoids littering the store with empty sessions on every startup.
     let mut session = match (&cli.resume, cli.continue_last, config.no_session) {
@@ -132,10 +123,8 @@ async fn main() -> Result<()> {
     for diagnostic in services.diagnostics() {
         eprintln!("warning: {diagnostic}");
     }
-    let mut messages = session
-        .as_ref()
-        .map(|value| value.messages.clone())
-        .unwrap_or_else(|| initial_messages(&config.workspace));
+    let mut messages =
+        session.as_ref().map(|value| value.messages.clone()).unwrap_or_else(|| initial_messages(&config.workspace));
     // A loop replays its own prompt each iteration; a plain run sends it once.
     let loop_config = if cli.loop_run {
         let promise = cli
@@ -155,39 +144,18 @@ async fn main() -> Result<()> {
         }
         store.save(session)?;
     }
-    let reporter = ActivityReporter::new(
-        settings.activity.enabled,
-        &settings.activity.endpoint,
-        &config.paths,
-    );
-    headless::run(
-        config,
-        cli.output_format,
-        messages,
-        session,
-        store,
-        services,
-        loop_config,
-        reporter,
-    )
-    .await
+    let reporter = ActivityReporter::new(settings.activity.enabled, &settings.activity.endpoint, &config.paths);
+    headless::run(config, cli.output_format, messages, session, store, services, loop_config, reporter).await
 }
 
 /// The model's limits as the provider reports them, unless the user pinned
 /// them. `None` when there is nothing to improve on.
-async fn detect_limits(
-    config: &Config,
-    mut limits: model_info::ModelLimits,
-) -> Option<model_info::ModelLimits> {
+async fn detect_limits(config: &Config, mut limits: model_info::ModelLimits) -> Option<model_info::ModelLimits> {
     if limits.source == model_info::LimitSource::Override {
         return None;
     }
-    let (context, output) = model_info::detect_limits(
-        &config.models_endpoint()?,
-        config.api_key.as_deref(),
-        &config.model,
-    )
-    .await?;
+    let (context, output) =
+        model_info::detect_limits(&config.models_endpoint()?, config.api_key.as_deref(), &config.model).await?;
     limits.apply_detected(context, output);
     Some(limits)
 }
@@ -250,13 +218,7 @@ async fn extension_command(cli: &Cli, paths: &AbacusPaths) -> Result<()> {
                 .list()
                 .find(|plugin| plugin.name == *name)
                 .with_context(|| format!("plugin `{name}` is not enabled"))?;
-            println!(
-                "{} {}\n{}\nroot: {}",
-                plugin.name,
-                plugin.version,
-                plugin.description,
-                plugin.root.display()
-            );
+            println!("{} {}\n{}\nroot: {}", plugin.name, plugin.version, plugin.description, plugin.root.display());
             for command in &plugin.commands {
                 println!("command: /{} — {}", command.name, command.description);
             }
@@ -269,10 +231,7 @@ async fn extension_command(cli: &Cli, paths: &AbacusPaths) -> Result<()> {
         }
         Some(Command::Plugins { .. }) => {
             for plugin in services.plugins.list() {
-                println!(
-                    "{}\t{}\t{}\t{}",
-                    plugin.name, plugin.version, plugin.source, plugin.description
-                );
+                println!("{}\t{}\t{}\t{}", plugin.name, plugin.version, plugin.source, plugin.description);
             }
         }
         _ => {
@@ -292,9 +251,7 @@ async fn extension_command(cli: &Cli, paths: &AbacusPaths) -> Result<()> {
 /// current routing.
 async fn list_providers(config: &Config) -> Result<()> {
     use abacus_agent::console;
-    let endpoints =
-        setup::discover_endpoints(&config.base_url, config.api_key.as_deref(), &config.model)
-            .await?;
+    let endpoints = setup::discover_endpoints(&config.base_url, config.api_key.as_deref(), &config.model).await?;
     console::banner(&format!("providers for {}", config.model));
     console::blank();
     if endpoints.is_empty() {
@@ -305,9 +262,7 @@ async fn list_providers(config: &Config) -> Result<()> {
     let pinned = &config.routing.order;
     let width = endpoints.iter().map(|endpoint| endpoint.name.len()).max().unwrap_or(16);
     for endpoint in &endpoints {
-        let is_pinned = pinned
-            .iter()
-            .any(|entry| entry.eq_ignore_ascii_case(&endpoint.name) || *entry == endpoint.tag);
+        let is_pinned = pinned.iter().any(|entry| entry.eq_ignore_ascii_case(&endpoint.name) || *entry == endpoint.tag);
         let marker = if is_pinned { console::ok(console::marks().pass) } else { " ".to_owned() };
         println!(
             "  {marker} {}  {}  {}",
@@ -371,26 +326,18 @@ fn pull_traces(paths: &AbacusPaths, destination: &Path, all: bool) -> Result<()>
     if all {
         // A live capture is strictly richer than a reconstruction, so sessions
         // that already have one are left alone.
-        let captured =
-            pulled.iter().map(|entry| entry.name.clone()).collect::<std::collections::HashSet<_>>();
-        let from_sessions =
-            abacus_agent::sft::pull_sessions(&paths.sessions_dir, destination, &captured)?;
+        let captured = pulled.iter().map(|entry| entry.name.clone()).collect::<std::collections::HashSet<_>>();
+        let from_sessions = abacus_agent::sft::pull_sessions(&paths.sessions_dir, destination, &captured)?;
         // Counts what was actually written, so a repeat run does not claim to
         // have rebuilt nine files it left untouched.
-        rebuilt = from_sessions
-            .iter()
-            .filter(|entry| matches!(entry.outcome, Pulled::Copied | Pulled::Updated))
-            .count();
+        rebuilt =
+            from_sessions.iter().filter(|entry| matches!(entry.outcome, Pulled::Copied | Pulled::Updated)).count();
         pulled.extend(from_sessions);
         pulled.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
     if pulled.is_empty() {
-        console::check(
-            Health::Warn,
-            "traces",
-            "none recorded yet — traces are written as you use Abacus",
-        );
+        console::check(Health::Warn, "traces", "none recorded yet — traces are written as you use Abacus");
         console::blank();
         return Ok(());
     }
@@ -442,10 +389,7 @@ fn pull_traces(paths: &AbacusPaths, destination: &Path, all: bool) -> Result<()>
             ))
         );
     } else if !all {
-        println!(
-            "  {}",
-            console::dim("run `abacus pull all` to include sessions recorded before tracing")
-        );
+        println!("  {}", console::dim("run `abacus pull all` to include sessions recorded before tracing"));
     }
     console::blank();
     Ok(())
@@ -517,29 +461,19 @@ async fn doctor(config: &Config, settings: &Settings) -> Result<()> {
         (_, Some(Ok(None))) if config.endpoint.is_some() => {
             record(Health::Pass, "credential", "none (scripted endpoint)")
         }
-        (_, Some(Err(error))) => record(
-            Health::Fail,
-            "credential",
-            &format!("scripted endpoint auth failed — {error:#}"),
-        ),
+        (_, Some(Err(error))) => {
+            record(Health::Fail, "credential", &format!("scripted endpoint auth failed — {error:#}"))
+        }
         (Some(_), _) => record(Health::Pass, "credential", "available"),
-        (None, _)
-            if config.base_url.contains("localhost") || config.base_url.contains("127.0.0.1") =>
-        {
+        (None, _) if config.base_url.contains("localhost") || config.base_url.contains("127.0.0.1") => {
             record(Health::Pass, "credential", "none (local endpoint)")
         }
-        (None, _) => record(
-            Health::Fail,
-            "credential",
-            "missing — export the profile's key or run `abacus setup`",
-        ),
+        (None, _) => record(Health::Fail, "credential", "missing — export the profile's key or run `abacus setup`"),
     }
     match setup::discover_models(&config.base_url, config.api_key.as_deref()).await {
-        Ok(models) if models.contains(&config.model) => record(
-            Health::Pass,
-            "reachable",
-            &format!("{} models, including {}", models.len(), config.model),
-        ),
+        Ok(models) if models.contains(&config.model) => {
+            record(Health::Pass, "reachable", &format!("{} models, including {}", models.len(), config.model))
+        }
         // The endpoint answered but does not list the configured model. Some
         // gateways omit models they still serve, so this is a warning rather
         // than a failure.
@@ -560,10 +494,8 @@ async fn doctor(config: &Config, settings: &Settings) -> Result<()> {
     // reported limits reflect the detected values rather than just the
     // heuristic/default estimate.
     let limits = detect_limits(config, config.model_limits).await.unwrap_or(config.model_limits);
-    let output_cap = limits
-        .configured_output_tokens
-        .map(|tokens| tokens.to_string())
-        .unwrap_or_else(|| "auto".to_owned());
+    let output_cap =
+        limits.configured_output_tokens.map(|tokens| tokens.to_string()).unwrap_or_else(|| "auto".to_owned());
     console::field(
         "limits",
         &format!(
@@ -582,11 +514,7 @@ async fn doctor(config: &Config, settings: &Settings) -> Result<()> {
     let tool_fmt = config.tool_format.as_arg();
     console::field(
         "tool calls",
-        &if tool_fmt == "none" {
-            "native only".to_owned()
-        } else {
-            format!("{tool_fmt} (text fallback enabled)")
-        },
+        &if tool_fmt == "none" { "native only".to_owned() } else { format!("{tool_fmt} (text fallback enabled)") },
     );
 
     console::section("Local state");
@@ -597,23 +525,15 @@ async fn doctor(config: &Config, settings: &Settings) -> Result<()> {
     }
     let store = SessionStore::new(&config.paths, config.workspace.clone());
     match store.list().context("could not inspect sessions") {
-        Ok(sessions) => {
-            record(Health::Pass, "sessions", &format!("{} for this workspace", sessions.len()))
-        }
+        Ok(sessions) => record(Health::Pass, "sessions", &format!("{} for this workspace", sessions.len())),
         Err(error) => record(Health::Fail, "sessions", &format!("{error:#}")),
     }
     if config.trace_enabled {
-        let count = std::fs::read_dir(&config.paths.traces_dir)
-            .map(|entries| entries.flatten().count())
-            .unwrap_or(0);
+        let count = std::fs::read_dir(&config.paths.traces_dir).map(|entries| entries.flatten().count()).unwrap_or(0);
         record(
             Health::Pass,
             "traces",
-            &format!(
-                "on · {} in {}",
-                console::count(count, "session"),
-                config.paths.traces_dir.display()
-            ),
+            &format!("on · {} in {}", console::count(count, "session"), config.paths.traces_dir.display()),
         );
     } else {
         record(Health::Pass, "traces", "off");
@@ -624,15 +544,9 @@ async fn doctor(config: &Config, settings: &Settings) -> Result<()> {
         Err(error) => record(Health::Fail, "cron", &format!("{error:#}")),
     }
     match AgentServices::discover(&config.workspace, &config.paths, settings).await {
-        Ok(services) if services.diagnostics().is_empty() => {
-            record(Health::Pass, "extensions", "no problems")
-        }
+        Ok(services) if services.diagnostics().is_empty() => record(Health::Pass, "extensions", "no problems"),
         Ok(services) => {
-            record(
-                Health::Warn,
-                "extensions",
-                &console::count(services.diagnostics().len(), "warning"),
-            );
+            record(Health::Warn, "extensions", &console::count(services.diagnostics().len(), "warning"));
             for diagnostic in services.diagnostics() {
                 println!("               {}", console::dim(&diagnostic));
             }
@@ -646,11 +560,7 @@ async fn doctor(config: &Config, settings: &Settings) -> Result<()> {
         if mode & 0o077 == 0 {
             record(Health::Pass, "key perms", &format!("{mode:o}"));
         } else {
-            record(
-                Health::Fail,
-                "key perms",
-                &format!("{mode:o} — readable by others; expected 600"),
-            );
+            record(Health::Fail, "key perms", &format!("{mode:o} — readable by others; expected 600"));
         }
     }
 
@@ -663,11 +573,9 @@ async fn doctor(config: &Config, settings: &Settings) -> Result<()> {
             console::marks().warn,
             console::count(warnings, "warning")
         )),
-        (failures, _) => console::err(&format!(
-            "{} {} found",
-            console::marks().fail,
-            console::count(failures, "problem")
-        )),
+        (failures, _) => {
+            console::err(&format!("{} {} found", console::marks().fail, console::count(failures, "problem")))
+        }
     };
     println!("  {summary}");
     console::blank();

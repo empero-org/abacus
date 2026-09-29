@@ -402,12 +402,7 @@ pub struct Config {
 impl Config {
     /// A configuration pointed at one endpoint, with every option at its
     /// default. What an embedder or a test starts from.
-    pub fn for_endpoint(
-        workspace: PathBuf,
-        base_url: String,
-        model: String,
-        paths: AbacusPaths,
-    ) -> Self {
+    pub fn for_endpoint(workspace: PathBuf, base_url: String, model: String, paths: AbacusPaths) -> Self {
         Self {
             workspace,
             profile: "default".to_owned(),
@@ -437,21 +432,14 @@ impl Config {
         }
     }
 
-    pub fn resolve(
-        cli: &Cli,
-        settings: &Settings,
-        credentials: &Credentials,
-        paths: AbacusPaths,
-    ) -> Result<Self> {
+    pub fn resolve(cli: &Cli, settings: &Settings, credentials: &Credentials, paths: AbacusPaths) -> Result<Self> {
         let workspace = resolve_workspace(cli.path.as_deref())?;
         let profile_name = cli.profile.clone().unwrap_or_else(|| settings.default_profile.clone());
         let profile = settings.profiles.get(&profile_name);
 
         let scripted_model = profile
             .and_then(|profile| profile.endpoint.as_deref())
-            .and_then(|reference| {
-                crate::endpoint::ScriptedEndpoint::resolve(reference, &paths.endpoints_dir).ok()
-            })
+            .and_then(|reference| crate::endpoint::ScriptedEndpoint::resolve(reference, &paths.endpoints_dir).ok())
             .and_then(|endpoint| endpoint.model.clone());
         let model = cli
             .model
@@ -466,9 +454,7 @@ impl Config {
         // workspace, since it can run a token command and carry a bearer.
         let endpoint = profile
             .and_then(|profile| profile.endpoint.as_deref())
-            .map(|reference| {
-                crate::endpoint::ScriptedEndpoint::resolve(reference, &paths.endpoints_dir)
-            })
+            .map(|reference| crate::endpoint::ScriptedEndpoint::resolve(reference, &paths.endpoints_dir))
             .transpose()?;
 
         let base_url = cli
@@ -504,8 +490,7 @@ impl Config {
         let (profile_context, profile_output) = settings.profile_limits(&profile_name);
         let context_override = cli.context_window.or(profile_context);
         let output_override = cli.max_output_tokens.or(profile_output);
-        let model_limits =
-            ModelLimits::resolve_from_name(&model, context_override, output_override);
+        let model_limits = ModelLimits::resolve_from_name(&model, context_override, output_override);
         let tool_format = cli
             .tool_format
             .or_else(|| settings.agent.tool_format.as_deref().and_then(ToolFormat::parse))
@@ -532,20 +517,14 @@ impl Config {
             },
             web_search: settings.search.resolve(),
             endpoint,
-            aux_model: profile
-                .and_then(|profile| profile.aux_model.clone())
-                .filter(|model| !model.trim().is_empty()),
+            aux_model: profile.and_then(|profile| profile.aux_model.clone()).filter(|model| !model.trim().is_empty()),
             // Only an *explicit* role assignment travels here. An unassigned
             // role stays `None` so the turn falls back to the main model,
             // which is what the fallback chain resolves to anyway — resolving
             // it here instead would pin the main model at startup and stop
             // `/model` from moving these along with it.
-            subagent_model: profile
-                .and_then(|profile| profile.role_model("subagent"))
-                .map(str::to_owned),
-            compaction_model: profile
-                .and_then(|profile| profile.role_model("compaction"))
-                .map(str::to_owned),
+            subagent_model: profile.and_then(|profile| profile.role_model("subagent")).map(str::to_owned),
+            compaction_model: profile.and_then(|profile| profile.role_model("compaction")).map(str::to_owned),
             reasoning_effort: profile.and_then(|profile| profile.reasoning_effort),
             token_compression: settings.agent.token_compression,
             one_stream: settings.agent.one_stream,
@@ -666,10 +645,8 @@ impl ProjectExtensions {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let content = fs::read_to_string(&path)
-            .with_context(|| format!("could not read {}", path.display()))?;
-        toml::from_str(&content)
-            .with_context(|| format!("invalid project extension config: {}", path.display()))
+        let content = fs::read_to_string(&path).with_context(|| format!("could not read {}", path.display()))?;
+        toml::from_str(&content).with_context(|| format!("invalid project extension config: {}", path.display()))
     }
 }
 
@@ -680,13 +657,10 @@ impl Settings {
         }
         let content = fs::read_to_string(&paths.config_file)
             .with_context(|| format!("could not read {}", paths.config_file.display()))?;
-        let mut settings: Self = toml::from_str(&content)
-            .with_context(|| format!("invalid config: {}", paths.config_file.display()))?;
+        let mut settings: Self =
+            toml::from_str(&content).with_context(|| format!("invalid config: {}", paths.config_file.display()))?;
         if settings.version > SETTINGS_VERSION {
-            bail!(
-                "config version {} is newer than this Abacus supports ({SETTINGS_VERSION})",
-                settings.version
-            );
+            bail!("config version {} is newer than this Abacus supports ({SETTINGS_VERSION})", settings.version);
         }
         settings.version = SETTINGS_VERSION;
         Ok(settings)
@@ -1188,8 +1162,7 @@ impl AbacusPaths {
     }
 
     pub fn ensure(&self) -> Result<()> {
-        fs::create_dir_all(&self.sessions_dir)
-            .with_context(|| format!("could not create {}", self.root.display()))?;
+        fs::create_dir_all(&self.sessions_dir).with_context(|| format!("could not create {}", self.root.display()))?;
         Ok(())
     }
 }
@@ -1212,10 +1185,7 @@ pub fn workspace_from_cli(cli: &Cli) -> Result<PathBuf> {
 /// Reads a JSON state file, starting from the default when it is missing or
 /// unreadable: these files hold learned history, never anything a run depends on.
 pub fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_default()
+    fs::read_to_string(path).ok().and_then(|content| serde_json::from_str(&content).ok()).unwrap_or_default()
 }
 
 /// Writes a JSON state file, best effort, for the same reason.
@@ -1233,8 +1203,8 @@ pub fn atomic_write(path: &Path, content: &[u8], private: bool) -> Result<()> {
         path.file_name().and_then(|name| name.to_str()).unwrap_or("abacus"),
         std::process::id()
     ));
-    let mut file = File::create(&temp)
-        .with_context(|| format!("could not create temporary file in {}", parent.display()))?;
+    let mut file =
+        File::create(&temp).with_context(|| format!("could not create temporary file in {}", parent.display()))?;
 
     #[cfg(unix)]
     if private {
@@ -1308,8 +1278,7 @@ mod tests {
         assert!(!none.is_pinned());
         assert!(none.body().is_none(), "an unpinned request carries no field");
 
-        let pinned =
-            Routing { order: vec!["Together".into(), "Anthropic".into()], allow_fallbacks: false };
+        let pinned = Routing { order: vec!["Together".into(), "Anthropic".into()], allow_fallbacks: false };
         let body = pinned.body().expect("a provider object");
         assert_eq!(body["order"][0], "Together");
         assert_eq!(body["order"][1], "Anthropic");

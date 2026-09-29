@@ -104,11 +104,7 @@ impl ModelHub {
         for (id, profile) in &settings.profiles {
             scopes.push(Scope::Profile {
                 id: id.clone(),
-                name: if profile.name.trim().is_empty() {
-                    id.clone()
-                } else {
-                    profile.name.clone()
-                },
+                name: if profile.name.trim().is_empty() { id.clone() } else { profile.name.clone() },
             });
         }
         ModelHub {
@@ -267,11 +263,7 @@ mod tests {
         let mut settings = Settings::default();
         settings.profiles.insert(
             "main".to_owned(),
-            ProviderProfile {
-                name: "OpenRouter".to_owned(),
-                model: "big/model".to_owned(),
-                ..Default::default()
-            },
+            ProviderProfile { name: "OpenRouter".to_owned(), model: "big/model".to_owned(), ..Default::default() },
         );
         settings.default_profile = "main".to_owned();
         settings
@@ -310,11 +302,7 @@ mod tests {
     #[test]
     fn roles_report_what_they_inherit() {
         let mut settings = settings();
-        settings
-            .profiles
-            .get_mut("main")
-            .unwrap()
-            .set_role_model("aux", Some("small/model".to_owned()));
+        settings.profiles.get_mut("main").unwrap().set_role_model("aux", Some("small/model".to_owned()));
         let rows = role_rows(&settings, "main");
         let by_id = |id: &str| rows.iter().find(|row| row.id == id).unwrap().clone();
         assert_eq!(by_id("default").model, "big/model");

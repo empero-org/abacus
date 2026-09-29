@@ -293,10 +293,7 @@ impl TurnOptions {
             tool_output_limit: config.tool_output_limit,
             mode: config.mode.unwrap_or(AgentMode::Auto),
             allow_mutations: Arc::new(AtomicBool::new(config.yes)),
-            compaction_budget: compression_budget(
-                config.model_limits.compaction_budget(),
-                config.token_compression,
-            ),
+            compaction_budget: compression_budget(config.model_limits.compaction_budget(), config.token_compression),
             token_compression: config.token_compression,
             allow_subagents: true,
             web_search: config.web_search.clone(),
@@ -310,10 +307,7 @@ impl TurnOptions {
     /// Load what the workspace has learned across sessions: recorded lessons,
     /// the delegation record, and mode discipline.
     pub fn with_workspace_stores(mut self, config: &crate::config::Config) -> Self {
-        self.papercuts = crate::papercuts::PapercutStore::load(
-            config.paths.papercuts_file.clone(),
-            &config.workspace,
-        );
+        self.papercuts = crate::papercuts::PapercutStore::load(config.paths.papercuts_file.clone(), &config.workspace);
         self.hive = crate::hive::HiveHandle::load(config.paths.hive_file.clone());
         self.modes = crate::modes::ModeCoach::load(config.paths.modes_file.clone());
         self
@@ -347,11 +341,10 @@ async fn run_turn_inner(
     // Paths outside the workspace that the safety layer has cleared for
     // reading. The executor consults it; the loop below fills it in.
     let outside_reads = crate::tools::OutsideReads::default();
-    let tools =
-        ToolExecutor::with_output_limit(options.workspace.clone(), options.tool_output_limit)
-            // The auxiliary model reads fetched pages for the tools.
-            .with_web(options.web_search.clone().with_extractor(aux.clone()))
-            .with_outside_reads(outside_reads.clone());
+    let tools = ToolExecutor::with_output_limit(options.workspace.clone(), options.tool_output_limit)
+        // The auxiliary model reads fetched pages for the tools.
+        .with_web(options.web_search.clone().with_extractor(aux.clone()))
+        .with_outside_reads(outside_reads.clone());
     let mut specs = options.services.tool_specs();
     specs.extend(GoalState::tool_specs());
     specs.extend(TaskList::tool_specs());
@@ -388,14 +381,13 @@ async fn run_turn_inner(
     let mut active_mode = options.mode;
     // Capture once per session. Later turns reuse the snapshot; only imminent
     // rolling compaction refreshes it before verbatim evidence is erased.
-    let mut intent_capture: Option<tokio::task::JoinHandle<Option<String>>> =
-        (options.session_id.is_some() && options.tether.intent().is_none()).then(|| {
-            let (aux, snapshot, previous, cancel) =
-                (aux.clone(), messages.clone(), options.tether.intent(), options.cancel.clone());
-            tokio::spawn(async move {
-                crate::tether::capture_intent(&aux, &snapshot, previous.as_deref(), &cancel).await
-            })
-        });
+    let mut intent_capture: Option<tokio::task::JoinHandle<Option<String>>> = (options.session_id.is_some()
+        && options.tether.intent().is_none())
+    .then(|| {
+        let (aux, snapshot, previous, cancel) =
+            (aux.clone(), messages.clone(), options.tether.intent(), options.cancel.clone());
+        tokio::spawn(async move { crate::tether::capture_intent(&aux, &snapshot, previous.as_deref(), &cancel).await })
+    });
     // Best-effort: count this turn against the active goal's progress metric.
     let _ = options.goal.increment_iteration();
 
@@ -417,13 +409,7 @@ async fn run_turn_inner(
         // Rolling-summary compaction erases verbatim history, so the
         // reflection pass runs first, unconditionally — a memory written from
         // the summary alone would be a memory of a summary.
-        if !rethought
-            && crate::compaction::needs_summary(
-                &messages,
-                &options.compaction,
-                &options.compaction_budget,
-            )
-        {
+        if !rethought && crate::compaction::needs_summary(&messages, &options.compaction, &options.compaction_budget) {
             rethought = true;
             run_refine(&reflector(&aux, &provider, &specs), &messages, &options, &events).await;
             // Refresh the tether snapshot while the evidence is still
@@ -440,8 +426,7 @@ async fn run_turn_inner(
                 );
                 tokio::spawn(async move {
                     if let Some(intent) =
-                        crate::tether::capture_intent(&aux, &snapshot, previous.as_deref(), &cancel)
-                            .await
+                        crate::tether::capture_intent(&aux, &snapshot, previous.as_deref(), &cancel).await
                     {
                         tether.set_intent(intent);
                     }
@@ -481,23 +466,20 @@ async fn run_turn_inner(
         sync_session_context(&mut messages, &options, active_mode);
         let mut provider_messages = messages.clone();
         let completion = loop {
-            let completion = match provider
-                .complete(&provider_messages, &specs, delta_tx.clone(), &options.cancel)
-                .await
-            {
-                Ok(completion) => completion,
-                Err(error) => {
-                    // The forwarder only exits once every sender is gone;
-                    // without this drop the await below deadlocks and the
-                    // turn hangs on "connecting" instead of reporting.
-                    drop(delta_tx);
-                    let _ = forward.await;
-                    abort_capture(intent_capture.take());
-                    let _ =
-                        events.send(AgentEvent::Failed { error: format!("{error:#}"), messages });
-                    return;
-                }
-            };
+            let completion =
+                match provider.complete(&provider_messages, &specs, delta_tx.clone(), &options.cancel).await {
+                    Ok(completion) => completion,
+                    Err(error) => {
+                        // The forwarder only exits once every sender is gone;
+                        // without this drop the await below deadlocks and the
+                        // turn hangs on "connecting" instead of reporting.
+                        drop(delta_tx);
+                        let _ = forward.await;
+                        abort_capture(intent_capture.take());
+                        let _ = events.send(AgentEvent::Failed { error: format!("{error:#}"), messages });
+                        return;
+                    }
+                };
             // A cancelled completion is empty by nature — it must not be
             // mistaken for the provider having nothing to say and retried.
             if completion.cancelled {
@@ -511,15 +493,13 @@ async fn run_turn_inner(
                     drop(delta_tx);
                     let _ = forward.await;
                     abort_capture(intent_capture.take());
-                    let _ =
-                        events.send(AgentEvent::Done { messages, reason: DoneReason::Complete });
+                    let _ = events.send(AgentEvent::Done { messages, reason: DoneReason::Complete });
                     return;
                 }
                 // Brief backoff before retrying so the provider has a moment
                 // to recover from a transient stream hiccup, then rebuild the
                 // message list in case compaction or context state changed.
-                tokio::time::sleep(std::time::Duration::from_millis(500 * empty_retries as u64))
-                    .await;
+                tokio::time::sleep(std::time::Duration::from_millis(500 * empty_retries as u64)).await;
                 sync_session_context(&mut messages, &options, active_mode);
                 provider_messages = messages.clone();
                 continue;
@@ -560,11 +540,7 @@ async fn run_turn_inner(
         // Skip an assistant turn that produced nothing at all, which is what a
         // cancel before the first token looks like.
         if !completion.content.is_empty() || !completion.tool_calls.is_empty() {
-            messages.push(assistant_message(
-                &completion.content,
-                &completion.reasoning,
-                &completion.tool_calls,
-            ));
+            messages.push(assistant_message(&completion.content, &completion.reasoning, &completion.tool_calls));
         }
         // Tether drift check every ~35 model steps: a quick call judges the
         // recent activity against the session intent, and an off-track verdict
@@ -588,9 +564,7 @@ async fn run_turn_inner(
                 events.clone(),
             );
             tokio::spawn(async move {
-                if let Some(correction) =
-                    crate::tether::check_drift(&aux, &intent, &plan, &snapshot, &cancel).await
-                {
+                if let Some(correction) = crate::tether::check_drift(&aux, &intent, &plan, &snapshot, &cancel).await {
                     tether.set_correction(correction.clone());
                     let _ = notices.send(AgentEvent::Notice(format!("tether — {correction}")));
                 }
@@ -614,10 +588,7 @@ async fn run_turn_inner(
             }
             // A turn with many actions earns a look back before it ends;
             // conversational turns end unexamined.
-            if !options.token_compression
-                && !rethought
-                && tool_calls_executed >= crate::refine::LONG_TURN_TOOL_CALLS
-            {
+            if !options.token_compression && !rethought && tool_calls_executed >= crate::refine::LONG_TURN_TOOL_CALLS {
                 run_refine(&reflector(&aux, &provider, &specs), &messages, &options, &events).await;
             }
             // Collect the intent snapshot started when the turn began. It has
@@ -647,20 +618,16 @@ async fn run_turn_inner(
             // counts under the repeat-call heuristic.
             let settled = match call.name.as_str() {
                 "mode_set" => {
-                    Some(set_auto_mode(options.mode, &mut active_mode, &call.arguments).map(
-                        |(mode, reason)| {
-                            // Choosing a mode unprompted is the habit worth
-                            // reinforcing; it pays down earlier slips.
-                            options.modes.record_switch();
-                            let output = format!("Mode set to {}. Reason: {reason}", mode.label());
-                            let _ = events.send(AgentEvent::ModeChanged { mode, reason });
-                            output
-                        },
-                    ))
+                    Some(set_auto_mode(options.mode, &mut active_mode, &call.arguments).map(|(mode, reason)| {
+                        // Choosing a mode unprompted is the habit worth
+                        // reinforcing; it pays down earlier slips.
+                        options.modes.record_switch();
+                        let output = format!("Mode set to {}. Reason: {reason}", mode.label());
+                        let _ = events.send(AgentEvent::ModeChanged { mode, reason });
+                        output
+                    }))
                 }
-                "ask_user" => Some(
-                    request_user_question(&call, &events).await.map(|answer| answer.describe()),
-                ),
+                "ask_user" => Some(request_user_question(&call, &events).await.map(|answer| answer.describe())),
                 _ => None,
             };
             if let Some(result) = settled {
@@ -677,8 +644,7 @@ async fn run_turn_inner(
             *repeated += 1;
             let loop_blocked = *repeated >= 3 && !is_read_only(&call);
             let requires_approval = tool_requires_approval(&call, &options.services);
-            let judge =
-                Judge { model: &safety_model, cache: &safety, workspace: &options.workspace };
+            let judge = Judge { model: &safety_model, cache: &safety, workspace: &options.workspace };
             // PLAN and AUTO block a shell command only when it actually changes
             // something. A command judged to have no side effects also skips
             // the approval prompt in PLAN: the mode exists to investigate, and
@@ -697,10 +663,7 @@ async fn run_turn_inner(
                 let details = if call.name == "spawn_subagents" {
                     SubagentRuntime::approval_details(&call.arguments)
                 } else {
-                    options
-                        .services
-                        .approval_details(&call)
-                        .unwrap_or_else(|| tools.approval_details(&call))
+                    options.services.approval_details(&call).unwrap_or_else(|| tools.approval_details(&call))
                 };
                 request_approval(&call, details, &events, &options.allow_mutations).await
             } else {
@@ -713,21 +676,17 @@ async fn run_turn_inner(
             let mut output = if let Some(refusal) = path_refusal {
                 refusal
             } else if loop_blocked {
-                "Blocked: the same tool call was requested three times. Change the approach before retrying."
-                    .to_owned()
+                "Blocked: the same tool call was requested three times. Change the approach before retrying.".to_owned()
             } else if mode_blocked && active_mode == AgentMode::Auto {
-                "Blocked by AUTO MODE: this would change something. Call mode_set with mode=build and a reason first.".to_owned()
+                "Blocked by AUTO MODE: this would change something. Call mode_set with mode=build and a reason first."
+                    .to_owned()
             } else if mode_blocked {
                 "Blocked by PLAN MODE: this changes something. Commands that only inspect run without asking — reading, searching, building, testing, printing. Rewrite this as an inspection, or switch to BUILD mode to make the change.".to_owned()
             } else if approved {
-                let _ = events.send(AgentEvent::ToolStarted {
-                    name: call.name.clone(),
-                    summary: call.summary(),
-                });
+                let _ = events.send(AgentEvent::ToolStarted { name: call.name.clone(), summary: call.summary() });
                 run_tool(&call, &options, &tools, &subagents, &aux).await
             } else {
-                "User rejected this tool call. Do not retry it without changing the approach."
-                    .to_owned()
+                "User rejected this tool call. Do not retry it without changing the approach.".to_owned()
             };
 
             // Papercut recall. Every tool result is scanned against the
@@ -765,9 +724,7 @@ async fn run_turn_inner(
             // Deliberately after the papercut scan — tripwires match on the
             // failure text. Handle tools are exempt: binding a slice of $h1 to
             // $h2 would give the model a handle to a handle and no way back.
-            if output.chars().count() >= crate::handles::BIND_THRESHOLD_CHARS
-                && !call.name.starts_with("handle_")
-            {
+            if output.chars().count() >= crate::handles::BIND_THRESHOLD_CHARS && !call.name.starts_with("handle_") {
                 let arguments: String = call.arguments.chars().take(120).collect();
                 let source = format!("{}: {arguments}", call.name);
                 output = options.handles.bind(&source, output).summary();
@@ -801,12 +758,7 @@ async fn run_turn_inner(
 }
 
 /// Record a tool's result: tell the UI, and put it in the conversation.
-fn finish_tool(
-    call: &ToolCall,
-    output: String,
-    messages: &mut Vec<Value>,
-    events: &mpsc::UnboundedSender<AgentEvent>,
-) {
+fn finish_tool(call: &ToolCall, output: String, messages: &mut Vec<Value>, events: &mpsc::UnboundedSender<AgentEvent>) {
     messages.push(json!({
         "role": "tool",
         "tool_call_id": call.id,
@@ -864,8 +816,7 @@ async fn run_tool(
         tools.execute(call).await
     };
     if name == "tool_search" {
-        let extensions =
-            options.services.search_catalog(&argument(call, "query").unwrap_or_default());
+        let extensions = options.services.search_catalog(&argument(call, "query").unwrap_or_default());
         if !extensions.is_empty() {
             output.push('\n');
             output.push_str(&extensions);
@@ -907,9 +858,7 @@ impl Judge<'_> {
         match crate::safety::command_verdict(&command) {
             Verdict::Allow => true,
             Verdict::Deny => false,
-            Verdict::Unclear => {
-                crate::safety::command_is_safe(self.model, self.cache, &command).await
-            }
+            Verdict::Unclear => crate::safety::command_is_safe(self.model, self.cache, &command).await,
         }
     }
 
@@ -921,11 +870,7 @@ impl Judge<'_> {
     /// the rest is judged once. Environment files are judged wherever they
     /// live: templates pass, production never does, and a real `.env` is
     /// cleared once rather than banned. Writes never take this path.
-    async fn refuse_read(
-        &self,
-        call: &ToolCall,
-        approved: &crate::tools::OutsideReads,
-    ) -> Option<String> {
+    async fn refuse_read(&self, call: &ToolCall, approved: &crate::tools::OutsideReads) -> Option<String> {
         use crate::safety::{self, Verdict};
         let approve = |path: std::path::PathBuf| {
             if let Ok(mut approved) = approved.write() {
@@ -941,9 +886,7 @@ impl Judge<'_> {
             let env_cleared = match env {
                 Verdict::Allow => true,
                 Verdict::Deny => false,
-                Verdict::Unclear => {
-                    safety::env_file_is_readable(self.model, self.cache, &path).await
-                }
+                Verdict::Unclear => safety::env_file_is_readable(self.model, self.cache, &path).await,
             };
             if !env_cleared {
                 return Some(format!(
@@ -1046,11 +989,7 @@ pub fn compaction_trace(messages: &[Value]) -> String {
                 let name = call["function"]["name"].as_str().unwrap_or("tool");
                 let args = call["function"]["arguments"].as_str().unwrap_or("");
                 let preview = arg_preview(args, name);
-                parts.push(if preview.is_empty() {
-                    name.to_owned()
-                } else {
-                    format!("{name}({preview})")
-                });
+                parts.push(if preview.is_empty() { name.to_owned() } else { format!("{name}({preview})") });
             }
         }
         if parts.is_empty()
@@ -1080,8 +1019,8 @@ fn arg_preview(args: &str, name: &str) -> String {
         return String::new();
     };
     let key = match name {
-        "read_file" | "read_files" | "edit_file" | "write_file" | "append_file" | "delete_file"
-        | "move_file" | "git_restore" | "git_checkout" => "path",
+        "read_file" | "read_files" | "edit_file" | "write_file" | "append_file" | "delete_file" | "move_file"
+        | "git_restore" | "git_checkout" => "path",
         "grep" => "query",
         "glob" => "pattern",
         "list_files" => "path",
@@ -1128,8 +1067,7 @@ async fn request_approval(
     allow_mutations: &Arc<AtomicBool>,
 ) -> bool {
     let (respond, receive) = oneshot::channel();
-    let request =
-        ApprovalRequest { tool: call.name.clone(), summary: call.summary(), details, respond };
+    let request = ApprovalRequest { tool: call.name.clone(), summary: call.summary(), details, respond };
     if events.send(AgentEvent::Approval(request)).is_err() {
         return false;
     }
@@ -1168,8 +1106,7 @@ async fn request_user_question(
         #[serde(default)]
         multi_select: bool,
     }
-    let args: Args = serde_json::from_str(&call.arguments)
-        .with_context(|| "ask_user arguments are invalid JSON")?;
+    let args: Args = serde_json::from_str(&call.arguments).with_context(|| "ask_user arguments are invalid JSON")?;
 
     let (respond, receive) = oneshot::channel();
     let request = UserQuestionRequest {
@@ -1193,11 +1130,7 @@ async fn request_user_question(
         // UI is gone — pick the first option as a programmatic fallback so
         // the agent loop can still point somewhere.
         return Ok(UserAnswer {
-            selected_labels: args
-                .options
-                .first()
-                .map(|opt| vec![opt.label.clone()])
-                .unwrap_or_default(),
+            selected_labels: args.options.first().map(|opt| vec![opt.label.clone()]).unwrap_or_default(),
             custom_text: None,
         });
     }
@@ -1211,9 +1144,10 @@ async fn request_user_question(
 /// is the executor's own list, with MCP servers able to override per tool.
 fn tool_requires_approval(call: &ToolCall, services: &AgentServices) -> bool {
     match call.name.as_str() {
-        "goal_status" | "goal_update" | "task_list" | "task_create" | "task_update"
-        | "papercut_record" | "papercut_list" | "memory_record" | "memory_list"
-        | "memory_forget" | "message_subagent" | "ask_user" => false,
+        "goal_status" | "goal_update" | "task_list" | "task_create" | "task_update" | "papercut_record"
+        | "papercut_list" | "memory_record" | "memory_list" | "memory_forget" | "message_subagent" | "ask_user" => {
+            false
+        }
         "spawn_subagents" => true,
         _ => services.needs_approval(call),
     }
@@ -1401,10 +1335,7 @@ fn context_layers(options: &TurnOptions, active_mode: AgentMode) -> Vec<(&'stati
         ("summary", options.compaction.prompt_context()),
         ("memory", options.harness.prompt_context()),
         ("correction", options.tether.correction_layer().unwrap_or_default()),
-        (
-            "delegation",
-            if options.allow_subagents { options.hive.guidance() } else { String::new() },
-        ),
+        ("delegation", if options.allow_subagents { options.hive.guidance() } else { String::new() }),
         ("goal", options.goal.prompt_context()),
         ("tasks", options.tasks.prompt_context()),
         ("mode", mode_prompt(active_mode).to_owned()),
@@ -1470,11 +1401,7 @@ fn sync_session_context(messages: &mut Vec<Value>, options: &TurnOptions, active
 /// system content (multimodal parts; Abacus never builds one) is left in place
 /// rather than dropped.
 pub(crate) fn merge_system_messages(messages: Vec<Value>) -> Vec<Value> {
-    if !messages
-        .iter()
-        .skip(1)
-        .any(|message| message["role"] == "system" && message["content"].is_string())
-    {
+    if !messages.iter().skip(1).any(|message| message["role"] == "system" && message["content"].is_string()) {
         return messages;
     }
 
@@ -1522,16 +1449,8 @@ fn abort_capture(handle: Option<tokio::task::JoinHandle<Option<String>>>) {
 /// default, since the `aux` role falls back to `default` — so the two
 /// refinement calls read the conversation's cached prefix instead of paying full
 /// price for a rendered copy of it.
-fn reflector<'a>(
-    aux: &'a Provider,
-    provider: &Provider,
-    specs: &'a [Value],
-) -> crate::refine::Reflector<'a> {
-    crate::refine::Reflector {
-        provider: aux,
-        in_context: aux.model() == provider.model(),
-        tools: specs,
-    }
+fn reflector<'a>(aux: &'a Provider, provider: &Provider, specs: &'a [Value]) -> crate::refine::Reflector<'a> {
+    crate::refine::Reflector { provider: aux, in_context: aux.model() == provider.model(), tools: specs }
 }
 
 /// The reflection pass: decide whether this turn taught anything, and if so
@@ -1549,15 +1468,13 @@ async fn run_refine(
     options: &TurnOptions,
     events: &mpsc::UnboundedSender<AgentEvent>,
 ) {
-    let instructions =
-        match crate::refine::should_refine(reflector, messages, &options.harness, &options.cancel)
-            .await
-        {
-            Some((true, instructions)) => instructions,
-            // A refusal and an unparseable gate reply both mean "do not spend
-            // the planning call".
-            _ => return,
-        };
+    let instructions = match crate::refine::should_refine(reflector, messages, &options.harness, &options.cancel).await
+    {
+        Some((true, instructions)) => instructions,
+        // A refusal and an unparseable gate reply both mean "do not spend
+        // the planning call".
+        _ => return,
+    };
     if let Some(outcome) = crate::refine::run(
         reflector,
         messages,
@@ -1584,11 +1501,7 @@ async fn run_refine(
 /// the UI what landed. Steering is labelled so the model treats it as the
 /// user's live instruction; a worker report is labelled as the delivery of
 /// something it started earlier.
-fn deliver_injections(
-    options: &TurnOptions,
-    messages: &mut Vec<Value>,
-    events: &mpsc::UnboundedSender<AgentEvent>,
-) {
+fn deliver_injections(options: &TurnOptions, messages: &mut Vec<Value>, events: &mpsc::UnboundedSender<AgentEvent>) {
     for injection in options.injections.drain() {
         let content = match &injection {
             Injection::UserMessage(text) => {
@@ -1605,9 +1518,8 @@ fn deliver_injections(
                 )
             }
             Injection::SubagentReport(report) => {
-                let _ = events.send(AgentEvent::Notice(
-                    "a background subagent finished; its report was delivered".to_owned(),
-                ));
+                let _ = events
+                    .send(AgentEvent::Notice("a background subagent finished; its report was delivered".to_owned()));
                 format!(
                     "[background subagent finished] {report}\n\nFold this into what you are \
                      doing; if it changes the plan, say so."
@@ -1674,10 +1586,7 @@ mod tests {
         assert_eq!(merged.len(), 3, "3 system messages collapse to 1, + user + assistant");
         assert_eq!(merged[0]["role"], "system");
         assert_eq!(merged[0]["content"], "base\n\ngoal\n\nmode");
-        assert!(
-            merged.iter().skip(1).all(|m| m["role"] != "system"),
-            "no system message may follow the first"
-        );
+        assert!(merged.iter().skip(1).all(|m| m["role"] != "system"), "no system message may follow the first");
         // Conversation order is untouched.
         assert_eq!(merged[1]["content"], "hey");
         assert_eq!(merged[2]["content"], "hi");
@@ -1697,8 +1606,7 @@ mod tests {
 
     #[test]
     fn leaves_an_already_valid_message_list_untouched() {
-        let messages =
-            vec![json!({"role":"system","content":"base"}), json!({"role":"user","content":"hey"})];
+        let messages = vec![json!({"role":"system","content":"base"}), json!({"role":"user","content":"hey"})];
         assert_eq!(merge_system_messages(messages.clone()), messages);
     }
 
@@ -1810,10 +1718,7 @@ mod tests {
         assert_eq!(&history[..3], &opening[..], "history before it is untouched");
         let first = appended(&history, 3);
         assert!(first.iter().all(|block| block.starts_with(SESSION_CONTEXT_TAG)));
-        assert!(
-            first.iter().any(|block| block.contains("layer=\"mode\"") && block.contains("BUILD")),
-            "{first:?}"
-        );
+        assert!(first.iter().any(|block| block.contains("layer=\"mode\"") && block.contains("BUILD")), "{first:?}");
 
         // A step later with nothing changed, nothing is appended: the next
         // request is exactly the last one plus what happened since, which is
@@ -1830,15 +1735,8 @@ mod tests {
         assert_eq!(&history[..settled.len()], &settled[..], "never rewritten");
         let changed = appended(&history, settled.len());
         assert_eq!(changed.len(), 2, "{changed:?}");
-        assert!(
-            changed
-                .iter()
-                .any(|block| block.contains("layer=\"goal\"")
-                    && block.contains("ship the parser fix"))
-        );
-        assert!(
-            changed.iter().any(|block| block.contains("layer=\"mode\"") && block.contains("PLAN"))
-        );
+        assert!(changed.iter().any(|block| block.contains("layer=\"goal\"") && block.contains("ship the parser fix")));
+        assert!(changed.iter().any(|block| block.contains("layer=\"mode\"") && block.contains("PLAN")));
     }
 
     #[test]
@@ -1865,11 +1763,8 @@ mod tests {
 
     #[test]
     fn token_compression_tightens_every_context_budget() {
-        let normal = CompactionBudget {
-            compact_at_chars: 100_000,
-            recent_budget_chars: 40_000,
-            summary_budget_chars: 12_000,
-        };
+        let normal =
+            CompactionBudget { compact_at_chars: 100_000, recent_budget_chars: 40_000, summary_budget_chars: 12_000 };
         let unchanged = compression_budget(normal, false);
         assert_eq!(unchanged.compact_at_chars, normal.compact_at_chars);
         assert_eq!(unchanged.recent_budget_chars, normal.recent_budget_chars);
@@ -1886,11 +1781,7 @@ mod tests {
         let value = assistant_message(
             "",
             "checking the readme first",
-            &[ToolCall {
-                id: "call_1".into(),
-                name: "read_file".into(),
-                arguments: r#"{"path":"README.md"}"#.into(),
-            }],
+            &[ToolCall { id: "call_1".into(), name: "read_file".into(), arguments: r#"{"path":"README.md"}"#.into() }],
         );
         assert!(value["content"].is_null());
         assert_eq!(value["tool_calls"][0]["function"]["name"], "read_file");
@@ -1931,10 +1822,7 @@ mod tests {
         let compacted = compact_messages(&messages, 160);
         let note = compacted
             .iter()
-            .find(|m| {
-                m["role"] == "system"
-                    && m["content"].as_str().is_some_and(|c| c.contains("omitted"))
-            })
+            .find(|m| m["role"] == "system" && m["content"].as_str().is_some_and(|c| c.contains("omitted")))
             .expect("compaction note present");
         let content = note["content"].as_str().unwrap();
         assert!(content.contains("edit_file(src/main.rs)"), "note was: {content}");
@@ -1973,26 +1861,12 @@ mod tests {
     fn inspection_is_allowed_in_every_mode() {
         for mode in [AgentMode::Plan, AgentMode::Auto, AgentMode::Build] {
             for name in [
-                "read_file",
-                "read_files",
-                "list_files",
-                "glob",
-                "grep",
-                "git_status",
-                "git_diff",
-                "git_log",
-                "git_show",
-                "git_blame",
-                "tool_search",
-                "web_search",
-                "read_page",
+                "read_file", "read_files", "list_files", "glob", "grep", "git_status", "git_diff", "git_log",
+                "git_show", "git_blame", "tool_search", "web_search", "read_page",
             ] {
                 // Even if something marks an inspection tool as needing
                 // approval, the mode gate must not be what stops it.
-                assert!(
-                    !mode_blocks(mode, &call(name), true),
-                    "{name} should not be mode-blocked in {mode:?}"
-                );
+                assert!(!mode_blocks(mode, &call(name), true), "{name} should not be mode-blocked in {mode:?}");
             }
         }
     }
@@ -2000,34 +1874,17 @@ mod tests {
     #[test]
     fn mutations_are_blocked_outside_build() {
         for name in [
-            "edit_file",
-            "write_file",
-            "apply_patch",
-            "delete_file",
-            "move_file",
-            "append_file",
-            "create_directory",
-            "run_command",
-            "git_commit",
-            "git_restore",
-            "git_checkout",
-            "spawn_subagents",
+            "edit_file", "write_file", "apply_patch", "delete_file", "move_file", "append_file", "create_directory",
+            "run_command", "git_commit", "git_restore", "git_checkout", "spawn_subagents",
             // Skill authoring writes files, so a read-only session must not
             // reach it. Mode gating keys off the approval list, so omitting
             // these here would let PLAN write a skill.
-            "skill_create",
-            "skill_update",
+            "skill_create", "skill_update",
         ] {
             for mode in [AgentMode::Plan, AgentMode::Auto] {
-                assert!(
-                    mode_blocks(mode, &call(name), true),
-                    "{name} should be mode-blocked in {mode:?}"
-                );
+                assert!(mode_blocks(mode, &call(name), true), "{name} should be mode-blocked in {mode:?}");
             }
-            assert!(
-                !mode_blocks(AgentMode::Build, &call(name), true),
-                "{name} should run in BUILD"
-            );
+            assert!(!mode_blocks(AgentMode::Build, &call(name), true), "{name} should run in BUILD");
         }
     }
 
@@ -2053,12 +1910,8 @@ mod tests {
         assert!(!tool_reads_only("skill_create"));
         assert!(!tool_reads_only("skill_update"));
         assert!(
-            crate::tools::ToolCall {
-                id: "1".into(),
-                name: "skill_create".into(),
-                arguments: "{}".into()
-            }
-            .needs_approval()
+            crate::tools::ToolCall { id: "1".into(), name: "skill_create".into(), arguments: "{}".into() }
+                .needs_approval()
         );
     }
 
@@ -2100,16 +1953,8 @@ mod tests {
     #[test]
     fn the_read_only_list_holds_no_mutating_tools() {
         for name in [
-            "edit_file",
-            "write_file",
-            "apply_patch",
-            "delete_file",
-            "move_file",
-            "append_file",
-            "run_command",
-            "git_commit",
-            "git_restore",
-            "git_checkout",
+            "edit_file", "write_file", "apply_patch", "delete_file", "move_file", "append_file", "run_command",
+            "git_commit", "git_restore", "git_checkout",
         ] {
             assert!(!is_read_only(&call(name)), "{name} must not be treated as read-only");
         }

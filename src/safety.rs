@@ -43,210 +43,44 @@ pub enum Verdict {
 /// Commands that only look. Recognising these is the difference between a
 /// planning mode that browses a repository freely and one that pays a model
 /// call to run `ls`.
+///
+/// In order: filesystem reading; text processing (`sed` only without -i, which
+/// is checked below); environment and process inspection; binary inspection;
+/// and language tooling that reads or builds into its own target directory.
 const INSPECT_VERBS: &[&str] = &[
-    // Filesystem reading.
-    "ls",
-    "cat",
-    "head",
-    "tail",
-    "wc",
-    "file",
-    "stat",
-    "du",
-    "df",
-    "tree",
-    "realpath",
-    "readlink",
-    "basename",
-    "dirname",
-    "pwd",
-    "find",
-    "locate",
-    "which",
-    "whereis",
-    "type",
-    "command",
-    // Text processing. `sed` is here only without -i, checked below.
-    "grep",
-    "rg",
-    "ag",
-    "ack",
-    "fd",
-    "sort",
-    "uniq",
-    "cut",
-    "tr",
-    "column",
-    "diff",
-    "cmp",
-    "comm",
-    "join",
-    "paste",
-    "fold",
-    "nl",
-    "sed",
-    "awk",
-    "jq",
-    "yq",
-    "xxd",
-    "od",
-    "strings",
-    "base64",
-    "md5sum",
-    "sha1sum",
-    "sha256sum",
-    "cksum",
-    // Environment and process inspection.
-    "echo",
-    "printf",
-    "date",
-    "env",
-    "printenv",
-    "uname",
-    "hostname",
-    "uptime",
-    "whoami",
-    "id",
-    "ps",
-    "free",
-    "nproc",
-    "lscpu",
-    "lsblk",
-    "groups",
-    "sleep",
-    "true",
-    "false",
-    "test",
-    // Binary inspection.
-    "nm",
-    "objdump",
-    "readelf",
-    "ldd",
-    "strip",
-    "size",
-    "otool",
-    // Language tooling that reads or builds into its own target directory.
-    "pytest",
-    "tsc",
-    "mypy",
-    "ruff",
-    "eslint",
-    "shellcheck",
-    "clippy-driver",
-    "rustc",
-    "rustfmt",
-    "gofmt",
-    "golangci-lint",
-    "terraform",
-    "helm",
-    "kubectl",
+    "ls", "cat", "head", "tail", "wc", "file", "stat", "du", "df", "tree", "realpath", "readlink", "basename",
+    "dirname", "pwd", "find", "locate", "which", "whereis", "type", "command", "grep", "rg", "ag", "ack", "fd", "sort",
+    "uniq", "cut", "tr", "column", "diff", "cmp", "comm", "join", "paste", "fold", "nl", "sed", "awk", "jq", "yq",
+    "xxd", "od", "strings", "base64", "md5sum", "sha1sum", "sha256sum", "cksum", "echo", "printf", "date", "env",
+    "printenv", "uname", "hostname", "uptime", "whoami", "id", "ps", "free", "nproc", "lscpu", "lsblk", "groups",
+    "sleep", "true", "false", "test", "nm", "objdump", "readelf", "ldd", "strip", "size", "otool", "pytest", "tsc",
+    "mypy", "ruff", "eslint", "shellcheck", "clippy-driver", "rustc", "rustfmt", "gofmt", "golangci-lint", "terraform",
+    "helm", "kubectl",
 ];
 
 /// Verbs that change the world. Never delegated to a classifier.
 const DESTRUCTIVE_VERBS: &[&str] = &[
-    "rm",
-    "rmdir",
-    "unlink",
-    "shred",
-    "dd",
-    "mkfs",
-    "fdisk",
-    "parted",
-    "mv",
-    "cp",
-    "install",
-    "ln",
-    "truncate",
-    "tee",
-    "chmod",
-    "chown",
-    "chgrp",
-    "chattr",
-    "mount",
-    "umount",
-    "swapon",
-    "sudo",
-    "su",
-    "doas",
-    "systemctl",
-    "service",
-    "shutdown",
-    "reboot",
-    "halt",
-    "poweroff",
-    "kill",
-    "killall",
-    "pkill",
-    "crontab",
-    "useradd",
-    "userdel",
-    "passwd",
+    "rm", "rmdir", "unlink", "shred", "dd", "mkfs", "fdisk", "parted", "mv", "cp", "install", "ln", "truncate", "tee",
+    "chmod", "chown", "chgrp", "chattr", "mount", "umount", "swapon", "sudo", "su", "doas", "systemctl", "service",
+    "shutdown", "reboot", "halt", "poweroff", "kill", "killall", "pkill", "crontab", "useradd", "userdel", "passwd",
 ];
 
 /// Package managers: the subcommand decides, so they are matched separately.
 const PACKAGE_MANAGERS: &[&str] = &[
-    "apt", "apt-get", "yum", "dnf", "pacman", "zypper", "apk", "brew", "port", "snap", "pip",
-    "pip3", "npm", "pnpm", "yarn", "gem", "cargo", "go", "poetry", "uv",
+    "apt", "apt-get", "yum", "dnf", "pacman", "zypper", "apk", "brew", "port", "snap", "pip", "pip3", "npm", "pnpm",
+    "yarn", "gem", "cargo", "go", "poetry", "uv",
 ];
 /// Package-manager subcommands that only report.
 const PACKAGE_READ_SUBCOMMANDS: &[&str] = &[
-    "list",
-    "show",
-    "info",
-    "search",
-    "check",
-    "outdated",
-    "tree",
-    "why",
-    "audit",
-    "config",
-    "metadata",
-    "version",
-    "--version",
-    "test",
-    "build",
-    "fmt",
-    "vet",
-    "clippy",
-    "bench",
-    "doc",
-    "run",
-    "freeze",
-    "ls",
-    "view",
-    "help",
+    "list", "show", "info", "search", "check", "outdated", "tree", "why", "audit", "config", "metadata", "version",
+    "--version", "test", "build", "fmt", "vet", "clippy", "bench", "doc", "run", "freeze", "ls", "view", "help",
 ];
 
 /// Git subcommands that change history, the working tree, or a remote.
 const DESTRUCTIVE_GIT: &[&str] = &[
-    "push",
-    "reset",
-    "clean",
-    "rebase",
-    "merge",
-    "commit",
-    "checkout",
-    "switch",
-    "restore",
-    "am",
-    "apply",
-    "cherry-pick",
-    "revert",
-    "stash",
-    "rm",
-    "mv",
-    "add",
-    "gc",
-    "prune",
-    "filter-branch",
-    "remote",
-    "fetch",
-    "pull",
-    "clone",
-    "init",
-    "tag",
-    "worktree",
-    "submodule",
+    "push", "reset", "clean", "rebase", "merge", "commit", "checkout", "switch", "restore", "am", "apply",
+    "cherry-pick", "revert", "stash", "rm", "mv", "add", "gc", "prune", "filter-branch", "remote", "fetch", "pull",
+    "clone", "init", "tag", "worktree", "submodule",
 ];
 
 /// Classify a shell command without a model call.
@@ -317,8 +151,7 @@ fn strip_descriptor_dups(lowered: &str) -> String {
         }
         if bytes.get(cursor) == Some(&b'>') && bytes.get(cursor + 1) == Some(&b'&') {
             cursor += 2;
-            while cursor < bytes.len() && (bytes[cursor].is_ascii_digit() || bytes[cursor] == b'-')
-            {
+            while cursor < bytes.len() && (bytes[cursor].is_ascii_digit() || bytes[cursor] == b'-') {
                 cursor += 1;
             }
             index = cursor;
@@ -332,8 +165,7 @@ fn strip_descriptor_dups(lowered: &str) -> String {
 
 /// Commands that run another command. The wrapper is harmless; whatever it
 /// wraps is the thing to judge, which is how `xargs rm` slipped through.
-const WRAPPERS: &[&str] =
-    &["xargs", "nice", "ionice", "timeout", "nohup", "time", "stdbuf", "watch", "env", "setsid"];
+const WRAPPERS: &[&str] = &["xargs", "nice", "ionice", "timeout", "nohup", "time", "stdbuf", "watch", "env", "setsid"];
 
 fn segment_verdict(segment: &str) -> Verdict {
     let mut words = segment.split_whitespace().filter(|word| !word.contains('='));
@@ -362,9 +194,7 @@ fn segment_verdict(segment: &str) -> Verdict {
     }
     // `find -delete` / `-exec` runs arbitrary work despite a safe-looking verb.
     if verb == "find"
-        && rest
-            .iter()
-            .any(|word| word.starts_with("-delete") || word.starts_with("-exec") || *word == "-ok")
+        && rest.iter().any(|word| word.starts_with("-delete") || word.starts_with("-exec") || *word == "-ok")
     {
         return Verdict::Deny;
     }
@@ -380,11 +210,7 @@ fn segment_verdict(segment: &str) -> Verdict {
         let subcommand = rest.iter().find(|word| !word.starts_with('-')).copied().unwrap_or("");
         // `cargo build` writes only into target/, which is what a planning
         // mode wants; `cargo install` changes the machine.
-        return if PACKAGE_READ_SUBCOMMANDS.contains(&subcommand) {
-            Verdict::Allow
-        } else {
-            Verdict::Deny
-        };
+        return if PACKAGE_READ_SUBCOMMANDS.contains(&subcommand) { Verdict::Allow } else { Verdict::Deny };
     }
     if INSPECT_VERBS.contains(&verb) {
         return Verdict::Allow;
@@ -397,23 +223,9 @@ fn segment_verdict(segment: &str) -> Verdict {
 /// Paths that are never read, whatever a classifier thinks. These hold
 /// credentials rather than code, and no plan needs them.
 const SECRET_PATH_MARKERS: &[&str] = &[
-    "/.ssh/",
-    "/.gnupg/",
-    "/.aws/credentials",
-    "/.config/gcloud/",
-    "/.kube/config",
-    "/.docker/config.json",
-    "/.netrc",
-    "/.npmrc",
-    "/.pypirc",
-    "/.git-credentials",
-    "/etc/shadow",
-    "/etc/gshadow",
-    "/etc/sudoers",
-    "/.password-store/",
-    "/keychains/",
-    "/cookies.sqlite",
-    "/login data",
+    "/.ssh/", "/.gnupg/", "/.aws/credentials", "/.config/gcloud/", "/.kube/config", "/.docker/config.json", "/.netrc",
+    "/.npmrc", "/.pypirc", "/.git-credentials", "/etc/shadow", "/etc/gshadow", "/etc/sudoers", "/.password-store/",
+    "/keychains/", "/cookies.sqlite", "/login data",
 ];
 /// File names that are private keys by convention.
 const SECRET_SUFFIXES: &[&str] = &[".pem", ".key", ".p12", ".pfx", "id_rsa", "id_ed25519"];
@@ -428,8 +240,7 @@ pub fn read_path_verdict(path: &Path) -> Verdict {
     }
     // Ordinary system and library locations are reference material, and an
     // agent reading them is the normal case rather than the suspicious one.
-    const OBVIOUSLY_PUBLIC: &[&str] =
-        &["/usr/", "/lib/", "/opt/", "/etc/os-release", "/proc/cpuinfo", "/proc/meminfo"];
+    const OBVIOUSLY_PUBLIC: &[&str] = &["/usr/", "/lib/", "/opt/", "/etc/os-release", "/proc/cpuinfo", "/proc/meminfo"];
     if OBVIOUSLY_PUBLIC.iter().any(|prefix| text.starts_with(prefix)) {
         return Verdict::Allow;
     }
@@ -438,11 +249,10 @@ pub fn read_path_verdict(path: &Path) -> Verdict {
     // a model call for each of those would rebuild, for paths, exactly the tax
     // that made the shell side unusable.
     const SOURCE_SUFFIXES: &[&str] = &[
-        ".rs", ".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".java", ".kt", ".rb", ".php", ".c",
-        ".h", ".cc", ".cpp", ".hpp", ".cs", ".swift", ".scala", ".clj", ".ex", ".exs", ".erl",
-        ".hs", ".ml", ".lua", ".sh", ".bash", ".zsh", ".fish", ".sql", ".proto", ".md", ".rst",
-        ".txt", ".adoc", ".toml", ".lock", ".cfg", ".ini", ".gradle", ".cmake", ".mk", ".css",
-        ".scss", ".html", ".vue", ".svelte",
+        ".rs", ".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".java", ".kt", ".rb", ".php", ".c", ".h", ".cc", ".cpp",
+        ".hpp", ".cs", ".swift", ".scala", ".clj", ".ex", ".exs", ".erl", ".hs", ".ml", ".lua", ".sh", ".bash", ".zsh",
+        ".fish", ".sql", ".proto", ".md", ".rst", ".txt", ".adoc", ".toml", ".lock", ".cfg", ".ini", ".gradle",
+        ".cmake", ".mk", ".css", ".scss", ".html", ".vue", ".svelte",
     ];
     if SOURCE_SUFFIXES.iter().any(|suffix| text.ends_with(suffix)) {
         return Verdict::Allow;
@@ -491,12 +301,7 @@ pub fn read_paths(name: &str, arguments: &str) -> Vec<String> {
         return Vec::new();
     };
     let one = |key: &str| {
-        args[key]
-            .as_str()
-            .map(str::to_owned)
-            .filter(|value| !value.trim().is_empty())
-            .into_iter()
-            .collect::<Vec<_>>()
+        args[key].as_str().map(str::to_owned).filter(|value| !value.trim().is_empty()).into_iter().collect::<Vec<_>>()
     };
     match name {
         "read_file" => one("path"),
@@ -564,15 +369,13 @@ pub async fn command_is_safe(provider: &Provider, cache: &SafetyCache, command: 
 /// Ask the model whether an environment file is safe to read.
 pub async fn env_file_is_readable(provider: &Provider, cache: &SafetyCache, path: &Path) -> bool {
     let (path, prompt) = (path.display(), ENV_PROMPT);
-    judged(provider, cache, format!("env:{path}"), (prompt, &format!("Path:\n{path}"), "READ"))
-        .await
+    judged(provider, cache, format!("env:{path}"), (prompt, &format!("Path:\n{path}"), "READ")).await
 }
 
 /// Ask the model whether a path outside the workspace is safe to read.
 pub async fn path_is_readable(provider: &Provider, cache: &SafetyCache, path: &Path) -> bool {
     let (path, prompt) = (path.display(), PATH_PROMPT);
-    judged(provider, cache, format!("path:{path}"), (prompt, &format!("Path:\n{path}"), "READ"))
-        .await
+    judged(provider, cache, format!("path:{path}"), (prompt, &format!("Path:\n{path}"), "READ")).await
 }
 
 /// One question to the classifier, remembered under `key`. Fails closed on any
@@ -587,10 +390,7 @@ async fn judged(
     if let Some(known) = cache.get(&key) {
         return known;
     }
-    let messages = vec![
-        json!({"role": "system", "content": prompt}),
-        json!({"role": "user", "content": data}),
-    ];
+    let messages = vec![json!({"role": "system", "content": prompt}), json!({"role": "user", "content": data})];
     let answer = provider.answer(&messages, &[], &AtomicBool::new(false)).await;
     let allowed = answer.is_some_and(|answer| answer.eq_ignore_ascii_case(yes));
     cache.put(key, allowed);
@@ -625,40 +425,21 @@ mod tests {
             "cargo check 2>/dev/null",
             "ls missing 2>&1",
         ] {
-            assert_eq!(
-                command_verdict(command),
-                Verdict::Allow,
-                "should run without a model call: {command}"
-            );
+            assert_eq!(command_verdict(command), Verdict::Allow, "should run without a model call: {command}");
         }
     }
 
     #[test]
     fn destruction_is_refused_without_asking_anyone() {
         for command in [
-            "rm -rf build",
-            "mv src/main.rs src/old.rs",
-            "cp secrets .",
-            "chmod 777 /etc/passwd",
-            "sudo systemctl restart nginx",
-            "git push origin main",
-            "git reset --hard HEAD~3",
-            "git commit -m 'wip'",
-            "pip install requests",
-            "cargo install ripgrep",
-            "npm install",
-            "sed -i 's/a/b/' src/main.rs",
-            "find . -name '*.tmp' -delete",
-            "find . -exec rm {} ;",
+            "rm -rf build", "mv src/main.rs src/old.rs", "cp secrets .", "chmod 777 /etc/passwd",
+            "sudo systemctl restart nginx", "git push origin main", "git reset --hard HEAD~3", "git commit -m 'wip'",
+            "pip install requests", "cargo install ripgrep", "npm install", "sed -i 's/a/b/' src/main.rs",
+            "find . -name '*.tmp' -delete", "find . -exec rm {} ;",
             // A redirect writes, whatever the verb.
-            "echo hi > file.txt",
-            "cargo check 2> errors.log",
+            "echo hi > file.txt", "cargo check 2> errors.log",
         ] {
-            assert_eq!(
-                command_verdict(command),
-                Verdict::Deny,
-                "must be blocked outright: {command}"
-            );
+            assert_eq!(command_verdict(command), Verdict::Deny, "must be blocked outright: {command}");
         }
     }
 
@@ -676,11 +457,7 @@ mod tests {
             "docker ps",
             "echo $(whoami)",
         ] {
-            assert_eq!(
-                command_verdict(command),
-                Verdict::Unclear,
-                "should be judged on its merits: {command}"
-            );
+            assert_eq!(command_verdict(command), Verdict::Unclear, "should be judged on its merits: {command}");
         }
     }
 
@@ -699,20 +476,10 @@ mod tests {
     #[test]
     fn credentials_are_never_readable_whatever_a_classifier_says() {
         for path in [
-            "/home/op/.ssh/id_ed25519",
-            "/home/op/.ssh/config",
-            "/home/op/.aws/credentials",
-            "/home/op/.netrc",
-            "/etc/shadow",
-            "/home/op/certs/server.pem",
-            "/home/op/.gnupg/secring.gpg",
-            "/home/op/.git-credentials",
+            "/home/op/.ssh/id_ed25519", "/home/op/.ssh/config", "/home/op/.aws/credentials", "/home/op/.netrc",
+            "/etc/shadow", "/home/op/certs/server.pem", "/home/op/.gnupg/secring.gpg", "/home/op/.git-credentials",
         ] {
-            assert_eq!(
-                read_path_verdict(Path::new(path)),
-                Verdict::Deny,
-                "must never be read: {path}"
-            );
+            assert_eq!(read_path_verdict(Path::new(path)), Verdict::Deny, "must never be read: {path}");
         }
     }
 
@@ -722,16 +489,11 @@ mod tests {
             assert_eq!(read_path_verdict(Path::new(path)), Verdict::Allow, "{path}");
         }
         // A sibling checkout reads as project material, with no model call.
-        assert_eq!(
-            read_path_verdict(Path::new("/home/op/other-project/src/main.rs")),
-            Verdict::Allow
-        );
+        assert_eq!(read_path_verdict(Path::new("/home/op/other-project/src/main.rs")), Verdict::Allow);
         // Formats that routinely hold tokens are judged, not presumed.
-        for judged in [
-            "/home/op/other/credentials.json",
-            "/home/op/other/service-account.yaml",
-            "/home/op/.config/app/state",
-        ] {
+        for judged in
+            ["/home/op/other/credentials.json", "/home/op/other/service-account.yaml", "/home/op/.config/app/state"]
+        {
             assert_eq!(read_path_verdict(Path::new(judged)), Verdict::Unclear, "{judged}");
         }
     }
@@ -740,14 +502,9 @@ mod tests {
     /// `.env*`, including the templates projects commit on purpose.
     #[test]
     fn env_templates_pass_and_production_never_does() {
-        for template in [
-            ".env.example",
-            ".env.sample",
-            ".env.template",
-            ".env.dist",
-            ".env.defaults",
-            "config/.env.tpl",
-        ] {
+        for template in
+            [".env.example", ".env.sample", ".env.template", ".env.dist", ".env.defaults", "config/.env.tpl"]
+        {
             assert_eq!(env_file_verdict(Path::new(template)), Verdict::Allow, "{template}");
         }
         for live in [".env.production", ".env.prod.local", "deploy/.env.production"] {

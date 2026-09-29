@@ -102,17 +102,13 @@ impl ScriptedEndpoint {
     /// name maps to `<endpoints_dir>/<name>.yaml`; a value containing a path
     /// separator or ending in `.yaml`/`.yml` is treated as an explicit path.
     pub fn resolve(reference: &str, endpoints_dir: &Path) -> Result<Self> {
-        let candidate = if reference.contains('/')
-            || reference.ends_with(".yaml")
-            || reference.ends_with(".yml")
-        {
+        let candidate = if reference.contains('/') || reference.ends_with(".yaml") || reference.ends_with(".yml") {
             expand_home(reference)
         } else {
             endpoints_dir.join(format!("{reference}.yaml"))
         };
-        let content = std::fs::read_to_string(&candidate).with_context(|| {
-            format!("could not read scripted endpoint `{reference}` at {}", candidate.display())
-        })?;
+        let content = std::fs::read_to_string(&candidate)
+            .with_context(|| format!("could not read scripted endpoint `{reference}` at {}", candidate.display()))?;
         let mut endpoint: ScriptedEndpoint = serde_yaml::from_str(&content)
             .with_context(|| format!("invalid scripted endpoint {}", candidate.display()))?;
         if endpoint.url.trim().is_empty() {
@@ -132,9 +128,7 @@ impl ScriptedEndpoint {
     pub fn resolved_headers(&self, session: &str) -> Vec<(String, String)> {
         self.headers
             .iter()
-            .map(|(name, value)| {
-                (name.clone(), value.replace("{uuid}", session).replace("{session}", session))
-            })
+            .map(|(name, value)| (name.clone(), value.replace("{uuid}", session).replace("{session}", session)))
             .collect()
     }
 
@@ -161,18 +155,13 @@ impl ScriptedEndpoint {
         let token = if let Some(literal) = &auth.token {
             literal.clone()
         } else if let Some(name) = &auth.env {
-            std::env::var(name).with_context(|| {
-                format!("auth env `{name}` is not set for {}", self.display_name())
-            })?
+            std::env::var(name).with_context(|| format!("auth env `{name}` is not set for {}", self.display_name()))?
         } else if let Some(file) = &auth.file {
             token_from_file(&expand_home(&file.to_string_lossy()), auth.file_field.as_deref())?
         } else if let Some(command) = &auth.command {
             token_from_command(command)?
         } else {
-            bail!(
-                "scripted endpoint {} has `auth` but no token source (token/env/file/command)",
-                self.display_name()
-            )
+            bail!("scripted endpoint {} has `auth` but no token source (token/env/file/command)", self.display_name())
         };
         let token = token.trim();
         if token.is_empty() {
@@ -185,10 +174,7 @@ impl ScriptedEndpoint {
     pub fn auth_header(&self) -> Result<Option<(String, String)>> {
         match self.resolve_token()? {
             Some(value) => Ok(Some((
-                self.auth
-                    .as_ref()
-                    .map(|auth| auth.header.clone())
-                    .unwrap_or_else(default_auth_header),
+                self.auth.as_ref().map(|auth| auth.header.clone()).unwrap_or_else(default_auth_header),
                 value,
             ))),
             None => Ok(None),
@@ -223,13 +209,13 @@ fn merge_value(base: &mut Value, overlay: &Value) {
 }
 
 fn token_from_file(path: &Path, field: Option<&str>) -> Result<String> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("could not read auth file {}", path.display()))?;
+    let content =
+        std::fs::read_to_string(path).with_context(|| format!("could not read auth file {}", path.display()))?;
     let Some(field) = field else {
         return Ok(content.trim().to_owned());
     };
-    let value: Value = serde_json::from_str(&content)
-        .with_context(|| format!("auth file {} is not JSON", path.display()))?;
+    let value: Value =
+        serde_json::from_str(&content).with_context(|| format!("auth file {} is not JSON", path.display()))?;
     let found = if let Some(pointer) = field.strip_prefix('/') {
         value.pointer(&format!("/{pointer}"))
     } else {
@@ -253,10 +239,7 @@ fn token_from_command(command: &[String]) -> Result<String> {
         .output()
         .with_context(|| format!("could not run auth command `{program}`"))?;
     if !output.status.success() {
-        bail!(
-            "auth command `{program}` failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        bail!("auth command `{program}` failed: {}", String::from_utf8_lossy(&output.stderr).trim());
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
@@ -293,11 +276,7 @@ mod tests {
             }
             let endpoint = ScriptedEndpoint::resolve(path.to_str().unwrap(), &examples)
                 .unwrap_or_else(|error| panic!("{} does not parse: {error:#}", path.display()));
-            assert!(
-                endpoint.url.starts_with("https://"),
-                "{} must call a https url",
-                path.display()
-            );
+            assert!(endpoint.url.starts_with("https://"), "{} must call a https url", path.display());
             seen += 1;
         }
         assert!(seen >= 4, "expected the shipped examples, found {seen}");
@@ -308,8 +287,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // A JSON token file in the OAuth shape from the reference doc.
         let auth_file = dir.path().join("auth.json");
-        std::fs::write(&auth_file, json!({"tokens": {"access_token": "sk-oauth-123"}}).to_string())
-            .unwrap();
+        std::fs::write(&auth_file, json!({"tokens": {"access_token": "sk-oauth-123"}}).to_string()).unwrap();
         write(
             dir.path(),
             "codex",
@@ -406,13 +384,7 @@ mod tests {
         assert!(auth.token.is_none(), "no inline token in the shipped file");
         assert_eq!(auth.header, "Authorization");
         assert_eq!(auth.format, "Bearer {token}");
-        let version = endpoint
-            .headers
-            .get("X-Grok-Client-Version")
-            .expect("proxy requires the client-version header");
-        assert!(
-            !version.is_empty() && !version.contains("{token}"),
-            "version header is static: {version}"
-        );
+        let version = endpoint.headers.get("X-Grok-Client-Version").expect("proxy requires the client-version header");
+        assert!(!version.is_empty() && !version.contains("{token}"), "version header is static: {version}");
     }
 }

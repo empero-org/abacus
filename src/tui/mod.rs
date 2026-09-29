@@ -1,8 +1,8 @@
 use crate::{
     activity::ActivityReporter,
     agent::{
-        AgentEvent, AgentMode, ApprovalDecision, ApprovalRequest, DoneReason, TurnOptions,
-        UserQuestionRequest, compact_messages, initial_messages, message_chars, run_turn,
+        AgentEvent, AgentMode, ApprovalDecision, ApprovalRequest, DoneReason, TurnOptions, UserQuestionRequest,
+        compact_messages, initial_messages, message_chars, run_turn,
     },
     config::{Config, Credentials, PermissionMode, ProviderProtocol, SETTINGS_VERSION, Settings},
     context::expand_file_references,
@@ -12,10 +12,7 @@ use crate::{
     ralph::{RalphLoop, RalphStatus},
     services::AgentServices,
     session::{Session, SessionState, SessionStore, SessionUsage},
-    theme::{
-        ThemeMode, border, danger, inverse, muted, primary, rail, secondary, success, surface,
-        text, warning,
-    },
+    theme::{ThemeMode, border, danger, inverse, muted, primary, rail, secondary, success, surface, text, warning},
     ui::{self, Entry, EntryKind, ToolCall, ToolStatus, bold, emphasis, fg},
 };
 use anyhow::{Context, Result, bail};
@@ -23,14 +20,12 @@ use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveDate, Utc};
 use crossterm::{
     cursor::Show,
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-        MouseButton, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, KeyCode,
+        KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEventKind,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{
-        EnterAlternateScreen, LeaveAlternateScreen, SetTitle, disable_raw_mode, enable_raw_mode,
-    },
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, SetTitle, disable_raw_mode, enable_raw_mode},
 };
 use futures_util::{SinkExt, StreamExt};
 use ratatui::{
@@ -598,18 +593,10 @@ pub async fn run(
     }
     let session_id = session.as_ref().map(|session| session.id.to_string());
     services
-        .run_hooks(
-            "session_start",
-            session_id.as_deref(),
-            &json!({"workspace":config.workspace,"mode":"tui"}),
-        )
+        .run_hooks("session_start", session_id.as_deref(), &json!({"workspace":config.workspace,"mode":"tui"}))
         .await?;
     // Anonymous activity ping for the Empero dashboard (best-effort, opt-out).
-    let reporter = ActivityReporter::new(
-        settings.activity.enabled,
-        &settings.activity.endpoint,
-        &config.paths,
-    );
+    let reporter = ActivityReporter::new(settings.activity.enabled, &settings.activity.endpoint, &config.paths);
     let activity_session = session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let activity_model = config.model.clone();
     if let Some(reporter) = &reporter {
@@ -639,8 +626,7 @@ pub async fn run(
     let _ = execute!(
         stdout,
         PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
         )
     );
     KEYBOARD_ENHANCED.store(true, Ordering::SeqCst);
@@ -650,8 +636,7 @@ pub async fn run(
     let mut terminal = Terminal::new(backend)?;
 
     let workspace = config.workspace.clone();
-    let mut app =
-        App::new(config, settings, credentials, session, session_store, services.clone())?;
+    let mut app = App::new(config, settings, credentials, session, session_store, services.clone())?;
     if let Some(error) = theme_error {
         app.fail(format!("{error}\nFalling back to the built-in theme."));
     }
@@ -665,9 +650,7 @@ pub async fn run(
     // Heartbeat the open session so the dashboard shows live tokens and so a
     // session that is killed (terminal closed) drops off "active" instead of
     // lingering. The shared token counter survives model switches.
-    let heartbeat = reporter
-        .as_ref()
-        .map(|reporter| reporter.heartbeat(activity_session.clone(), app.tokens.clone()));
+    let heartbeat = reporter.as_ref().map(|reporter| reporter.heartbeat(activity_session.clone(), app.tokens.clone()));
     // Before the first frame: a reply an earlier run died in the middle of is
     // handed back at the top of the transcript.
     app.surface_recovered_reply();
@@ -694,12 +677,9 @@ pub async fn run(
         );
     }
     if crate::sync::is_configured(&app.credentials)
-        && tokio::time::timeout(
-            Duration::from_secs(3),
-            crate::sync::push_all_updated_local(&app.config.paths),
-        )
-        .await
-        .is_err()
+        && tokio::time::timeout(Duration::from_secs(3), crate::sync::push_all_updated_local(&app.config.paths))
+            .await
+            .is_err()
     {
         eprintln!("Session sync is still pending; it will retry next time Abacus opens.");
     }
@@ -767,13 +747,7 @@ fn restore_terminal() {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     }
     let _ = disable_raw_mode();
-    let _ = execute!(
-        io::stdout(),
-        DisableMouseCapture,
-        DisableBracketedPaste,
-        LeaveAlternateScreen,
-        Show
-    );
+    let _ = execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste, LeaveAlternateScreen, Show);
 }
 
 /// Cover the two exits `Drop` cannot see: a panic, whose message would
@@ -813,10 +787,7 @@ fn install_terminal_guards() {
                 if !GRACEFUL_EXIT.load(Ordering::SeqCst) {
                     restore_terminal();
                     if let Some(path) = crate::recovery::flush() {
-                        eprintln!(
-                            "Interrupted mid-reply; the partial text is in {}",
-                            path.display()
-                        );
+                        eprintln!("Interrupted mid-reply; the partial text is in {}", path.display());
                     }
                     std::process::exit(code);
                 }
@@ -833,10 +804,7 @@ impl Drop for TerminalRestore {
     }
 }
 
-async fn event_loop(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    app: &mut App,
-) -> Result<()> {
+async fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
     let mut dirty = true;
     while !app.quit {
         dirty |= app.drain_agent_events();
@@ -897,15 +865,12 @@ async fn event_loop(
                         if !form.sending {
                             form.input.insert_str(&text);
                         }
-                    } else if let Some(input) =
-                        app.picker.as_mut().and_then(|picker| match picker.prompt.as_mut() {
-                            Some(PickerPrompt::Rename { input, .. }) => Some(input),
-                            _ => None,
-                        })
-                    {
+                    } else if let Some(input) = app.picker.as_mut().and_then(|picker| match picker.prompt.as_mut() {
+                        Some(PickerPrompt::Rename { input, .. }) => Some(input),
+                        _ => None,
+                    }) {
                         input.insert_str(&text);
-                    } else if let Some((_, input)) =
-                        app.config_panel.as_mut().and_then(|panel| panel.editing.as_mut())
+                    } else if let Some((_, input)) = app.config_panel.as_mut().and_then(|panel| panel.editing.as_mut())
                     {
                         input.insert_str(&text);
                     } else if app.usage_panel.is_none() && app.mode == InputMode::Insert {
@@ -1161,18 +1126,15 @@ impl App {
             settings.ui.permission_mode = PermissionMode::AlwaysApprove;
         }
         let initial_tokens = session.as_ref().map(|session| session.tokens_used).unwrap_or(0);
-        let session_initial_active_secs =
-            session.as_ref().map(|session| session.active_secs).unwrap_or(0);
+        let session_initial_active_secs = session.as_ref().map(|session| session.active_secs).unwrap_or(0);
         let tokens = Arc::new(crate::provider::TokenLedger::new(initial_tokens));
         let provider = Provider::with_tokens(&config, tokens.clone())?;
         let aux_provider = provider.for_role(config.aux_model.as_deref());
         let hive = crate::hive::HiveHandle::load(config.paths.hive_file.clone());
         let modes = crate::modes::ModeCoach::load(config.paths.modes_file.clone());
         let ralph_loop = session.as_ref().and_then(|session| session.ralph_loop.clone());
-        let messages = session
-            .as_ref()
-            .map(|value| value.messages.clone())
-            .unwrap_or_else(|| initial_messages(&config.workspace));
+        let messages =
+            session.as_ref().map(|value| value.messages.clone()).unwrap_or_else(|| initial_messages(&config.workspace));
         let ctx_chars = message_chars(&messages);
         let mut entries = entries_from_messages(&messages);
         if !entries.is_empty() {
@@ -1194,19 +1156,14 @@ impl App {
             let cache = config.paths.update_file.clone();
             let updates = background_tx.clone();
             runtime.spawn(async move {
-                if let Ok(Some(available)) =
-                    crate::update::check(&cache, env!("CARGO_PKG_VERSION")).await
-                {
+                if let Ok(Some(available)) = crate::update::check(&cache, env!("CARGO_PKG_VERSION")).await {
                     let _ = updates.send(Background::Update(available));
                 }
             });
         }
         let yes = config.yes;
         let branch = git_branch(&config.workspace);
-        let papercuts = crate::papercuts::PapercutStore::load(
-            config.paths.papercuts_file.clone(),
-            &config.workspace,
-        );
+        let papercuts = crate::papercuts::PapercutStore::load(config.paths.papercuts_file.clone(), &config.workspace);
         let state = SessionState::open(&config, session.as_ref(), session_key(session.as_ref()));
         if let Some(store) = &session_store
             && let Ok(summaries) = store.list()
@@ -1220,9 +1177,7 @@ impl App {
                     && crate::sync::is_placeholder(&session)
                 {
                     let _ = std::fs::remove_file(store.path(summary.id));
-                    let _ = std::fs::remove_file(
-                        config.paths.traces_dir.join(format!("{}.jsonl", summary.id)),
-                    );
+                    let _ = std::fs::remove_file(config.paths.traces_dir.join(format!("{}.jsonl", summary.id)));
                 }
             }
         }
@@ -1230,9 +1185,7 @@ impl App {
             None
         } else if let Some(store) = &session_store
             && let Ok(summaries) = store.list()
-            && summaries
-                .iter()
-                .any(|summary| summary.message_count > 1 || summary.title != "New session")
+            && summaries.iter().any(|summary| summary.message_count > 1 || summary.title != "New session")
         {
             store.latest().ok().map(|session| session.id.to_string())
         } else {
@@ -1373,10 +1326,7 @@ impl App {
     /// because the caller is about to mutate what it hands back.
     fn open_tool(&mut self) -> Option<&mut ToolCall> {
         self.entries_rev = self.entries_rev.wrapping_add(1);
-        self.entries
-            .last_mut()
-            .filter(|entry| entry.kind == EntryKind::Tool)
-            .and_then(|entry| entry.tool.as_mut())
+        self.entries.last_mut().filter(|entry| entry.kind == EntryKind::Tool).and_then(|entry| entry.tool.as_mut())
     }
 
     /// Collapse a run of successful read-only tool rows into one "explored"
@@ -1391,14 +1341,11 @@ impl App {
             return;
         }
         let explorable = |call: &ToolCall| {
-            call.status == ToolStatus::Ok
-                && !call.expanded
-                && crate::agent::tool_reads_only(&call.name)
+            call.status == ToolStatus::Ok && !call.expanded && crate::agent::tool_reads_only(&call.name)
         };
         let current_fits = self.entries[count - 1].tool.as_ref().is_some_and(explorable);
         let previous = self.entries[count - 2].tool.as_ref();
-        let previous_is_group =
-            previous.is_some_and(|call| call.name == "explored" && call.status == ToolStatus::Ok);
+        let previous_is_group = previous.is_some_and(|call| call.name == "explored" && call.status == ToolStatus::Ok);
         let previous_fits = previous.is_some_and(explorable);
         if !current_fits || (!previous_is_group && !previous_fits) {
             return;
@@ -1422,10 +1369,8 @@ impl App {
             // the fold.
             target.output = String::new();
         }
-        target.summary = ui::truncate(
-            &format!("{} · {} {}", target.summary, explore_verb(&current.name), current.summary),
-            200,
-        );
+        target.summary =
+            ui::truncate(&format!("{} · {} {}", target.summary, explore_verb(&current.name), current.summary), 200);
         target.full.push_str(&format!(
             "\n\n── {} {} ──\n{}",
             current.name,
@@ -1540,8 +1485,7 @@ impl App {
                     // say what the model is doing either way.
                     self.turn_reasoning.push_str(&piece);
                     crate::recovery::record_thinking(&piece);
-                    self.status = reasoning_header(&self.turn_reasoning)
-                        .unwrap_or_else(|| "thinking".to_owned());
+                    self.status = reasoning_header(&self.turn_reasoning).unwrap_or_else(|| "thinking".to_owned());
                     if !self.settings.ui.show_thinking {
                         continue;
                     }
@@ -1572,10 +1516,7 @@ impl App {
                     // The full tool result (not the preview) lands in the
                     // messages array; estimate its JSON size for the live ctx %.
                     self.ctx_chars = self.ctx_chars.saturating_add(output.len() + name.len() + 80);
-                    let duration_ms = self
-                        .tool_started
-                        .take()
-                        .map(|started| started.elapsed().as_millis() as u64);
+                    let duration_ms = self.tool_started.take().map(|started| started.elapsed().as_millis() as u64);
                     // Settle the row the matching `ToolStarted` opened, keeping
                     // the argument summary it already shows rather than
                     // replacing the row wholesale.
@@ -1635,10 +1576,7 @@ impl App {
                     {
                         self.push_entry(Entry::new(
                             EntryKind::Rule,
-                            format!(
-                                "Worked for {}",
-                                ui::format_elapsed(started.elapsed().as_millis() as u64)
-                            ),
+                            format!("Worked for {}", ui::format_elapsed(started.elapsed().as_millis() as u64)),
                         ));
                     }
                     // A turn cut short used to look exactly like a finished one.
@@ -1666,11 +1604,7 @@ impl App {
                         self.continue_ralph_loop();
                     } else if !matches!(
                         self.ralph_loop.as_ref().map(|state| state.status),
-                        Some(
-                            RalphStatus::Completed
-                                | RalphStatus::MaxIterations
-                                | RalphStatus::Paused
-                        )
+                        Some(RalphStatus::Completed | RalphStatus::MaxIterations | RalphStatus::Paused)
                     ) {
                         self.status = "ready".to_owned();
                     }
@@ -1684,8 +1618,8 @@ impl App {
                     // Provider rejections are very often not transient: an
                     // interrupted turn leaves history that strict providers
                     // refuse on every retry. Point at the way out.
-                    let provider_rejection = error.contains("provider stream error")
-                        || error.contains("provider returned");
+                    let provider_rejection =
+                        error.contains("provider stream error") || error.contains("provider returned");
                     if let Some(remote) = &self.remote_outbound {
                         let _ = remote.send(format!("Error: {error}"));
                     }
@@ -1773,11 +1707,7 @@ impl App {
         self.overlay_hidden = false;
         self.status = format!("waiting for answer: {}", request.header);
         self.question = Some(PendingUserQuestion::new(
-            request.header,
-            request.question,
-            request.options,
-            request.multi_select,
-            request.respond,
+            request.header, request.question, request.options, request.multi_select, request.respond,
         ));
     }
 
@@ -1868,16 +1798,12 @@ impl App {
     /// is discarded from history (and from the saved session — this is a
     /// fork, not an undo stack). Repeating steps back one prompt at a time.
     fn rewind_to_previous_prompt(&mut self) {
-        let Some(entry_index) =
-            self.entries.iter().rposition(|entry| entry.kind == EntryKind::User)
-        else {
+        let Some(entry_index) = self.entries.iter().rposition(|entry| entry.kind == EntryKind::User) else {
             self.status = "nothing to rewind".to_owned();
             return;
         };
-        let Some(message_index) = self
-            .messages
-            .iter()
-            .rposition(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        let Some(message_index) =
+            self.messages.iter().rposition(|message| message.get("role").and_then(Value::as_str) == Some("user"))
         else {
             self.status = "nothing to rewind".to_owned();
             return;
@@ -1913,23 +1839,18 @@ impl App {
             self.push_entry(Entry::new(EntryKind::User, display_prompt.clone()));
         }
         let model_prompt = if display {
-            expand_file_references(&self.config.workspace, &effective_prompt).unwrap_or_else(
-                |error| {
-                    self.status = format!("file reference warning: {error}");
-                    effective_prompt
-                },
-            )
+            expand_file_references(&self.config.workspace, &effective_prompt).unwrap_or_else(|error| {
+                self.status = format!("file reference warning: {error}");
+                effective_prompt
+            })
         } else {
             // Ralph iterations must receive the exact same prompt bytes every time.
             effective_prompt
         };
         // Resolve `[image:…]` paste tokens and `@file.png` references into
         // vision content parts; a text-only prompt stays a plain string.
-        let content = crate::context::user_content(
-            &self.config.workspace,
-            &self.config.paths.attachments_dir,
-            &model_prompt,
-        );
+        let content =
+            crate::context::user_content(&self.config.workspace, &self.config.paths.attachments_dir, &model_prompt);
         let message = json!({"role": "user", "content": content});
         self.ctx_chars = self.ctx_chars.saturating_add(crate::agent::message_chars_one(&message));
         self.messages.push(message);
@@ -1981,11 +1902,7 @@ impl App {
         // sending anything doesn't leave an empty session behind.
         if self.session.is_none() {
             self.session = store
-                .create(
-                    self.config.profile.clone(),
-                    self.config.model.clone(),
-                    self.messages.clone(),
-                )
+                .create(self.config.profile.clone(), self.config.model.clone(), self.messages.clone())
                 .map_err(|error| self.status = format!("session create failed: {error}"))
                 .ok();
         }
@@ -1996,8 +1913,7 @@ impl App {
         self.state.save(session);
         session.ralph_loop = self.ralph_loop.clone();
         session.tokens_used = self.provider.tokens_used();
-        session.active_secs =
-            self.session_initial_active_secs.saturating_add(self.started.elapsed().as_secs());
+        session.active_secs = self.session_initial_active_secs.saturating_add(self.started.elapsed().as_secs());
         // A fresh screen that has never received a prompt is not a real session
         // yet — keep it out of storage and out of the trace set. The first
         // `start_turn` persists immediately, before calling the model.
@@ -2007,10 +1923,7 @@ impl App {
         // The trace is keyed by session id, so it can only be opened once the
         // session exists — which is here, on the first real persist.
         if self.trace.is_none() && (self.config.trace_enabled || self.credentials.sync.is_some()) {
-            match crate::sft::TraceWriter::open(
-                &self.config.paths.traces_dir,
-                &session.id.to_string(),
-            ) {
+            match crate::sft::TraceWriter::open(&self.config.paths.traces_dir, &session.id.to_string()) {
                 Ok(writer) => self.trace = Some(writer),
                 Err(error) => self.status = format!("training trace disabled: {error:#}"),
             }
@@ -2030,8 +1943,7 @@ impl App {
         if idle_since.elapsed() < crate::sync::AUTO_PUSH_IDLE {
             return;
         }
-        if self.last_auto_push.is_some_and(|pushed| pushed.elapsed() < crate::sync::AUTO_PUSH_IDLE)
-        {
+        if self.last_auto_push.is_some_and(|pushed| pushed.elapsed() < crate::sync::AUTO_PUSH_IDLE) {
             return;
         }
         self.last_auto_push = Some(Instant::now());
@@ -2046,12 +1958,10 @@ impl App {
     /// stay queued: they belong to the process, not to a session.
     fn adopt(&mut self, session: Option<Session>) {
         let injections = self.state.injections.clone();
-        let state =
-            SessionState::open(&self.config, session.as_ref(), session_key(session.as_ref()));
+        let state = SessionState::open(&self.config, session.as_ref(), session_key(session.as_ref()));
         self.state = SessionState { injections, ..state };
-        self.messages = session
-            .as_ref()
-            .map_or_else(|| initial_messages(&self.config.workspace), |s| s.messages.clone());
+        self.messages =
+            session.as_ref().map_or_else(|| initial_messages(&self.config.workspace), |s| s.messages.clone());
         self.ctx_chars = message_chars(&self.messages);
         self.set_entries(entries_from_messages(&self.messages));
         self.ralph_loop = session.as_ref().and_then(|session| session.ralph_loop.clone());
@@ -2092,17 +2002,14 @@ impl App {
                 self.status = "nothing to fork yet — send a message first".to_owned();
                 return;
             };
-            let mut fork = match store.create(
-                self.config.profile.clone(),
-                self.config.model.clone(),
-                self.messages.clone(),
-            ) {
-                Ok(fork) => fork,
-                Err(error) => {
-                    self.status = format!("fork failed: {error}");
-                    return;
-                }
-            };
+            let mut fork =
+                match store.create(self.config.profile.clone(), self.config.model.clone(), self.messages.clone()) {
+                    Ok(fork) => fork,
+                    Err(error) => {
+                        self.status = format!("fork failed: {error}");
+                        return;
+                    }
+                };
             fork.title = format!("(fork) {}", current.title).chars().take(100).collect();
             // A fork is a branch of the work, so the session state that shapes
             // it carries over; time and token accounting start fresh.
@@ -2138,9 +2045,7 @@ impl App {
             return;
         };
         match store.list() {
-            Ok(sessions) if sessions.is_empty() => {
-                self.say("No saved sessions for this workspace.")
-            }
+            Ok(sessions) if sessions.is_empty() => self.say("No saved sessions for this workspace."),
             Ok(sessions) => {
                 self.picker = Some(Picker {
                     title: "sessions".to_owned(),
@@ -2181,8 +2086,7 @@ impl App {
         };
         match store.load(id.trim()) {
             Ok(session) => {
-                let resumed =
-                    format!("Resumed {} ({})", session.title, &session.id.to_string()[..8]);
+                let resumed = format!("Resumed {} ({})", session.title, &session.id.to_string()[..8]);
                 self.adopt(Some(session));
                 self.say(resumed);
                 self.status = "ready".to_owned();
@@ -2361,8 +2265,7 @@ impl App {
                 }
                 Background::Feedback(Ok(receipt)) => {
                     self.feedback_form = None;
-                    let reference =
-                        receipt.id.map(|id| format!(" Reference: {id}.")).unwrap_or_default();
+                    let reference = receipt.id.map(|id| format!(" Reference: {id}.")).unwrap_or_default();
                     self.say(format!("Thank you — your feedback was sent.{reference}"));
                     self.status = "feedback sent".to_owned();
                 }
@@ -2382,9 +2285,7 @@ impl App {
                             self.status = "configuration active".to_owned();
                         }
                         Err(error) => {
-                            self.fail(format!(
-                                "Configuration saved, but extensions could not reload: {error}"
-                            ));
+                            self.fail(format!("Configuration saved, but extensions could not reload: {error}"));
                             self.status = "extension reload failed".to_owned();
                         }
                     }
@@ -2477,13 +2378,12 @@ impl App {
     /// F12: pick up the most recent session that was actually used, or offer
     /// the list when there is none.
     fn resume_latest(&mut self) {
-        let used =
-            self.session_store.as_ref().and_then(|store| store.list().ok()).and_then(|sessions| {
-                sessions
-                    .into_iter()
-                    .filter(|session| session.message_count > 1 || session.title != "New session")
-                    .max_by_key(|session| session.updated_at)
-            });
+        let used = self.session_store.as_ref().and_then(|store| store.list().ok()).and_then(|sessions| {
+            sessions
+                .into_iter()
+                .filter(|session| session.message_count > 1 || session.title != "New session")
+                .max_by_key(|session| session.updated_at)
+        });
         match used {
             Some(session) => self.resume_session(&session.id.to_string()),
             None => self.list_sessions(),

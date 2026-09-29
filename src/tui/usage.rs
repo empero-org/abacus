@@ -9,20 +9,11 @@ pub(super) fn draw_usage(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let width = area.width.saturating_sub(4).clamp(24, 112);
     let height = area.height.saturating_sub(2).clamp(12, 29);
     let popup = ui::centered(width, height, area);
-    let inner = open_overlay(
-        frame,
-        popup,
-        "USAGE",
-        secondary(),
-        &[("tab", "view"), ("r", "dates"), ("esc", "close")],
-    );
+    let inner = open_overlay(frame, popup, "USAGE", secondary(), &[("tab", "view"), ("r", "dates"), ("esc", "close")]);
 
     let today = Local::now().date_naive();
-    let records = panel
-        .records
-        .iter()
-        .filter(|record| panel.range.includes(usage_date(record), today))
-        .collect::<Vec<_>>();
+    let records =
+        panel.records.iter().filter(|record| panel.range.includes(usage_date(record), today)).collect::<Vec<_>>();
     let inner_width = inner.width as usize;
     let mut lines = vec![usage_tabs(panel.tab), Line::from("")];
     match panel.tab {
@@ -180,23 +171,16 @@ pub(super) fn usage_stats(records: &[&SessionUsage], today: NaiveDate) -> UsageS
         stats.longest_session = stats.longest_session.max(record.active_secs);
     }
     stats.active_days = dates.len();
-    stats.favorite_model = models
-        .into_iter()
-        .max_by_key(|(_, (sessions, tokens))| (*tokens, *sessions))
-        .map(|(model, _)| model);
-    stats.most_active_day =
-        daily.into_iter().max_by_key(|(_, activity)| *activity).map(|(date, _)| date);
+    stats.favorite_model =
+        models.into_iter().max_by_key(|(_, (sessions, tokens))| (*tokens, *sessions)).map(|(model, _)| model);
+    stats.most_active_day = daily.into_iter().max_by_key(|(_, activity)| *activity).map(|(date, _)| date);
 
     let mut sorted_dates = dates.into_iter().collect::<Vec<_>>();
     sorted_dates.sort_unstable();
     let mut run = 0;
     let mut previous = None;
     for date in &sorted_dates {
-        run = if previous.is_some_and(|value| *date == value + ChronoDuration::days(1)) {
-            run + 1
-        } else {
-            1
-        };
+        run = if previous.is_some_and(|value| *date == value + ChronoDuration::days(1)) { run + 1 } else { 1 };
         stats.longest_streak = stats.longest_streak.max(run);
         previous = Some(*date);
     }
@@ -219,11 +203,7 @@ pub(super) fn usage_stats_wide(stats: &UsageStats, width: usize) -> Vec<Line<'st
             "Favorite model",
             stats.favorite_model.as_deref().unwrap_or("—"),
             "Total tokens",
-            &format!(
-                "{}{}",
-                if stats.tokens_estimated { "~" } else { "" },
-                ui::format_count(stats.total_tokens)
-            ),
+            &format!("{}{}", if stats.tokens_estimated { "~" } else { "" }, ui::format_count(stats.total_tokens)),
             left_width,
         ),
         usage_stat_pair(
@@ -242,10 +222,7 @@ pub(super) fn usage_stats_wide(stats: &UsageStats, width: usize) -> Vec<Line<'st
         ),
         usage_stat_pair(
             "Most active day",
-            &stats
-                .most_active_day
-                .map(|date| date.format("%b %-d").to_string())
-                .unwrap_or_else(|| "—".to_owned()),
+            &stats.most_active_day.map(|date| date.format("%b %-d").to_string()).unwrap_or_else(|| "—".to_owned()),
             "Current streak",
             &format!("{} days", stats.current_streak),
             left_width,
@@ -276,11 +253,7 @@ pub(super) fn usage_stats_compact(stats: &UsageStats) -> Vec<Line<'static>> {
         usage_stat_line("Sessions", &stats.sessions.to_string()),
         usage_stat_line(
             "Total tokens",
-            &format!(
-                "{}{}",
-                if stats.tokens_estimated { "~" } else { "" },
-                ui::format_count(stats.total_tokens)
-            ),
+            &format!("{}{}", if stats.tokens_estimated { "~" } else { "" }, ui::format_count(stats.total_tokens)),
         ),
         usage_stat_line("Favorite model", stats.favorite_model.as_deref().unwrap_or("—")),
         usage_stat_line("Active days", &stats.active_days.to_string()),
@@ -291,11 +264,7 @@ pub(super) fn usage_stat_line(label: &str, value: &str) -> Line<'static> {
     Line::from(vec![fg(format!(" {label:<18}"), muted()), bold(value.to_owned(), primary())])
 }
 
-pub(super) fn usage_model_lines(
-    records: &[&SessionUsage],
-    current_model: &str,
-    width: usize,
-) -> Vec<Line<'static>> {
+pub(super) fn usage_model_lines(records: &[&SessionUsage], current_model: &str, width: usize) -> Vec<Line<'static>> {
     if records.is_empty() {
         return vec![Line::from(fg(" No model activity in this date range yet.", muted()))];
     }
@@ -310,10 +279,8 @@ pub(super) fn usage_model_lines(
     models.sort_by_key(|(_, (sessions, tokens, _))| std::cmp::Reverse((*tokens, *sessions)));
     let maximum = models.iter().map(|(_, (_, tokens, _))| *tokens).max().unwrap_or(1).max(1);
     let bar_width = width.saturating_sub(55).clamp(6, 28);
-    let mut lines = vec![Line::from(vec![
-        fg("   Model", muted()),
-        fg("                    Sessions   Tokens", muted()),
-    ])];
+    let mut lines =
+        vec![Line::from(vec![fg("   Model", muted()), fg("                    Sessions   Tokens", muted())])];
     for (model, (sessions, tokens, duration)) in models.into_iter().take(12) {
         let filled = ((tokens as u128 * bar_width as u128) / maximum as u128) as usize;
         let marker = if model == current_model { "●" } else { " " };
@@ -365,8 +332,7 @@ impl App {
             }
         } else {
             let elapsed = self.started.elapsed();
-            let created_at = Utc::now()
-                - ChronoDuration::from_std(elapsed).unwrap_or_else(|_| ChronoDuration::zero());
+            let created_at = Utc::now() - ChronoDuration::from_std(elapsed).unwrap_or_else(|_| ChronoDuration::zero());
             vec![SessionUsage {
                 id: uuid::Uuid::nil(),
                 model: self.config.model.clone(),
@@ -378,7 +344,6 @@ impl App {
                 active_secs: elapsed.as_secs(),
             }]
         };
-        self.usage_panel =
-            Some(UsagePanel { records, tab: UsageTab::Overview, range: UsageRange::AllTime });
+        self.usage_panel = Some(UsagePanel { records, tab: UsageTab::Overview, range: UsageRange::AllTime });
     }
 }

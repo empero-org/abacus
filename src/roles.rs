@@ -184,10 +184,7 @@ mod tests {
         assert!(profile.resolve_role("aux").unwrap().inherited);
 
         profile.set_role_model("default", None);
-        assert_eq!(
-            profile.model, "big/model",
-            "the root of the chain cannot be cleared out from under the session"
-        );
+        assert_eq!(profile.model, "big/model", "the root of the chain cannot be cleared out from under the session");
         // Whitespace is not an assignment.
         profile.set_role_model("subagent", Some("   ".to_owned()));
         assert!(profile.resolve_role("subagent").unwrap().inherited);

@@ -108,9 +108,7 @@ impl EditFileArgs {
     fn into_operations(self) -> Result<(String, Vec<EditOperation>)> {
         let mut operations = self.edits;
         match (self.old_text, self.new_text) {
-            (Some(old_text), Some(new_text)) => {
-                operations.insert(0, EditOperation { old_text, new_text })
-            }
+            (Some(old_text), Some(new_text)) => operations.insert(0, EditOperation { old_text, new_text }),
             (None, None) => {}
             _ => bail!("old_text and new_text must be provided together"),
         }
@@ -126,8 +124,7 @@ impl ToolCall {
         let args: Value = serde_json::from_str(&self.arguments).unwrap_or(Value::Null);
         match self.name.as_str() {
             "run_command" => args["command"].as_str().unwrap_or("shell command").to_owned(),
-            "edit_file" | "write_file" | "read_file" | "delete_file" | "append_file"
-            | "git_show" | "git_blame" => {
+            "edit_file" | "write_file" | "read_file" | "delete_file" | "append_file" | "git_show" | "git_blame" => {
                 args["path"].as_str().unwrap_or("unknown path").to_owned()
             }
             "move_file" => format!(
@@ -138,11 +135,9 @@ impl ToolCall {
             "apply_patch" => "workspace patch".to_owned(),
             "web_search" => args["query"].as_str().unwrap_or("web search").to_owned(),
             "read_page" => args["url"].as_str().unwrap_or("web page").to_owned(),
-            "grep" => format!(
-                "{} in {}",
-                args["query"].as_str().unwrap_or("pattern"),
-                args["path"].as_str().unwrap_or(".")
-            ),
+            "grep" => {
+                format!("{} in {}", args["query"].as_str().unwrap_or("pattern"), args["path"].as_str().unwrap_or("."))
+            }
             "list_files" => args["path"].as_str().unwrap_or(".").to_owned(),
             "glob" => args["pattern"].as_str().unwrap_or("*").to_owned(),
             "git_diff" => match (args["base"].as_str(), args["head"].as_str()) {
@@ -281,10 +276,7 @@ impl ToolExecutor {
             "run_command" => Ok(format!("$ {}", call.summary())),
             _ => Ok(call.summary()),
         };
-        truncate(
-            result.unwrap_or_else(|error| format!("Could not prepare preview: {error:#}")),
-            12_000,
-        )
+        truncate(result.unwrap_or_else(|error| format!("Could not prepare preview: {error:#}")), 12_000)
     }
 
     fn read_file(&self, arguments: &str) -> Result<String> {
@@ -331,8 +323,7 @@ impl ToolExecutor {
         if path.metadata()?.len() > 10_000_000 {
             bail!("file is larger than the 10 MB read limit");
         }
-        let content = fs::read_to_string(&path)
-            .with_context(|| format!("could not read {raw_path} as UTF-8 text"))?;
+        let content = fs::read_to_string(&path).with_context(|| format!("could not read {raw_path} as UTF-8 text"))?;
         let offset = offset.max(1);
         let limit = limit.clamp(1, 2_000);
         let lines: Vec<_> = content.lines().collect();
@@ -350,11 +341,7 @@ impl ToolExecutor {
             .collect::<Vec<_>>()
             .join("\n");
         let remaining = lines.len().saturating_sub(offset - 1 + limit);
-        if remaining > 0 {
-            Ok(format!("{selected}\n\n… {remaining} more lines"))
-        } else {
-            Ok(selected)
-        }
+        if remaining > 0 { Ok(format!("{selected}\n\n… {remaining} more lines")) } else { Ok(selected) }
     }
 
     fn list_files(&self, arguments: &str) -> Result<String> {
@@ -401,8 +388,7 @@ impl ToolExecutor {
         }
 
         let args: Args = parse_args(arguments)?;
-        let expression =
-            if args.case_sensitive { args.query.clone() } else { format!("(?i:{})", args.query) };
+        let expression = if args.case_sensitive { args.query.clone() } else { format!("(?i:{})", args.query) };
         let regex = Regex::new(&expression).context("invalid regular expression")?;
         let globs = build_globs(&args.glob)?;
         let base = self.resolve_for_read(&args.path)?;
@@ -444,12 +430,7 @@ impl ToolExecutor {
             }
             if context == 0 {
                 for index in &hits {
-                    matches.push(format!(
-                        "{}:{}: {}",
-                        relative.display(),
-                        index + 1,
-                        lines[*index]
-                    ));
+                    matches.push(format!("{}:{}: {}", relative.display(), index + 1, lines[*index]));
                 }
             } else {
                 let mut windows: Vec<(usize, usize)> = Vec::new();
@@ -468,13 +449,7 @@ impl ToolExecutor {
                     for (offset, line) in lines[start..=end].iter().enumerate() {
                         let index = start + offset;
                         let marker = if hits.contains(&index) { ':' } else { '-' };
-                        matches.push(format!(
-                            "{}:{}{} {}",
-                            relative.display(),
-                            index + 1,
-                            marker,
-                            line
-                        ));
+                        matches.push(format!("{}:{}{} {}", relative.display(), index + 1, marker, line));
                     }
                 }
             }
@@ -506,8 +481,7 @@ impl ToolExecutor {
         for entry in walk(&base, None) {
             let relative = entry.path().strip_prefix(&self.root).unwrap_or(entry.path());
             if matcher.is_match(relative) {
-                let suffix =
-                    if entry.file_type().is_some_and(|kind| kind.is_dir()) { "/" } else { "" };
+                let suffix = if entry.file_type().is_some_and(|kind| kind.is_dir()) { "/" } else { "" };
                 results.push(format!("{}{suffix}", relative.display()));
                 if results.len() >= max_results {
                     results.push(format!("… output capped at {max_results} paths"));
@@ -555,9 +529,7 @@ impl ToolExecutor {
             bail!("web tools are disabled; set `[search] enabled = true`");
         }
         let args: Args = parse_args(arguments)?;
-        self.web
-            .search_and_extract(&args.query, args.max_results.unwrap_or(5), args.extract.as_deref())
-            .await
+        self.web.search_and_extract(&args.query, args.max_results.unwrap_or(5), args.extract.as_deref()).await
     }
 
     async fn read_page(&self, arguments: &str) -> Result<String> {
@@ -581,11 +553,9 @@ impl ToolExecutor {
         let (raw_path, operations) = args.into_operations()?;
         let path = self.resolve_existing(&raw_path)?;
         guard_secret(&path)?;
-        let content = fs::read_to_string(&path)
-            .with_context(|| format!("could not read {raw_path} as UTF-8 text"))?;
+        let content = fs::read_to_string(&path).with_context(|| format!("could not read {raw_path} as UTF-8 text"))?;
         let content = apply_edits(content, &operations)?;
-        write_text_atomic(&path, &content)
-            .with_context(|| format!("could not write {raw_path}"))?;
+        write_text_atomic(&path, &content).with_context(|| format!("could not write {raw_path}"))?;
         Ok(format!("Applied {} edit(s) to {raw_path}.", operations.len()))
     }
 
@@ -594,8 +564,7 @@ impl ToolExecutor {
         let path = self.resolve_for_write(raw)?;
         guard_secret(&path)?;
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("could not create parent directory for {raw}"))?;
+            fs::create_dir_all(parent).with_context(|| format!("could not create parent directory for {raw}"))?;
         }
         Ok(path)
     }
@@ -608,8 +577,7 @@ impl ToolExecutor {
     fn write_file(&self, arguments: &str) -> Result<String> {
         let args: PathContent = parse_args(arguments)?;
         let path = self.writable(&args.path)?;
-        write_text_atomic(&path, &args.content)
-            .with_context(|| format!("could not write {}", args.path))?;
+        write_text_atomic(&path, &args.content).with_context(|| format!("could not write {}", args.path))?;
         Ok(format!("Wrote {}.", args.path))
     }
 
@@ -798,12 +766,9 @@ impl ToolExecutor {
             .filter_map(|arg| arg.as_ref().to_str())
             .find(|arg| *arg != "-c" && !arg.contains('='))
             .unwrap_or("command");
-        let output = timeout(
-            Duration::from_secs(30),
-            Command::new("git").args(args).current_dir(&self.root).output(),
-        )
-        .await
-        .map_err(|_| anyhow!("git {name} timed out"))??;
+        let output = timeout(Duration::from_secs(30), Command::new("git").args(args).current_dir(&self.root).output())
+            .await
+            .map_err(|_| anyhow!("git {name} timed out"))??;
         if !output.status.success() {
             bail!("git {name} failed: {}", String::from_utf8_lossy(&output.stderr));
         }
@@ -864,9 +829,7 @@ impl ToolExecutor {
         }
         match self.git(&command).await {
             Ok(log) => Ok(or_note(log, "No commits.")),
-            Err(error) if error.to_string().contains("does not have any commits") => {
-                Ok("No commits.".to_owned())
-            }
+            Err(error) if error.to_string().contains("does not have any commits") => Ok("No commits.".to_owned()),
             Err(error) => Err(error),
         }
     }
@@ -944,11 +907,8 @@ impl ToolExecutor {
         }
         let args: Args = parse_args(arguments)?;
         let branch = validate_branch(&args.branch)?;
-        let (flags, done): (&[&str], _) = if args.create {
-            (&["checkout", "-b"], "Created and switched to")
-        } else {
-            (&["checkout"], "Switched to")
-        };
+        let (flags, done): (&[&str], _) =
+            if args.create { (&["checkout", "-b"], "Created and switched to") } else { (&["checkout"], "Switched to") };
         self.git(&[flags, &[branch.as_str()]].concat()).await?;
         Ok(format!("{done} branch {branch}."))
     }
@@ -1024,9 +984,7 @@ impl ToolExecutor {
         // timeout used to kill it mid-wait. The declared sleep total (plus
         // grace for the work around it) raises the floor, capped at 10 minutes.
         let requested = args.timeout_seconds.clamp(1, 600);
-        let sleep_floor = declared_sleep_seconds(&args.command)
-            .map(|seconds| (seconds + 30).min(600))
-            .unwrap_or(0);
+        let sleep_floor = declared_sleep_seconds(&args.command).map(|seconds| (seconds + 30).min(600)).unwrap_or(0);
         let duration = Duration::from_secs(requested.max(sleep_floor));
         let mut child = command.spawn().context("could not start command")?;
         let stdout = child.stdout.take().context("could not capture stdout")?;
@@ -1059,24 +1017,19 @@ impl ToolExecutor {
     fn resolve_for_read(&self, raw: &str) -> Result<PathBuf> {
         let path = Path::new(raw);
         let joined = if path.is_absolute() { path.to_path_buf() } else { self.root.join(path) };
-        let canonical =
-            joined.canonicalize().with_context(|| format!("path does not exist: {raw}"))?;
+        let canonical = joined.canonicalize().with_context(|| format!("path does not exist: {raw}"))?;
         if canonical.starts_with(&self.root) {
             return Ok(canonical);
         }
         if self.outside_reads.read().is_ok_and(|approved| approved.contains(&canonical)) {
             return Ok(canonical);
         }
-        bail!(
-            "path is outside the workspace and was not approved for reading: {}",
-            canonical.display()
-        )
+        bail!("path is outside the workspace and was not approved for reading: {}", canonical.display())
     }
 
     fn resolve_existing(&self, raw: &str) -> Result<PathBuf> {
         let joined = workspace_join(&self.root, raw)?;
-        let canonical =
-            joined.canonicalize().with_context(|| format!("path does not exist: {raw}"))?;
+        let canonical = joined.canonicalize().with_context(|| format!("path does not exist: {raw}"))?;
         ensure_inside(&self.root, &canonical)?;
         Ok(canonical)
     }
@@ -1186,18 +1139,12 @@ pub fn tool_specs() -> Vec<Value> {
         tool(
             "write_file",
             "Create or completely replace a UTF-8 text file.",
-            [
-                req("path", string("Workspace-relative file path")),
-                req("content", string("Complete file content")),
-            ],
+            [req("path", string("Workspace-relative file path")), req("content", string("Complete file content"))],
         ),
         tool(
             "apply_patch",
             "Apply a unified diff to one or more workspace files. Prefer this for precise multi-file changes.",
-            [req(
-                "patch",
-                string("Complete unified diff, including ---/+++ file headers and @@ hunks"),
-            )],
+            [req("patch", string("Complete unified diff, including ---/+++ file headers and @@ hunks"))],
         ),
         tool(
             "delete_file",
@@ -1225,17 +1172,9 @@ pub fn tool_specs() -> Vec<Value> {
             "git_diff",
             "Show a repository diff without modifying anything. Defaults to the working tree against HEAD; pass base/head to diff a commit or revision range.",
             [
-                opt(
-                    "staged",
-                    boolean("Show staged changes (against the index, or against base when set)"),
-                ),
+                opt("staged", boolean("Show staged changes (against the index, or against base when set)")),
                 opt("path", string("Optional workspace-relative path filter")),
-                opt(
-                    "base",
-                    string(
-                        "Optional revision to diff from, such as HEAD~1, a commit sha, or a branch",
-                    ),
-                ),
+                opt("base", string("Optional revision to diff from, such as HEAD~1, a commit sha, or a branch")),
                 opt(
                     "head",
                     string(
@@ -1274,9 +1213,7 @@ pub fn tool_specs() -> Vec<Value> {
                 ),
                 opt(
                     "staged_only",
-                    boolean(
-                        "Only unstage (restore to index), keep working-tree changes; defaults to false",
-                    ),
+                    boolean("Only unstage (restore to index), keep working-tree changes; defaults to false"),
                 ),
             ],
         ),
@@ -1287,9 +1224,7 @@ pub fn tool_specs() -> Vec<Value> {
                 req("path", string("Workspace-relative file path")),
                 opt(
                     "revision",
-                    string(
-                        "Git revision such as HEAD, HEAD~1, a commit sha, or a branch; defaults to HEAD",
-                    ),
+                    string("Git revision such as HEAD, HEAD~1, a commit sha, or a branch; defaults to HEAD"),
                 ),
             ],
         ),
@@ -1306,19 +1241,13 @@ pub fn tool_specs() -> Vec<Value> {
             "Create and switch to a new branch, or switch to an existing one. Approval-gated.",
             [
                 req("branch", string("Branch name to create or switch to")),
-                opt(
-                    "create",
-                    boolean("Create the branch with -b before switching; defaults to false"),
-                ),
+                opt("create", boolean("Create the branch with -b before switching; defaults to false")),
             ],
         ),
         tool(
             "append_file",
             "Append text to an existing file, or create it if it is missing. Atomic and approval-gated.",
-            [
-                req("path", string("Workspace-relative file path")),
-                req("content", string("Text to append")),
-            ],
+            [req("path", string("Workspace-relative file path")), req("content", string("Text to append"))],
         ),
         tool(
             "run_command",
@@ -1345,16 +1274,8 @@ pub fn tool_specs() -> Vec<Value> {
             "ask_user",
             "Ask the user a question when a decision, clarification, or sign-off is needed before continuing. Provide 2-4 mutually exclusive options; the user can pick one or type a custom answer. Use sparingly — only when the answer genuinely blocks progress or a major preference is at stake.",
             [
-                req(
-                    "question",
-                    string("The question to ask the user; shown at the top of the prompt."),
-                ),
-                opt(
-                    "header",
-                    string(
-                        "Short topic label shown on the modal border (e.g. \"Test framework\").",
-                    ),
-                ),
+                req("question", string("The question to ask the user; shown at the top of the prompt.")),
+                opt("header", string("Short topic label shown on the modal border (e.g. \"Test framework\").")),
                 req(
                     "options",
                     json!({"type": "array", "items": {"type": "object", "properties": {"label": {"type": "string", "description": "1-5 word choice label shown to the user."}, "description": {"type": "string", "description": "One sentence explaining the option."}, "preview": {"type": "string", "description": "Optional longer preview of what the option implies."}}, "required": ["label"]}, "minItems": 2, "maxItems": 4}),
@@ -1370,9 +1291,7 @@ fn workspace_join(root: &Path, raw: &str) -> Result<PathBuf> {
     if path.is_absolute() {
         bail!("absolute paths are not allowed: {raw}");
     }
-    if path.components().any(|part| {
-        matches!(part, Component::ParentDir | Component::RootDir | Component::Prefix(_))
-    }) {
+    if path.components().any(|part| matches!(part, Component::ParentDir | Component::RootDir | Component::Prefix(_))) {
         bail!("parent path traversal is not allowed: {raw}");
     }
     Ok(root.join(path))
@@ -1440,10 +1359,7 @@ fn guard_secret(path: &Path) -> Result<()> {
 
 fn write_text_atomic(path: &Path, content: &str) -> Result<()> {
     let parent = path.parent().context("file has no parent directory")?;
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
     let temp = parent.join(format!(".abacus-write-{}-{nonce}.tmp", std::process::id()));
     let mut file = File::create(&temp)?;
     if let Ok(metadata) = path.metadata() {
@@ -1582,12 +1498,7 @@ async fn run_git_apply(root: &Path, patch: &str, check: bool) -> Result<()> {
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let mut child = command.spawn().context("could not start git apply")?;
-    child
-        .stdin
-        .take()
-        .context("could not open git apply stdin")?
-        .write_all(patch.as_bytes())
-        .await?;
+    child.stdin.take().context("could not open git apply stdin")?.write_all(patch.as_bytes()).await?;
     let output = timeout(Duration::from_secs(30), child.wait_with_output())
         .await
         .map_err(|_| anyhow!("git apply timed out"))??;
@@ -1724,9 +1635,7 @@ fn validate_branch(value: &str) -> Result<String> {
     }
     if trimmed.starts_with('-')
         || trimmed.contains("..")
-        || trimmed.chars().any(|c| {
-            c.is_whitespace() || matches!(c, ':' | '~' | '^' | '?' | '*' | '[' | ']' | '\\')
-        })
+        || trimmed.chars().any(|c| c.is_whitespace() || matches!(c, ':' | '~' | '^' | '?' | '*' | '[' | ']' | '\\'))
     {
         bail!("invalid branch name {trimmed:?}");
     }
@@ -1740,11 +1649,7 @@ mod tests {
     fn declared_sleep_raises_the_command_timeout_floor() {
         assert_eq!(declared_sleep_seconds("sleep 180 && cargo test"), Some(180));
         assert_eq!(declared_sleep_seconds("sleep 2m; echo done"), Some(120));
-        assert_eq!(
-            declared_sleep_seconds("sleep 30s && sleep 45"),
-            Some(75),
-            "multiple sleeps sum"
-        );
+        assert_eq!(declared_sleep_seconds("sleep 30s && sleep 45"), Some(75), "multiple sleeps sum");
         assert_eq!(declared_sleep_seconds("(sleep 90) & wait"), Some(90));
         assert_eq!(declared_sleep_seconds("cargo test"), None);
         assert_eq!(declared_sleep_seconds("echo sleep"), None);
@@ -1811,10 +1716,7 @@ mod tests {
         let approved = OutsideReads::default();
         approved.write().unwrap().insert(target.canonicalize().unwrap());
         let tools = ToolExecutor::new(workspace).with_outside_reads(approved);
-        let call = tool_call(
-            "write_file",
-            format!(r#"{{"path":"{}","content":"overwritten"}}"#, target.display()),
-        );
+        let call = tool_call("write_file", format!(r#"{{"path":"{}","content":"overwritten"}}"#, target.display()));
         let result = tools.execute(&call).await;
         assert!(
             result.to_lowercase().contains("absolute")
@@ -1837,8 +1739,7 @@ mod tests {
         fs::write(dir.path().join(".env.production"), "TOKEN=prod-value").unwrap();
 
         let approved = OutsideReads::default();
-        let tools = ToolExecutor::new(dir.path().canonicalize().unwrap())
-            .with_outside_reads(approved.clone());
+        let tools = ToolExecutor::new(dir.path().canonicalize().unwrap()).with_outside_reads(approved.clone());
         let read = |path: &str| tool_call("read_file", format!(r#"{{"path":"{path}"}}"#));
 
         for name in [".env.example", ".env.sample", ".env.template", ".env.dist", ".env.defaults"] {
@@ -1864,8 +1765,7 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("file.txt"), "same\nsame\n").unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
-        let call =
-            tool_call("edit_file", r#"{"path":"file.txt","old_text":"same","new_text":"new"}"#);
+        let call = tool_call("edit_file", r#"{"path":"file.txt","old_text":"same","new_text":"new"}"#);
         assert!(tools.execute(&call).await.contains("found 2 matches"));
     }
 
@@ -1884,11 +1784,8 @@ mod tests {
     #[tokio::test]
     async fn grep_emits_context_lines_around_matches() {
         let dir = tempdir().unwrap();
-        fs::write(
-            dir.path().join("main.rs"),
-            "one\ntwo\nneedle\nfour\nfive\nsix\nseven\neight\nneedle\nten\n",
-        )
-        .unwrap();
+        fs::write(dir.path().join("main.rs"), "one\ntwo\nneedle\nfour\nfive\nsix\nseven\neight\nneedle\nten\n")
+            .unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
         let call = tool_call("grep", r#"{"query":"needle","context":1}"#);
         let output = tools.execute(&call).await;
@@ -1907,8 +1804,7 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("file.txt"), "old\n").unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
-        let call =
-            tool_call("edit_file", r#"{"path":"file.txt","old_text":"old","new_text":"new"}"#);
+        let call = tool_call("edit_file", r#"{"path":"file.txt","old_text":"old","new_text":"new"}"#);
         let preview = tools.approval_details(&call);
         assert!(preview.contains("-old"));
         assert!(preview.contains("+new"));
@@ -1937,15 +1833,11 @@ mod tests {
         fs::write(dir.path().join("value.txt"), "one\ntwo\n").unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
         let patch = unified_diff("value.txt", "one\ntwo\n", "one\nchanged\nthree\n");
-        let call =
-            tool_call("apply_patch", serde_json::to_string(&json!({"patch": patch})).unwrap());
+        let call = tool_call("apply_patch", serde_json::to_string(&json!({"patch": patch})).unwrap());
         let preview = tools.approval_details(&call);
         assert!(preview.contains("+changed"));
         assert_eq!(tools.execute(&call).await, "Applied patch successfully.");
-        assert_eq!(
-            fs::read_to_string(dir.path().join("value.txt")).unwrap(),
-            "one\nchanged\nthree\n"
-        );
+        assert_eq!(fs::read_to_string(dir.path().join("value.txt")).unwrap(), "one\nchanged\nthree\n");
     }
 
     #[tokio::test]
@@ -1956,8 +1848,7 @@ mod tests {
             "--- a/../outside\n+++ b/../outside\n@@ -0,0 +1 @@\n+x\n",
             "--- /dev/null\n+++ b/.env\n@@ -0,0 +1 @@\n+TOKEN=x\n",
         ] {
-            let call =
-                tool_call("apply_patch", serde_json::to_string(&json!({"patch": patch})).unwrap());
+            let call = tool_call("apply_patch", serde_json::to_string(&json!({"patch": patch})).unwrap());
             assert!(tools.execute(&call).await.starts_with("Error:"));
         }
         assert!(!dir.path().join("../outside").exists());
@@ -1972,8 +1863,7 @@ mod tests {
         let delete = tool_call("delete_file", r#"{"path":"old.txt"}"#);
         assert!(tools.approval_details(&delete).contains("-remove me"));
 
-        let outside =
-            tool_call("move_file", r#"{"source":"old.txt","destination":"../escaped.txt"}"#);
+        let outside = tool_call("move_file", r#"{"source":"old.txt","destination":"../escaped.txt"}"#);
         assert!(tools.execute(&outside).await.contains("parent path traversal"));
         assert!(dir.path().join("old.txt").exists());
     }
@@ -1981,14 +1871,7 @@ mod tests {
     #[tokio::test]
     async fn git_status_and_log_include_repository_state() {
         let dir = tempdir().unwrap();
-        assert!(
-            StdCommand::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(dir.path())
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(StdCommand::new("git").args(["init", "--quiet"]).current_dir(dir.path()).status().unwrap().success());
         fs::write(dir.path().join("untracked.txt"), "hello\n").unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
         let status = tool_call("git_status", "{}");
@@ -2016,24 +1899,13 @@ mod tests {
     #[tokio::test]
     async fn git_commit_stages_paths_and_creates_a_commit() {
         let dir = tempdir().unwrap();
-        assert!(
-            StdCommand::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(dir.path())
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(StdCommand::new("git").args(["init", "--quiet"]).current_dir(dir.path()).status().unwrap().success());
         StdCommand::new("git")
             .args(["config", "user.email", "agent@abacus.test"])
             .current_dir(dir.path())
             .status()
             .unwrap();
-        StdCommand::new("git")
-            .args(["config", "user.name", "Abacus"])
-            .current_dir(dir.path())
-            .status()
-            .unwrap();
+        StdCommand::new("git").args(["config", "user.name", "Abacus"]).current_dir(dir.path()).status().unwrap();
         fs::write(dir.path().join("file.txt"), "first\n").unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
         let call = tool_call("git_commit", r#"{"message":"initial","paths":["file.txt"]}"#);
@@ -2045,24 +1917,13 @@ mod tests {
     #[tokio::test]
     async fn git_restore_reverts_working_tree_to_head() {
         let dir = tempdir().unwrap();
-        assert!(
-            StdCommand::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(dir.path())
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(StdCommand::new("git").args(["init", "--quiet"]).current_dir(dir.path()).status().unwrap().success());
         StdCommand::new("git")
             .args(["config", "user.email", "agent@abacus.test"])
             .current_dir(dir.path())
             .status()
             .unwrap();
-        StdCommand::new("git")
-            .args(["config", "user.name", "Abacus"])
-            .current_dir(dir.path())
-            .status()
-            .unwrap();
+        StdCommand::new("git").args(["config", "user.name", "Abacus"]).current_dir(dir.path()).status().unwrap();
         fs::write(dir.path().join("file.txt"), "original\n").unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
         let commit = tool_call("git_commit", r#"{"message":"baseline","paths":["file.txt"]}"#);
@@ -2076,16 +1937,8 @@ mod tests {
 
     fn init_repo(dir: &std::path::Path) {
         StdCommand::new("git").args(["init", "--quiet"]).current_dir(dir).status().unwrap();
-        StdCommand::new("git")
-            .args(["config", "user.email", "agent@abacus.test"])
-            .current_dir(dir)
-            .status()
-            .unwrap();
-        StdCommand::new("git")
-            .args(["config", "user.name", "Abacus"])
-            .current_dir(dir)
-            .status()
-            .unwrap();
+        StdCommand::new("git").args(["config", "user.email", "agent@abacus.test"]).current_dir(dir).status().unwrap();
+        StdCommand::new("git").args(["config", "user.name", "Abacus"]).current_dir(dir).status().unwrap();
     }
 
     #[tokio::test]
@@ -2114,8 +1967,7 @@ mod tests {
         // between the two commits must surface the added line.
         let working = tools.execute(&tool_call("git_diff", "{}")).await;
         assert_eq!(working, "No diff.");
-        let range =
-            tools.execute(&tool_call("git_diff", r#"{"base":"HEAD~1","head":"HEAD"}"#)).await;
+        let range = tools.execute(&tool_call("git_diff", r#"{"base":"HEAD~1","head":"HEAD"}"#)).await;
         assert!(range.contains("+second"), "range diff was: {range}");
         assert!(!range.contains("Error:"));
         // head without base is rejected.
@@ -2142,13 +1994,9 @@ mod tests {
         fs::write(dir.path().join("file.txt"), "first\n").unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
         tools.execute(&tool_call("git_commit", r#"{"message":"base","paths":["file.txt"]}"#)).await;
-        let output = tools
-            .execute(&tool_call("git_checkout", r#"{"branch":"feature/x","create":true}"#))
-            .await;
+        let output = tools.execute(&tool_call("git_checkout", r#"{"branch":"feature/x","create":true}"#)).await;
         assert!(output.contains("Created and switched to"));
-        let branch = tools
-            .execute(&tool_call("run_command", r#"{"command":"git branch --show-current"}"#))
-            .await;
+        let branch = tools.execute(&tool_call("run_command", r#"{"command":"git branch --show-current"}"#)).await;
         assert!(branch.contains("feature/x"));
     }
 
@@ -2156,9 +2004,7 @@ mod tests {
     async fn append_file_creates_then_appends() {
         let dir = tempdir().unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
-        tools
-            .execute(&tool_call("append_file", r#"{"path":"log.txt","content":"line one"}"#))
-            .await;
+        tools.execute(&tool_call("append_file", r#"{"path":"log.txt","content":"line one"}"#)).await;
         let second = tool_call("append_file", r#"{"path":"log.txt","content":"line two"}"#);
         tools.execute(&second).await;
         assert_eq!(fs::read_to_string(dir.path().join("log.txt")).unwrap(), "line one\nline two");
@@ -2176,24 +2022,12 @@ mod tests {
     #[test]
     fn tool_specs_are_unique_and_cover_mutations() {
         let specs = tool_specs();
-        let names =
-            specs.iter().filter_map(|spec| spec["function"]["name"].as_str()).collect::<Vec<_>>();
+        let names = specs.iter().filter_map(|spec| spec["function"]["name"].as_str()).collect::<Vec<_>>();
         let unique = names.iter().copied().collect::<std::collections::HashSet<_>>();
         assert_eq!(names.len(), unique.len());
         for name in [
-            "apply_patch",
-            "delete_file",
-            "move_file",
-            "create_directory",
-            "git_status",
-            "git_log",
-            "git_commit",
-            "git_restore",
-            "git_show",
-            "git_blame",
-            "git_checkout",
-            "append_file",
-            "read_files",
+            "apply_patch", "delete_file", "move_file", "create_directory", "git_status", "git_log", "git_commit",
+            "git_restore", "git_show", "git_blame", "git_checkout", "append_file", "read_files",
         ] {
             assert!(unique.contains(name), "missing {name}");
         }

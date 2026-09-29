@@ -60,13 +60,12 @@ impl Cache {
 
     /// Whether the last check is recent enough to answer from.
     fn fresh(&self) -> bool {
-        self.checked_at
-            .as_deref()
-            .and_then(|stamp| chrono::DateTime::parse_from_rfc3339(stamp).ok())
-            .is_some_and(|stamp| {
+        self.checked_at.as_deref().and_then(|stamp| chrono::DateTime::parse_from_rfc3339(stamp).ok()).is_some_and(
+            |stamp| {
                 chrono::Utc::now().signed_duration_since(stamp.with_timezone(&chrono::Utc))
                     < chrono::Duration::hours(CACHE_HOURS)
-            })
+            },
+        )
     }
 }
 
@@ -80,11 +79,7 @@ pub async fn check(cache_file: &Path, current: &str) -> Result<Option<Available>
 /// driven against a local server. A parameter rather than an environment
 /// variable: tests run in parallel threads of one process, and a global would
 /// race between them.
-pub async fn check_against(
-    tags_url: &str,
-    cache_file: &Path,
-    current: &str,
-) -> Result<Option<Available>> {
+pub async fn check_against(tags_url: &str, cache_file: &Path, current: &str) -> Result<Option<Available>> {
     let cache: Cache = crate::config::read_json(cache_file);
     let latest = if cache.fresh() {
         // Answer from cache rather than asking again — but still compare, so a
@@ -99,8 +94,7 @@ pub async fn check_against(
         latest
     };
 
-    Ok(is_newer(&latest, current)
-        .then(|| Available { version: latest, current: current.to_owned() }))
+    Ok(is_newer(&latest, current).then(|| Available { version: latest, current: current.to_owned() }))
 }
 
 async fn newest_tag(tags_url: &str) -> Result<String> {

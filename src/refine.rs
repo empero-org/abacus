@@ -200,10 +200,7 @@ impl<'a> Reflector<'a> {
             // Fall through: a refinement is optional, but if the cheap call
             // fails the detached prompt is still worth one attempt.
         }
-        let messages = vec![
-            json!({"role": "system", "content": system}),
-            json!({"role": "user", "content": detail}),
-        ];
+        let messages = vec![json!({"role": "system", "content": system}), json!({"role": "user", "content": detail})];
         self.provider.answer(&messages, &[], cancel).await
     }
 }
@@ -216,16 +213,11 @@ pub async fn should_refine(
     cancel: &AtomicBool,
 ) -> Option<(bool, Option<String>)> {
     let detail = reflector.evidence(messages, harness, REVIEW_TRAJECTORY_CHARS);
-    let reply =
-        reflector.ask(REVIEW_PROMPT, IN_CONTEXT_REVIEW_PROMPT, &detail, messages, cancel).await?;
+    let reply = reflector.ask(REVIEW_PROMPT, IN_CONTEXT_REVIEW_PROMPT, &detail, messages, cancel).await?;
     let value = extract_json(&reply).ok()?;
     Some((
         value.get("should_refine").and_then(Value::as_bool) == Some(true),
-        value
-            .get("instructions")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .filter(|text| !text.trim().is_empty()),
+        value.get("instructions").and_then(Value::as_str).map(str::to_owned).filter(|text| !text.trim().is_empty()),
     ))
 }
 
@@ -249,12 +241,9 @@ pub async fn run(
     if let Some(instructions) = instructions {
         detail.push_str(&format!("\n\n<focus>\n{instructions}\n</focus>"));
     }
-    detail.push_str(
-        "\n\nReturn only the JSON object. If nothing is justified, return an empty edits array.",
-    );
+    detail.push_str("\n\nReturn only the JSON object. If nothing is justified, return an empty edits array.");
 
-    let reply =
-        reflector.ask(PLAN_PROMPT, IN_CONTEXT_PLAN_PROMPT, &detail, messages, cancel).await?;
+    let reply = reflector.ask(PLAN_PROMPT, IN_CONTEXT_PLAN_PROMPT, &detail, messages, cancel).await?;
     let (proposal, drafts) = parse_reply(&reply).ok()?;
 
     // Papercuts go through the ordinary tool path, so they inherit its
@@ -305,8 +294,7 @@ fn trajectory(messages: &[Value], budget: usize) -> String {
                     lines.push(format!("{role}: {}", content.trim()));
                 }
                 if let Some(calls) = message["tool_calls"].as_array() {
-                    let names: Vec<&str> =
-                        calls.iter().filter_map(|call| call["function"]["name"].as_str()).collect();
+                    let names: Vec<&str> = calls.iter().filter_map(|call| call["function"]["name"].as_str()).collect();
                     if !names.is_empty() {
                         lines.push(format!("assistant ran: {}", names.join(", ")));
                     }
@@ -357,10 +345,8 @@ fn parse_reply(reply: &str) -> Result<(RefinementProposal, Vec<Value>)> {
 /// the cause — so truncation is named explicitly.
 pub(crate) fn extract_json(reply: &str) -> Result<Value> {
     let trimmed = reply.trim();
-    let candidate = if let Some(fenced) = trimmed
-        .split_once("```")
-        .and_then(|(_, rest)| rest.split_once("```"))
-        .map(|(inside, _)| inside)
+    let candidate = if let Some(fenced) =
+        trimmed.split_once("```").and_then(|(_, rest)| rest.split_once("```")).map(|(inside, _)| inside)
     {
         inside_fence(fenced)
     } else {
@@ -451,8 +437,7 @@ mod tests {
     fn a_truncated_reply_is_named_as_truncation_not_malformed_json() {
         // The failure mode when the output budget runs out mid-proposal, which
         // is a different problem from the model writing nonsense.
-        let cut =
-            r#"{"summary":"s","rationale":"r","expected_outcome":"e","edits":[{"action":"cre"#;
+        let cut = r#"{"summary":"s","rationale":"r","expected_outcome":"e","edits":[{"action":"cre"#;
         let error = parse_proposal(cut).unwrap_err().to_string();
         assert!(error.contains("cut off"), "{error}");
 
@@ -491,9 +476,8 @@ mod tests {
 
     #[test]
     fn trajectory_keeps_the_tail_when_it_overflows() {
-        let messages: Vec<Value> = (0..200)
-            .map(|index| json!({"role": "assistant", "content": format!("step {index}")}))
-            .collect();
+        let messages: Vec<Value> =
+            (0..200).map(|index| json!({"role": "assistant", "content": format!("step {index}")})).collect();
         let rendered = trajectory(&messages, 200);
         // Conclusions live at the end of a turn, so the tail is what survives.
         assert!(rendered.contains("step 199"), "{rendered}");

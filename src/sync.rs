@@ -72,9 +72,7 @@ impl SyncClient {
             bail!("sync server must use HTTP or HTTPS");
         }
         Ok(Self {
-            http: Client::builder()
-                .user_agent(concat!("abacus-agent/", env!("CARGO_PKG_VERSION")))
-                .build()?,
+            http: Client::builder().user_agent(concat!("abacus-agent/", env!("CARGO_PKG_VERSION"))).build()?,
             server,
             token: credentials.token.clone(),
         })
@@ -114,12 +112,7 @@ impl SyncClient {
         self.push_at_revision(session, trace, revision).await
     }
 
-    async fn push_at_revision(
-        &self,
-        session: &Session,
-        trace: &[u8],
-        revision: Option<u64>,
-    ) -> Result<u64> {
+    async fn push_at_revision(&self, session: &Session, trace: &[u8], revision: Option<u64>) -> Result<u64> {
         let digest = format!("{:x}", Sha256::digest(trace));
         let body = json!({
             "session": session,
@@ -127,8 +120,7 @@ impl SyncClient {
             "trace_sha256": digest,
             "device_id": device_id(),
         });
-        let mut request =
-            self.request(reqwest::Method::PUT, &format!("/v1/sync/sessions/{}", session.id));
+        let mut request = self.request(reqwest::Method::PUT, &format!("/v1/sync/sessions/{}", session.id));
         request = if let Some(revision) = revision {
             request.header(header::IF_MATCH, format!("\"{revision}\""))
         } else {
@@ -139,11 +131,7 @@ impl SyncClient {
     }
 }
 
-async fn password_login_flow(
-    server: &str,
-    email: Option<String>,
-    password: Option<String>,
-) -> Result<LoginResponse> {
+async fn password_login_flow(server: &str, email: Option<String>, password: Option<String>) -> Result<LoginResponse> {
     let email = match email {
         Some(value) => value,
         None => prompt("Email: ")?,
@@ -199,10 +187,7 @@ async fn device_login_flow(server: &str) -> Result<LoginResponse> {
             }
             other => {
                 let detail = response.text().await.unwrap_or_default();
-                bail!(
-                    "sync server returned {other}: {}",
-                    detail.chars().take(1000).collect::<String>()
-                );
+                bail!("sync server returned {other}: {}", detail.chars().take(1000).collect::<String>());
             }
         }
     }
@@ -214,9 +199,7 @@ fn anonymous_client() -> Result<Client> {
 
 async fn decode<T: for<'de> Deserialize<'de>>(response: reqwest::Response) -> Result<T> {
     let status = response.status();
-    if response.headers().get("Abacus-Protocol").and_then(|value| value.to_str().ok())
-        != Some(PROTOCOL)
-    {
+    if response.headers().get("Abacus-Protocol").and_then(|value| value.to_str().ok()) != Some(PROTOCOL) {
         bail!("sync server did not confirm Abacus protocol version {PROTOCOL}");
     }
     let body = response.text().await.unwrap_or_default();
@@ -227,11 +210,7 @@ async fn decode<T: for<'de> Deserialize<'de>>(response: reqwest::Response) -> Re
     serde_json::from_str(&body).context("sync server returned invalid JSON")
 }
 
-pub async fn handle(
-    action: SyncCommand,
-    paths: &AbacusPaths,
-    workspace: std::path::PathBuf,
-) -> Result<()> {
+pub async fn handle(action: SyncCommand, paths: &AbacusPaths, workspace: std::path::PathBuf) -> Result<()> {
     let mut credentials = Credentials::load(paths)?;
     match action {
         SyncCommand::Login { server, email, password, password_login } => {
@@ -241,16 +220,10 @@ pub async fn handle(
             } else {
                 device_login_flow(&server).await?
             };
-            credentials.sync = Some(SyncCredentials {
-                server,
-                token: login.access_token,
-                email: login.user.email.clone(),
-            });
+            credentials.sync =
+                Some(SyncCredentials { server, token: login.access_token, email: login.user.email.clone() });
             credentials.save(paths)?;
-            println!(
-                "Signed in as {}. Sessions now sync automatically across devices.",
-                login.user.email
-            );
+            println!("Signed in as {}. Sessions now sync automatically across devices.", login.user.email);
         }
         SyncCommand::Logout => {
             credentials.sync = None;
@@ -313,8 +286,7 @@ pub async fn handle(
 }
 
 fn configured(credentials: &Credentials) -> Result<SyncClient> {
-    let credentials =
-        credentials.sync.as_ref().context("sync is not configured; run `abacus sync login`")?;
+    let credentials = credentials.sync.as_ref().context("sync is not configured; run `abacus sync login`")?;
     SyncClient::new(credentials)
 }
 
@@ -344,9 +316,7 @@ fn prompt_password() -> Result<String> {
 }
 
 fn device_id() -> String {
-    std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("COMPUTERNAME"))
-        .unwrap_or_else(|_| "Abacus CLI".to_owned())
+    std::env::var("HOSTNAME").or_else(|_| std::env::var("COMPUTERNAME")).unwrap_or_else(|_| "Abacus CLI".to_owned())
 }
 
 pub fn is_configured(credentials: &Credentials) -> bool {
@@ -397,8 +367,7 @@ async fn push_all_updated_local_inner(paths: &AbacusPaths, force: bool) -> Resul
             if !force && is_placeholder(&session) {
                 continue;
             }
-            let trace = std::fs::read(paths.traces_dir.join(format!("{}.jsonl", session.id)))
-                .unwrap_or_default();
+            let trace = std::fs::read(paths.traces_dir.join(format!("{}.jsonl", session.id))).unwrap_or_default();
             let revision = client.revision(&session.id.to_string()).await.ok().flatten();
             let result = if force {
                 client.push(&session, &trace, true).await
@@ -410,10 +379,7 @@ async fn push_all_updated_local_inner(paths: &AbacusPaths, force: bool) -> Resul
                 Err(error) => {
                     let message = format!("{error:#}");
                     if message.contains("409") || message.contains("conflict") {
-                        eprintln!(
-                            "sync push conflict for {}: use `abacus sync push --force`",
-                            session.id
-                        );
+                        eprintln!("sync push conflict for {}: use `abacus sync push --force`", session.id);
                     }
                 }
             }
@@ -463,8 +429,7 @@ pub fn is_placeholder(session: &Session) -> bool {
     // A session that has never received a prompt is not a session yet. The
     // transcript always opens with the system prompt, so "empty" means no user
     // message has ever been added.
-    session.title == "New session"
-        && !session.messages.iter().any(|message| message["role"] == "user")
+    session.title == "New session" && !session.messages.iter().any(|message| message["role"] == "user")
 }
 
 async fn push_one(client: &SyncClient, paths: &AbacusPaths, session: &Session) -> Result<u64> {
@@ -472,8 +437,7 @@ async fn push_one(client: &SyncClient, paths: &AbacusPaths, session: &Session) -
         let revision = client.revision(&session.id.to_string()).await.ok().flatten();
         return Ok(revision.unwrap_or_default());
     }
-    let trace =
-        std::fs::read(paths.traces_dir.join(format!("{}.jsonl", session.id))).unwrap_or_default();
+    let trace = std::fs::read(paths.traces_dir.join(format!("{}.jsonl", session.id))).unwrap_or_default();
     // Read immediately before the conditional write. A concurrent writer still
     // produces a conflict; automatic sync never retries by overwriting it.
     let revision = client.revision(&session.id.to_string()).await.ok().flatten();
@@ -517,10 +481,8 @@ struct TicketResponse {
 
 impl SyncClient {
     pub async fn enable_remote(&self, session_id: &str) -> Result<String> {
-        let response = self
-            .request(reqwest::Method::POST, &format!("/v1/remote/sessions/{session_id}/enable"))
-            .send()
-            .await?;
+        let response =
+            self.request(reqwest::Method::POST, &format!("/v1/remote/sessions/{session_id}/enable")).send().await?;
         let _: serde_json::Value = decode(response).await?;
         let ticket: TicketResponse = decode(
             self.request(reqwest::Method::POST, "/v1/remote/tickets")
@@ -538,10 +500,8 @@ impl SyncClient {
     }
 
     pub async fn disable_remote(&self, session_id: &str) -> Result<()> {
-        let response = self
-            .request(reqwest::Method::POST, &format!("/v1/remote/sessions/{session_id}/disable"))
-            .send()
-            .await?;
+        let response =
+            self.request(reqwest::Method::POST, &format!("/v1/remote/sessions/{session_id}/disable")).send().await?;
         let _: serde_json::Value = decode(response).await?;
         Ok(())
     }
@@ -558,16 +518,11 @@ struct GetResponse {
 
 impl SyncClient {
     async fn pull(&self, session_id: &str) -> Result<(Session, Vec<u8>)> {
-        let document: GetResponse = decode(
-            self.request(reqwest::Method::GET, &format!("/v1/sync/sessions/{session_id}"))
-                .send()
-                .await?,
-        )
-        .await?;
-        let response = self
-            .request(reqwest::Method::GET, &format!("/v1/sync/sessions/{session_id}/trace"))
-            .send()
-            .await?;
+        let document: GetResponse =
+            decode(self.request(reqwest::Method::GET, &format!("/v1/sync/sessions/{session_id}")).send().await?)
+                .await?;
+        let response =
+            self.request(reqwest::Method::GET, &format!("/v1/sync/sessions/{session_id}/trace")).send().await?;
         let status = response.status();
         if !status.is_success() {
             bail!("sync trace download returned {status}");
@@ -604,10 +559,6 @@ fn install_pulled(paths: &AbacusPaths, session: Session, trace: &[u8], force: bo
     }
     store.save(&session)?;
     std::fs::create_dir_all(&paths.traces_dir)?;
-    crate::config::atomic_write(
-        &paths.traces_dir.join(format!("{}.jsonl", session.id)),
-        trace,
-        true,
-    )?;
+    crate::config::atomic_write(&paths.traces_dir.join(format!("{}.jsonl", session.id)), trace, true)?;
     Ok(())
 }

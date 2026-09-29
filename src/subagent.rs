@@ -137,10 +137,8 @@ struct ResolvedRole {
 /// cost fidelity, not the task.
 fn resolve_role(harness: &crate::harness::HarnessStore, task: &SubagentTask) -> ResolvedRole {
     if let Some(id) = task.spec.as_deref().filter(|id| !id.trim().is_empty())
-        && let Some(entry) = harness
-            .snapshot_of(crate::harness::EntryKind::Subagent)
-            .into_iter()
-            .find(|entry| entry.id == id)
+        && let Some(entry) =
+            harness.snapshot_of(crate::harness::EntryKind::Subagent).into_iter().find(|entry| entry.id == id)
     {
         return ResolvedRole {
             read_only: entry.metadata.get("read_only").and_then(Value::as_bool).unwrap_or(false),
@@ -149,17 +147,12 @@ fn resolve_role(harness: &crate::harness::HarnessStore, task: &SubagentTask) -> 
         };
     }
     let (system_prompt, read_only) = task.role.built_in();
-    ResolvedRole {
-        label: task.role.label().to_owned(),
-        system_prompt: system_prompt.to_owned(),
-        read_only,
-    }
+    ResolvedRole { label: task.role.label().to_owned(), system_prompt: system_prompt.to_owned(), read_only }
 }
 
 /// The workers of a request as one line: name, role, and model where one was chosen.
 fn roster(tasks: &[SubagentTask]) -> String {
-    let worker = |task: &SubagentTask| match task.model.as_deref().filter(|m| !m.trim().is_empty())
-    {
+    let worker = |task: &SubagentTask| match task.model.as_deref().filter(|m| !m.trim().is_empty()) {
         Some(model) => format!("{} ({}, {model})", task.name, task.role.label()),
         None => format!("{} ({})", task.name, task.role.label()),
     };
@@ -247,8 +240,7 @@ impl SubagentRuntime {
             name: String,
             message: String,
         }
-        let args: MessageArgs =
-            serde_json::from_str(arguments).context("invalid message_subagent arguments")?;
+        let args: MessageArgs = serde_json::from_str(arguments).context("invalid message_subagent arguments")?;
         let name = args.name.trim();
         if args.message.trim().is_empty() {
             bail!("message must not be empty");
@@ -260,9 +252,7 @@ impl SubagentRuntime {
             }
             let known = roster
                 .iter()
-                .map(|(worker, running)| {
-                    format!("{worker} ({})", if *running { "running" } else { "finished" })
-                })
+                .map(|(worker, running)| format!("{worker} ({})", if *running { "running" } else { "finished" }))
                 .collect::<Vec<_>>()
                 .join(", ");
             bail!("no worker named `{name}`. Known workers: {known}");
@@ -291,12 +281,7 @@ impl SubagentRuntime {
     /// Continue a finished worker: its own conversation plus the new message,
     /// in a fresh worktree seeded from the workspace as it is now. Runs in the
     /// background and reports back like any other worker.
-    async fn resume_worker(
-        &self,
-        name: String,
-        transcript: Vec<Value>,
-        message: String,
-    ) -> Result<String> {
+    async fn resume_worker(&self, name: String, transcript: Vec<Value>, message: String) -> Result<String> {
         let context = Arc::new(WorktreeContext::capture(&self.workspace).await?);
         let runtime = self.clone();
         let injections = self.injections.clone();
@@ -399,8 +384,7 @@ impl SubagentRuntime {
         // writing.
         let failures = results.iter().filter(|result| result.error.is_some()).count();
         let record = self.hive.record_run(results.len() as u32, failures as u32);
-        let body =
-            if all_typed { format_results_json(&results) } else { format_results(&results, apply) };
+        let body = if all_typed { format_results_json(&results) } else { format_results(&results, apply) };
         format!("{body}\n\n{record}")
     }
 
@@ -427,8 +411,7 @@ impl SubagentRuntime {
             spec: None,
             resume_from: Some(transcript.clone()),
         };
-        let outcome =
-            self.run_one_inner(&context, &task, board_id, worker_provider, injections).await;
+        let outcome = self.run_one_inner(&context, &task, board_id, worker_provider, injections).await;
         self.provider.add_tokens(&worker_tokens);
         match outcome {
             Ok((response, _patch, new_transcript)) => {
@@ -457,8 +440,7 @@ impl SubagentRuntime {
         // Register before starting so a message addressed to this worker mid-run
         // reaches the turn that is about to begin.
         let worker_injections = self.hive.workers.open(&name);
-        let outcome =
-            self.run_one_inner(&context, &task, board_id, worker_provider, worker_injections).await;
+        let outcome = self.run_one_inner(&context, &task, board_id, worker_provider, worker_injections).await;
         // Fold the worker's usage into the session total — the per-worker
         // counter exists for the board, not to hide cost.
         self.provider.add_tokens(&worker_tokens);
@@ -469,9 +451,7 @@ impl SubagentRuntime {
                 // reasoning toward the shape. This way the schema constrains the
                 // report and nothing else.
                 let coerced = match &task.schema {
-                    Some(schema) => {
-                        coerce_to_schema(&self.provider, &response, schema).await.map(Some)
-                    }
+                    Some(schema) => coerce_to_schema(&self.provider, &response, schema).await.map(Some),
                     None => Ok(None),
                 };
                 self.hive.board.finish(board_id, coerced.is_ok());
@@ -480,9 +460,7 @@ impl SubagentRuntime {
                 self.hive.workers.close(&name, transcript);
                 let (structured, error) = match coerced {
                     Ok(value) => (value, None),
-                    Err(error) => {
-                        (None, Some(format!("result did not match the schema: {error:#}")))
-                    }
+                    Err(error) => (None, Some(format!("result did not match the schema: {error:#}"))),
                 };
                 SubagentResult { name, response, patch, structured, error }
             }
@@ -502,11 +480,8 @@ impl SubagentRuntime {
         provider: Provider,
         injections: crate::agent::InjectionQueue,
     ) -> Result<(String, String, Vec<Value>)> {
-        let worker_root = std::env::temp_dir().join("abacus-worktrees").join(format!(
-            "{}-{}",
-            safe_name(&task.name),
-            Uuid::new_v4()
-        ));
+        let worker_root =
+            std::env::temp_dir().join("abacus-worktrees").join(format!("{}-{}", safe_name(&task.name), Uuid::new_v4()));
         if let Some(parent) = worker_root.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -518,8 +493,7 @@ impl SubagentRuntime {
         }
 
         let mut guard = WorktreeGuard::new(context.repo_root.clone(), worker_root.clone());
-        let result =
-            self.run_in_worktree(context, &worker_root, task, board_id, provider, injections).await;
+        let result = self.run_in_worktree(context, &worker_root, task, board_id, provider, injections).await;
         let cleanup = context.remove(&worker_root).await;
         if cleanup.is_ok() {
             guard.disarm();
@@ -644,8 +618,7 @@ async fn coerce_to_schema(provider: &Provider, report: &str, schema: &Value) -> 
                  Return corrected JSON only."
             );
         }
-        let conversation =
-            vec![json!({"role":"system","content":system}), json!({"role":"user","content":user})];
+        let conversation = vec![json!({"role":"system","content":system}), json!({"role":"user","content":user})];
         let completion = match provider.ask(&conversation, &[], &AtomicBool::new(false)).await {
             Ok(completion) => completion,
             Err(error) => {
@@ -667,11 +640,7 @@ async fn coerce_to_schema(provider: &Provider, report: &str, schema: &Value) -> 
     bail!("after {COERCE_ATTEMPTS} attempts: {last_error}")
 }
 
-fn capture_event(
-    event: AgentEvent,
-    final_messages: &mut Option<Vec<Value>>,
-    failure: &mut Option<String>,
-) {
+fn capture_event(event: AgentEvent, final_messages: &mut Option<Vec<Value>>, failure: &mut Option<String>) {
     match event {
         AgentEvent::Approval(request) => {
             let _ = request.respond.send(crate::agent::ApprovalDecision::Once);
@@ -732,19 +701,12 @@ impl WorktreeContext {
         let root = String::from_utf8(root).context("git returned non-UTF-8 text")?;
         let repo_root = PathBuf::from(root.trim()).canonicalize()?;
         let workspace = workspace.canonicalize()?;
-        let workspace_relative = workspace
-            .strip_prefix(&repo_root)
-            .context("workspace is outside its git repository")?
-            .to_owned();
+        let workspace_relative =
+            workspace.strip_prefix(&repo_root).context("workspace is outside its git repository")?.to_owned();
         let scope = git_scope(&workspace_relative);
-        let baseline_patch =
-            git(&repo_root, &["diff", "--binary", "HEAD", "--", scope.as_str()], None).await?;
-        let untracked_raw = git(
-            &repo_root,
-            &["ls-files", "--others", "--exclude-standard", "-z", "--", scope.as_str()],
-            None,
-        )
-        .await?;
+        let baseline_patch = git(&repo_root, &["diff", "--binary", "HEAD", "--", scope.as_str()], None).await?;
+        let untracked_raw =
+            git(&repo_root, &["ls-files", "--others", "--exclude-standard", "-z", "--", scope.as_str()], None).await?;
         let untracked = untracked_raw
             .split(|byte| *byte == 0)
             .filter(|path| !path.is_empty())
@@ -772,13 +734,9 @@ impl WorktreeContext {
     }
 
     async fn create(&self, worker_root: &Path) -> Result<()> {
-        git(
-            &self.repo_root,
-            &["worktree", "add", "--detach", path_text(worker_root)?, "HEAD"],
-            None,
-        )
-        .await
-        .context("could not create isolated git worktree")?;
+        git(&self.repo_root, &["worktree", "add", "--detach", path_text(worker_root)?, "HEAD"], None)
+            .await
+            .context("could not create isolated git worktree")?;
         if !self.baseline_patch.is_empty() {
             git(worker_root, &["apply", "--binary", "-"], Some(&self.baseline_patch))
                 .await
@@ -791,10 +749,8 @@ impl WorktreeContext {
         }
         let scope = git_scope(&self.workspace_relative);
         git(worker_root, &["add", "-A", "--", scope.as_str()], None).await?;
-        let status = Command::new("git")
-            .args(["-C", path_text(worker_root)?, "diff", "--cached", "--quiet"])
-            .status()
-            .await?;
+        let status =
+            Command::new("git").args(["-C", path_text(worker_root)?, "diff", "--cached", "--quiet"]).status().await?;
         if !status.success() {
             let mut command = Command::new("git");
             command
@@ -807,10 +763,7 @@ impl WorktreeContext {
                 .stderr(Stdio::piped());
             let output = command.output().await?;
             if !output.status.success() {
-                bail!(
-                    "could not snapshot worker baseline: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                );
+                bail!("could not snapshot worker baseline: {}", String::from_utf8_lossy(&output.stderr).trim());
             }
         }
         Ok(())
@@ -819,8 +772,7 @@ impl WorktreeContext {
     async fn diff(&self, worker_root: &Path) -> Result<String> {
         let scope = git_scope(&self.workspace_relative);
         git(worker_root, &["add", "-N", "--", scope.as_str()], None).await?;
-        let bytes =
-            git(worker_root, &["diff", "--binary", "HEAD", "--", scope.as_str()], None).await?;
+        let bytes = git(worker_root, &["diff", "--binary", "HEAD", "--", scope.as_str()], None).await?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
@@ -858,20 +810,13 @@ fn default_concurrency() -> usize {
 }
 
 fn safe_name(name: &str) -> String {
-    let value: String = name
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
-        .take(24)
-        .collect();
+    let value: String =
+        name.chars().filter(|character| character.is_ascii_alphanumeric() || *character == '-').take(24).collect();
     if value.is_empty() { "worker".into() } else { value }
 }
 
 fn git_scope(relative: &Path) -> String {
-    if relative.as_os_str().is_empty() {
-        ".".into()
-    } else {
-        relative.to_string_lossy().into_owned()
-    }
+    if relative.as_os_str().is_empty() { ".".into() } else { relative.to_string_lossy().into_owned() }
 }
 
 fn path_text(path: &Path) -> Result<&str> {
@@ -973,9 +918,7 @@ fn format_results(results: &[SubagentResult], applied: bool) -> String {
         output.push('\n');
         if let Some(value) = &result.structured {
             output.push_str("```json\n");
-            output.push_str(
-                &serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
-            );
+            output.push_str(&serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()));
             output.push_str("\n```\n");
         }
         if !applied && !result.patch.is_empty() {
@@ -1052,8 +995,7 @@ mod tests {
             None,
             None,
         );
-        let authored =
-            resolve_role(&harness, &task_with_spec(Some("release_auditor"), SubagentRole::Worker));
+        let authored = resolve_role(&harness, &task_with_spec(Some("release_auditor"), SubagentRole::Worker));
         assert_eq!(authored.label, "release_auditor");
         assert!(authored.system_prompt.contains("audit a release branch"));
         // No read_only metadata means it may build, like a worker.
@@ -1066,8 +1008,7 @@ mod tests {
         let harness = crate::harness::HarnessStore::load(dir.path().join("h"), dir.path());
         // The roster is advisory context, so a stale id should cost fidelity,
         // not the task.
-        let resolved =
-            resolve_role(&harness, &task_with_spec(Some("deleted_spec"), SubagentRole::Scout));
+        let resolved = resolve_role(&harness, &task_with_spec(Some("deleted_spec"), SubagentRole::Scout));
         assert_eq!(resolved.label, "scout");
         assert!(resolved.read_only);
 
@@ -1123,8 +1064,7 @@ mod tests {
     fn a_structured_result_is_still_shown_in_the_markdown_report() {
         // Background swarms and mixed swarms deliver prose; the data must not
         // vanish just because the rendering is markdown.
-        let rendered =
-            format_results(&[result("auditor", Some(json!({"verdict": "pass"})), None)], false);
+        let rendered = format_results(&[result("auditor", Some(json!({"verdict": "pass"})), None)], false);
         assert!(rendered.contains("```json"), "{rendered}");
         assert!(rendered.contains("\"verdict\""), "{rendered}");
         assert!(rendered.contains("auditor did the work"));
@@ -1133,14 +1073,8 @@ mod tests {
     #[test]
     fn validates_worker_bounds_and_names() {
         assert!(parse_args(r#"{"tasks":[]}"#).is_err());
-        assert!(
-            parse_args(r#"{"tasks":[{"name":"a","prompt":"x"},{"name":"A","prompt":"y"}]}"#)
-                .is_err()
-        );
-        assert!(
-            parse_args(r#"{"tasks":[{"name":"test","prompt":"verify it"}],"max_concurrency":2}"#)
-                .is_ok()
-        );
+        assert!(parse_args(r#"{"tasks":[{"name":"a","prompt":"x"},{"name":"A","prompt":"y"}]}"#).is_err());
+        assert!(parse_args(r#"{"tasks":[{"name":"test","prompt":"verify it"}],"max_concurrency":2}"#).is_ok());
     }
 
     #[test]

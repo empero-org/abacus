@@ -24,9 +24,7 @@ use ratatui::widgets::{Block, Borders, Padding};
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
-use crate::theme::{
-    self, danger, muted, primary, rail, secondary, success, text as text_color, warning,
-};
+use crate::theme::{self, danger, muted, primary, rail, secondary, success, text as text_color, warning};
 
 /// Content is inset two columns from the marker gutter.
 pub const GUTTER: usize = 2;
@@ -277,9 +275,7 @@ impl GlyphChoice {
             GlyphChoice::Nerd => &Glyphs::NERD,
             GlyphChoice::Ascii => &Glyphs::ASCII,
             GlyphChoice::Auto => {
-                let bare = std::env::var("TERM")
-                    .map(|term| matches!(term.trim(), "dumb" | "linux"))
-                    .unwrap_or(false);
+                let bare = std::env::var("TERM").map(|term| matches!(term.trim(), "dumb" | "linux")).unwrap_or(false);
                 if bare { &Glyphs::ASCII } else { &Glyphs::UNICODE }
             }
         }
@@ -296,9 +292,8 @@ fn glyph_override() -> Option<GlyphChoice> {
     {
         return Some(choice);
     }
-    let forced = std::env::var("ABACUS_ASCII")
-        .map(|value| matches!(value.trim(), "1" | "true" | "yes"))
-        .unwrap_or(false);
+    let forced =
+        std::env::var("ABACUS_ASCII").map(|value| matches!(value.trim(), "1" | "true" | "yes")).unwrap_or(false);
     forced.then_some(GlyphChoice::Ascii)
 }
 
@@ -363,14 +358,11 @@ pub fn shimmer(text: &str, elapsed: std::time::Duration, animated: bool) -> Vec<
             let mut style = match blend {
                 Some(((br, bg, bb), (tr, tg, tb))) => {
                     let mix = |from: u8, to: u8| {
-                        (f64::from(from) + (f64::from(to) - f64::from(from)) * intensity).round()
-                            as u8
+                        (f64::from(from) + (f64::from(to) - f64::from(from)) * intensity).round() as u8
                     };
                     Style::default().fg(Color::Rgb(mix(br, tr), mix(bg, tg), mix(bb, tb)))
                 }
-                None if intensity < 0.33 => {
-                    Style::default().fg(palette.muted).add_modifier(Modifier::DIM)
-                }
+                None if intensity < 0.33 => Style::default().fg(palette.muted).add_modifier(Modifier::DIM),
                 None => Style::default().fg(palette.text),
             };
             if intensity > 0.85 {
@@ -406,11 +398,7 @@ pub fn bold<'a>(text: impl Into<std::borrow::Cow<'a, str>>, color: Color) -> Spa
 
 /// Label style for a list row: bright and bold under the cursor, muted elsewhere.
 pub fn emphasis(selected: bool) -> Style {
-    if selected {
-        Style::default().fg(text_color()).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(muted())
-    }
+    if selected { Style::default().fg(text_color()).add_modifier(Modifier::BOLD) } else { Style::default().fg(muted()) }
 }
 
 // ---------------------------------------------------------------------------
@@ -490,10 +478,7 @@ pub fn rule(width: u16) -> Line<'static> {
 pub fn meter(percent: u16, cells: usize, color: Color) -> Vec<Span<'static>> {
     let set = glyphs();
     let filled = ((percent as usize * cells) / 100).min(cells);
-    vec![
-        fg(set.meter_full.repeat(filled), color),
-        fg(set.meter_empty.repeat(cells - filled), rail()),
-    ]
+    vec![fg(set.meter_full.repeat(filled), color), fg(set.meter_empty.repeat(cells - filled), rail())]
 }
 
 /// Truncate to `max` display columns, appending `…` when it doesn't fit. Width
@@ -908,8 +893,7 @@ pub fn wrap(
     rows.into_iter()
         .enumerate()
         .map(|(index, cells)| {
-            let mut line: Vec<Span<'static>> =
-                if index == 0 { first.to_vec() } else { cont.to_vec() };
+            let mut line: Vec<Span<'static>> = if index == 0 { first.to_vec() } else { cont.to_vec() };
             // Regroup consecutive cells that share a style back into spans, so
             // the buffer sees a handful of runs instead of one span per char.
             let mut current = String::new();
@@ -1086,12 +1070,8 @@ pub fn transcript(
                     lines.extend(tool_block(call, width, spinner, selected));
                 }
             }
-            EntryKind::System => {
-                lines.extend(notice_block(&entry.text, width, muted(), glyphs().notice))
-            }
-            EntryKind::Error => {
-                lines.extend(notice_block(&entry.text, width, danger(), glyphs().failed))
-            }
+            EntryKind::System => lines.extend(notice_block(&entry.text, width, muted(), glyphs().notice)),
+            EntryKind::Error => lines.extend(notice_block(&entry.text, width, danger(), glyphs().failed)),
             EntryKind::Rule => lines.push(rule_line(&entry.text, width)),
         }
         // Selected blocks are deliberately not tinted. A click used to paint a
@@ -1126,8 +1106,7 @@ fn user_block(body: &str, width: usize) -> Vec<Line<'static>> {
     let pad_row = || Line::from(Span::styled(" ".repeat(width), Style::default().bg(tint)));
     let mut card = vec![pad_row()];
     for mut line in lines {
-        let used: usize =
-            line.spans.iter().map(|span| UnicodeWidthStr::width(span.content.as_ref())).sum();
+        let used: usize = line.spans.iter().map(|span| UnicodeWidthStr::width(span.content.as_ref())).sum();
         for span in &mut line.spans {
             span.style = span.style.bg(tint);
         }
@@ -1226,11 +1205,8 @@ fn tool_block(call: &ToolCall, width: usize, spinner: &str, selected: bool) -> V
     let name_width = UnicodeWidthStr::width(call.name.as_str());
     let right_width = UnicodeWidthStr::width(right.as_str());
     let fixed = 2 + name_width + 2 + right_width + 1;
-    let summary = if call.summary.is_empty() || inner <= fixed {
-        String::new()
-    } else {
-        truncate(&call.summary, inner - fixed)
-    };
+    let summary =
+        if call.summary.is_empty() || inner <= fixed { String::new() } else { truncate(&call.summary, inner - fixed) };
     let used = 2 + name_width + 2 + UnicodeWidthStr::width(summary.as_str());
     let pad = inner.saturating_sub(used + right_width).max(1);
 
@@ -1243,14 +1219,8 @@ fn tool_block(call: &ToolCall, width: usize, spinner: &str, selected: bool) -> V
 
     let mut header = vec![
         Span::styled(" ".repeat(GUTTER), tint(Style::default())),
-        Span::styled(
-            format!("{glyph} "),
-            tint(Style::default().fg(color).add_modifier(Modifier::BOLD)),
-        ),
-        Span::styled(
-            call.name.clone(),
-            tint(Style::default().fg(text_color()).add_modifier(Modifier::BOLD)),
-        ),
+        Span::styled(format!("{glyph} "), tint(Style::default().fg(color).add_modifier(Modifier::BOLD))),
+        Span::styled(call.name.clone(), tint(Style::default().fg(text_color()).add_modifier(Modifier::BOLD))),
     ];
     if !summary.is_empty() {
         header.push(Span::styled("  ", tint(Style::default())));
@@ -1262,11 +1232,8 @@ fn tool_block(call: &ToolCall, width: usize, spinner: &str, selected: bool) -> V
     }
 
     let mut lines = vec![Line::from(header)];
-    let body_style = if call.status == ToolStatus::Failed {
-        Style::default().fg(danger())
-    } else {
-        Style::default().fg(muted())
-    };
+    let body_style =
+        if call.status == ToolStatus::Failed { Style::default().fg(danger()) } else { Style::default().fg(muted()) };
     let body = if call.expanded { &call.full } else { &call.output };
     let indent = GUTTER + 2;
     let measure = width.saturating_sub(indent);
@@ -1275,10 +1242,7 @@ fn tool_block(call: &ToolCall, width: usize, spinner: &str, selected: bool) -> V
             continue;
         }
         if lines.len() > MAX_EXPANDED_ROWS {
-            lines.push(Line::from(vec![
-                Span::raw(" ".repeat(indent)),
-                fg("… output truncated".to_owned(), rail()),
-            ]));
+            lines.push(Line::from(vec![Span::raw(" ".repeat(indent)), fg("… output truncated".to_owned(), rail())]));
             break;
         }
         if call.expanded {
@@ -1380,17 +1344,11 @@ pub fn welcome(info: &Welcome<'_>, width: usize) -> Vec<Line<'static>> {
             ("Goal", "/goal sets a persistent definition of done.", primary()),
             ("Loop", "/loop runs promise-driven iteration.", secondary()),
         ] {
-            lines.push(Line::from(vec![
-                bold(format!("{key:<7}"), color),
-                fg(label.to_owned(), muted()),
-            ]));
+            lines.push(Line::from(vec![bold(format!("{key:<7}"), color), fg(label.to_owned(), muted())]));
         }
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(fg(
-        "Type / for commands  ·  @file to attach context  ·  F1 for help",
-        rail(),
-    )));
+    lines.push(Line::from(fg("Type / for commands  ·  @file to attach context  ·  F1 for help", rail())));
     lines
 }
 
@@ -1416,13 +1374,9 @@ mod tests {
         let lines = user_block("hello there", 40);
         assert!(lines.len() >= 3, "padding row above and below the text");
         for line in &lines {
-            let width: usize =
-                line.spans.iter().map(|span| UnicodeWidthStr::width(span.content.as_ref())).sum();
+            let width: usize = line.spans.iter().map(|span| UnicodeWidthStr::width(span.content.as_ref())).sum();
             assert_eq!(width, 40, "every row pads to the measure: {:?}", plain(line));
-            assert!(
-                line.spans.iter().all(|span| span.style.bg == Some(tint)),
-                "every span carries the tint"
-            );
+            assert!(line.spans.iter().all(|span| span.style.bg == Some(tint)), "every span carries the tint");
         }
         assert_eq!(plain(&lines[0]).trim(), "", "top padding row is blank");
         assert!(plain(&lines[1]).contains("hello there"));
@@ -1438,8 +1392,7 @@ mod tests {
             assert!(plain(line).starts_with("▌ "), "{:?}", plain(line));
             assert!(spans_width(&line.spans) <= 14, "{:?}", plain(line));
         }
-        let joined: String =
-            lines.iter().map(|line| plain(line).replace("▌ ", "")).collect::<Vec<_>>().join(" ");
+        let joined: String = lines.iter().map(|line| plain(line).replace("▌ ", "")).collect::<Vec<_>>().join(" ");
         assert_eq!(joined, "alpha beta gamma delta");
     }
 
@@ -1481,8 +1434,7 @@ mod tests {
 
     #[test]
     fn running_tools_show_the_spinner_and_finished_tools_the_duration() {
-        let running =
-            transcript(&[Entry::tool(ToolCall::running("grep", "fn parse"))], 60, "⠹", None, true);
+        let running = transcript(&[Entry::tool(ToolCall::running("grep", "fn parse"))], 60, "⠹", None, true);
         let row = plain(&running.lines[0]);
         assert!(row.contains('⠹'), "{row}");
         assert!(row.trim_end().ends_with("running"), "{row}");
@@ -1505,13 +1457,8 @@ mod tests {
 
     #[test]
     fn consecutive_tool_rows_group_without_a_blank_between_them() {
-        let call = || {
-            Entry::tool(ToolCall {
-                status: ToolStatus::Ok,
-                duration_ms: Some(5),
-                ..ToolCall::running("grep", "")
-            })
-        };
+        let call =
+            || Entry::tool(ToolCall { status: ToolStatus::Ok, duration_ms: Some(5), ..ToolCall::running("grep", "") });
         let text = transcript(&[call(), call()], 60, "⠋", None, true);
         assert_eq!(text.lines.len(), 2, "tool rows should not be separated");
     }
@@ -1568,8 +1515,7 @@ mod tests {
 
     #[test]
     fn metric_columns_collapse_one_at_a_time() {
-        let rows =
-            [vec!["200k ctx".to_owned(), String::new()], vec!["1m ctx".to_owned(), String::new()]];
+        let rows = [vec!["200k ctx".to_owned(), String::new()], vec!["1m ctx".to_owned(), String::new()]];
         let widths = metric_widths(rows.iter().map(Vec::as_slice), 2);
         assert_eq!(widths, vec![8, 0], "the empty column collapses to nothing");
         assert_eq!(metrics_width(&widths), 8, "and takes its gap with it");
@@ -1584,11 +1530,7 @@ mod tests {
         let joined = plain(&line);
         assert!(joined.contains("200k ctx"));
         assert!(joined.contains("reasoning"));
-        assert_eq!(
-            joined.matches(glyphs().separator).count(),
-            1,
-            "one separator, not two: {joined:?}"
-        );
+        assert_eq!(joined.matches(glyphs().separator).count(), 1, "one separator, not two: {joined:?}");
     }
 
     /// Every Nerd Font glyph must measure exactly one cell.
@@ -1715,10 +1657,9 @@ mod tests {
         // The bracket marks hold a column rather than a cell, so they are
         // checked at their own width instead of against the one-cell rule.
         // The Nerd preset spends one cell on them and is checked below.
-        for (name, rich, plain) in [
-            ("enabled", unicode.enabled, ascii.enabled),
-            ("disabled", unicode.disabled, ascii.disabled),
-        ] {
+        for (name, rich, plain) in
+            [("enabled", unicode.enabled, ascii.enabled), ("disabled", unicode.disabled, ascii.disabled)]
+        {
             assert_eq!(
                 UnicodeWidthStr::width(rich),
                 UnicodeWidthStr::width(plain),

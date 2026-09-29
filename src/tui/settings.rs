@@ -16,11 +16,7 @@ pub(super) const SETTINGS: &[(&str, &[Setting])] = &[
                 "Active profile",
                 "Which stored provider profile this session talks to. Enter to switch, r to rename, d to delete, n to add.",
             ),
-            typed(
-                ConfigKey::Model,
-                "Model",
-                "Model ID sent to the provider. /model lists what the endpoint offers.",
-            ),
+            typed(ConfigKey::Model, "Model", "Model ID sent to the provider. /model lists what the endpoint offers."),
             typed(
                 ConfigKey::AuxModel,
                 "Auxiliary model",
@@ -31,11 +27,7 @@ pub(super) const SETTINGS: &[(&str, &[Setting])] = &[
                 "Reasoning effort",
                 "How hard the model thinks: minimal, low, medium, high — or blank to leave it to the provider. Models without reasoning ignore it.",
             ),
-            typed(
-                ConfigKey::BaseUrl,
-                "Provider URL",
-                "OpenAI-compatible endpoint, including the /v1 suffix.",
-            ),
+            typed(ConfigKey::BaseUrl, "Provider URL", "OpenAI-compatible endpoint, including the /v1 suffix."),
             toggled(
                 ConfigKey::Protocol,
                 "Wire protocol",
@@ -76,16 +68,8 @@ pub(super) const SETTINGS: &[(&str, &[Setting])] = &[
                 "Permission mode",
                 "Ask before every mutation, or allow them for the session.",
             ),
-            typed(
-                ConfigKey::MaxSteps,
-                "Maximum agent steps",
-                "How many tool calls one turn may make before it stops.",
-            ),
-            typed(
-                ConfigKey::ToolOutputLimit,
-                "Tool output limit",
-                "Characters of tool output kept before truncation.",
-            ),
+            typed(ConfigKey::MaxSteps, "Maximum agent steps", "How many tool calls one turn may make before it stops."),
+            typed(ConfigKey::ToolOutputLimit, "Tool output limit", "Characters of tool output kept before truncation."),
             toggled(
                 ConfigKey::ProjectTrust,
                 "Trust this project",
@@ -161,16 +145,8 @@ pub(super) const SETTINGS: &[(&str, &[Setting])] = &[
                 "Show tokens/second",
                 "Show a live generation rate while a turn runs. Estimated.",
             ),
-            toggled(
-                ConfigKey::Animations,
-                "Animations",
-                "Spinners and the wave on running tool calls.",
-            ),
-            toggled(
-                ConfigKey::Tooltips,
-                "Welcome tips",
-                "The guidance block on the welcome screen.",
-            ),
+            toggled(ConfigKey::Animations, "Animations", "Spinners and the wave on running tool calls."),
+            toggled(ConfigKey::Tooltips, "Welcome tips", "The guidance block on the welcome screen."),
             toggled(
                 ConfigKey::DraftReplies,
                 "Draft next message",
@@ -196,21 +172,13 @@ pub(super) const SETTINGS: &[(&str, &[Setting])] = &[
     (
         "PRIVACY",
         &[
-            toggled(
-                ConfigKey::FeedbackEnabled,
-                "Feedback",
-                "Whether /feedback is available at all.",
-            ),
+            toggled(ConfigKey::FeedbackEnabled, "Feedback", "Whether /feedback is available at all."),
             toggled(
                 ConfigKey::FeedbackDiagnostics,
                 "Feedback diagnostics",
                 "Attach extension diagnostics to feedback. Never your transcript.",
             ),
-            typed(
-                ConfigKey::FeedbackEndpoint,
-                "Feedback endpoint",
-                "Where /feedback submissions are sent.",
-            ),
+            typed(ConfigKey::FeedbackEndpoint, "Feedback endpoint", "Where /feedback submissions are sent."),
         ],
     ),
     (
@@ -279,8 +247,7 @@ pub(super) fn on_off(value: bool) -> String {
 impl App {
     pub(super) fn open_config(&mut self, argument: &str) {
         if self.running.is_some() {
-            self.status =
-                "finish or interrupt the active turn before changing configuration".to_owned();
+            self.status = "finish or interrupt the active turn before changing configuration".to_owned();
             return;
         }
         if argument.trim() == "raw" {
@@ -308,13 +275,9 @@ impl App {
         };
         let content = editor.input.text();
         let result = (|| {
-            let mut settings: Settings =
-                toml::from_str(&content).context("configuration is not valid TOML")?;
+            let mut settings: Settings = toml::from_str(&content).context("configuration is not valid TOML")?;
             if settings.version > SETTINGS_VERSION {
-                bail!(
-                    "configuration version {} is newer than supported version {SETTINGS_VERSION}",
-                    settings.version
-                );
+                bail!("configuration version {} is newer than supported version {SETTINGS_VERSION}", settings.version);
             }
             settings.version = SETTINGS_VERSION;
             validate_settings(&settings)?;
@@ -339,12 +302,7 @@ impl App {
     pub(super) fn apply_settings(&mut self) -> Result<()> {
         validate_settings(&self.settings)?;
         let profile_name = self.settings.default_profile.clone();
-        let profile = self
-            .settings
-            .profiles
-            .get(&profile_name)
-            .context("default profile no longer exists")?
-            .clone();
+        let profile = self.settings.profiles.get(&profile_name).context("default profile no longer exists")?.clone();
         let prior_profile = self.config.profile.clone();
         let prior_key = self.config.api_key.clone();
         self.config.profile = profile_name.clone();
@@ -358,10 +316,8 @@ impl App {
         self.config.aux_model = profile.aux_model.clone().filter(|model| !model.trim().is_empty());
         self.config.reasoning_effort = profile.reasoning_effort;
         // Pins take effect on the running session, not on the next launch.
-        self.config.routing = crate::config::Routing {
-            order: profile.providers.clone(),
-            allow_fallbacks: profile.allow_fallbacks,
-        };
+        self.config.routing =
+            crate::config::Routing { order: profile.providers.clone(), allow_fallbacks: profile.allow_fallbacks };
         self.config.base_url = profile.base_url.trim_end_matches('/').to_owned();
         self.config.protocol = profile.protocol;
         // Re-resolve the scripted endpoint for the new profile — without this a
@@ -370,10 +326,7 @@ impl App {
         // "switched" profile kept talking to the previous endpoint.
         self.config.endpoint = match &profile.endpoint {
             Some(reference) => {
-                match crate::endpoint::ScriptedEndpoint::resolve(
-                    reference,
-                    &self.config.paths.endpoints_dir,
-                ) {
+                match crate::endpoint::ScriptedEndpoint::resolve(reference, &self.config.paths.endpoints_dir) {
                     Ok(endpoint) => {
                         // A scripted endpoint is the authority on its own URL,
                         // protocol, and (when the profile omits it) model.
@@ -417,9 +370,7 @@ impl App {
             || self.config.model_limits.source == crate::model_info::LimitSource::Override
         {
             self.config.model_limits = crate::model_info::ModelLimits::resolve_from_name(
-                &self.config.model,
-                context_override,
-                output_override,
+                &self.config.model, context_override, output_override,
             );
         }
         let always = self.settings.ui.permission_mode == PermissionMode::AlwaysApprove;
@@ -441,8 +392,7 @@ impl App {
         // The interface's own appearance travels with the settings too, so a
         // theme edited through the raw config file takes effect on save
         // rather than on next launch.
-        let (theme, theme_error) =
-            crate::theme::resolve(&self.settings.ui.theme, &self.config.paths.themes_dir);
+        let (theme, theme_error) = crate::theme::resolve(&self.settings.ui.theme, &self.config.paths.themes_dir);
         crate::theme::set_active(theme);
         crate::ui::set_glyphs(self.settings.ui.glyphs);
         if let Some(error) = theme_error {
@@ -481,12 +431,11 @@ impl App {
                 };
             }
             ConfigKey::Permission => {
-                self.settings.ui.permission_mode =
-                    if self.settings.ui.permission_mode == PermissionMode::Ask {
-                        PermissionMode::AlwaysApprove
-                    } else {
-                        PermissionMode::Ask
-                    };
+                self.settings.ui.permission_mode = if self.settings.ui.permission_mode == PermissionMode::Ask {
+                    PermissionMode::AlwaysApprove
+                } else {
+                    PermissionMode::Ask
+                };
             }
             ConfigKey::SearchEnabled => {
                 toggle(&mut self.settings.search.enabled);
@@ -512,10 +461,7 @@ impl App {
                 let mut names = vec!["auto".to_owned(), "dark".to_owned(), "light".to_owned()];
                 names.extend(crate::theme::available(&self.config.paths.themes_dir));
                 let current = self.settings.ui.theme.label().to_owned();
-                let next = names
-                    .iter()
-                    .position(|name| *name == current)
-                    .map_or(0, |index| (index + 1) % names.len());
+                let next = names.iter().position(|name| *name == current).map_or(0, |index| (index + 1) % names.len());
                 let choice = crate::theme::ThemeChoice::parse(&names[next]);
                 let (theme, error) = crate::theme::resolve(&choice, &self.config.paths.themes_dir);
                 crate::theme::set_active(theme);
@@ -571,9 +517,7 @@ impl App {
                 self.settings.trust.set(&self.config.workspace, !trusted);
             }
             ConfigKey::FeedbackEnabled => toggle(&mut self.settings.feedback.enabled),
-            ConfigKey::FeedbackDiagnostics => {
-                toggle(&mut self.settings.feedback.include_diagnostics)
-            }
+            ConfigKey::FeedbackDiagnostics => toggle(&mut self.settings.feedback.include_diagnostics),
             ConfigKey::AdvancedToml => {
                 self.open_raw_config();
                 return Ok(());
@@ -586,10 +530,7 @@ impl App {
     }
 
     pub(super) fn active_profile_mut(&mut self) -> Result<&mut crate::config::ProviderProfile> {
-        self.settings
-            .profiles
-            .get_mut(&self.settings.default_profile)
-            .context("default profile does not exist")
+        self.settings.profiles.get_mut(&self.settings.default_profile).context("default profile does not exist")
     }
 
     /// Re-resolve the search backend after a settings change.
@@ -641,9 +582,7 @@ impl App {
                     && !matches!(trimmed.to_ascii_lowercase().as_str(), "auto" | "default")
                     && parsed.is_none()
                 {
-                    Err(anyhow::anyhow!(
-                        "effort must be minimal, low, medium, high, xhigh, max, or auto"
-                    ))
+                    Err(anyhow::anyhow!("effort must be minimal, low, medium, high, xhigh, max, or auto"))
                 } else {
                     self.active_profile_mut().map(|profile| {
                         profile.reasoning_effort = parsed;
@@ -653,20 +592,16 @@ impl App {
             ConfigKey::SearchInstanceUrl => {
                 let trimmed = value.trim().trim_end_matches('/');
                 if !trimmed.is_empty() && !trimmed.starts_with("http") {
-                    Err(anyhow::anyhow!(
-                        "a SearXNG URL needs its scheme, e.g. http://localhost:8888"
-                    ))
+                    Err(anyhow::anyhow!("a SearXNG URL needs its scheme, e.g. http://localhost:8888"))
                 } else {
-                    self.settings.search.instance_url =
-                        (!trimmed.is_empty()).then(|| trimmed.to_owned());
+                    self.settings.search.instance_url = (!trimmed.is_empty()).then(|| trimmed.to_owned());
                     self.apply_search_settings();
                     Ok(())
                 }
             }
             ConfigKey::SearchApiKeyEnv => {
                 let trimmed = value.trim();
-                self.settings.search.api_key_env =
-                    (!trimmed.is_empty()).then(|| trimmed.to_owned());
+                self.settings.search.api_key_env = (!trimmed.is_empty()).then(|| trimmed.to_owned());
                 self.apply_search_settings();
                 Ok(())
             }
@@ -677,15 +612,13 @@ impl App {
                 profile.providers = crate::config::Routing::parse_order(&value);
             }),
             ConfigKey::MaxSteps => {
-                value.trim().parse::<usize>().context("max steps must be a number").and_then(
-                    |number| {
-                        if !(1..=128).contains(&number) {
-                            bail!("max steps must be between 1 and 128");
-                        }
-                        self.settings.agent.max_steps = number;
-                        Ok(())
-                    },
-                )
+                value.trim().parse::<usize>().context("max steps must be a number").and_then(|number| {
+                    if !(1..=128).contains(&number) {
+                        bail!("max steps must be between 1 and 128");
+                    }
+                    self.settings.agent.max_steps = number;
+                    Ok(())
+                })
             }
             // Blank returns the limit to auto-resolution; a value (with `k`/`m`
             // suffixes accepted) becomes a hard override sent to the provider.
@@ -702,22 +635,18 @@ impl App {
                 self.settings.agent.max_output_tokens = None;
                 Ok(())
             }),
-            ConfigKey::ToolOutputLimit => value
-                .trim()
-                .parse::<usize>()
-                .context("tool output limit must be a number")
-                .and_then(|number| {
+            ConfigKey::ToolOutputLimit => {
+                value.trim().parse::<usize>().context("tool output limit must be a number").and_then(|number| {
                     if !(2_000..=200_000).contains(&number) {
                         bail!("tool output limit must be between 2000 and 200000");
                     }
                     self.settings.agent.tool_output_limit = number;
                     Ok(())
-                }),
-            ConfigKey::FeedbackEndpoint => {
-                crate::feedback::FeedbackClient::new(value.trim()).map(|_| {
-                    self.settings.feedback.endpoint = value.trim().to_owned();
                 })
             }
+            ConfigKey::FeedbackEndpoint => crate::feedback::FeedbackClient::new(value.trim()).map(|_| {
+                self.settings.feedback.endpoint = value.trim().to_owned();
+            }),
             // The key goes to credentials.toml, which is written separately
             // from settings and kept owner-only.
             ConfigKey::ApiKey => {
@@ -761,23 +690,16 @@ impl App {
                 .map(|effort| effort.label().to_owned())
                 .unwrap_or_else(|| "auto".to_owned()),
             ConfigKey::BaseUrl => profile.map(|value| value.base_url.clone()).unwrap_or_default(),
-            ConfigKey::Protocol => {
-                profile.map(|value| format!("{:?}", value.protocol)).unwrap_or_default()
-            }
+            ConfigKey::Protocol => profile.map(|value| format!("{:?}", value.protocol)).unwrap_or_default(),
             ConfigKey::Providers => {
                 let pinned = profile.map(|profile| profile.providers.clone()).unwrap_or_default();
-                if pinned.is_empty() {
-                    "any (endpoint chooses)".to_owned()
-                } else {
-                    pinned.join(", ")
-                }
+                if pinned.is_empty() { "any (endpoint chooses)".to_owned() } else { pinned.join(", ") }
             }
             ConfigKey::Fallbacks => on_off(profile.is_none_or(|profile| profile.allow_fallbacks)),
             // Report where the credential comes from, never the credential.
             ConfigKey::ApiKey => {
                 let env = profile.and_then(|value| value.api_key_env.as_deref());
-                let in_env =
-                    env.is_some_and(|name| std::env::var(name).is_ok_and(|v| !v.trim().is_empty()));
+                let in_env = env.is_some_and(|name| std::env::var(name).is_ok_and(|v| !v.trim().is_empty()));
                 if in_env {
                     format!("set · {} from environment", env.unwrap_or_default())
                 } else if self
@@ -807,11 +729,8 @@ impl App {
                 if choice == crate::ui::GlyphChoice::Auto {
                     // `auto` alone does not say what you are looking at, and
                     // the difference is the whole reason to open this row.
-                    let resolved = if std::ptr::eq(choice.resolve(), &crate::ui::Glyphs::ASCII) {
-                        "ascii"
-                    } else {
-                        "unicode"
-                    };
+                    let resolved =
+                        if std::ptr::eq(choice.resolve(), &crate::ui::Glyphs::ASCII) { "ascii" } else { "unicode" };
                     format!("auto · {resolved}")
                 } else {
                     choice.label().to_owned()
@@ -859,8 +778,7 @@ impl App {
             ConfigKey::OneStream => on_off(self.settings.agent.one_stream),
             ConfigKey::CheckUpdates => on_off(self.settings.ui.check_updates),
             ConfigKey::SafetyModel => {
-                if self.settings.ui.safety_uses_main { "Main model" } else { "Auxiliary model" }
-                    .to_owned()
+                if self.settings.ui.safety_uses_main { "Main model" } else { "Auxiliary model" }.to_owned()
             }
             ConfigKey::TraceLogging => match (&self.trace, self.settings.trace.enabled) {
                 (Some(trace), true) => format!("On · {} records", trace.steps()),
@@ -916,11 +834,8 @@ impl App {
         };
         // Only roll back a profile that is still unusable; if the user gave it
         // a model by another route, leave it alone.
-        let unfinished = self
-            .settings
-            .profiles
-            .get(&pending.profile)
-            .is_some_and(|profile| profile.model.trim().is_empty());
+        let unfinished =
+            self.settings.profiles.get(&pending.profile).is_some_and(|profile| profile.model.trim().is_empty());
         if !unfinished {
             return;
         }
@@ -976,10 +891,7 @@ impl App {
                 format!("{ENDPOINT_SENTINEL_PREFIX}{name}"),
             ));
         }
-        items.push((
-            "  Custom OpenAI-compatible endpoint".to_owned(),
-            CUSTOM_PROVIDER_SENTINEL.to_owned(),
-        ));
+        items.push(("  Custom OpenAI-compatible endpoint".to_owned(), CUSTOM_PROVIDER_SENTINEL.to_owned()));
         self.picker = Some(Picker {
             title: "provider".to_owned(),
             items,
@@ -1021,9 +933,7 @@ impl App {
         self.picker = None;
         match action {
             PickerAction::ResumeSession => self.resume_session(&value),
-            PickerAction::SwitchProfile if value == NEW_PROVIDER_SENTINEL => {
-                self.open_provider_picker()
-            }
+            PickerAction::SwitchProfile if value == NEW_PROVIDER_SENTINEL => self.open_provider_picker(),
             PickerAction::SwitchProfile => {
                 self.settings.default_profile = value.clone();
                 if let Err(error) = self.save_and_apply_settings() {
@@ -1090,8 +1000,7 @@ impl App {
         if self.settings.profiles.contains_key(&to) {
             bail!("a profile named `{to}` already exists");
         }
-        let mut profile =
-            self.settings.profiles.remove(from).context("that profile no longer exists")?;
+        let mut profile = self.settings.profiles.remove(from).context("that profile no longer exists")?;
         if profile.name == from {
             profile.name = to.clone();
         }
@@ -1128,8 +1037,7 @@ impl App {
         self.credentials.keys.remove(id);
         self.credentials.save(&self.config.paths)?;
         if self.settings.default_profile == id {
-            let next =
-                self.settings.profiles.keys().next().cloned().context("no remaining profile")?;
+            let next = self.settings.profiles.keys().next().cloned().context("no remaining profile")?;
             self.settings.default_profile = next;
         }
         if let Some(pending) = &self.pending_provider
@@ -1200,10 +1108,8 @@ impl App {
             .find(|candidate| !self.settings.profiles.contains_key(candidate))
             .expect("an unused suffix exists");
         let (name, ready) = (profile.name.clone(), !profile.model.trim().is_empty());
-        let key = profile
-            .api_key_env
-            .clone()
-            .filter(|name| !std::env::var(name).is_ok_and(|value| !value.trim().is_empty()));
+        let key =
+            profile.api_key_env.clone().filter(|name| !std::env::var(name).is_ok_and(|value| !value.trim().is_empty()));
         self.settings.profiles.insert(profile_id.clone(), profile);
         let previous = std::mem::replace(&mut self.settings.default_profile, profile_id.clone());
 

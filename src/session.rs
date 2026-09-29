@@ -50,13 +50,9 @@ impl SessionState {
         }
         Self {
             goal: crate::goal::GoalState::new(session.and_then(|session| session.goal.clone())),
-            tasks: crate::task::TaskList::new(
-                session.map(|session| session.tasks.clone()).unwrap_or_default(),
-            ),
+            tasks: crate::task::TaskList::new(session.map(|session| session.tasks.clone()).unwrap_or_default()),
             compaction: session.and_then(|session| session.compaction.clone()).unwrap_or_default(),
-            tether: crate::tether::TetherState::new(
-                session.and_then(|session| session.intent.clone()),
-            ),
+            tether: crate::tether::TetherState::new(session.and_then(|session| session.intent.clone())),
             harness,
             handles: Default::default(),
             injections: Default::default(),
@@ -150,9 +146,10 @@ impl Session {
         self.messages = messages;
         self.updated_at = Utc::now();
         if self.title == "New session"
-            && let Some(prompt) = self.messages.iter().find_map(|message| {
-                (message["role"] == "user").then(|| message["content"].as_str()).flatten()
-            })
+            && let Some(prompt) = self
+                .messages
+                .iter()
+                .find_map(|message| (message["role"] == "user").then(|| message["content"].as_str()).flatten())
         {
             self.title = title_from_prompt(prompt);
         }
@@ -225,10 +222,8 @@ impl SessionStore {
 
     pub fn load(&self, id_or_prefix: &str) -> Result<Session> {
         let summaries = self.list()?;
-        let matches = summaries
-            .iter()
-            .filter(|session| session.id.to_string().starts_with(id_or_prefix))
-            .collect::<Vec<_>>();
+        let matches =
+            summaries.iter().filter(|session| session.id.to_string().starts_with(id_or_prefix)).collect::<Vec<_>>();
         match matches.as_slice() {
             [] => bail!("no session matches `{id_or_prefix}`"),
             [session] => self.load_exact(session.id),
@@ -333,10 +328,8 @@ impl SessionStore {
 
     fn load_exact(&self, id: Uuid) -> Result<Session> {
         let path = self.path(id);
-        let content = fs::read(&path)
-            .with_context(|| format!("could not read session {}", path.display()))?;
-        let mut session: Session =
-            serde_json::from_slice(&content).context("invalid session file")?;
+        let content = fs::read(&path).with_context(|| format!("could not read session {}", path.display()))?;
+        let mut session: Session = serde_json::from_slice(&content).context("invalid session file")?;
         if session.version > SESSION_VERSION {
             bail!("session requires a newer version of Abacus");
         }
@@ -499,16 +492,13 @@ mod tests {
         fs::create_dir(&workspace).unwrap();
         let paths = AbacusPaths::under(dir.path().join("home"));
         let store = SessionStore::new(&paths, workspace.canonicalize().unwrap());
-        let mut session = store
-            .create("local".into(), "model".into(), vec![json!({"role":"system","content":"x"})])
-            .unwrap();
+        let mut session =
+            store.create("local".into(), "model".into(), vec![json!({"role":"system","content":"x"})]).unwrap();
         session.update_messages(vec![
             json!({"role":"system","content":"x"}),
             json!({"role":"user","content":"Fix the parser without changing its API"}),
         ]);
-        session.ralph_loop = Some(
-            crate::ralph::RalphLoop::new("Keep fixing".into(), "DONE".into(), Some(5)).unwrap(),
-        );
+        session.ralph_loop = Some(crate::ralph::RalphLoop::new("Keep fixing".into(), "DONE".into(), Some(5)).unwrap());
         session.tokens_used = 12_345;
         session.active_secs = 3_661;
         store.save(&session).unwrap();

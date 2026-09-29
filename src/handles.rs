@@ -147,11 +147,7 @@ impl HandleStore {
         let mut inner = self.inner.write().expect("handle lock");
         inner.next += 1;
         let id = format!("h{}", inner.next);
-        let handle = Handle {
-            id: id.clone(),
-            source: source.chars().take(200).collect(),
-            content: Arc::new(content),
-        };
+        let handle = Handle { id: id.clone(), source: source.chars().take(200).collect(), content: Arc::new(content) };
         inner.resident += handle.content.len();
         inner.handles.insert(id.clone(), handle.clone());
         inner.order.push(id);
@@ -269,9 +265,7 @@ impl HandleStore {
     }
 
     fn handle_from(&self, id: &str) -> Result<Handle> {
-        self.get(id).with_context(|| {
-            format!("no bound payload `{id}` — use handle_list to see what exists")
-        })
+        self.get(id).with_context(|| format!("no bound payload `{id}` — use handle_list to see what exists"))
     }
 
     fn info(&self, arguments: &str) -> Result<String> {
@@ -279,8 +273,7 @@ impl HandleStore {
         struct Args {
             id: String,
         }
-        let args: Args =
-            serde_json::from_str(arguments).context("invalid handle_info arguments")?;
+        let args: Args = serde_json::from_str(arguments).context("invalid handle_info arguments")?;
         let handle = self.handle_from(&args.id)?;
         let lines: Vec<&str> = handle.content.lines().collect();
         let head: Vec<&str> = lines.iter().take(10).copied().collect();
@@ -304,8 +297,7 @@ impl HandleStore {
             start_line: Option<usize>,
             end_line: Option<usize>,
         }
-        let args: Args =
-            serde_json::from_str(arguments).context("invalid handle_slice arguments")?;
+        let args: Args = serde_json::from_str(arguments).context("invalid handle_slice arguments")?;
         let handle = self.handle_from(&args.id)?;
         let lines: Vec<&str> = handle.content.lines().collect();
         let start = args.start_line.unwrap_or(1).max(1);
@@ -337,11 +329,9 @@ impl HandleStore {
             pattern: String,
             context: Option<usize>,
         }
-        let args: Args =
-            serde_json::from_str(arguments).context("invalid handle_grep arguments")?;
+        let args: Args = serde_json::from_str(arguments).context("invalid handle_grep arguments")?;
         let handle = self.handle_from(&args.id)?;
-        let regex = regex::Regex::new(&args.pattern)
-            .with_context(|| format!("invalid regex `{}`", args.pattern))?;
+        let regex = regex::Regex::new(&args.pattern).with_context(|| format!("invalid regex `{}`", args.pattern))?;
         let lines: Vec<&str> = handle.content.lines().collect();
         let context = args.context.unwrap_or(0).min(10);
 
@@ -389,10 +379,7 @@ impl HandleStore {
         }
         let chunks = chunks.clamp(1, MAX_CHUNKS).min(lines.len());
         let per = lines.len().div_ceil(chunks);
-        lines
-            .chunks(per)
-            .map(|group| crate::text::clip(&group.join("\n"), MAX_CHUNK_CHARS, "\n… truncated"))
-            .collect()
+        lines.chunks(per).map(|group| crate::text::clip(&group.join("\n"), MAX_CHUNK_CHARS, "\n… truncated")).collect()
     }
 
     fn spend(&self, calls: usize) -> Result<()> {
@@ -413,12 +400,7 @@ impl HandleStore {
 /// Depth is one by construction: a sub-call is a bare model call with no tools,
 /// so it cannot recurse. That is the paper's own choice, and it is what keeps a
 /// fan-out from becoming a fan-out of fan-outs.
-pub async fn recurse(
-    provider: &Provider,
-    store: &HandleStore,
-    arguments: &str,
-    cancel: &AtomicBool,
-) -> Result<String> {
+pub async fn recurse(provider: &Provider, store: &HandleStore, arguments: &str, cancel: &AtomicBool) -> Result<String> {
     #[derive(Deserialize)]
     struct Args {
         id: String,
@@ -516,18 +498,15 @@ pub async fn recurse(
     rows.sort_by_key(|(index, _)| *index);
 
     if args.schema.is_some() {
-        let mut report =
-            serde_json::to_string_pretty(&structured).unwrap_or_else(|_| "[]".to_owned());
-        let problems: Vec<String> =
-            rows.into_iter().map(|(_, row)| row).filter(|row| !row.is_empty()).collect();
+        let mut report = serde_json::to_string_pretty(&structured).unwrap_or_else(|_| "[]".to_owned());
+        let problems: Vec<String> = rows.into_iter().map(|(_, row)| row).filter(|row| !row.is_empty()).collect();
         if !problems.is_empty() {
             report.push_str(&format!("\n\n{failed} chunk(s) unusable:\n{}", problems.join("\n")));
         }
         return Ok(report);
     }
 
-    let body: Vec<String> =
-        rows.into_iter().map(|(_, row)| row).filter(|row| !row.is_empty()).collect();
+    let body: Vec<String> = rows.into_iter().map(|(_, row)| row).filter(|row| !row.is_empty()).collect();
     // A silent nothing is a real answer and must be distinguishable from a
     // fan-out that failed.
     let header = format!(
@@ -552,10 +531,7 @@ mod tests {
     }
 
     fn log(lines: usize) -> String {
-        (1..=lines)
-            .map(|index| format!("line {index}: something happened"))
-            .collect::<Vec<_>>()
-            .join("\n")
+        (1..=lines).map(|index| format!("line {index}: something happened")).collect::<Vec<_>>().join("\n")
     }
 
     #[test]
@@ -581,20 +557,16 @@ mod tests {
     #[test]
     fn slice_returns_a_numbered_window_and_rejects_a_bad_range() {
         let (store, _) = store_with(&log(100));
-        let output = store
-            .execute("handle_slice", &json!({"id":"h1","start_line":3,"end_line":5}).to_string())
-            .unwrap();
+        let output =
+            store.execute("handle_slice", &json!({"id":"h1","start_line":3,"end_line":5}).to_string()).unwrap();
         assert!(output.contains("line 3:"), "{output}");
         assert!(output.contains("     5\t"), "line numbers are shown: {output}");
         assert!(!output.contains("line 6:"), "{output}");
 
-        let past_end = store
-            .execute("handle_slice", &json!({"id":"h1","start_line":500}).to_string())
-            .unwrap();
+        let past_end = store.execute("handle_slice", &json!({"id":"h1","start_line":500}).to_string()).unwrap();
         assert!(past_end.starts_with("Error:"), "{past_end}");
-        let backwards = store
-            .execute("handle_slice", &json!({"id":"h1","start_line":9,"end_line":2}).to_string())
-            .unwrap();
+        let backwards =
+            store.execute("handle_slice", &json!({"id":"h1","start_line":9,"end_line":2}).to_string()).unwrap();
         assert!(backwards.starts_with("Error:"), "{backwards}");
     }
 
@@ -604,18 +576,14 @@ mod tests {
         content.push_str("\nERROR: DATABASE_URL must be set");
         let (store, _) = store_with(&content);
 
-        let hit = store
-            .execute("handle_grep", &json!({"id":"h1","pattern":"DATABASE_URL"}).to_string())
-            .unwrap();
+        let hit = store.execute("handle_grep", &json!({"id":"h1","pattern":"DATABASE_URL"}).to_string()).unwrap();
         assert!(hit.contains("1 match(es)"), "{hit}");
         assert!(hit.contains("DATABASE_URL must be set"), "{hit}");
 
-        let miss =
-            store.execute("handle_grep", &json!({"id":"h1","pattern":"zzz"}).to_string()).unwrap();
+        let miss = store.execute("handle_grep", &json!({"id":"h1","pattern":"zzz"}).to_string()).unwrap();
         assert!(miss.starts_with("No matches"), "{miss}");
 
-        let bad =
-            store.execute("handle_grep", &json!({"id":"h1","pattern":"["}).to_string()).unwrap();
+        let bad = store.execute("handle_grep", &json!({"id":"h1","pattern":"["}).to_string()).unwrap();
         assert!(bad.starts_with("Error:"), "an invalid regex reports itself: {bad}");
     }
 
@@ -699,9 +667,7 @@ mod tests {
         assert!(listing.contains("$h2"), "{listing}");
         assert!(listing.contains("notes.md"), "{listing}");
 
-        assert!(
-            HandleStore::default().execute("handle_list", "{}").unwrap().contains("No payloads")
-        );
+        assert!(HandleStore::default().execute("handle_list", "{}").unwrap().contains("No payloads"));
     }
 
     #[test]

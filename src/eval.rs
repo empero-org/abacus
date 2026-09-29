@@ -30,9 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use crate::agent::{
-    AgentEvent, AgentMode, ApprovalDecision, TurnOptions, UserAnswer, initial_messages, run_turn,
-};
+use crate::agent::{AgentEvent, AgentMode, ApprovalDecision, TurnOptions, UserAnswer, initial_messages, run_turn};
 use crate::compaction::CompactionState;
 use crate::config::{AbacusPaths, Config, EvalState, Settings};
 use crate::model_info::ModelLimits;
@@ -86,8 +84,7 @@ impl EvalTask {
         let Some(mode) = self.file.mode.as_deref() else {
             return Ok(AgentMode::Build);
         };
-        AgentMode::parse(mode)
-            .with_context(|| format!("task `{}`: unknown mode `{mode}`", self.name))
+        AgentMode::parse(mode).with_context(|| format!("task `{}`: unknown mode `{mode}`", self.name))
     }
 }
 
@@ -148,17 +145,14 @@ pub fn discover(workspace: &Path, filter: Option<&str>) -> Result<Vec<EvalTask>>
         if !manifest.is_file() {
             continue;
         }
-        let name =
-            path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
         if let Some(filter) = filter
             && !name.contains(filter)
         {
             continue;
         }
-        let raw = std::fs::read_to_string(&manifest)
-            .with_context(|| format!("read {}", manifest.display()))?;
-        let file: TaskFile =
-            toml::from_str(&raw).with_context(|| format!("parse {}", manifest.display()))?;
+        let raw = std::fs::read_to_string(&manifest).with_context(|| format!("read {}", manifest.display()))?;
+        let file: TaskFile = toml::from_str(&raw).with_context(|| format!("parse {}", manifest.display()))?;
         tasks.push(EvalTask { name, root: path, file });
     }
     if tasks.is_empty() {
@@ -179,11 +173,7 @@ pub async fn run(config: Config, settings: Settings, options: EvalOptions) -> Re
         EvalState::Both => vec![true, false],
     };
 
-    let run_id = format!(
-        "{}-{}",
-        chrono::Utc::now().format("%Y%m%d-%H%M%S"),
-        &uuid::Uuid::new_v4().to_string()[..8]
-    );
+    let run_id = format!("{}-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"), &uuid::Uuid::new_v4().to_string()[..8]);
     let run_root = config.paths.root.join("evals").join(&run_id);
     std::fs::create_dir_all(&run_root).with_context(|| format!("create {}", run_root.display()))?;
 
@@ -212,17 +202,10 @@ pub async fn run(config: Config, settings: Settings, options: EvalOptions) -> Re
     for task in &tasks {
         for &state_on in &states {
             for repetition in 1..=options.repeat {
-                let outcome = run_once(
-                    &config,
-                    &settings,
-                    task,
-                    state_on,
-                    repetition,
-                    &run_root,
-                    options.model.as_deref(),
-                )
-                .await
-                .unwrap_or_else(|error| failed_outcome(task, state_on, repetition, error));
+                let outcome =
+                    run_once(&config, &settings, task, state_on, repetition, &run_root, options.model.as_deref())
+                        .await
+                        .unwrap_or_else(|error| failed_outcome(task, state_on, repetition, error));
                 if options.json {
                     println!("{}", serde_json::to_string(&outcome)?);
                 } else {
@@ -254,12 +237,7 @@ pub async fn run(config: Config, settings: Settings, options: EvalOptions) -> Re
     Ok(())
 }
 
-fn failed_outcome(
-    task: &EvalTask,
-    state_on: bool,
-    repetition: usize,
-    error: anyhow::Error,
-) -> RunOutcome {
+fn failed_outcome(task: &EvalTask, state_on: bool, repetition: usize, error: anyhow::Error) -> RunOutcome {
     RunOutcome {
         task: task.name.clone(),
         state: if state_on { "on" } else { "off" },
@@ -281,8 +259,7 @@ async fn run_once(
     let label = format!("{}-{}-{repetition}", task.name, if state_on { "on" } else { "off" });
     let case_root = run_root.join(&label);
     let workspace = case_root.join("workspace");
-    std::fs::create_dir_all(&workspace)
-        .with_context(|| format!("create {}", workspace.display()))?;
+    std::fs::create_dir_all(&workspace).with_context(|| format!("create {}", workspace.display()))?;
 
     let fixture = task.root.join("fixture");
     if fixture.is_dir() {
@@ -317,9 +294,7 @@ async fn run_once(
     }
 
     let services = Arc::new(
-        AgentServices::discover(&config.workspace, &config.paths, settings)
-            .await
-            .context("discover extensions")?,
+        AgentServices::discover(&config.workspace, &config.paths, settings).await.context("discover extensions")?,
     );
     let tokens = Arc::new(crate::provider::TokenLedger::default());
     let provider = Provider::with_tokens(&config, tokens.clone())?;
@@ -346,9 +321,8 @@ async fn run_once(
     let started = Instant::now();
     let handle = tokio::spawn(run_turn(provider, messages, turn, events));
 
-    let replies = |messages: &[serde_json::Value]| {
-        messages.iter().filter(|message| message["role"] == "assistant").count()
-    };
+    let replies =
+        |messages: &[serde_json::Value]| messages.iter().filter(|message| message["role"] == "assistant").count();
     let mut tool_calls = 0_usize;
     let mut papercut_recalls = 0_usize;
     let mut assistant_steps = 0_usize;
@@ -357,8 +331,7 @@ async fn run_once(
     let deadline = Duration::from_secs(task.file.timeout_seconds);
 
     loop {
-        let next =
-            tokio::time::timeout(deadline.saturating_sub(started.elapsed()), receiver.recv()).await;
+        let next = tokio::time::timeout(deadline.saturating_sub(started.elapsed()), receiver.recv()).await;
         let event = match next {
             // A timed-out run is data, not an error: ask the turn to stop and
             // score whatever it managed to produce.
@@ -450,10 +423,7 @@ async fn run_check(task: &EvalTask, workspace: &Path) -> Result<(bool, String)> 
     let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
     combined.push_str(&String::from_utf8_lossy(&output.stderr));
     let passed = output.status.success();
-    Ok((
-        passed,
-        if passed { String::new() } else { crate::text::clip(combined.trim(), 2_000, "…") },
-    ))
+    Ok((passed, if passed { String::new() } else { crate::text::clip(combined.trim(), 2_000, "…") }))
 }
 
 /// A fresh git repository, so `git_diff` and `git_status` work and the model
@@ -468,24 +438,13 @@ async fn init_git(workspace: &Path) -> Result<()> {
         vec!["init", "-q"],
         vec!["add", "-A"],
         vec![
-            "-c",
-            "user.email=eval@abacus.local",
-            "-c",
-            "user.name=abacus eval",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
+            "-c", "user.email=eval@abacus.local", "-c", "user.name=abacus eval", "commit", "-q", "--allow-empty", "-m",
             "fixture",
         ],
     ] {
         let status = run(args).output().await.context("run git")?;
         if !status.status.success() {
-            bail!(
-                "git setup failed in {}: {}",
-                workspace.display(),
-                String::from_utf8_lossy(&status.stderr).trim()
-            );
+            bail!("git setup failed in {}: {}", workspace.display(), String::from_utf8_lossy(&status.stderr).trim());
         }
     }
     Ok(())
@@ -499,8 +458,7 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
             std::fs::create_dir_all(&target)?;
             copy_tree(&entry.path(), &target)?;
         } else {
-            std::fs::copy(entry.path(), &target)
-                .with_context(|| format!("copy into {}", target.display()))?;
+            std::fs::copy(entry.path(), &target).with_context(|| format!("copy into {}", target.display()))?;
         }
     }
     Ok(())
@@ -527,10 +485,8 @@ fn print_summary(outcomes: &[RunOutcome], repeat: usize, state: EvalState) {
     println!("{:-<72}", "");
     for name in &names {
         for arm in ["on", "off"] {
-            let runs: Vec<&RunOutcome> = outcomes
-                .iter()
-                .filter(|outcome| outcome.task == *name && outcome.state == arm)
-                .collect();
+            let runs: Vec<&RunOutcome> =
+                outcomes.iter().filter(|outcome| outcome.task == *name && outcome.state == arm).collect();
             if runs.is_empty() {
                 continue;
             }
@@ -548,8 +504,7 @@ fn print_summary(outcomes: &[RunOutcome], repeat: usize, state: EvalState) {
     println!("{:-<72}", "");
 
     let rate = |arm: &str| -> (usize, usize) {
-        let runs: Vec<&RunOutcome> =
-            outcomes.iter().filter(|outcome| outcome.state == arm).collect();
+        let runs: Vec<&RunOutcome> = outcomes.iter().filter(|outcome| outcome.state == arm).collect();
         (runs.iter().filter(|outcome| outcome.passed).count(), runs.len())
     };
     if state == EvalState::Both {
@@ -633,10 +588,7 @@ mod tests {
         std::fs::create_dir_all(&destination).unwrap();
         copy_tree(&source, &destination).unwrap();
         assert_eq!(std::fs::read_to_string(destination.join("top.txt")).unwrap(), "top");
-        assert_eq!(
-            std::fs::read_to_string(destination.join("nested/deep/leaf.txt")).unwrap(),
-            "leaf"
-        );
+        assert_eq!(std::fs::read_to_string(destination.join("nested/deep/leaf.txt")).unwrap(), "leaf");
     }
 
     #[tokio::test]
@@ -701,11 +653,7 @@ mod tests {
         assert!(!tasks.is_empty());
         for task in &tasks {
             assert!(task.root.join("check.sh").is_file(), "task `{}` has no check.sh", task.name);
-            assert!(
-                !task.file.prompt.trim().is_empty(),
-                "task `{}` has an empty prompt",
-                task.name
-            );
+            assert!(!task.file.prompt.trim().is_empty(), "task `{}` has an empty prompt", task.name);
             task.mode().unwrap_or_else(|error| panic!("task `{}`: {error}", task.name));
         }
     }

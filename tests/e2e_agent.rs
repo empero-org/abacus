@@ -45,8 +45,7 @@ async fn streamed_agent_searches_workspace_and_finishes() {
 
     assert!(searched);
     assert!(completed.iter().any(|message| {
-        message["role"] == "tool"
-            && message["content"].as_str().is_some_and(|content| content.contains("main.rs:1"))
+        message["role"] == "tool" && message["content"].as_str().is_some_and(|content| content.contains("main.rs:1"))
     }));
     assert_eq!(completed.last().unwrap()["content"], "Found the reference in main.rs.");
 }
@@ -84,15 +83,11 @@ async fn a_cancelled_turn_keeps_the_work_it_already_did() {
     // The assistant's tool call and the tool's result both survive, so the
     // next turn knows the search happened.
     assert!(
-        completed
-            .iter()
-            .any(|message| message["role"] == "assistant" && message["tool_calls"].is_array()),
+        completed.iter().any(|message| message["role"] == "assistant" && message["tool_calls"].is_array()),
         "the assistant's tool call should be in history"
     );
-    let tool_result = completed
-        .iter()
-        .find(|message| message["role"] == "tool")
-        .expect("the tool result should be in history");
+    let tool_result =
+        completed.iter().find(|message| message["role"] == "tool").expect("the tool result should be in history");
     assert_eq!(tool_result["name"], "grep");
 }
 
@@ -105,27 +100,16 @@ async fn responses_protocol_uses_responses_endpoint_and_stream_format() {
     )
     .to_owned()])
     .await;
-    let config = abacus_agent::config::Config {
-        protocol: ProviderProtocol::Responses,
-        ..project.config(mock.address)
-    };
+    let config = abacus_agent::config::Config { protocol: ProviderProtocol::Responses, ..project.config(mock.address) };
     let (deltas, mut streamed) = tokio::sync::mpsc::unbounded_channel();
     let completion = Provider::new(&config)
         .unwrap()
-        .complete(
-            &[json!({"role":"user","content":"hello"})],
-            &tool_specs(),
-            deltas,
-            &AtomicBool::new(false),
-        )
+        .complete(&[json!({"role":"user","content":"hello"})], &tool_specs(), deltas, &AtomicBool::new(false))
         .await
         .unwrap();
 
     assert_eq!(completion.content, "ready");
-    assert_eq!(
-        streamed.try_recv().unwrap(),
-        abacus_agent::provider::Chunk::Text("ready".to_owned())
-    );
+    assert_eq!(streamed.try_recv().unwrap(), abacus_agent::provider::Chunk::Text("ready".to_owned()));
     let request = &mock.finish().await[0];
     assert!(request.starts_with("POST /v1/responses HTTP/1.1"));
     assert!(request.contains("\"input\""));
@@ -167,26 +151,14 @@ async fn text_emitted_tool_calls_are_parsed_when_native_calls_absent() {
     use abacus_agent::tool_format::{ToolFormat, render_hermes_call};
     let project = project(&[("target.txt", "hello\n")]);
     let call = render_hermes_call("read_file", r#"{"path":"target.txt"}"#);
-    let mock = Mock::script([
-        says(&format!("Reading.\n{call}")),
-        says("Done, target.txt contains hello."),
-    ])
-    .await;
-    let config = abacus_agent::config::Config {
-        tool_format: ToolFormat::Hermes,
-        ..project.config(mock.address)
-    };
+    let mock = Mock::script([says(&format!("Reading.\n{call}")), says("Done, target.txt contains hello.")]).await;
+    let config = abacus_agent::config::Config { tool_format: ToolFormat::Hermes, ..project.config(mock.address) };
 
     let (mut saw_read, mut saw_result) = (false, false);
     turn(
         Provider::new(&config).unwrap(),
         project.asks("read target.txt"),
-        TurnOptions {
-            mode: AgentMode::Auto,
-            allow_mutations: locked(),
-            allow_subagents: true,
-            ..project.options()
-        },
+        TurnOptions { mode: AgentMode::Auto, allow_mutations: locked(), allow_subagents: true, ..project.options() },
         |event| match event {
             AgentEvent::ToolStarted { name, summary } => {
                 assert_eq!(name, "read_file");
@@ -238,10 +210,7 @@ async fn auto_mode_selection_enables_later_tool_in_same_completion() {
     let project = project(&[("value.txt", "old\n")]);
     let choose = json!({"mode": "build", "reason": "The user requested implementation"});
     let mock = Mock::script([
-        calls(&[
-            ("mode_1", "mode_set", choose),
-            ("edit_1", "edit_file", serde_json::from_str(EDIT).unwrap()),
-        ]),
+        calls(&[("mode_1", "mode_set", choose), ("edit_1", "edit_file", serde_json::from_str(EDIT).unwrap())]),
         says("Updated value.txt."),
     ])
     .await;
@@ -310,22 +279,16 @@ async fn rolling_summary_compaction_fires_on_large_context() {
         )),
         // The review gate runs before summary compaction; refuse it so no
         // planning call fires and the flow continues.
-        Asked::ReviewGate => {
-            Reply::Send(says(r#"{"should_refine": false, "rationale": "nothing to keep"}"#))
-        }
+        Asked::ReviewGate => Reply::Send(says(r#"{"should_refine": false, "rationale": "nothing to keep"}"#)),
         _ => Reply::Last(says("all done")),
     })
     .await;
 
     let mut messages = oversized(&project);
     messages.push(json!({"role":"assistant","content":"working on it"}));
-    let (completed, _) = turn(
-        project.provider(&mock),
-        messages,
-        TurnOptions { allow_subagents: true, ..project.options() },
-        |_| {},
-    )
-    .await;
+    let (completed, _) =
+        turn(project.provider(&mock), messages, TurnOptions { allow_subagents: true, ..project.options() }, |_| {})
+            .await;
     let requests = mock.finish().await;
 
     let summary = requests.iter().find(|request| asked(request) == Asked::Summary);
@@ -343,10 +306,7 @@ async fn rolling_summary_compaction_fires_on_large_context() {
         !contents.iter().any(|content| content.contains("were omitted")),
         "fallback drop-only path was used instead of LLM summarization"
     );
-    assert!(
-        !contents.iter().any(|content| content.contains("BIGBLOB")),
-        "compacted middle was not dropped"
-    );
+    assert!(!contents.iter().any(|content| content.contains("BIGBLOB")), "compacted middle was not dropped");
     assert!(contents.contains(&"working on it"), "recent tail was not preserved");
     assert_eq!(completed.last().unwrap()["content"], "all done");
 }
@@ -395,9 +355,7 @@ async fn intent_snapshot_runs_beside_the_turn_not_after_it() {
             tether: tether.clone(),
             ..project.options()
         },
-        |event| {
-            tethered |= matches!(event, AgentEvent::Notice(text) if text.starts_with("tethered"))
-        },
+        |event| tethered |= matches!(event, AgentEvent::Notice(text) if text.starts_with("tethered")),
     )
     .await;
     server.await.unwrap();
@@ -421,15 +379,9 @@ async fn intent_snapshot_runs_beside_the_turn_not_after_it() {
 async fn a_refusing_review_gate_skips_the_planning_call() {
     let project = project(&[]);
     let mock = Mock::answering(|request| match asked(request) {
-        Asked::ReviewGate => {
-            Reply::Send(says(r#"{"should_refine": false, "rationale": "routine work"}"#))
-        }
-        Asked::RefinePlan => Reply::Send(says(
-            r#"{"summary":"s","rationale":"r","expected_outcome":"e","edits":[]}"#,
-        )),
-        Asked::Summary => Reply::Send(says(
-            "1. Primary Request and Intent: do the thing. 10. Next Step: continue.",
-        )),
+        Asked::ReviewGate => Reply::Send(says(r#"{"should_refine": false, "rationale": "routine work"}"#)),
+        Asked::RefinePlan => Reply::Send(says(r#"{"summary":"s","rationale":"r","expected_outcome":"e","edits":[]}"#)),
+        Asked::Summary => Reply::Send(says("1. Primary Request and Intent: do the thing. 10. Next Step: continue.")),
         Asked::Turn => Reply::Last(says("all done")),
     })
     .await;
@@ -470,10 +422,7 @@ async fn shipped_grok_example_sends_a_bearer_key_to_an_openai_shaped_endpoint() 
     let key_file = home.join("xai-key");
     std::fs::write(&key_file, "xai-test-key-123\n").unwrap();
     let adapted = shipped
-        .replace(
-            "https://api.x.ai/v1/chat/completions",
-            &format!("http://{}/v1/chat/completions", mock.address),
-        )
+        .replace("https://api.x.ai/v1/chat/completions", &format!("http://{}/v1/chat/completions", mock.address))
         .replace("  env: XAI_API_KEY", &format!("  file: {}", key_file.display()));
     let endpoints = home.join("endpoints");
     std::fs::create_dir(&endpoints).unwrap();
@@ -493,18 +442,12 @@ async fn shipped_grok_example_sends_a_bearer_key_to_an_openai_shaped_endpoint() 
     let (headers, body) = request.split_once("\r\n\r\n").expect("a request body");
     let lowered = headers.to_ascii_lowercase();
     assert!(headers.contains("POST /v1/chat/completions"), "the url is used verbatim: {headers}");
-    assert!(
-        lowered.contains("authorization: bearer xai-test-key-123"),
-        "the key goes out as a bearer: {headers}"
-    );
+    assert!(lowered.contains("authorization: bearer xai-test-key-123"), "the key goes out as a bearer: {headers}");
     // OpenAI-shaped, not Anthropic: messages at the top level, no anthropic-version.
     let body: serde_json::Value = serde_json::from_str(body).expect("json body");
     assert_eq!(body["model"], "grok-4.5", "the model comes from the endpoint");
     assert!(body["messages"].is_array(), "chat-completions shape: {body}");
-    assert!(
-        !lowered.contains("anthropic-version"),
-        "no anthropic headers on an OpenAI endpoint: {headers}"
-    );
+    assert!(!lowered.contains("anthropic-version"), "no anthropic headers on an OpenAI endpoint: {headers}");
 }
 
 fn grep_command() -> String {
@@ -543,10 +486,7 @@ async fn plan_mode_runs_inspection_without_a_classifier_call() {
     let requests = mock.finish().await;
 
     assert!(!output.contains("Blocked by PLAN MODE"), "grep only inspects: {output}");
-    assert!(
-        !output.contains("User rejected"),
-        "inspection must not wait on an approval nobody can give: {output}"
-    );
+    assert!(!output.contains("User rejected"), "inspection must not wait on an approval nobody can give: {output}");
     assert!(output.contains("needle"), "the command actually ran: {output}");
     assert_eq!(requests.len(), 2, "two turn requests and no classifier call in between");
 }
@@ -589,16 +529,8 @@ async fn an_outside_read_is_cleared_but_a_credential_is_not() {
     mock.finish().await;
 
     assert_eq!(outputs.len(), 2, "both reads were attempted: {outputs:?}");
-    assert!(
-        outputs[0].contains("pub fn shared()"),
-        "the sibling checkout is readable: {}",
-        outputs[0]
-    );
-    assert!(
-        !outputs[1].contains("PRIVATE KEY MATERIAL"),
-        "the key must never be returned: {}",
-        outputs[1]
-    );
+    assert!(outputs[0].contains("pub fn shared()"), "the sibling checkout is readable: {}", outputs[0]);
+    assert!(!outputs[1].contains("PRIVATE KEY MATERIAL"), "the key must never be returned: {}", outputs[1]);
     assert!(outputs[1].contains("private data"), "and it says why: {}", outputs[1]);
 }
 
@@ -636,12 +568,9 @@ async fn build_mode_still_asks_before_running_a_command() {
 async fn an_oversized_tool_result_is_bound_instead_of_flooding_the_context() {
     // read_file returns at most 400 lines by default, so the lines have to be
     // long enough that a bounded read still clears the bind threshold.
-    let huge: String =
-        (0..4_000).map(|index| format!("line {index}: {}\n", "filler ".repeat(40))).collect();
+    let huge: String = (0..4_000).map(|index| format!("line {index}: {}\n", "filler ".repeat(40))).collect();
     let project = project(&[("big.log", &huge)]);
-    let mock =
-        Mock::script([calls(&[("t1", "read_file", json!({"path": "big.log"}))]), says("done")])
-            .await;
+    let mock = Mock::script([calls(&[("t1", "read_file", json!({"path": "big.log"}))]), says("done")]).await;
 
     let handles = abacus_agent::handles::HandleStore::default();
     let (completed, _) = turn(

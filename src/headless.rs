@@ -32,17 +32,12 @@ pub async fn run(
     let provider = Provider::with_tokens(&config, tokens.clone())?;
     let session_id = session.as_ref().map(|session| session.id.to_string());
     services
-        .run_hooks(
-            "session_start",
-            session_id.as_deref(),
-            &json!({"workspace":config.workspace,"mode":"headless"}),
-        )
+        .run_hooks("session_start", session_id.as_deref(), &json!({"workspace":config.workspace,"mode":"headless"}))
         .await?;
     let started = Instant::now();
     let activity_session = session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    if crate::sync::is_configured(
-        &crate::config::Credentials::load(&config.paths).unwrap_or_default(),
-    ) && let Ok(count) = crate::sync::pull_workspace(&config.paths, &config.workspace).await
+    if crate::sync::is_configured(&crate::config::Credentials::load(&config.paths).unwrap_or_default())
+        && let Ok(count) = crate::sync::pull_workspace(&config.paths, &config.workspace).await
         && count > 0
         && let (Some(current), Some(store)) = (session.as_ref(), store.as_ref())
         && let Ok(updated) = store.load(&current.id.to_string())
@@ -52,8 +47,7 @@ pub async fn run(
     if let Some(reporter) = &reporter {
         reporter.report_start(&activity_session, &config.model).await;
     }
-    let heartbeat =
-        reporter.as_ref().map(|reporter| reporter.heartbeat(activity_session.clone(), tokens));
+    let heartbeat = reporter.as_ref().map(|reporter| reporter.heartbeat(activity_session.clone(), tokens));
     let (events, mut receiver) = mpsc::unbounded_channel();
     let allow = Arc::new(AtomicBool::new(config.yes));
     // Keyed by the session id so promotion counts distinct sessions rather
@@ -103,8 +97,7 @@ pub async fn run(
     }
 
     let start = |messages: Vec<Value>| {
-        let options =
-            turn_options(&config, &allow, &services, &state, session_id.clone(), trace.clone());
+        let options = turn_options(&config, &allow, &services, &state, session_id.clone(), trace.clone());
         tokio::spawn(run_turn(provider.clone(), messages, options, events.clone()))
     };
     let mut current_task = failure.is_none().then(|| start(final_messages.clone()));
@@ -120,9 +113,7 @@ pub async fn run(
                         print!("{delta}");
                         io::stdout().flush()?;
                     }
-                    OutputFormat::StreamingJson => {
-                        emit(json!({"type": "assistant.delta", "text": delta}))?
-                    }
+                    OutputFormat::StreamingJson => emit(json!({"type": "assistant.delta", "text": delta}))?,
                     OutputFormat::Json => {}
                 }
             }
@@ -131,9 +122,7 @@ pub async fn run(
                 let (tool, summary) = (request.tool, request.summary);
                 announce(
                     format,
-                    &format!(
-                        "rejected {tool}: {summary}; use --always-approve for headless mutations"
-                    ),
+                    &format!("rejected {tool}: {summary}; use --always-approve for headless mutations"),
                     json!({"type": "approval.rejected", "tool": tool, "summary": summary}),
                 )?;
             }
@@ -141,10 +130,9 @@ pub async fn run(
                 // Headless mode can't show a modal — auto-pick the first
                 // option so the agent loop can continue without blocking.
                 let first = request.options.first().filter(|option| !option.is_empty()).cloned();
-                let _ = request.respond.send(crate::agent::UserAnswer {
-                    selected_labels: first.into_iter().collect(),
-                    custom_text: None,
-                });
+                let _ = request
+                    .respond
+                    .send(crate::agent::UserAnswer { selected_labels: first.into_iter().collect(), custom_text: None });
                 announce(
                     format,
                     &format!("auto-answered question: {}", request.header),
@@ -174,10 +162,7 @@ pub async fn run(
                 final_messages = messages;
                 let Some(state) = ralph.as_mut() else { break };
                 if state.observe_output(crate::text::last_reply(&final_messages)) {
-                    aside(
-                        format,
-                        &format!("loop completed after {} iteration(s)", state.iteration),
-                    );
+                    aside(format, &format!("loop completed after {} iteration(s)", state.iteration));
                 } else if state.status == RalphStatus::MaxIterations {
                     aside(format, &format!("loop stopped at {} iteration(s)", state.iteration));
                 }
@@ -187,8 +172,7 @@ pub async fn run(
                 match state.begin_iteration() {
                     Ok(iteration) => {
                         aside(format, &format!("loop · iteration {iteration}"));
-                        final_messages
-                            .push(json!({"role": "user", "content": state.prompt.clone()}));
+                        final_messages.push(json!({"role": "user", "content": state.prompt.clone()}));
                         current_task = Some(start(final_messages.clone()));
                     }
                     Err(error) => {
@@ -248,9 +232,7 @@ pub async fn run(
         handle.abort();
     }
     if let Some(reporter) = &reporter {
-        reporter
-            .report_end(&activity_session, provider.tokens_used(), started.elapsed().as_secs())
-            .await;
+        reporter.report_end(&activity_session, provider.tokens_used(), started.elapsed().as_secs()).await;
     }
     if format == OutputFormat::Plain && !text.ends_with('\n') {
         println!();
@@ -383,10 +365,8 @@ mod tests {
         let directory = tempdir().unwrap();
         let workspace = directory.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
-        let store = SessionStore::new(
-            &AbacusPaths::under(directory.path().join("home")),
-            workspace.canonicalize().unwrap(),
-        );
+        let store =
+            SessionStore::new(&AbacusPaths::under(directory.path().join("home")), workspace.canonicalize().unwrap());
         let messages = vec![
             json!({"role":"system","content":"x"}),
             json!({"role":"user","content":"count this"}),
@@ -420,17 +400,10 @@ mod tests {
         let directory = tempdir().unwrap();
         let workspace = directory.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
-        let store = SessionStore::new(
-            &AbacusPaths::under(directory.path().join("home")),
-            workspace.canonicalize().unwrap(),
-        );
-        let mut session = store
-            .create(
-                "local".into(),
-                "old-model".into(),
-                vec![json!({"role":"system","content":"x"})],
-            )
-            .unwrap();
+        let store =
+            SessionStore::new(&AbacusPaths::under(directory.path().join("home")), workspace.canonicalize().unwrap());
+        let mut session =
+            store.create("local".into(), "old-model".into(), vec![json!({"role":"system","content":"x"})]).unwrap();
         session.tokens_used = 12_000;
         session.active_secs = 30;
         store.save(&session).unwrap();
@@ -439,10 +412,7 @@ mod tests {
             Some(session),
             Some(store.clone()),
             PersistedRun {
-                messages: vec![
-                    json!({"role":"system","content":"x"}),
-                    json!({"role":"user","content":"continue"}),
-                ],
+                messages: vec![json!({"role":"system","content":"x"}), json!({"role":"user","content":"continue"})],
                 state: &SessionState::default(),
                 ralph: &None,
                 profile: "ignored",

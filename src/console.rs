@@ -27,8 +27,7 @@ pub const WIDTH: usize = 74;
 /// resolved colour depth is more than nothing.
 pub fn colored() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::io::stdout().is_terminal() && ColorDepth::detect() != ColorDepth::None)
+    *ENABLED.get_or_init(|| std::io::stdout().is_terminal() && ColorDepth::detect() != ColorDepth::None)
 }
 
 fn sgr(code: &str, value: &str) -> String {
@@ -78,10 +77,8 @@ pub struct Marks {
 }
 
 pub fn marks() -> &'static Marks {
-    const RICH: Marks =
-        Marks { pass: "✓", fail: "✗", warn: "!", rule: "─", bullet: "•", arrow: "›" };
-    const PLAIN: Marks =
-        Marks { pass: "+", fail: "x", warn: "!", rule: "-", bullet: "*", arrow: ">" };
+    const RICH: Marks = Marks { pass: "✓", fail: "✗", warn: "!", rule: "─", bullet: "•", arrow: "›" };
+    const PLAIN: Marks = Marks { pass: "+", fail: "x", warn: "!", rule: "-", bullet: "*", arrow: ">" };
     static ACTIVE: OnceLock<&Marks> = OnceLock::new();
     ACTIVE.get_or_init(|| if crate::ui::glyphs().wordmark.is_some() { &RICH } else { &PLAIN })
 }

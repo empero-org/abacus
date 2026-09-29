@@ -63,10 +63,7 @@ impl Project {
     pub fn options(&self) -> TurnOptions {
         TurnOptions {
             max_steps: 4,
-            ..TurnOptions::bare(
-                self.workspace.clone(),
-                Arc::new(AgentServices::empty(self.workspace.clone())),
-            )
+            ..TurnOptions::bare(self.workspace.clone(), Arc::new(AgentServices::empty(self.workspace.clone())))
         }
     }
 

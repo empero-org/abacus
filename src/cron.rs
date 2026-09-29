@@ -200,11 +200,7 @@ impl CronStore {
     fn mark_started(&self, id: Uuid, now: DateTime<Utc>) -> Result<()> {
         let _lock = self.lock()?;
         let mut file = self.load_unlocked()?;
-        let job = file
-            .jobs
-            .iter_mut()
-            .find(|job| job.id == id)
-            .context("job disappeared before execution")?;
+        let job = file.jobs.iter_mut().find(|job| job.id == id).context("job disappeared before execution")?;
         job.last_started_at = Some(now);
         job.last_status = Some("running".into());
         self.save_unlocked(&file)
@@ -214,11 +210,7 @@ impl CronStore {
         self.append_log(id, log)?;
         let _lock = self.lock()?;
         let mut file = self.load_unlocked()?;
-        let job = file
-            .jobs
-            .iter_mut()
-            .find(|job| job.id == id)
-            .context("job disappeared while running")?;
+        let job = file.jobs.iter_mut().find(|job| job.id == id).context("job disappeared while running")?;
         job.last_completed_at = Some(Utc::now());
         job.last_status = Some(status);
         self.save_unlocked(&file)
@@ -260,11 +252,7 @@ impl CronStore {
     }
 }
 
-pub async fn handle(
-    action: CronCommand,
-    paths: &AbacusPaths,
-    default_workspace: PathBuf,
-) -> Result<()> {
+pub async fn handle(action: CronCommand, paths: &AbacusPaths, default_workspace: PathBuf) -> Result<()> {
     let store = CronStore::new(paths);
     match action {
         CronCommand::List => {
@@ -283,15 +271,7 @@ pub async fn handle(
                 );
             }
         }
-        CronCommand::Add {
-            name,
-            schedule,
-            prompt,
-            workspace,
-            profile,
-            always_approve,
-            timeout_minutes,
-        } => {
+        CronCommand::Add { name, schedule, prompt, workspace, profile, always_approve, timeout_minutes } => {
             let job = store.add(NewCronJob {
                 name,
                 expression: schedule,
@@ -316,9 +296,7 @@ pub async fn handle(
                 bail!("scheduled job failed");
             }
         }
-        CronCommand::Daemon { once, poll_seconds } => {
-            run_daemon(&store, once, poll_seconds).await?
-        }
+        CronCommand::Daemon { once, poll_seconds } => run_daemon(&store, once, poll_seconds).await?,
         CronCommand::Install => install_service(paths)?,
         CronCommand::Uninstall => uninstall_service(paths)?,
     }
@@ -369,24 +347,22 @@ async fn run_job(job: &CronJob, store: &CronStore) -> Result<bool> {
     if job.always_approve {
         command.arg("--always-approve");
     }
-    let output = match tokio::time::timeout(
-        Duration::from_secs(job.timeout_seconds.clamp(60, 24 * 60 * 60)),
-        command.output(),
-    )
-    .await
-    {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => {
-            let detail = format!("could not start scheduled Abacus run: {error}");
-            store.finish(job.id, "failed".into(), &detail)?;
-            return Err(error).context("could not start scheduled Abacus run");
-        }
-        Err(_) => {
-            let detail = format!("job timed out after {} seconds", job.timeout_seconds);
-            store.finish(job.id, "timed-out".into(), &detail)?;
-            bail!(detail);
-        }
-    };
+    let output =
+        match tokio::time::timeout(Duration::from_secs(job.timeout_seconds.clamp(60, 24 * 60 * 60)), command.output())
+            .await
+        {
+            Ok(Ok(output)) => output,
+            Ok(Err(error)) => {
+                let detail = format!("could not start scheduled Abacus run: {error}");
+                store.finish(job.id, "failed".into(), &detail)?;
+                return Err(error).context("could not start scheduled Abacus run");
+            }
+            Err(_) => {
+                let detail = format!("job timed out after {} seconds", job.timeout_seconds);
+                store.finish(job.id, "timed-out".into(), &detail)?;
+                bail!(detail);
+            }
+        };
     let stdout = bounded_text(&output.stdout);
     let stderr = bounded_text(&output.stderr);
     let status = if output.status.success() { "ok" } else { "failed" };
@@ -542,9 +518,8 @@ fn install_service(paths: &AbacusPaths) -> Result<()> {
     );
     atomic_write(&path, content.as_bytes(), false)?;
     let domain = format!("gui/{}", unsafe { libc_getuid() });
-    let _ = std::process::Command::new("launchctl")
-        .args(["bootout", &domain, path.to_str().unwrap_or_default()])
-        .status();
+    let _ =
+        std::process::Command::new("launchctl").args(["bootout", &domain, path.to_str().unwrap_or_default()]).status();
     let status = std::process::Command::new("launchctl")
         .args(["bootstrap", &domain, path.to_str().context("service path is not UTF-8")?])
         .status()?;
@@ -560,9 +535,8 @@ fn uninstall_service(_paths: &AbacusPaths) -> Result<()> {
     let home = std::env::var_os("HOME").map(PathBuf::from).context("HOME is unavailable")?;
     let path = home.join("Library/LaunchAgents/com.abacus.agent.plist");
     let domain = format!("gui/{}", unsafe { libc_getuid() });
-    let _ = std::process::Command::new("launchctl")
-        .args(["bootout", &domain, path.to_str().unwrap_or_default()])
-        .status();
+    let _ =
+        std::process::Command::new("launchctl").args(["bootout", &domain, path.to_str().unwrap_or_default()]).status();
     if path.exists() {
         fs::remove_file(&path)?;
     }
@@ -600,9 +574,8 @@ fn install_service(paths: &AbacusPaths) -> Result<()> {
 fn uninstall_service(_paths: &AbacusPaths) -> Result<()> {
     let home = std::env::var_os("HOME").map(PathBuf::from).context("HOME is unavailable")?;
     let path = home.join(".config/systemd/user/abacus-agent.service");
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "disable", "--now", "abacus-agent.service"])
-        .status();
+    let _ =
+        std::process::Command::new("systemctl").args(["--user", "disable", "--now", "abacus-agent.service"]).status();
     if path.exists() {
         fs::remove_file(&path)?;
     }
@@ -628,9 +601,7 @@ fn install_service(paths: &AbacusPaths) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 fn uninstall_service(_paths: &AbacusPaths) -> Result<()> {
-    let status = std::process::Command::new("schtasks")
-        .args(["/Delete", "/F", "/TN", "Abacus Agent"])
-        .status()?;
+    let status = std::process::Command::new("schtasks").args(["/Delete", "/F", "/TN", "Abacus Agent"]).status()?;
     if !status.success() {
         bail!("schtasks failed");
     }

@@ -30,9 +30,7 @@ pub fn read_image() -> Result<Option<ClipboardImage>> {
         // the end: a clipboard utility may still be installed.
         Err(arboard_error) => match command_image() {
             Some(image) => Ok(Some(image)),
-            None => Err(anyhow!(
-                "clipboard unavailable ({arboard_error}); install wl-clipboard or xclip"
-            )),
+            None => Err(anyhow!("clipboard unavailable ({arboard_error}); install wl-clipboard or xclip")),
         },
     }
 }
@@ -89,10 +87,8 @@ fn arboard_image() -> Result<Option<ClipboardImage>> {
 
 /// Fallback: ask the platform's clipboard utility for PNG data directly.
 fn command_image() -> Option<ClipboardImage> {
-    let candidates: [(&str, &[&str]); 2] = [
-        ("wl-paste", &["-t", "image/png"]),
-        ("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"]),
-    ];
+    let candidates: [(&str, &[&str]); 2] =
+        [("wl-paste", &["-t", "image/png"]), ("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"])];
     for (program, args) in candidates {
         let Ok(output) = Command::new(program).args(args).output() else {
             continue;
@@ -154,8 +150,7 @@ mod tests {
     #[test]
     fn save_attachment_writes_the_token_named_file() {
         let dir = tempfile::tempdir().unwrap();
-        let image =
-            ClipboardImage { png: encode_png(&[0_u8; 4], 1, 1).unwrap(), width: 1, height: 1 };
+        let image = ClipboardImage { png: encode_png(&[0_u8; 4], 1, 1).unwrap(), width: 1, height: 1 };
         let (token, path) = save_attachment(dir.path(), &image).unwrap();
         assert!(token.starts_with("[image:img-") && token.ends_with(".png]"));
         assert!(path.exists());
@@ -170,9 +165,7 @@ mod tests {
     fn clipboard_round_trip_on_a_desktop_session() {
         let rgba = vec![128_u8; 4 * 2 * 2];
         let mut clipboard = arboard::Clipboard::new().unwrap();
-        clipboard
-            .set_image(arboard::ImageData { width: 2, height: 2, bytes: rgba.into() })
-            .unwrap();
+        clipboard.set_image(arboard::ImageData { width: 2, height: 2, bytes: rgba.into() }).unwrap();
         let image = read_image().unwrap().expect("an image was just set");
         assert_eq!((image.width, image.height), (2, 2));
     }

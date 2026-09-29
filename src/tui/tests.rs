@@ -25,11 +25,7 @@ async fn effort_command_sets_clears_and_reports() {
     let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
     // Unset: reported as auto, and nothing is sent.
     assert!(app.slash_command("/effort"));
-    assert!(
-        app.entries.last().unwrap().text.contains("auto"),
-        "{}",
-        app.entries.last().unwrap().text
-    );
+    assert!(app.entries.last().unwrap().text.contains("auto"), "{}", app.entries.last().unwrap().text);
     assert!(app.config.reasoning_effort.is_none());
 
     assert!(app.slash_command("/effort high"));
@@ -82,15 +78,11 @@ fn composer_height_is_measured_at_the_width_it_is_drawn_at() {
     // The two must agree for every terminal width, narrow or wide.
     for frame_width in [40_u16, 80, 112, 150, 300] {
         let measured = frame_width.min(CONTENT_COLUMNS).saturating_sub(6).max(1);
-        let drawn =
-            ui::measure(Rect { x: 0, y: 0, width: frame_width, height: 10 }, CONTENT_COLUMNS)
-                .width
-                .saturating_sub(6)
-                .max(1);
-        assert_eq!(
-            measured, drawn,
-            "at {frame_width} columns the composer measures {measured} but draws {drawn}"
-        );
+        let drawn = ui::measure(Rect { x: 0, y: 0, width: frame_width, height: 10 }, CONTENT_COLUMNS)
+            .width
+            .saturating_sub(6)
+            .max(1);
+        assert_eq!(measured, drawn, "at {frame_width} columns the composer measures {measured} but draws {drawn}");
     }
 }
 
@@ -104,11 +96,7 @@ async fn btw_notes_a_side_question_without_derailing_the_turn() {
     // With nothing running it declines rather than losing the note.
     assert!(app.slash_command("/btw is this thread safe?"));
     assert!(app.state.injections.is_empty());
-    assert!(
-        app.entries.last().unwrap().text.contains("ask it directly"),
-        "{}",
-        app.entries.last().unwrap().text
-    );
+    assert!(app.entries.last().unwrap().text.contains("ask it directly"), "{}", app.entries.last().unwrap().text);
 
     app.start_turn("do the thing".into(), "do the thing".into(), false);
     assert!(app.slash_command("/btw is this thread safe?"));
@@ -151,12 +139,7 @@ async fn a_background_report_arriving_while_idle_starts_a_delivery_turn() {
     app.state.injections.push(crate::agent::Injection::SubagentReport("alpha: done".into()));
     assert!(app.deliver_pending_injections(), "a turn was started");
     assert!(app.running.is_some());
-    let delivered = app
-        .messages
-        .iter()
-        .rev()
-        .find_map(|message| message["content"].as_str())
-        .unwrap_or_default();
+    let delivered = app.messages.iter().rev().find_map(|message| message["content"].as_str()).unwrap_or_default();
     assert!(delivered.contains("alpha: done"), "{delivered}");
     assert!(delivered.contains("background subagent finished"));
 }
@@ -186,8 +169,7 @@ async fn aux_model_drives_the_secondary_provider_and_defaults_to_main() {
     // the same endpoint with the cheaper model.
     let mut input = InputBuffer::new();
     input.insert_str("cheap/model");
-    app.config_panel =
-        Some(ConfigPanel { selected: 0, editing: Some((ConfigKey::AuxModel, input)) });
+    app.config_panel = Some(ConfigPanel { selected: 0, editing: Some((ConfigKey::AuxModel, input)) });
     app.commit_config_edit();
     assert_eq!(app.aux_provider.model(), "cheap/model");
     assert_eq!(app.provider.model(), "test-model", "main model untouched");
@@ -196,8 +178,7 @@ async fn aux_model_drives_the_secondary_provider_and_defaults_to_main() {
     // Clearing it returns to "(same as main)".
     let mut blank = InputBuffer::new();
     blank.insert_str("  ");
-    app.config_panel =
-        Some(ConfigPanel { selected: 0, editing: Some((ConfigKey::AuxModel, blank)) });
+    app.config_panel = Some(ConfigPanel { selected: 0, editing: Some((ConfigKey::AuxModel, blank)) });
     app.commit_config_edit();
     assert_eq!(app.aux_provider.model(), app.provider.model());
     assert_eq!(app.config_value(ConfigKey::AuxModel), "(same as main)");
@@ -274,11 +255,7 @@ fn scripted_endpoints_are_listed_and_selectable_in_the_provider_picker() {
     // Selecting it creates a live profile referencing the endpoint, with
     // the model/url/protocol copied from the YAML so it validates.
     app.add_provider(&format!("{ENDPOINT_SENTINEL_PREFIX}claude-oauth"));
-    let profile = app
-        .settings
-        .profiles
-        .get(&app.settings.default_profile)
-        .expect("the new profile is active");
+    let profile = app.settings.profiles.get(&app.settings.default_profile).expect("the new profile is active");
     assert_eq!(profile.endpoint.as_deref(), Some("claude-oauth"));
     assert_eq!(profile.model, "claude-opus-4-8");
     assert_eq!(profile.protocol, ProviderProtocol::Anthropic);
@@ -315,10 +292,7 @@ fn accepting_a_suggestion_closes_the_popup() {
     assert_eq!(app.input.text(), "/compact ");
     // The trailing space is the signal that choosing is done. Trimming it
     // away was what trapped Enter in an accept loop.
-    assert!(
-        app.visible_completion().is_none(),
-        "a completed command must not keep offering itself"
-    );
+    assert!(app.visible_completion().is_none(), "a completed command must not keep offering itself");
     press(&mut app, KeyCode::Enter);
     assert!(app.input.is_empty(), "Enter should have submitted");
 }
@@ -329,10 +303,7 @@ fn shift_enter_inserts_a_newline_instead_of_submitting() {
     app.input.insert_str("line one");
     handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
     assert_eq!(app.input.text(), "line one\n");
-    assert!(
-        app.running.is_none() && app.entries.is_empty(),
-        "shift+enter must not send the prompt"
-    );
+    assert!(app.running.is_none() && app.entries.is_empty(), "shift+enter must not send the prompt");
 }
 
 #[test]
@@ -345,10 +316,7 @@ fn ctrl_shift_enter_forks_the_session_keeping_the_draft() {
     assert_eq!(app.session.as_ref().unwrap().title, "fix the parser");
     app.input.insert_str("then write the tests");
 
-    handle_key(
-        &mut app,
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
-    );
+    handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL | KeyModifiers::SHIFT));
 
     let fork = app.session.as_ref().expect("forked session");
     assert_ne!(fork.id, original_id, "a fork is a new session");
@@ -416,11 +384,7 @@ fn the_profile_row_opens_a_picker_that_switches_profiles() {
     // Every profile, plus the add-a-provider row.
     assert_eq!(picker.items.len(), app.settings.profiles.len() + 1);
 
-    let index = picker
-        .items
-        .iter()
-        .position(|(_, value)| value == "second")
-        .expect("second profile listed");
+    let index = picker.items.iter().position(|(_, value)| value == "second").expect("second profile listed");
     app.accept_picker(Some(index));
     assert_eq!(app.settings.default_profile, "second");
     assert!(app.picker.is_none());
@@ -498,15 +462,12 @@ fn profile_picker_renames_and_moves_the_stored_key() {
     extra_profile(&mut app, "second", "other-model");
     app.credentials.keys.insert("second".into(), "secret-key".into());
     app.open_profile_picker();
-    let index =
-        app.picker.as_ref().unwrap().items.iter().position(|(_, value)| value == "second").unwrap();
+    let index = app.picker.as_ref().unwrap().items.iter().position(|(_, value)| value == "second").unwrap();
     app.picker.as_mut().unwrap().selected = index;
     app.begin_profile_rename("second");
     handle_picker_prompt(&mut app, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
     // Replace the seeded id with the new one.
-    if let Some(PickerPrompt::Rename { input, .. }) =
-        app.picker.as_mut().and_then(|picker| picker.prompt.as_mut())
-    {
+    if let Some(PickerPrompt::Rename { input, .. }) = app.picker.as_mut().and_then(|picker| picker.prompt.as_mut()) {
         input.clear();
         input.insert_str("renamed");
     }
@@ -587,8 +548,7 @@ fn adding_a_provider_creates_a_profile_and_asks_for_a_model() {
     // That row opens a second step rather than selecting anything.
     let picker = app.picker.as_ref().expect("provider picker");
     assert_eq!(picker.action, PickerAction::AddProvider);
-    let xai =
-        picker.items.iter().position(|(_, value)| value == "xai").expect("xai preset offered");
+    let xai = picker.items.iter().position(|(_, value)| value == "xai").expect("xai preset offered");
     app.accept_picker(Some(xai));
 
     let profile = app.settings.profiles.get("xai").expect("profile created");
@@ -599,8 +559,7 @@ fn adding_a_provider_creates_a_profile_and_asks_for_a_model() {
     // running session stays on the old provider until one is given.
     assert_eq!(app.config.profile, "test");
     // A profile with no model cannot run, so that field opens straight away.
-    let editing =
-        app.config_panel.as_ref().and_then(|panel| panel.editing.as_ref()).map(|(key, _)| *key);
+    let editing = app.config_panel.as_ref().and_then(|panel| panel.editing.as_ref()).map(|(key, _)| *key);
     assert_eq!(editing, Some(ConfigKey::Model));
 }
 
@@ -614,10 +573,7 @@ fn abandoning_the_model_prompt_rolls_the_new_provider_back() {
     // Esc out of the model prompt.
     press(&mut app, KeyCode::Esc);
     assert_eq!(app.settings.default_profile, "test", "the previous profile should be restored");
-    assert!(
-        !app.settings.profiles.contains_key("groq"),
-        "an unusable profile should not be left behind"
-    );
+    assert!(!app.settings.profiles.contains_key("groq"), "an unusable profile should not be left behind");
 }
 
 #[test]
@@ -646,11 +602,7 @@ fn adding_the_same_provider_twice_does_not_overwrite_the_first() {
     app.add_provider("groq");
     app.settings.profiles.get_mut("groq").expect("first").model = "keep-me".into();
     app.add_provider("groq");
-    assert_eq!(
-        app.settings.profiles.get("groq").expect("first").model,
-        "keep-me",
-        "the existing profile must survive"
-    );
+    assert_eq!(app.settings.profiles.get("groq").expect("first").model, "keep-me", "the existing profile must survive");
     assert!(app.settings.profiles.contains_key("groq-2"));
     assert_eq!(app.settings.default_profile, "groq-2");
 }
@@ -706,11 +658,7 @@ fn a_picker_opened_from_config_is_visible_and_owns_the_keys() {
     // And it owns the keys, rather than them going to the panel behind it.
     press(&mut app, KeyCode::Down);
     assert_eq!(app.picker.as_ref().expect("picker").selected, 1);
-    assert_eq!(
-        app.config_panel.as_ref().expect("panel").selected,
-        0,
-        "the panel behind must not have moved"
-    );
+    assert_eq!(app.config_panel.as_ref().expect("panel").selected, 0, "the panel behind must not have moved");
 }
 
 #[test]
@@ -796,10 +744,7 @@ fn the_footer_separates_session_total_from_context_size() {
     assert!(rendered.contains("↑ "), "session input should be marked up");
     assert!(rendered.contains("↓ "), "session output should be marked down");
     assert!(rendered.contains("ctx "), "context should be labelled");
-    assert!(
-        !rendered.contains("tokens  ·  ctx"),
-        "the two figures must not both read as token counts"
-    );
+    assert!(!rendered.contains("tokens  ·  ctx"), "the two figures must not both read as token counts");
 }
 
 #[test]
@@ -843,10 +788,7 @@ fn a_trace_opens_with_the_session_and_records_the_toggle() {
     app.persist_session();
     let trace = app.trace.as_ref().expect("trace should open with the session");
     assert!(trace.path().exists());
-    assert!(
-        trace.path().starts_with(&app.config.paths.traces_dir),
-        "traces belong under the traces directory"
-    );
+    assert!(trace.path().starts_with(&app.config.paths.traces_dir), "traces belong under the traces directory");
 
     // Turning it off in /config drops the writer.
     app.settings.trace.enabled = true;
@@ -879,15 +821,8 @@ async fn steering_mid_stream_does_not_merge_the_user_into_the_model_block() {
     // The model keeps streaming.
     delta(&mut app, "and kept going afterwards");
 
-    let user = app
-        .entries
-        .iter()
-        .find(|entry| entry.kind == EntryKind::User)
-        .expect("the steering message");
-    assert_eq!(
-        user.text, "GLM-5.3 drops tomorrow",
-        "the user's block must hold only what the user typed"
-    );
+    let user = app.entries.iter().find(|entry| entry.kind == EntryKind::User).expect("the steering message");
+    assert_eq!(user.text, "GLM-5.3 drops tomorrow", "the user's block must hold only what the user typed");
     let last = app.entries.last().unwrap();
     assert_eq!(last.kind, EntryKind::Assistant, "a fresh block for the model");
     assert_eq!(last.text, "and kept going afterwards");
@@ -902,8 +837,7 @@ async fn a_notice_mid_reasoning_does_not_capture_the_stream() {
     app.push_entry(Entry::new(EntryKind::System, "noted — a side question".to_owned()));
     reasoning(&mut app, "still weighing them");
 
-    let system =
-        app.entries.iter().find(|entry| entry.kind == EntryKind::System).expect("the notice");
+    let system = app.entries.iter().find(|entry| entry.kind == EntryKind::System).expect("the notice");
     assert_eq!(system.text, "noted — a side question");
     let last = app.entries.last().unwrap();
     assert_eq!(last.kind, EntryKind::Thinking);
@@ -925,12 +859,7 @@ async fn ctrl_o_opens_the_newest_tool_block_even_mid_run() {
         })
     };
     app.push_entry(tool("first", "short", "short\nand more", ui::ToolStatus::Ok));
-    app.push_entry(tool(
-        "second",
-        "building…",
-        "building…\nline 2\nline 3",
-        ui::ToolStatus::Running,
-    ));
+    app.push_entry(tool("second", "building…", "building…\nline 2\nline 3", ui::ToolStatus::Running));
 
     assert!(app.toggle_latest_tool(), "opens without a cursor");
     let newest = app.entries.last().unwrap().tool.as_ref().unwrap();
@@ -976,11 +905,7 @@ fn thinking_is_shown_by_default_and_kept_apart_from_the_answer() {
     app.drain_agent_events();
 
     let kinds: Vec<EntryKind> = app.entries.iter().map(|entry| entry.kind).collect();
-    assert_eq!(
-        kinds,
-        vec![EntryKind::Thinking, EntryKind::Assistant],
-        "reasoning must not be appended to the answer"
-    );
+    assert_eq!(kinds, vec![EntryKind::Thinking, EntryKind::Assistant], "reasoning must not be appended to the answer");
     assert_eq!(app.entries[0].text, "let me check the parser");
     assert_eq!(app.entries[1].text, "Here is the fix.");
 }
@@ -1153,12 +1078,8 @@ fn consecutive_read_only_tools_collapse_into_an_explored_group() {
         ("grep", "'pattern'", "src/a.rs:3: match"),
         ("read_file", "src/b.rs", "fn b() {}"),
     ] {
-        let _ = app
-            .event_tx
-            .send(AgentEvent::ToolStarted { name: name.into(), summary: summary.into() });
-        let _ = app
-            .event_tx
-            .send(AgentEvent::ToolFinished { name: name.into(), output: output.into() });
+        let _ = app.event_tx.send(AgentEvent::ToolStarted { name: name.into(), summary: summary.into() });
+        let _ = app.event_tx.send(AgentEvent::ToolFinished { name: name.into(), output: output.into() });
     }
     assert!(app.drain_agent_events());
     let tools: Vec<_> = app.entries.iter().filter_map(|entry| entry.tool.as_ref()).collect();
@@ -1175,14 +1096,9 @@ fn consecutive_read_only_tools_collapse_into_an_explored_group() {
 #[test]
 fn writes_and_failures_do_not_join_an_exploration_group() {
     let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
-    for (name, output) in
-        [("read_file", "content"), ("write_file", "wrote 3 lines"), ("read_file", "Error: missing")]
-    {
-        let _ =
-            app.event_tx.send(AgentEvent::ToolStarted { name: name.into(), summary: "x".into() });
-        let _ = app
-            .event_tx
-            .send(AgentEvent::ToolFinished { name: name.into(), output: output.into() });
+    for (name, output) in [("read_file", "content"), ("write_file", "wrote 3 lines"), ("read_file", "Error: missing")] {
+        let _ = app.event_tx.send(AgentEvent::ToolStarted { name: name.into(), summary: "x".into() });
+        let _ = app.event_tx.send(AgentEvent::ToolFinished { name: name.into(), output: output.into() });
     }
     assert!(app.drain_agent_events());
     let tools: Vec<_> = app.entries.iter().filter_map(|entry| entry.tool.as_ref()).collect();
@@ -1213,10 +1129,7 @@ async fn esc_esc_rewinds_to_the_previous_prompt() {
     press(&mut app, KeyCode::Esc);
     assert_eq!(app.input.text(), "first question");
     assert_eq!(app.messages.len(), 1, "only the system message remains");
-    assert!(
-        app.entries.iter().all(|entry| entry.kind != EntryKind::User),
-        "the user entry was rewound"
-    );
+    assert!(app.entries.iter().all(|entry| entry.kind != EntryKind::User), "the user entry was rewound");
 
     // Any other key disarms: Esc, type, Esc must not rewind.
     app.input.clear();
@@ -1243,32 +1156,18 @@ fn approval_modal_spells_out_the_choices() {
 
 #[test]
 fn diff_hunks_render_a_gap_mark_instead_of_headers() {
-    let diff = DiffDocument::parse(
-        "--- a/x.rs\n+++ b/x.rs\n@@ -1,2 +1,2 @@\n-a\n+b\n@@ -10,2 +10,2 @@\n-c\n+d\n",
-    )
-    .unwrap();
+    let diff =
+        DiffDocument::parse("--- a/x.rs\n+++ b/x.rs\n@@ -1,2 +1,2 @@\n-a\n+b\n@@ -10,2 +10,2 @@\n-c\n+d\n").unwrap();
     let text = diff_text(&diff);
-    let plain: Vec<String> = text
-        .lines
-        .iter()
-        .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
-        .collect();
-    assert!(
-        !plain.iter().any(|line| line.contains("@@")),
-        "hunk headers must not render: {plain:?}"
-    );
-    assert_eq!(
-        plain.iter().filter(|line| line.trim() == "⋮").count(),
-        1,
-        "one gap between two hunks: {plain:?}"
-    );
+    let plain: Vec<String> =
+        text.lines.iter().map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>()).collect();
+    assert!(!plain.iter().any(|line| line.contains("@@")), "hunk headers must not render: {plain:?}");
+    assert_eq!(plain.iter().filter(|line| line.trim() == "⋮").count(), 1, "one gap between two hunks: {plain:?}");
 }
 
 #[test]
 fn shimmer_preserves_the_text_and_respects_the_animations_toggle() {
-    let joined = |spans: &[ratatui::text::Span<'_>]| {
-        spans.iter().map(|span| span.content.as_ref()).collect::<String>()
-    };
+    let joined = |spans: &[ratatui::text::Span<'_>]| spans.iter().map(|span| span.content.as_ref()).collect::<String>();
     let off = ui::shimmer("thinking", Duration::from_millis(500), false);
     assert_eq!(off.len(), 1);
     assert_eq!(joined(&off), "thinking");
@@ -1280,15 +1179,9 @@ fn shimmer_preserves_the_text_and_respects_the_animations_toggle() {
 #[test]
 fn reasoning_header_takes_the_latest_complete_bold_span() {
     assert_eq!(reasoning_header("no markup at all"), None);
-    assert_eq!(
-        reasoning_header("**Reading the config** then prose"),
-        Some("Reading the config".to_owned())
-    );
+    assert_eq!(reasoning_header("**Reading the config** then prose"), Some("Reading the config".to_owned()));
     // The newest header wins, and an unterminated one is ignored.
-    assert_eq!(
-        reasoning_header("**First step** prose **Second step** more **half"),
-        Some("Second step".to_owned())
-    );
+    assert_eq!(reasoning_header("**First step** prose **Second step** more **half"), Some("Second step".to_owned()));
     // Emphasis spanning lines or overlong "headers" are not headers.
     assert_eq!(reasoning_header("**a\nb**"), None);
     let long = format!("**{}**", "x".repeat(80));
@@ -1306,8 +1199,7 @@ async fn heavy_turns_get_a_worked_for_separator_and_chat_turns_do_not() {
         reason: DoneReason::Complete,
     });
     assert!(app.drain_agent_events());
-    let rule =
-        app.entries.iter().find(|entry| entry.kind == EntryKind::Rule).expect("a worked-for rule");
+    let rule = app.entries.iter().find(|entry| entry.kind == EntryKind::Rule).expect("a worked-for rule");
     assert!(rule.text.starts_with("Worked for 1m"), "{}", rule.text);
 
     // A quick conversational turn → no rule.
@@ -1414,11 +1306,7 @@ fn thinking_command_says_capture_continues_when_hidden() {
     app.slash_command("/thinking off");
     let last = app.entries.last().expect("a notice");
     assert_eq!(last.kind, EntryKind::System);
-    assert!(
-        last.text.contains("still recorded"),
-        "hiding must not read as disabling capture: {}",
-        last.text
-    );
+    assert!(last.text.contains("still recorded"), "hiding must not read as disabling capture: {}", last.text);
 }
 
 #[test]
@@ -1544,13 +1432,8 @@ fn transcript_renders_markdown_semantically() {
 #[test]
 fn semantic_diff_approval_renders_at_standard_and_compact_sizes() {
     let patch = concat!(
-        "--- a/src/main.rs\n",
-        "+++ b/src/main.rs\n",
-        "@@ -1,2 +1,2 @@\n",
-        " fn main() {\n",
-        "-    println!(\"old\");\n",
-        "+    println!(\"new\");\n",
-        " }\n"
+        "--- a/src/main.rs\n", "+++ b/src/main.rs\n", "@@ -1,2 +1,2 @@\n", " fn main() {\n",
+        "-    println!(\"old\");\n", "+    println!(\"new\");\n", " }\n"
     );
     for (width, height) in [(100, 28), (60, 20)] {
         let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
@@ -1693,19 +1576,13 @@ async fn goal_text_becomes_the_starting_prompt_and_can_pause() {
     let goal = app.state.goal.snapshot().unwrap();
     assert_eq!(goal.objective, "Finish the migration and keep tests green");
     assert_eq!(goal.status, crate::goal::GoalStatus::Active);
-    assert_eq!(
-        app.messages.last().unwrap()["content"],
-        "Finish the migration and keep tests green"
-    );
+    assert_eq!(app.messages.last().unwrap()["content"], "Finish the migration and keep tests green");
     assert!(app.running.is_some());
     app.goal_command("pause");
     assert_eq!(app.state.goal.snapshot().unwrap().status, crate::goal::GoalStatus::Paused);
     assert!(app.running.is_none());
     app.goal_command("edit Finish migration with all release checks");
-    assert_eq!(
-        app.state.goal.snapshot().unwrap().objective,
-        "Finish migration with all release checks"
-    );
+    assert_eq!(app.state.goal.snapshot().unwrap().objective, "Finish migration with all release checks");
     app.goal_command("clear");
     assert!(app.state.goal.snapshot().is_none());
 }
@@ -1902,10 +1779,7 @@ fn exporting_a_theme_writes_a_file_that_loads_back() {
 
     // A path separator in a name must not escape the themes directory.
     app.export_theme("../escaped");
-    assert!(
-        !app.config.paths.themes_dir.join("../escaped.json").exists(),
-        "a traversing name is refused"
-    );
+    assert!(!app.config.paths.themes_dir.join("../escaped.json").exists(), "a traversing name is refused");
 }
 
 #[test]
@@ -1918,10 +1792,7 @@ fn a_role_assigned_mid_session_reaches_the_running_config() {
     app.assign_role("subagent", Some("openai/gpt-5".to_owned()));
     assert_eq!(app.config.subagent_model.as_deref(), Some("openai/gpt-5"));
     app.assign_role("subagent", None);
-    assert_eq!(
-        app.config.subagent_model, None,
-        "clearing it lets the turn fall back to the main model again"
-    );
+    assert_eq!(app.config.subagent_model, None, "clearing it lets the turn fall back to the main model again");
 }
 
 #[test]
@@ -2042,21 +1913,15 @@ fn normal_mode_walks_blocks_and_unfolds_the_selected_tool() {
 
     let collapsed = ui::transcript(&app.entries, 60, "•", app.cursor, true).lines.len();
     press(&mut app, KeyCode::Char('o'));
-    assert!(
-        app.entries[1].tool.as_ref().expect("tool").expanded,
-        "o should unfold the selected tool"
-    );
+    assert!(app.entries[1].tool.as_ref().expect("tool").expanded, "o should unfold the selected tool");
     let expanded = ui::transcript(&app.entries, 60, "•", app.cursor, true).lines.len();
     assert!(expanded > collapsed, "unfolding must reveal rows: {collapsed} -> {expanded}");
 
     // The preview caps at 8 lines; the full result must survive for the
     // unfolded view.
     let rendered = ui::transcript(&app.entries, 60, "•", app.cursor, true);
-    let text: String = rendered
-        .lines
-        .iter()
-        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
-        .collect();
+    let text: String =
+        rendered.lines.iter().flat_map(|line| line.spans.iter().map(|span| span.content.as_ref())).collect();
     assert!(text.contains("line 40"), "full output should be reachable");
 
     press(&mut app, KeyCode::Char('o'));
@@ -2121,10 +1986,7 @@ fn clicking_the_transcript_selects_then_unfolds_a_tool_row() {
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     handle_click(&mut app, rect.x + 2, rect.y);
-    assert!(
-        app.entries[1].tool.as_ref().expect("tool").expanded,
-        "clicking the selected row unfolds it"
-    );
+    assert!(app.entries[1].tool.as_ref().expect("tool").expanded, "clicking the selected row unfolds it");
 }
 
 #[test]
@@ -2158,20 +2020,9 @@ fn a_click_on_an_overlay_does_not_reach_the_transcript_beneath() {
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
-    let (rect, _) = app
-        .hits
-        .borrow()
-        .config
-        .iter()
-        .copied()
-        .find(|(_, index)| *index == 2)
-        .expect("config row");
+    let (rect, _) = app.hits.borrow().config.iter().copied().find(|(_, index)| *index == 2).expect("config row");
     handle_click(&mut app, rect.x + 2, rect.y);
-    assert_eq!(
-        app.config_panel.as_ref().expect("panel").selected,
-        2,
-        "the click belongs to the panel on top"
-    );
+    assert_eq!(app.config_panel.as_ref().expect("panel").selected, 2, "the click belongs to the panel on top");
     assert_eq!(app.cursor, None, "the transcript must not have been touched");
 }
 
@@ -2260,9 +2111,8 @@ async fn ralph_replays_the_exact_prompt_until_the_promise_appears() {
         for content in ["still working", "DONE"] {
             let (mut stream, _) = listener.accept().await.unwrap();
             requests.push(read_http_request(&mut stream).await);
-            let body = format!(
-                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{content}\"}}}}]}}\n\ndata: [DONE]\n\n"
-            );
+            let body =
+                format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{content}\"}}}}]}}\n\ndata: [DONE]\n\n");
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
@@ -2273,8 +2123,7 @@ async fn ralph_replays_the_exact_prompt_until_the_promise_appears() {
     });
     let (_directory, mut app) = test_app(&format!("http://{address}/v1"));
     std::fs::write(app.config.workspace.join("task.md"), "mutable task details").unwrap();
-    app.ralph_loop =
-        Some(RalphLoop::new("Use @task.md exactly".into(), "DONE".into(), Some(3)).unwrap());
+    app.ralph_loop = Some(RalphLoop::new("Use @task.md exactly".into(), "DONE".into(), Some(3)).unwrap());
     app.continue_ralph_loop();
     for _ in 0..200 {
         sleep(Duration::from_millis(10)).await;
@@ -2293,9 +2142,7 @@ async fn ralph_replays_the_exact_prompt_until_the_promise_appears() {
             .as_array()
             .unwrap()
             .iter()
-            .filter(|message| {
-                message["role"] == "user" && message["content"] == "Use @task.md exactly"
-            })
+            .filter(|message| message["role"] == "user" && message["content"] == "Use @task.md exactly")
             .count();
         assert_eq!(repeats, index + 1);
     }
@@ -2343,15 +2190,8 @@ fn test_app(base_url: &str) -> (TempDir, App) {
         no_session: true,
         ..Config::for_endpoint(workspace.clone(), base_url.into(), "test-model".into(), paths)
     };
-    let app = App::new(
-        config,
-        settings,
-        Credentials::default(),
-        None,
-        None,
-        Arc::new(AgentServices::empty(workspace)),
-    )
-    .unwrap();
+    let app = App::new(config, settings, Credentials::default(), None, None, Arc::new(AgentServices::empty(workspace)))
+        .unwrap();
     (directory, app)
 }
 

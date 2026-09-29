@@ -40,12 +40,7 @@ struct Frontmatter {
 }
 
 impl SkillRegistry {
-    pub fn discover(
-        paths: &AbacusPaths,
-        workspace: &Path,
-        plugin_roots: &[PathBuf],
-        extra_paths: &[PathBuf],
-    ) -> Self {
+    pub fn discover(paths: &AbacusPaths, workspace: &Path, plugin_roots: &[PathBuf], extra_paths: &[PathBuf]) -> Self {
         let mut registry = Self::default();
         for root in plugin_roots {
             registry.scan_root(root, "plugin");
@@ -75,24 +70,18 @@ impl SkillRegistry {
     }
 
     pub fn search(&self, query: &str) -> Vec<&Skill> {
-        let words =
-            query.to_ascii_lowercase().split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+        let words = query.to_ascii_lowercase().split_whitespace().map(str::to_owned).collect::<Vec<_>>();
         let mut matches = self
             .skills
             .values()
             .filter_map(|skill| {
-                let haystack = format!(
-                    "{} {}",
-                    skill.name.to_ascii_lowercase(),
-                    skill.description.to_ascii_lowercase()
-                );
+                let haystack =
+                    format!("{} {}", skill.name.to_ascii_lowercase(), skill.description.to_ascii_lowercase());
                 let score = words.iter().filter(|word| haystack.contains(word.as_str())).count();
                 (words.is_empty() || score > 0).then_some((score, skill))
             })
             .collect::<Vec<_>>();
-        matches.sort_by(|left, right| {
-            right.0.cmp(&left.0).then_with(|| left.1.name.cmp(&right.1.name))
-        });
+        matches.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.name.cmp(&right.1.name)));
         matches.into_iter().map(|(_, skill)| skill).collect()
     }
 
@@ -104,10 +93,7 @@ impl SkillRegistry {
             "<available_skills>\nLoad a relevant skill with skill_load before following it. Only metadata is shown here.\n",
         );
         for skill in self.skills.values() {
-            output.push_str(&format!(
-                "- {}: {} [source={}]\n",
-                skill.name, skill.description, skill.source
-            ));
+            output.push_str(&format!("- {}: {} [source={}]\n", skill.name, skill.description, skill.source));
         }
         output.push_str("</available_skills>");
         output
@@ -128,10 +114,7 @@ impl SkillRegistry {
             tool(
                 "skill_read",
                 "Read a referenced text resource inside an installed skill directory.",
-                [
-                    req("name", json!({"type": "string"})),
-                    req("path", string("Skill-relative resource path")),
-                ],
+                [req("name", json!({"type": "string"})), req("path", string("Skill-relative resource path"))],
             ),
         ]
     }
@@ -149,12 +132,7 @@ impl SkillRegistry {
                 "skill_create",
                 "Write a new Agent Skill so a procedure you have worked out becomes reusable. Use this once you have done something non-obvious that will recur — the skill is loadable by name in this and every later session. Not for one-off work, and not a place for failure lessons (use papercut_record).",
                 [
-                    req(
-                        "name",
-                        string(
-                            "1-64 lowercase letters, digits, or hyphens; becomes the directory name",
-                        ),
-                    ),
+                    req("name", string("1-64 lowercase letters, digits, or hyphens; becomes the directory name")),
                     req(
                         "description",
                         string(
@@ -163,9 +141,7 @@ impl SkillRegistry {
                     ),
                     req(
                         "instructions",
-                        string(
-                            "The full skill body in markdown: the procedure, its steps, and any gotchas",
-                        ),
+                        string("The full skill body in markdown: the procedure, its steps, and any gotchas"),
                     ),
                     opt(
                         "scope",
@@ -206,8 +182,7 @@ impl SkillRegistry {
     }
 
     pub fn invocation(&self, name: &str, user_text: &str) -> Result<String> {
-        let skill =
-            self.skills.get(name).with_context(|| format!("skill `{name}` is not installed"))?;
+        let skill = self.skills.get(name).with_context(|| format!("skill `{name}` is not installed"))?;
         Ok(format!(
             "The user explicitly invoked the `{}` skill. Follow these instructions for this request:\n\n<skill name=\"{}\" root=\"{}\">\n{}\n</skill>\n\nUser request: {}",
             skill.name,
@@ -276,10 +251,7 @@ impl SkillRegistry {
             name: String,
         }
         let args: Args = serde_json::from_str(arguments)?;
-        let skill = self
-            .skills
-            .get(&args.name)
-            .with_context(|| format!("skill `{}` is not installed", args.name))?;
+        let skill = self.skills.get(&args.name).with_context(|| format!("skill `{}` is not installed", args.name))?;
         Ok(format!(
             "<skill name=\"{}\" root=\"{}\">\n{}\n</skill>",
             skill.name,
@@ -295,15 +267,10 @@ impl SkillRegistry {
             path: String,
         }
         let args: Args = serde_json::from_str(arguments)?;
-        let skill = self
-            .skills
-            .get(&args.name)
-            .with_context(|| format!("skill `{}` is not installed", args.name))?;
+        let skill = self.skills.get(&args.name).with_context(|| format!("skill `{}` is not installed", args.name))?;
         let relative = Path::new(&args.path);
         if relative.is_absolute()
-            || relative
-                .components()
-                .any(|part| matches!(part, Component::ParentDir | Component::RootDir))
+            || relative.components().any(|part| matches!(part, Component::ParentDir | Component::RootDir))
         {
             bail!("skill resource path must stay inside the skill");
         }
@@ -353,9 +320,7 @@ fn split_frontmatter(content: &str) -> Result<(&str, &str)> {
         .strip_prefix("---\n")
         .or_else(|| content.strip_prefix("---\r\n"))
         .context("SKILL.md must begin with YAML frontmatter")?;
-    let Some((frontmatter, body)) =
-        content.split_once("\n---\n").or_else(|| content.split_once("\r\n---\r\n"))
-    else {
+    let Some((frontmatter, body)) = content.split_once("\n---\n").or_else(|| content.split_once("\r\n---\r\n")) else {
         bail!("SKILL.md frontmatter is not terminated with ---");
     };
     Ok((frontmatter, body))
@@ -366,12 +331,7 @@ fn split_frontmatter(content: &str) -> Result<(&str, &str)> {
 /// `load_skill` is the reader for this format and enforces the same rules, so
 /// they are checked here rather than letting a malformed write surface later
 /// as a discovery diagnostic the model never sees.
-pub fn write_skill(
-    root: &Path,
-    name: &str,
-    description: &str,
-    instructions: &str,
-) -> Result<PathBuf> {
+pub fn write_skill(root: &Path, name: &str, description: &str, instructions: &str) -> Result<PathBuf> {
     super::validate_name("skill name", name)?;
     let description = description.trim();
     if description.is_empty() || description.len() > 1_024 {
@@ -396,14 +356,12 @@ pub fn write_skill(
     }
 
     let directory = root.join(name);
-    fs::create_dir_all(&directory)
-        .with_context(|| format!("could not create {}", directory.display()))?;
+    fs::create_dir_all(&directory).with_context(|| format!("could not create {}", directory.display()))?;
     let path = directory.join("SKILL.md");
     crate::config::atomic_write(&path, content.as_bytes(), false)?;
     // Round-trip through the reader: a skill that cannot be loaded back is a
     // broken write, and better to fail now than to leave it on disk.
-    load_skill(&directory, "project")
-        .with_context(|| format!("wrote {} but it does not load", path.display()))?;
+    load_skill(&directory, "project").with_context(|| format!("wrote {} but it does not load", path.display()))?;
     Ok(path)
 }
 
@@ -429,9 +387,8 @@ mod tests {
         assert!(!registry.prompt_index().contains("Always inspect"));
         let loaded = registry.execute("skill_load", r#"{"name":"review-helper"}"#).unwrap();
         assert!(loaded.contains("Always inspect the diff"));
-        let resource = registry
-            .execute("skill_read", r#"{"name":"review-helper","path":"references/checks.md"}"#)
-            .unwrap();
+        let resource =
+            registry.execute("skill_read", r#"{"name":"review-helper","path":"references/checks.md"}"#).unwrap();
         assert_eq!(resource, "Check errors.");
     }
 }

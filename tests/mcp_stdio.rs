@@ -46,8 +46,5 @@ for line in sys.stdin:
     let manager = McpManager::connect(&configs, directory.path()).await;
     assert!(manager.diagnostics().is_empty(), "{:?}", manager.diagnostics());
     assert_eq!(manager.tools().next().unwrap().exposed_name, "mcp__local__echo");
-    assert_eq!(
-        manager.execute("mcp__local__echo", r#"{"text":"hello stdio"}"#).await.unwrap(),
-        "hello stdio"
-    );
+    assert_eq!(manager.execute("mcp__local__echo", r#"{"text":"hello stdio"}"#).await.unwrap(), "hello stdio");
 }

@@ -6,9 +6,7 @@ use super::*;
 pub(super) fn hit(regions: &[(Rect, usize)], column: u16, row: u16) -> Option<usize> {
     regions
         .iter()
-        .find(|(rect, _)| {
-            column >= rect.x && column < rect.right() && row >= rect.y && row < rect.bottom()
-        })
+        .find(|(rect, _)| column >= rect.x && column < rect.right() && row >= rect.y && row < rect.bottom())
         .map(|(_, index)| *index)
 }
 
@@ -43,8 +41,7 @@ pub(super) fn handle_key(app: &mut App, key: KeyEvent) {
     }
     let dialog = app.approval.is_some() || app.question.is_some();
     let dialog_open = dialog && !app.overlay_hidden;
-    let editing_form =
-        app.config_panel.is_some() || app.raw_config.is_some() || app.feedback_form.is_some();
+    let editing_form = app.config_panel.is_some() || app.raw_config.is_some() || app.feedback_form.is_some();
 
     // With a selection up, Ctrl+C means copy — the meaning it has everywhere
     // else. Without one it keeps its terminal meaning of interrupt/clear/quit.
@@ -165,8 +162,7 @@ pub(super) fn approval_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('a') => app.decide(ApprovalDecision::Always),
         KeyCode::Char('n') | KeyCode::Esc => app.decide(ApprovalDecision::Reject),
         KeyCode::Char('v') => {
-            if let Some(approval) = app.approval.as_mut().filter(|approval| approval.diff.is_some())
-            {
+            if let Some(approval) = app.approval.as_mut().filter(|approval| approval.diff.is_some()) {
                 approval.view = match approval.view {
                     ApprovalView::Unified => ApprovalView::Raw,
                     ApprovalView::Raw => ApprovalView::Unified,
@@ -174,12 +170,8 @@ pub(super) fn approval_key(app: &mut App, key: KeyEvent) {
                 (app.approval_scroll, app.approval_horizontal) = (0, 0);
             }
         }
-        KeyCode::Char('h') | KeyCode::Left => {
-            app.approval_horizontal = app.approval_horizontal.saturating_sub(4)
-        }
-        KeyCode::Char('l') | KeyCode::Right => {
-            app.approval_horizontal = app.approval_horizontal.saturating_add(4)
-        }
+        KeyCode::Char('h') | KeyCode::Left => app.approval_horizontal = app.approval_horizontal.saturating_sub(4),
+        KeyCode::Char('l') | KeyCode::Right => app.approval_horizontal = app.approval_horizontal.saturating_add(4),
         KeyCode::Home => (app.approval_scroll, app.approval_horizontal) = (0, 0),
         KeyCode::Char('c') if ctrl(key, 'c') => app.handle_ctrl_c(),
         _ => {}
@@ -203,12 +195,8 @@ pub(super) fn question_key(app: &mut App, key: KeyEvent) {
     let count = question.options.len();
     match key.code {
         KeyCode::Esc | KeyCode::Enter => app.answer_user_question(),
-        KeyCode::Up | KeyCode::Char('k') if count > 0 => {
-            question.cursor = (question.cursor + count - 1) % count
-        }
-        KeyCode::Down | KeyCode::Char('j') if count > 0 => {
-            question.cursor = (question.cursor + 1) % count
-        }
+        KeyCode::Up | KeyCode::Char('k') if count > 0 => question.cursor = (question.cursor + count - 1) % count,
+        KeyCode::Down | KeyCode::Char('j') if count > 0 => question.cursor = (question.cursor + 1) % count,
         KeyCode::Char(' ' | 'x') if question.multi_select => {
             question.selected.get_mut(question.cursor).into_iter().for_each(toggle);
         }
@@ -270,9 +258,7 @@ pub(super) fn config_key(app: &mut App, key: KeyEvent) {
     }
     match key.code {
         KeyCode::Char('k') | KeyCode::Up => panel.selected = panel.selected.saturating_sub(1),
-        KeyCode::Char('j') | KeyCode::Down => {
-            panel.selected = (panel.selected + 1).min(settings().count() - 1)
-        }
+        KeyCode::Char('j') | KeyCode::Down => panel.selected = (panel.selected + 1).min(settings().count() - 1),
         KeyCode::Enter | KeyCode::Char(' ') => {
             let selected = panel.selected;
             app.activate_setting(selected);
@@ -314,9 +300,10 @@ pub(super) fn handle_click(app: &mut App, column: u16, row: u16) {
             // First click moves the cursor, second commits — the same
             // two-step every other list in the interface uses, so a click
             // never switches a model you were only pointing at.
-            let already = app.model_hub.as_ref().is_some_and(|hub| {
-                hub.selected == index && hub.pane == crate::model_hub::Pane::Body
-            });
+            let already = app
+                .model_hub
+                .as_ref()
+                .is_some_and(|hub| hub.selected == index && hub.pane == crate::model_hub::Pane::Body);
             if let Some(hub) = app.model_hub.as_mut() {
                 hub.pane = crate::model_hub::Pane::Body;
                 hub.selected = index;
@@ -403,12 +390,8 @@ pub(super) fn handle_insert_key(app: &mut App, key: KeyEvent) {
         KeyCode::Down if completing => app.move_completion(1),
         // Within a multi-line draft the arrows move through it; only at the
         // top or bottom edge do they reach for prompt history.
-        KeyCode::Up if !app.input.move_up_wrapped(app.composer_width as usize) => {
-            app.history_prev()
-        }
-        KeyCode::Down if !app.input.move_down_wrapped(app.composer_width as usize) => {
-            app.history_next()
-        }
+        KeyCode::Up if !app.input.move_up_wrapped(app.composer_width as usize) => app.history_prev(),
+        KeyCode::Down if !app.input.move_down_wrapped(app.composer_width as usize) => app.history_next(),
         KeyCode::Up | KeyCode::Down => {}
         KeyCode::PageUp => app.scroll_up(page),
         KeyCode::PageDown => app.scroll_down(page),
@@ -445,12 +428,8 @@ pub(super) fn handle_insert_key(app: &mut App, key: KeyEvent) {
             app.input.select_all();
             app.status = "selected all — ^C copies, typing replaces".to_owned();
         }
-        KeyCode::Char('z') if control && !app.input.undo() => {
-            app.status = "nothing to undo".to_owned()
-        }
-        KeyCode::Char('y') if control && !app.input.redo() => {
-            app.status = "nothing to redo".to_owned()
-        }
+        KeyCode::Char('z') if control && !app.input.undo() => app.status = "nothing to undo".to_owned(),
+        KeyCode::Char('y') if control && !app.input.redo() => app.status = "nothing to redo".to_owned(),
         KeyCode::Char('z' | 'y') if control => {}
         // Ctrl+V: images first — a terminal's own paste can only ever deliver
         // text, so this key is the sole route by which a screenshot on the
@@ -511,12 +490,8 @@ pub(super) fn handle_normal_key(app: &mut App, key: KeyEvent) {
         (_, KeyCode::Char('o' | ' ')) => {
             app.toggle_cursor_fold(None);
         }
-        (_, KeyCode::Char('l') | KeyCode::Right) if !app.toggle_cursor_fold(Some(true)) => {
-            app.input.move_right()
-        }
-        (_, KeyCode::Char('h') | KeyCode::Left) if !app.toggle_cursor_fold(Some(false)) => {
-            app.input.move_left()
-        }
+        (_, KeyCode::Char('l') | KeyCode::Right) if !app.toggle_cursor_fold(Some(true)) => app.input.move_right(),
+        (_, KeyCode::Char('h') | KeyCode::Left) if !app.toggle_cursor_fold(Some(false)) => app.input.move_left(),
         (_, KeyCode::PageUp) => app.scroll_up(page),
         (_, KeyCode::PageDown) => app.scroll_down(page),
         (_, KeyCode::Char('G')) => app.follow_tail(),
@@ -568,10 +543,7 @@ pub(super) fn clipboard_text() -> Option<String> {
 }
 
 pub(super) fn handle_picker_prompt(app: &mut App, key: KeyEvent) {
-    let renaming = app
-        .picker
-        .as_ref()
-        .is_some_and(|picker| matches!(picker.prompt, Some(PickerPrompt::Rename { .. })));
+    let renaming = app.picker.as_ref().is_some_and(|picker| matches!(picker.prompt, Some(PickerPrompt::Rename { .. })));
     if renaming {
         match key.code {
             KeyCode::Esc => {
@@ -700,10 +672,8 @@ pub(super) fn active_completion(app: &App) -> Option<(Vec<(String, String)>, &'s
     let text = app.input.text();
     let slash = slash_suggestions(&text);
     if !slash.is_empty() {
-        let items = slash
-            .into_iter()
-            .map(|(command, description)| (command.to_owned(), description.to_owned()))
-            .collect();
+        let items =
+            slash.into_iter().map(|(command, description)| (command.to_owned(), description.to_owned())).collect();
         return Some((items, "COMMANDS"));
     }
     let token = app.input.token_before_cursor();
@@ -739,9 +709,7 @@ impl App {
 
     /// Copy the most recent assistant reply — the thing most often wanted.
     pub(super) fn yank_last_reply(&mut self) {
-        let Some(entry) =
-            self.entries.iter().rev().find(|entry| entry.kind == EntryKind::Assistant)
-        else {
+        let Some(entry) = self.entries.iter().rev().find(|entry| entry.kind == EntryKind::Assistant) else {
             self.status = "no reply to copy yet".to_owned();
             return;
         };
@@ -769,11 +737,9 @@ impl App {
     pub(super) fn paste_from_clipboard(&mut self) {
         match crate::clipboard::read_image() {
             Ok(Some(image)) => {
-                match crate::clipboard::save_attachment(&self.config.paths.attachments_dir, &image)
-                {
+                match crate::clipboard::save_attachment(&self.config.paths.attachments_dir, &image) {
                     Ok((token, _)) => {
-                        let needs_space =
-                            !self.input.is_empty() && !self.input.text().ends_with(' ');
+                        let needs_space = !self.input.is_empty() && !self.input.text().ends_with(' ');
                         if needs_space {
                             self.input.insert(' ');
                         }
@@ -867,9 +833,7 @@ impl App {
                 // Nothing withheld: say so rather than appearing to ignore the
                 // key. A running command that has not printed yet lands here.
                 self.status = match call.status {
-                    ui::ToolStatus::Running => {
-                        "nothing buffered yet — output appears as it arrives"
-                    }
+                    ui::ToolStatus::Running => "nothing buffered yet — output appears as it arrives",
                     _ => "that output is already shown in full",
                 }
                 .to_owned();
@@ -883,8 +847,7 @@ impl App {
         self.cursor = Some(index);
         self.entries_rev = self.entries_rev.wrapping_add(1);
         self.follow = true;
-        self.status =
-            if expanded { "expanded — ^O closes it".to_owned() } else { "collapsed".to_owned() };
+        self.status = if expanded { "expanded — ^O closes it".to_owned() } else { "collapsed".to_owned() };
         true
     }
 
@@ -964,8 +927,7 @@ impl App {
     pub(super) fn scroll_step(&mut self) -> u16 {
         const TRACKPAD_GAP: Duration = Duration::from_millis(80);
         let now = Instant::now();
-        let rapid =
-            self.last_scroll.is_some_and(|previous| now.duration_since(previous) < TRACKPAD_GAP);
+        let rapid = self.last_scroll.is_some_and(|previous| now.duration_since(previous) < TRACKPAD_GAP);
         self.last_scroll = Some(now);
         if rapid { 1 } else { 3 }
     }

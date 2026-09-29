@@ -81,8 +81,7 @@ impl TetherState {
     }
 
     pub fn set_correction(&self, correction: String) {
-        self.inner.write().expect("tether lock").correction =
-            Some((correction, CORRECTION_REQUESTS));
+        self.inner.write().expect("tether lock").correction = Some((correction, CORRECTION_REQUESTS));
     }
 
     /// The system-layer text for the next request, if a correction is active.
@@ -107,8 +106,7 @@ impl TetherState {
 pub fn compact_history(messages: &[Value]) -> String {
     // (is_user, text): what the user asked is the evidence both callers judge
     // against, so it is budgeted separately from what the agent has been doing.
-    let excerpt =
-        |text: &str, max: usize| crate::text::clip(&crate::text::flat(text.trim()), max, "…");
+    let excerpt = |text: &str, max: usize| crate::text::clip(&crate::text::flat(text.trim()), max, "…");
     let said = |message: &Value, field: &str| {
         let text = message.get(field).and_then(Value::as_str);
         text.filter(|text| !text.trim().is_empty()).map(|text| excerpt(text, EXCERPT_CHARS))
@@ -211,9 +209,7 @@ pub async fn capture_intent(
 /// Empty when neither exists.
 pub fn agreed_plan(goal: &crate::goal::GoalState, tasks: &crate::task::TaskList) -> String {
     let mut parts: Vec<String> = Vec::new();
-    if let Some(goal) =
-        goal.snapshot().filter(|goal| goal.status == crate::goal::GoalStatus::Active)
-    {
+    if let Some(goal) = goal.snapshot().filter(|goal| goal.status == crate::goal::GoalStatus::Active) {
         parts.push(format!("Active goal: {}", goal.objective));
     }
     let items = tasks.snapshot();
@@ -324,10 +320,7 @@ mod tests {
             }));
         }
         let compact = compact_history(&messages);
-        assert!(
-            compact.contains("build the full SaaS backend"),
-            "the actual request must survive: {compact}"
-        );
+        assert!(compact.contains("build the full SaaS backend"), "the actual request must survive: {compact}");
         assert!(compact.contains("empero.org"), "so must the opening prompt: {compact}");
         // Recent activity still gets its share.
         assert!(compact.contains("writing module 399"), "{compact}");
@@ -342,13 +335,10 @@ mod tests {
     fn activity_keeps_its_share_when_the_user_talks_a_lot() {
         let mut messages = Vec::new();
         for index in 0..400 {
-            messages
-                .push(json!({"role":"user","content":format!("note {index} {}", "u".repeat(200))}));
+            messages.push(json!({"role":"user","content":format!("note {index} {}", "u".repeat(200))}));
         }
         for index in 0..50 {
-            messages.push(
-                json!({"role":"assistant","content":format!("doing {index} {}", "a".repeat(200))}),
-            );
+            messages.push(json!({"role":"assistant","content":format!("doing {index} {}", "a".repeat(200))}));
         }
         let compact = compact_history(&messages);
         assert!(compact.contains("doing 49"), "recent activity survives: {compact}");
@@ -372,9 +362,7 @@ mod tests {
     fn compact_history_keeps_the_tail_under_budget() {
         let mut messages = Vec::new();
         for index in 0..200 {
-            messages.push(
-                json!({"role":"assistant","content":format!("step {index} {}", "x".repeat(200))}),
-            );
+            messages.push(json!({"role":"assistant","content":format!("step {index} {}", "x".repeat(200))}));
         }
         let compact = compact_history(&messages);
         assert!(compact.len() <= COMPACT_HISTORY_CHARS + 300);
@@ -390,10 +378,7 @@ mod tests {
             parse_verdict("OFF_TRACK: stop refactoring the CLI and return to the importer bug."),
             Some("stop refactoring the CLI and return to the importer bug.".to_owned())
         );
-        assert_eq!(
-            parse_verdict("off track - go back to the tests"),
-            Some("go back to the tests".to_owned())
-        );
+        assert_eq!(parse_verdict("off track - go back to the tests"), Some("go back to the tests".to_owned()));
         // An empty correction or free-form rambling earns no steering power.
         assert_eq!(parse_verdict("OFF_TRACK:"), None);
         assert_eq!(parse_verdict("The agent seems busy."), None);

@@ -102,12 +102,7 @@ fn check(value: &Value, schema: &Value, path: &str) -> Result<()> {
     }
 
     if let Some(object) = value.as_object() {
-        for required in schema
-            .get("required")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
+        for required in schema.get("required").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str)
         {
             if !object.contains_key(required) {
                 bail!("{path}: missing required property `{required}`");
@@ -196,8 +191,7 @@ mod tests {
 
     #[test]
     fn a_missing_required_property_names_itself() {
-        let error =
-            validate(&json!({"verdict": "pass"}), &findings_schema()).unwrap_err().to_string();
+        let error = validate(&json!({"verdict": "pass"}), &findings_schema()).unwrap_err().to_string();
         assert!(error.contains("missing required property `findings`"), "{error}");
     }
 

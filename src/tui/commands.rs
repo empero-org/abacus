@@ -57,12 +57,7 @@ impl App {
 
     /// Put the outcome of a settings change in the status bar: `done` when it
     /// saved, the error under `failure` when it did not.
-    pub(super) fn report(
-        &mut self,
-        result: Result<()>,
-        done: impl Into<String>,
-        failure: &str,
-    ) -> bool {
+    pub(super) fn report(&mut self, result: Result<()>, done: impl Into<String>, failure: &str) -> bool {
         let saved = result.is_ok();
         self.status = match result {
             Ok(()) => done.into(),
@@ -113,8 +108,7 @@ impl App {
                  minimal|low|medium|high|xhigh|max, or /effort auto to leave it to the provider."
             ));
         }
-        let cleared =
-            matches!(argument.to_ascii_lowercase().as_str(), "auto" | "default" | "unset");
+        let cleared = matches!(argument.to_ascii_lowercase().as_str(), "auto" | "default" | "unset");
         let parsed = crate::config::ReasoningEffort::parse(argument);
         if !cleared && parsed.is_none() {
             return self.fail("Usage: /effort minimal|low|medium|high|xhigh|max|auto");
@@ -162,8 +156,7 @@ impl App {
                 format!(
                     "Pinned, in order: {}\nFallbacks: {}",
                     pinned.join(", "),
-                    on_off(profile.is_none_or(|profile| profile.allow_fallbacks))
-                        .to_ascii_lowercase()
+                    on_off(profile.is_none_or(|profile| profile.allow_fallbacks)).to_ascii_lowercase()
                 )
             };
             return self.say(format!(
@@ -173,25 +166,24 @@ impl App {
                  List what is available with `abacus providers`."
             ));
         }
-        let change =
-            self.active_profile_mut().map(|profile| match argument.to_ascii_lowercase().as_str() {
-                "clear" | "none" | "off" => {
-                    profile.providers.clear();
-                    "providers unpinned".to_owned()
-                }
-                "strict" => {
-                    profile.allow_fallbacks = false;
-                    "strict: only pinned providers may serve this model".to_owned()
-                }
-                "fallback" | "fallbacks" => {
-                    profile.allow_fallbacks = true;
-                    "fallbacks allowed".to_owned()
-                }
-                _ => {
-                    profile.providers = crate::config::Routing::parse_order(argument);
-                    format!("pinned to {}", profile.providers.join(", "))
-                }
-            });
+        let change = self.active_profile_mut().map(|profile| match argument.to_ascii_lowercase().as_str() {
+            "clear" | "none" | "off" => {
+                profile.providers.clear();
+                "providers unpinned".to_owned()
+            }
+            "strict" => {
+                profile.allow_fallbacks = false;
+                "strict: only pinned providers may serve this model".to_owned()
+            }
+            "fallback" | "fallbacks" => {
+                profile.allow_fallbacks = true;
+                "fallbacks allowed".to_owned()
+            }
+            _ => {
+                profile.providers = crate::config::Routing::parse_order(argument);
+                format!("pinned to {}", profile.providers.join(", "))
+            }
+        });
         match change {
             Ok(summary) => {
                 let result = self.save_and_apply_settings();
@@ -231,19 +223,13 @@ impl App {
                 services
                     .plugins
                     .list()
-                    .map(|plugin| {
-                        format!("{} {}  {}", plugin.name, plugin.version, plugin.description)
-                    })
+                    .map(|plugin| format!("{} {}  {}", plugin.name, plugin.version, plugin.description))
                     .collect(),
             ),
             _ => (
                 "MCP tools",
                 "No MCP tools connected.",
-                services
-                    .mcp
-                    .tools()
-                    .map(|tool| format!("{}  {}", tool.exposed_name, tool.description))
-                    .collect(),
+                services.mcp.tools().map(|tool| format!("{}  {}", tool.exposed_name, tool.description)).collect(),
             ),
         };
         if rows.is_empty() {
@@ -356,8 +342,7 @@ impl App {
         // sees would target different entries.
         let snapshot = self.state.harness.snapshot_of(Memory);
         if let Some(number) = argument.strip_prefix("delete") {
-            let removed = numbered(&snapshot, number)
-                .filter(|memory| self.state.harness.remove(Memory, &memory.id));
+            let removed = numbered(&snapshot, number).filter(|memory| self.state.harness.remove(Memory, &memory.id));
             return match removed {
                 Some(memory) => self.say(format!("Memory \"{}\" deleted.", memory.title)),
                 None => self.fail("Usage: /memories delete <number> — numbers from /memories"),
@@ -370,8 +355,7 @@ impl App {
                  it into future sessions.",
             );
         }
-        let mut lines =
-            vec![format!("{} memori(es) for this workspace, newest first:", snapshot.len())];
+        let mut lines = vec![format!("{} memori(es) for this workspace, newest first:", snapshot.len())];
         // The lifetime is the part a user needs to see: a session memory
         // disappears when the session ends.
         lines.extend(snapshot.iter().enumerate().map(|(index, memory)| {
@@ -397,8 +381,7 @@ impl App {
         };
         if let Some(id) = argument.strip_prefix("revert").map(str::trim) {
             if id.is_empty() {
-                return self
-                    .fail("Usage: /harness revert <refinement-id> — ids come from /harness log");
+                return self.fail("Usage: /harness revert <refinement-id> — ids come from /harness log");
             }
             return match self.state.harness.rollback(id) {
                 Ok(result) => self.say(format!(
@@ -479,22 +462,14 @@ impl App {
                             "Goal · {:?}\n{}{}",
                             goal.status,
                             goal.objective,
-                            goal.note
-                                .map(|note| format!("\n\nLatest update: {note}"))
-                                .unwrap_or_default()
+                            goal.note.map(|note| format!("\n\nLatest update: {note}")).unwrap_or_default()
                         )
                     })
-                    .unwrap_or_else(|| {
-                        "No goal is set. Use /goal <objective>, ideally after /plan.".to_owned()
-                    })),
+                    .unwrap_or_else(|| "No goal is set. Use /goal <objective>, ideally after /plan.".to_owned())),
                 None,
             )
         } else if argument == "pause" {
-            let result = self
-                .state
-                .goal
-                .pause()
-                .map(|_| "Goal paused. Use /goal resume when ready.".to_owned());
+            let result = self.state.goal.pause().map(|_| "Goal paused. Use /goal resume when ready.".to_owned());
             if result.is_ok()
                 && let Some(handle) = self.running.take()
             {
@@ -510,10 +485,7 @@ impl App {
             (result, None)
         } else if argument == "resume" {
             match self.state.goal.resume() {
-                Ok(goal) => (
-                    Ok("Goal resumed.".to_owned()),
-                    Some(("Resume goal".to_owned(), goal.objective)),
-                ),
+                Ok(goal) => (Ok("Goal resumed.".to_owned()), Some(("Resume goal".to_owned(), goal.objective))),
                 Err(error) => (Err(error), None),
             }
         } else if argument == "clear" {
@@ -528,19 +500,12 @@ impl App {
                 None,
             )
         } else if let Some(objective) = argument.strip_prefix("edit ") {
-            (
-                self.state
-                    .goal
-                    .edit(objective)
-                    .map(|goal| format!("Goal updated: {}", goal.objective)),
-                None,
-            )
+            (self.state.goal.edit(objective).map(|goal| format!("Goal updated: {}", goal.objective)), None)
         } else {
             match self.state.goal.create(argument) {
-                Ok(goal) => (
-                    Ok(format!("Goal set: {}", goal.objective)),
-                    Some((goal.objective.clone(), goal.objective)),
-                ),
+                Ok(goal) => {
+                    (Ok(format!("Goal set: {}", goal.objective)), Some((goal.objective.clone(), goal.objective)))
+                }
                 Err(error) => (Err(error), None),
             }
         };
@@ -600,11 +565,7 @@ impl App {
             return;
         }
         if argument == "pause" {
-            let result = self
-                .ralph_loop
-                .as_mut()
-                .context("no Ralph loop is configured")
-                .and_then(RalphLoop::pause);
+            let result = self.ralph_loop.as_mut().context("no Ralph loop is configured").and_then(RalphLoop::pause);
             self.status = result
                 .map(|()| "loop pauses after the current turn".to_owned())
                 .unwrap_or_else(|error| format!("loop pause failed: {error}"));
@@ -612,11 +573,7 @@ impl App {
             return;
         }
         if argument == "resume" {
-            let result = self
-                .ralph_loop
-                .as_mut()
-                .context("no Ralph loop is configured")
-                .and_then(RalphLoop::resume);
+            let result = self.ralph_loop.as_mut().context("no Ralph loop is configured").and_then(RalphLoop::resume);
             match result {
                 Ok(()) => self.continue_ralph_loop(),
                 Err(error) => self.status = format!("loop resume failed: {error}"),
@@ -686,10 +643,7 @@ impl App {
                 self.settings.ui.theme.label(),
                 if resolved == ThemeMode::Dark { "dark" } else { "light" },
             );
-            body.push_str(&format!(
-                "\n\nTheme files live in {}.",
-                self.config.paths.themes_dir.display()
-            ));
+            body.push_str(&format!("\n\nTheme files live in {}.", self.config.paths.themes_dir.display()));
             if custom.is_empty() {
                 body.push_str(
                     "\nNothing there yet — `/theme export <name>` writes the current palette out as a starting point.",
@@ -740,10 +694,7 @@ impl App {
         });
         match written {
             Ok(()) => {
-                self.say(format!(
-                    "Wrote {}.\nEdit the colours, then `/theme {name}` to use it.",
-                    path.display()
-                ));
+                self.say(format!("Wrote {}.\nEdit the colours, then `/theme {name}` to use it.", path.display()));
                 self.status = format!("theme exported: {name}");
             }
             Err(error) => self.fail(format!("could not write {}: {error}", path.display())),
@@ -765,16 +716,13 @@ impl App {
                 .collect::<Vec<_>>();
             lines.push(String::new());
             lines.push(
-                "Switch with /profile <id>; /profile rename <id>; /profile delete <id>; /profile add."
-                    .to_owned(),
+                "Switch with /profile <id>; /profile rename <id>; /profile delete <id>; /profile add.".to_owned(),
             );
             self.say(lines.join("\n"));
             return;
         }
-        let (verb, rest) = argument
-            .split_once(char::is_whitespace)
-            .map(|(verb, rest)| (verb, rest.trim()))
-            .unwrap_or((argument, ""));
+        let (verb, rest) =
+            argument.split_once(char::is_whitespace).map(|(verb, rest)| (verb, rest.trim())).unwrap_or((argument, ""));
         match verb {
             "rename" => {
                 if rest.is_empty() {

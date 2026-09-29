@@ -46,15 +46,7 @@ const TOOL_BODY_OMITTED: &str = "[tool output omitted for summarization]";
 /// Tools whose results are large and re-derivable from disk, so their old
 /// output is safe to placeholder.
 const COMPACTABLE_TOOLS: &[&str] = &[
-    "read_file",
-    "read_files",
-    "grep",
-    "glob",
-    "list_files",
-    "run_command",
-    "git_diff",
-    "git_show",
-    "git_blame",
+    "read_file", "read_files", "grep", "glob", "list_files", "run_command", "git_diff", "git_show", "git_blame",
     "git_log",
 ];
 
@@ -94,11 +86,7 @@ impl CompactionState {
 /// can run its reflection pass first, while the evidence still exists.
 /// Microcompaction inside `compact` may still relieve the pressure, in which
 /// case the reflection simply ran a little early.
-pub fn needs_summary(
-    messages: &[Value],
-    state: &CompactionState,
-    budget: &CompactionBudget,
-) -> bool {
+pub fn needs_summary(messages: &[Value], state: &CompactionState, budget: &CompactionBudget) -> bool {
     under_pressure(messages, state, budget) && messages.len() > KEEP_FIRST + 1
 }
 
@@ -309,8 +297,7 @@ fn microcompact(messages: &mut [Value], budget: &CompactionBudget) {
         .iter()
         .enumerate()
         .filter(|(_, message)| {
-            message["role"] == "tool"
-                && message["name"].as_str().is_some_and(|name| COMPACTABLE_TOOLS.contains(&name))
+            message["role"] == "tool" && message["name"].as_str().is_some_and(|name| COMPACTABLE_TOOLS.contains(&name))
         })
         .map(|(index, _)| index)
         .collect();
@@ -358,9 +345,7 @@ fn call_subject(messages: &[Value], result: usize) -> String {
     };
     let arguments = messages[..result].iter().rev().find_map(|message| {
         message["tool_calls"].as_array()?.iter().find_map(|call| {
-            (call["id"].as_str() == Some(id))
-                .then(|| call.pointer("/function/arguments")?.as_str())
-                .flatten()
+            (call["id"].as_str() == Some(id)).then(|| call.pointer("/function/arguments")?.as_str()).flatten()
         })
     });
     let Some(parsed) = arguments.and_then(|raw| serde_json::from_str::<Value>(raw).ok()) else {
@@ -455,9 +440,7 @@ async fn summarize_in_context(
     cancel: &AtomicBool,
 ) -> Result<String, String> {
     let mut directive = String::from(IN_CONTEXT_PROMPT);
-    if let Some(prior) =
-        state.running_summary.as_deref().filter(|summary| !summary.trim().is_empty())
-    {
+    if let Some(prior) = state.running_summary.as_deref().filter(|summary| !summary.trim().is_empty()) {
         directive.push_str(&format!(
             "\n\nEarlier conversation was already compacted into this summary. Fold everything \
              from it that still matters into the new one; do not lose a decision or constraint it \
@@ -524,9 +507,7 @@ async fn summarize_range(
         let mut messages = Vec::with_capacity(range.len() + 4);
         messages.push(prompt.clone());
         if let Some(summary) = prior {
-            messages.push(
-                json!({"role":"user","content":format!("Existing summary so far:\n{summary}")}),
-            );
+            messages.push(json!({"role":"user","content":format!("Existing summary so far:\n{summary}")}));
             messages.push(json!({"role":"assistant","content":"Understood. I will extend it."}));
         }
         if strip_percent == 0 {
@@ -690,12 +671,7 @@ mod tests {
     use serde_json::json;
 
     /// Append `count` calls to `tool`, each with the result `result` gives it.
-    fn tool_calls(
-        messages: &mut Vec<Value>,
-        count: usize,
-        tool: &str,
-        result: impl Fn(usize) -> String,
-    ) {
+    fn tool_calls(messages: &mut Vec<Value>, count: usize, tool: &str, result: impl Fn(usize) -> String) {
         for i in 0..count {
             messages.push(json!({"role":"assistant","content":null,"tool_calls":[
                 {"id":format!("c{i}"),"type":"function","function":{"name":tool,"arguments":"{}"}}
@@ -709,11 +685,8 @@ mod tests {
         // Regression: microcompaction used to blank tool results every turn,
         // even on a tiny context, so the model forgot findings and re-read in a
         // loop. Below the recent-window budget, nothing is shed.
-        let budget = CompactionBudget {
-            compact_at_chars: 100_000,
-            recent_budget_chars: 30_000,
-            summary_budget_chars: 4_000,
-        };
+        let budget =
+            CompactionBudget { compact_at_chars: 100_000, recent_budget_chars: 30_000, summary_budget_chars: 4_000 };
         let mut messages = vec![json!({"role":"system","content":"rules"})];
         tool_calls(&mut messages, 20, "read_file", |i| format!("finding {i}"));
         assert!(!should_microcompact(&messages, &budget));
@@ -722,9 +695,7 @@ mod tests {
             microcompact(&mut messages, &CompactionBudget::default());
         }
         assert!(
-            !messages
-                .iter()
-                .any(|m| m["content"].as_str().is_some_and(|c| c.starts_with(SENTINEL_PREFIX))),
+            !messages.iter().any(|m| m["content"].as_str().is_some_and(|c| c.starts_with(SENTINEL_PREFIX))),
             "tool results must survive on a small context"
         );
     }
@@ -733,11 +704,8 @@ mod tests {
     fn large_contexts_trim_stale_tool_output_before_summarizing() {
         // Above the recent-window budget but below the ceiling: microcompaction
         // trims old bodies (token savings) without invoking the summarizer.
-        let budget = CompactionBudget {
-            compact_at_chars: 1_000_000,
-            recent_budget_chars: 1_000,
-            summary_budget_chars: 4_000,
-        };
+        let budget =
+            CompactionBudget { compact_at_chars: 1_000_000, recent_budget_chars: 1_000, summary_budget_chars: 4_000 };
         let mut messages = vec![json!({"role":"system","content":"rules"})];
         tool_calls(&mut messages, 20, "read_file", |_| "x".repeat(200));
         assert!(should_microcompact(&messages, &budget));
@@ -745,10 +713,7 @@ mod tests {
         microcompact(&mut messages, &CompactionBudget::default());
         let live = messages
             .iter()
-            .filter(|m| {
-                m["role"] == "tool"
-                    && m["content"].as_str().is_some_and(|c| !c.starts_with(SENTINEL_PREFIX))
-            })
+            .filter(|m| m["role"] == "tool" && m["content"].as_str().is_some_and(|c| !c.starts_with(SENTINEL_PREFIX)))
             .count();
         assert_eq!(live, KEEP_RECENT_TOOL_RESULTS);
     }
@@ -780,10 +745,7 @@ mod tests {
         microcompact(&mut messages, &CompactionBudget::default());
         let edited = messages
             .iter()
-            .filter(|m| {
-                m["role"] == "tool"
-                    && m["content"].as_str().is_some_and(|c| c.starts_with("edited"))
-            })
+            .filter(|m| m["role"] == "tool" && m["content"].as_str().is_some_and(|c| c.starts_with("edited")))
             .count();
         assert_eq!(edited, 20);
     }
@@ -824,10 +786,7 @@ mod tests {
             .filter_map(|m| m["content"].as_str())
             .find(|c| c.starts_with(SENTINEL_PREFIX))
             .expect("something should have been shrunk");
-        assert!(
-            shrunk.contains("src/module_0.rs"),
-            "the file must still be identifiable: {shrunk}"
-        );
+        assert!(shrunk.contains("src/module_0.rs"), "the file must still be identifiable: {shrunk}");
     }
 
     #[test]
@@ -838,9 +797,7 @@ mod tests {
         microcompact(&mut messages, &CompactionBudget::default());
         // Nothing should have been wrapped a second time.
         assert!(
-            !messages.iter().any(|m| m["content"]
-                .as_str()
-                .is_some_and(|c| c.matches(SENTINEL_PREFIX).count() > 1)),
+            !messages.iter().any(|m| m["content"].as_str().is_some_and(|c| c.matches(SENTINEL_PREFIX).count() > 1)),
             "an already-shrunk result must be left alone"
         );
     }
@@ -852,11 +809,8 @@ mod tests {
         let big = "x".repeat(5_000);
         let mut messages = vec![json!({"role":"system","content":"rules"})];
         tool_calls(&mut messages, 12, "read_file", |_| big.clone());
-        let budget = CompactionBudget {
-            compact_at_chars: 100_000,
-            recent_budget_chars: 20_000,
-            summary_budget_chars: 4_000,
-        };
+        let budget =
+            CompactionBudget { compact_at_chars: 100_000, recent_budget_chars: 20_000, summary_budget_chars: 4_000 };
         microcompact(&mut messages, &budget);
         let live: usize = messages
             .iter()
@@ -864,10 +818,7 @@ mod tests {
             .filter(|m| m["content"].as_str().is_some_and(|c| !c.starts_with(SENTINEL_PREFIX)))
             .map(message_chars_one)
             .sum();
-        assert!(
-            live <= budget.recent_budget_chars / 2,
-            "the live tail should fit its byte budget, got {live}"
-        );
+        assert!(live <= budget.recent_budget_chars / 2, "the live tail should fit its byte budget, got {live}");
         // The count limit alone would have kept all twelve.
         assert!(live < 12 * 5_000);
     }
@@ -895,10 +846,8 @@ mod tests {
         // system + original user + assistant/tool pairs: last user is still
         // the opening prompt. Rolling-summary must refuse, or the next
         // request is just that prompt again.
-        let mut messages = vec![
-            json!({"role":"system","content":"rules"}),
-            json!({"role":"user","content":"fix the importer"}),
-        ];
+        let mut messages =
+            vec![json!({"role":"system","content":"rules"}), json!({"role":"user","content":"fix the importer"})];
         tool_calls(&mut messages, 8, "read_file", |i| format!("finding {i}"));
         assert!(opening_turn_still_live(&messages));
         assert_eq!(last_user_index(&messages), Some(1));
@@ -924,8 +873,7 @@ mod tests {
             json!({"role":"tool","tool_call_id":"c1","name":"read_file","content":"body"}),
         ];
         let head_end = first_legal_cut_at_or_after(&messages, KEEP_FIRST);
-        let cut = find_tail_cut(&messages, 0, head_end)
-            .min(last_user_index(&messages).unwrap_or(messages.len()));
+        let cut = find_tail_cut(&messages, 0, head_end).min(last_user_index(&messages).unwrap_or(messages.len()));
         assert_eq!(cut, 3, "current user turn must survive a zero recent budget");
         assert!(cut > head_end);
     }
@@ -964,8 +912,7 @@ mod tests {
             .map(|i| json!({"role":"tool","tool_call_id":format!("t{i}"),"name":"read_file","content":format!("body{i}")}))
             .collect();
         let stripped = strip_tool_bodies(&range, 40); // 2 of 5 removed
-        let omitted =
-            stripped.iter().filter(|m| m["content"].as_str() == Some(TOOL_BODY_OMITTED)).count();
+        let omitted = stripped.iter().filter(|m| m["content"].as_str() == Some(TOOL_BODY_OMITTED)).count();
         assert_eq!(omitted, 2);
         // Middle-out: index 2 (center) must be among the removed.
         assert_eq!(stripped[2]["content"].as_str(), Some(TOOL_BODY_OMITTED));

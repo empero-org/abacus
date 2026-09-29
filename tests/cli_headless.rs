@@ -21,16 +21,13 @@ fn headless_json_runs_without_prior_setup() {
             let read = stream.read(&mut buffer).unwrap();
             let request = String::from_utf8_lossy(&buffer[..read]);
             if request.starts_with("GET /v1/models") {
-                let response =
-                    "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+                let response = "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
                 stream.write_all(response.as_bytes()).unwrap();
                 continue;
             }
             assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
-            let body = concat!(
-                "data: {\"choices\":[{\"delta\":{\"content\":\"headless works\"}}]}\n\n",
-                "data: [DONE]\n\n"
-            );
+            let body =
+                concat!("data: {\"choices\":[{\"delta\":{\"content\":\"headless works\"}}]}\n\n", "data: [DONE]\n\n");
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                 body.len(),
@@ -83,16 +80,14 @@ fn headless_loop_stops_when_promise_appears() {
             let read = stream.read(&mut buffer).unwrap();
             let request = String::from_utf8_lossy(&buffer[..read]);
             if request.starts_with("GET /v1/models") {
-                let response =
-                    "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+                let response = "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
                 stream.write_all(response.as_bytes()).unwrap();
                 continue;
             }
             // First chat turn: no promise yet. Second: emits DONE and ends the loop.
             let content = if served_chat == 0 { "still working" } else { "all green DONE" };
-            let body = format!(
-                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{content}\"}}}}]}}\n\ndata: [DONE]\n\n"
-            );
+            let body =
+                format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{content}\"}}}}]}}\n\ndata: [DONE]\n\n");
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                 body.len(),

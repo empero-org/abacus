@@ -16,23 +16,13 @@ pub(super) fn draw_model_hub(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let assigning = hub.assigning.as_deref();
     let hints: &[(&str, &str)] = match (hub.pane, hub.current_scope(), assigning) {
         (Pane::Sidebar, _, _) => &[("↑↓", "scope"), ("→ enter", "browse"), ("esc", "close")],
-        (Pane::Body, Scope::Roles, _) => &[
-            ("↑↓", "role"),
-            ("enter", "assign"),
-            ("del", "inherit"),
-            ("←", "scopes"),
-            ("esc", "close"),
-        ],
-        (Pane::Body, _, Some(_)) => {
-            &[("↑↓", "select"), ("enter", "assign"), ("type", "filter"), ("esc", "back")]
+        (Pane::Body, Scope::Roles, _) => {
+            &[("↑↓", "role"), ("enter", "assign"), ("del", "inherit"), ("←", "scopes"), ("esc", "close")]
         }
-        (Pane::Body, _, None) => &[
-            ("↑↓", "select"),
-            ("enter", "switch"),
-            ("type", "filter"),
-            ("←", "scopes"),
-            ("esc", "close"),
-        ],
+        (Pane::Body, _, Some(_)) => &[("↑↓", "select"), ("enter", "assign"), ("type", "filter"), ("esc", "back")],
+        (Pane::Body, _, None) => {
+            &[("↑↓", "select"), ("enter", "switch"), ("type", "filter"), ("←", "scopes"), ("esc", "close")]
+        }
     };
     // Full-bleed rather than a centred card: this is a surface you go *to*,
     // and a floating panel with the composer showing around its edges reads as
@@ -66,10 +56,7 @@ pub(super) fn draw_model_hub(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let split = ui::split(columns, sidebar_width);
     let narrow = split.body.width < ui::MIN_SPLIT_BODY;
 
-    frame.render_widget(
-        Paragraph::new(Text::from(vec![ui::rule(inner.width), Line::from(ui::hints(hints))])),
-        footer,
-    );
+    frame.render_widget(Paragraph::new(Text::from(vec![ui::rule(inner.width), Line::from(ui::hints(hints))])), footer);
     if !narrow {
         draw_hub_divider(frame, popup, footer.y, split.divider_x);
         draw_hub_sidebar(frame, split.sidebar, app, hub);
@@ -99,18 +86,12 @@ pub(super) fn draw_hub_divider(frame: &mut Frame<'_>, popup: Rect, footer_y: u16
             set.track
         };
         if let Some(cell) = buffer.cell_mut((column, row)) {
-            cell.set_symbol(glyph)
-                .set_style(Style::default().fg(palette.border).bg(palette.overlay));
+            cell.set_symbol(glyph).set_style(Style::default().fg(palette.border).bg(palette.overlay));
         }
     }
 }
 
-pub(super) fn draw_hub_sidebar(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    app: &App,
-    hub: &crate::model_hub::ModelHub,
-) {
+pub(super) fn draw_hub_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App, hub: &crate::model_hub::ModelHub) {
     use crate::model_hub::{Catalog, Pane, Scope};
     let width = area.width as usize;
     let focused = hub.pane == Pane::Sidebar;
@@ -150,8 +131,7 @@ pub(super) fn draw_hub_sidebar(
             content.push(ui::state_mark(active));
             content.push(Span::raw(" "));
         }
-        let label_width =
-            width.saturating_sub(2 + ui::spans_width(&content) + annotation.chars().count() + 1);
+        let label_width = width.saturating_sub(2 + ui::spans_width(&content) + annotation.chars().count() + 1);
         content.push(Span::styled(ui::truncate(&label, label_width), emphasis(selected)));
         let used = ui::spans_width(&content) + 2;
         let gap = width.saturating_sub(used + annotation.chars().count()).max(1);
@@ -165,12 +145,7 @@ pub(super) fn draw_hub_sidebar(
 /// Rows reserved below a hub list for the rule and the detail block.
 pub(super) const HUB_DETAIL_ROWS: u16 = 3;
 
-pub(super) fn draw_hub_roles(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    app: &App,
-    hub: &crate::model_hub::ModelHub,
-) {
+pub(super) fn draw_hub_roles(frame: &mut Frame<'_>, area: Rect, app: &App, hub: &crate::model_hub::ModelHub) {
     use crate::model_hub::Pane;
     let rows = crate::model_hub::role_rows(&app.settings, &app.settings.default_profile);
     let width = area.width as usize;
@@ -192,17 +167,13 @@ pub(super) fn draw_hub_roles(
         } else {
             Style::default().fg(text())
         };
-        let model =
-            if row.inherited { format!("{} (inherited)", row.model) } else { row.model.clone() };
+        let model = if row.inherited { format!("{} (inherited)", row.model) } else { row.model.clone() };
         lines.push(ui::list_row(
             state,
             width,
             vec![
                 Span::styled(format!("{:<label_width$}  ", row.label), emphasis(selected)),
-                Span::styled(
-                    ui::truncate(&model, width.saturating_sub(label_width + 5)),
-                    model_style,
-                ),
+                Span::styled(ui::truncate(&model, width.saturating_sub(label_width + 5)), model_style),
             ],
         ));
     }
@@ -213,10 +184,7 @@ pub(super) fn draw_hub_roles(
     }
     lines.truncate(area.height.saturating_sub(2) as usize);
     lines.push(ui::rule(area.width));
-    lines.push(Line::from(fg(
-        format!("  {}", ui::truncate(&detail, width.saturating_sub(2))),
-        muted(),
-    )));
+    lines.push(Line::from(fg(format!("  {}", ui::truncate(&detail, width.saturating_sub(2))), muted())));
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
@@ -234,11 +202,7 @@ pub(super) fn draw_hub_models(
 
     // The search row is always live — there is no mode to enter, so there is
     // none to forget to leave.
-    let query = if hub.search.is_empty() {
-        fg("type to filter", rail())
-    } else {
-        fg(hub.search.clone(), text())
-    };
+    let query = if hub.search.is_empty() { fg("type to filter", rail()) } else { fg(hub.search.clone(), text()) };
     lines.push(Line::from(vec![bold(format!("{} ", ui::glyphs().prompt), primary()), query]));
     lines.push(Line::default());
 
@@ -257,8 +221,7 @@ pub(super) fn draw_hub_models(
     // holding a gutter open for rows that are not on screen.
     let visible: Vec<&crate::model_info::ModelCard> =
         matched.iter().skip(hub.window).take(list_height).copied().collect();
-    let cells: Vec<Vec<String>> =
-        visible.iter().map(|card| vec![card.context_label(), card.cost_label()]).collect();
+    let cells: Vec<Vec<String>> = visible.iter().map(|card| vec![card.context_label(), card.cost_label()]).collect();
     let widths = ui::metric_widths(cells.iter().map(Vec::as_slice), 2);
     let metrics = ui::metrics_width(&widths);
 
@@ -268,9 +231,7 @@ pub(super) fn draw_hub_models(
                 Catalog::Loading => "  Asking the endpoint what it serves…".to_owned(),
                 Catalog::Failed(error) => format!("  {error}"),
                 Catalog::Idle => "  Nothing loaded yet.".to_owned(),
-                Catalog::Ready(_) if !hub.search.is_empty() => {
-                    "  Nothing matches that filter.".to_owned()
-                }
+                Catalog::Ready(_) if !hub.search.is_empty() => "  Nothing matches that filter.".to_owned(),
                 Catalog::Ready(_) => "  The endpoint listed no models.".to_owned(),
             },
             if matches!(catalog, Catalog::Failed(_)) { danger() } else { muted() },
@@ -290,9 +251,11 @@ pub(super) fn draw_hub_models(
         }
         content.push(Span::styled(
             card.short_id().to_owned(),
-            Style::default()
-                .fg(if selected { primary() } else { text() })
-                .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
+            Style::default().fg(if selected { primary() } else { text() }).add_modifier(if selected {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }),
         ));
         if card.id == current {
             content.push(fg(format!(" {}", ui::glyphs().ok), success()));
@@ -318,10 +281,7 @@ pub(super) fn draw_hub_models(
 /// A row of comparable, `·`-joined facts about the selected model — the shape
 /// of it, then the prose. Truncation eats the description first, which is the
 /// part you can afford to lose.
-pub(super) fn hub_detail(
-    card: Option<&crate::model_info::ModelCard>,
-    width: usize,
-) -> Line<'static> {
+pub(super) fn hub_detail(card: Option<&crate::model_info::ModelCard>, width: usize) -> Line<'static> {
     let Some(card) = card else {
         return Line::default();
     };
@@ -427,16 +387,13 @@ pub(super) fn handle_model_hub_key(app: &mut App, key: KeyEvent) {
             hub.reset_body();
         }
         KeyCode::Delete if in_body && in_roles => {
-            let role = crate::roles::ROLES
-                .get(app.model_hub.as_ref().expect("checked above").selected)
-                .map(|role| role.id);
+            let role =
+                crate::roles::ROLES.get(app.model_hub.as_ref().expect("checked above").selected).map(|role| role.id);
             if let Some(role) = role {
                 app.assign_role(role, None);
             }
         }
-        KeyCode::Char(ch)
-            if in_body && !in_roles && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-        {
+        KeyCode::Char(ch) if in_body && !in_roles && !key.modifiers.contains(KeyModifiers::CONTROL) => {
             let hub = app.model_hub.as_mut().expect("checked above");
             hub.search.push(ch);
             hub.reset_body();
@@ -453,9 +410,11 @@ impl App {
         // common reason to open this is to change the model, and the roles
         // view is one keypress up from there.
         let active = self.settings.default_profile.clone();
-        if let Some(index) = hub.scopes.iter().position(
-            |scope| matches!(scope, crate::model_hub::Scope::Profile { id, .. } if *id == active),
-        ) {
+        if let Some(index) = hub
+            .scopes
+            .iter()
+            .position(|scope| matches!(scope, crate::model_hub::Scope::Profile { id, .. } if *id == active))
+        {
             hub.scope = index;
             hub.pane = crate::model_hub::Pane::Body;
         }
@@ -474,10 +433,7 @@ impl App {
         };
         let base_url = profile.base_url.clone();
         if base_url.trim().is_empty() {
-            self.catalogs.insert(
-                profile_id.to_owned(),
-                Catalog::Failed("this profile has no base URL".to_owned()),
-            );
+            self.catalogs.insert(profile_id.to_owned(), Catalog::Failed("this profile has no base URL".to_owned()));
             return;
         }
         // The key for the *active* profile is already resolved on `config`;
@@ -536,8 +492,7 @@ impl App {
 
     /// Make sure the scope under the sidebar cursor has a catalog on the way.
     pub(super) fn enter_hub_scope(&mut self) {
-        let profile =
-            self.model_hub.as_ref().and_then(|hub| hub.scoped_profile()).map(str::to_owned);
+        let profile = self.model_hub.as_ref().and_then(|hub| hub.scoped_profile()).map(str::to_owned);
         if let Some(profile) = profile {
             self.fetch_catalog(&profile);
         }
@@ -568,9 +523,7 @@ impl App {
                 };
                 let active = self.settings.default_profile.clone();
                 let target = self.model_hub.as_ref().and_then(|hub| {
-                    hub.scopes.iter().position(
-                        |scope| matches!(scope, Scope::Profile { id, .. } if *id == active),
-                    )
+                    hub.scopes.iter().position(|scope| matches!(scope, Scope::Profile { id, .. } if *id == active))
                 });
                 let Some(target) = target else {
                     self.status = "no profile to pick a model from".to_owned();
@@ -587,9 +540,8 @@ impl App {
             }
             Scope::Profile { .. } => {
                 let cards = self.hub_catalog().cards();
-                let Some(model) = crate::model_hub::filter(cards, &hub.search)
-                    .get(hub.selected)
-                    .map(|card| card.id.clone())
+                let Some(model) =
+                    crate::model_hub::filter(cards, &hub.search).get(hub.selected).map(|card| card.id.clone())
                 else {
                     return;
                 };
@@ -606,10 +558,7 @@ impl App {
                     // Land back on the role that was just set rather than at
                     // the top: assigning two roles in a row is the common
                     // case, and the eye is already there.
-                    hub.selected = crate::roles::ROLES
-                        .iter()
-                        .position(|role| role.id == assigned)
-                        .unwrap_or(0);
+                    hub.selected = crate::roles::ROLES.iter().position(|role| role.id == assigned).unwrap_or(0);
                 }
             }
         }

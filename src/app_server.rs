@@ -40,10 +40,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    agent::{
-        AgentEvent, AgentMode, ApprovalDecision, DoneReason, TurnOptions, UserAnswer,
-        initial_messages, run_turn,
-    },
+    agent::{AgentEvent, AgentMode, ApprovalDecision, DoneReason, TurnOptions, UserAnswer, initial_messages, run_turn},
     config::{Config, Settings},
     provider::Provider,
     services::AgentServices,
@@ -64,15 +61,8 @@ const SERVER_ERROR: i32 = -32000;
 const COMMAND_TOOLS: &[&str] = &["run_command"];
 /// Tools that change files. Split out because a front end shows a diff for
 /// these and a log for everything else.
-const FILE_CHANGE_TOOLS: &[&str] = &[
-    "edit_file",
-    "write_file",
-    "apply_patch",
-    "delete_file",
-    "move_file",
-    "append_file",
-    "create_directory",
-];
+const FILE_CHANGE_TOOLS: &[&str] =
+    &["edit_file", "write_file", "apply_patch", "delete_file", "move_file", "append_file", "create_directory"];
 
 fn item_type(tool: &str) -> &'static str {
     if COMMAND_TOOLS.contains(&tool) {
@@ -129,10 +119,7 @@ impl ThreadState {
         let state = SessionState::open(config, Some(&session), session.id.to_string());
         let trace = config
             .trace_enabled
-            .then(|| {
-                crate::sft::TraceWriter::open(&config.paths.traces_dir, &session.id.to_string())
-                    .ok()
-            })
+            .then(|| crate::sft::TraceWriter::open(&config.paths.traces_dir, &session.id.to_string()).ok())
             .flatten();
         Self { messages: session.messages.clone(), state, trace, persisted, session }
     }
@@ -191,9 +178,8 @@ pub async fn run(
     store: Option<SessionStore>,
     services: Arc<AgentServices>,
 ) -> Result<()> {
-    let tokens = Arc::new(crate::provider::TokenLedger::new(
-        session.as_ref().map(|value| value.tokens_used).unwrap_or(0),
-    ));
+    let tokens =
+        Arc::new(crate::provider::TokenLedger::new(session.as_ref().map(|value| value.tokens_used).unwrap_or(0)));
     let provider = Provider::with_tokens(&config, tokens.clone())?;
     let allow = Arc::new(AtomicBool::new(config.yes));
     let mode = config.mode.unwrap_or(AgentMode::Auto);
@@ -393,10 +379,7 @@ impl App {
                 let store = self.store.as_ref().ok_or_else(|| anyhow!("sessions off"))?;
                 store.rename(&mut self.thread.session, name)?;
                 self.thread.persisted = true;
-                notify(
-                    "thread/name/updated",
-                    json!({"threadId": self.thread_id(), "name": self.thread.session.title}),
-                );
+                notify("thread/name/updated", json!({"threadId": self.thread_id(), "name": self.thread.session.title}));
                 Ok(json!({"name": self.thread.session.title}))
             }
 
@@ -414,8 +397,7 @@ impl App {
                 if method == "turn/steer" {
                     return Err(anyhow!("no turn is running to steer"));
                 }
-                let text = crate::context::expand_file_references(&self.config.workspace, &text)
-                    .unwrap_or(text);
+                let text = crate::context::expand_file_references(&self.config.workspace, &text).unwrap_or(text);
                 self.start_turn(text, events);
                 Ok(json!({"turnId": self.turn_id(), "threadId": self.thread_id()}))
             }
@@ -426,15 +408,10 @@ impl App {
 
             // ---- models and config -----------------------------------------
             "model/list" => {
-                let models = crate::setup::discover_models(
-                    &self.config.base_url,
-                    self.config.api_key.as_deref(),
-                )
-                .await?;
-                let models: Vec<Value> = models
-                    .into_iter()
-                    .map(|id| json!({"id": id, "selected": id == self.config.model}))
-                    .collect();
+                let models =
+                    crate::setup::discover_models(&self.config.base_url, self.config.api_key.as_deref()).await?;
+                let models: Vec<Value> =
+                    models.into_iter().map(|id| json!({"id": id, "selected": id == self.config.model})).collect();
                 Ok(json!({"models": models}))
             }
             "config/read" => Ok(json!({
@@ -559,13 +536,10 @@ impl App {
                 let effort = match value {
                     Value::Null => None,
                     Value::String(ref text) if text.is_empty() || text == "auto" => None,
-                    Value::String(ref text) => {
-                        Some(crate::config::ReasoningEffort::parse(text).ok_or_else(|| {
-                            anyhow!(
-                                "effort must be minimal, low, medium, high, xhigh, max, or auto"
-                            )
-                        })?)
-                    }
+                    Value::String(ref text) => Some(
+                        crate::config::ReasoningEffort::parse(text)
+                            .ok_or_else(|| anyhow!("effort must be minimal, low, medium, high, xhigh, max, or auto"))?,
+                    ),
                     _ => return Err(anyhow!("effort must be a string or null")),
                 };
                 self.config.reasoning_effort = effort;
@@ -588,10 +562,7 @@ impl App {
 
     /// Edit the active profile and write the settings file, so a change made
     /// here is the same change `/config` would have made.
-    fn update_profile(
-        &mut self,
-        edit: impl FnOnce(&mut crate::config::ProviderProfile),
-    ) -> Result<()> {
+    fn update_profile(&mut self, edit: impl FnOnce(&mut crate::config::ProviderProfile)) -> Result<()> {
         let Some(profile) = self.settings.profiles.get_mut(&self.config.profile) else {
             // No stored profile (an env-only or one-off configuration): the
             // change still applies to this session, there is just nowhere to
@@ -630,11 +601,8 @@ impl App {
     }
 
     async fn git(&self, args: &[&str]) -> Result<String> {
-        let output = tokio::process::Command::new("git")
-            .args(args)
-            .current_dir(&self.config.workspace)
-            .output()
-            .await?;
+        let output =
+            tokio::process::Command::new("git").args(args).current_dir(&self.config.workspace).output().await?;
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
@@ -656,18 +624,9 @@ impl App {
             session_id: Some(self.thread_id()),
             trace: self.thread.trace.clone(),
             cancel: self.cancel.clone(),
-            ..self
-                .thread
-                .state
-                .turn(&self.config, self.services.clone())
-                .with_workspace_stores(&self.config)
+            ..self.thread.state.turn(&self.config, self.services.clone()).with_workspace_stores(&self.config)
         };
-        tokio::spawn(run_turn(
-            self.provider.clone(),
-            self.thread.messages.clone(),
-            options,
-            events.clone(),
-        ));
+        tokio::spawn(run_turn(self.provider.clone(), self.thread.messages.clone(), options, events.clone()));
     }
 
     /// Announce an item of the running turn opening (`started`) or closing
@@ -708,8 +667,7 @@ impl App {
 
     /// Open the item for a tool call and announce it at `status`.
     fn open_tool(&mut self, name: &str, summary: &str, status: &str) -> String {
-        let open =
-            OpenItem { id: self.next("item"), kind: item_type(name), summary: summary.to_owned() };
+        let open = OpenItem { id: self.next("item"), kind: item_type(name), summary: summary.to_owned() };
         self.item("started", open.tool(name, status));
         let id = open.id.clone();
         self.open_items.insert(name.to_owned(), open);
@@ -719,9 +677,7 @@ impl App {
     fn handle_event(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::Delta(text) => self.stream("agentMessage", "item/agentMessage/delta", text),
-            AgentEvent::Reasoning(text) => {
-                self.stream("reasoning", "item/reasoning/textDelta", text)
-            }
+            AgentEvent::Reasoning(text) => self.stream("reasoning", "item/reasoning/textDelta", text),
             AgentEvent::ToolStarted { name, summary } => {
                 // A tool call ends whatever text was streaming: the model has
                 // stopped talking and started doing.
@@ -824,10 +780,7 @@ impl App {
     fn flush_streaming(&mut self) {
         for kind in ["agentMessage", "reasoning"] {
             if let Some(open) = self.open_items.remove(kind) {
-                self.item(
-                    "completed",
-                    json!({"id": open.id, "type": open.kind, "text": open.summary}),
-                );
+                self.item("completed", json!({"id": open.id, "type": open.kind, "text": open.summary}));
             }
         }
     }
@@ -886,15 +839,11 @@ impl App {
             else {
                 return;
             };
-            let files: Vec<Value> =
-                String::from_utf8_lossy(&output.stdout).lines().filter_map(parse_numstat).collect();
+            let files: Vec<Value> = String::from_utf8_lossy(&output.stdout).lines().filter_map(parse_numstat).collect();
             if files.is_empty() {
                 return;
             }
-            notify(
-                "turn/diff/updated",
-                json!({"threadId": thread, "turnId": turn, "files": files}),
-            );
+            notify("turn/diff/updated", json!({"threadId": thread, "turnId": turn, "files": files}));
         });
     }
 
@@ -920,9 +869,7 @@ impl App {
         if let Some(responder) = self.pending_questions.remove(id) {
             let selected = result["selected"]
                 .as_array()
-                .map(|values| {
-                    values.iter().filter_map(|value| value.as_str().map(str::to_owned)).collect()
-                })
+                .map(|values| values.iter().filter_map(|value| value.as_str().map(str::to_owned)).collect())
                 .unwrap_or_default();
             let _ = responder.send(UserAnswer {
                 selected_labels: selected,
@@ -1005,8 +952,7 @@ fn turn_input(params: &Value) -> Result<String> {
         return non_empty(text);
     }
     if let Some(items) = params["input"].as_array() {
-        let text =
-            items.iter().filter_map(|item| item["text"].as_str()).collect::<Vec<_>>().join("\n");
+        let text = items.iter().filter_map(|item| item["text"].as_str()).collect::<Vec<_>>().join("\n");
         return non_empty(&text);
     }
     Err(anyhow!("turn input required"))
@@ -1075,8 +1021,7 @@ mod tests {
         let notification = parse(r#"{"jsonrpc":"2.0","method":"shutdown"}"#).unwrap();
         assert!(matches!(notification, Incoming::Notification { .. }));
         // A reply to a server-initiated request carries a result, not a method.
-        let response =
-            parse(r#"{"jsonrpc":"2.0","id":"srv_1","result":{"decision":"accept"}}"#).unwrap();
+        let response = parse(r#"{"jsonrpc":"2.0","id":"srv_1","result":{"decision":"accept"}}"#).unwrap();
         match response {
             Incoming::Response { id, result } => {
                 assert_eq!(id, json!("srv_1"));
@@ -1089,10 +1034,7 @@ mod tests {
     #[test]
     fn turn_input_accepts_both_shapes() {
         assert_eq!(turn_input(&json!({"text": "hello"})).unwrap(), "hello");
-        assert_eq!(
-            turn_input(&json!({"input": [{"type": "text", "text": "hello"}]})).unwrap(),
-            "hello"
-        );
+        assert_eq!(turn_input(&json!({"input": [{"type": "text", "text": "hello"}]})).unwrap(), "hello");
         assert!(turn_input(&json!({"text": "  "})).is_err());
         assert!(turn_input(&json!({})).is_err());
     }

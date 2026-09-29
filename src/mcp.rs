@@ -125,8 +125,7 @@ impl McpManager {
                 let workspace = workspace.clone();
                 async move {
                     let result = async {
-                        let client =
-                            Arc::new(McpClient::connect(&name, &config, &workspace).await?);
+                        let client = Arc::new(McpClient::connect(&name, &config, &workspace).await?);
                         let server_tools = client.list_tools().await?;
                         Ok::<_, anyhow::Error>((client, server_tools))
                     }
@@ -145,9 +144,7 @@ impl McpManager {
                     for tool in server_tools {
                         let exposed = namespaced(&name, &tool.name);
                         if tools.contains_key(&exposed) {
-                            diagnostics.push(format!(
-                                "MCP tool collision for {exposed}; later tool ignored"
-                            ));
+                            diagnostics.push(format!("MCP tool collision for {exposed}; later tool ignored"));
                             continue;
                         }
                         tools.insert(
@@ -168,11 +165,7 @@ impl McpManager {
             }
         }
 
-        Self {
-            servers: Arc::new(servers),
-            tools: Arc::new(tools),
-            diagnostics: Arc::new(diagnostics),
-        }
+        Self { servers: Arc::new(servers), tools: Arc::new(tools), diagnostics: Arc::new(diagnostics) }
     }
 
     pub fn tools(&self) -> impl Iterator<Item = &McpTool> {
@@ -209,22 +202,16 @@ impl McpManager {
                 .ok()
                 .and_then(|value| serde_json::to_string_pretty(&value).ok())
                 .unwrap_or_else(|| arguments.to_owned());
-            format!(
-                "MCP server: {}\nTool: {}\nArguments:\n{}",
-                tool.server, tool.original_name, pretty
-            )
+            format!("MCP server: {}\nTool: {}\nArguments:\n{}", tool.server, tool.original_name, pretty)
         })
     }
 
     pub async fn execute(&self, name: &str, arguments: &str) -> Option<String> {
         let tool = self.tools.get(name)?;
         let result = async {
-            let arguments: Value =
-                serde_json::from_str(arguments).context("invalid MCP arguments")?;
+            let arguments: Value = serde_json::from_str(arguments).context("invalid MCP arguments")?;
             let client = self.servers.get(&tool.server).context("MCP server is not connected")?;
-            let result = client
-                .request("tools/call", json!({"name":tool.original_name,"arguments":arguments}))
-                .await?;
+            let result = client.request("tools/call", json!({"name":tool.original_name,"arguments":arguments})).await?;
             format_tool_result(&result)
         }
         .await;
@@ -255,13 +242,10 @@ impl McpClient {
                 }),
             )
             .await?;
-        let negotiated = initialized["protocolVersion"]
-            .as_str()
-            .context("MCP initialize response omitted protocolVersion")?;
+        let negotiated =
+            initialized["protocolVersion"].as_str().context("MCP initialize response omitted protocolVersion")?;
         if negotiated != MCP_PROTOCOL_VERSION {
-            bail!(
-                "MCP server negotiated unsupported protocol {negotiated}; Abacus requires {MCP_PROTOCOL_VERSION}"
-            );
+            bail!("MCP server negotiated unsupported protocol {negotiated}; Abacus requires {MCP_PROTOCOL_VERSION}");
         }
         client.notify("notifications/initialized", json!({})).await?;
         Ok(client)
@@ -285,18 +269,14 @@ impl McpClient {
         let mut cursor = None;
         let mut output = Vec::new();
         loop {
-            let params =
-                cursor.as_ref().map(|cursor| json!({"cursor":cursor})).unwrap_or_else(|| json!({}));
+            let params = cursor.as_ref().map(|cursor| json!({"cursor":cursor})).unwrap_or_else(|| json!({}));
             let result = self.request("tools/list", params).await?;
-            let listed =
-                result["tools"].as_array().context("MCP tools/list response omitted tools")?;
+            let listed = result["tools"].as_array().context("MCP tools/list response omitted tools")?;
             for tool in listed {
                 let name = tool["name"].as_str().context("MCP tool omitted name")?.to_owned();
                 let description = tool["description"].as_str().unwrap_or("MCP tool").to_owned();
-                let input_schema = tool
-                    .get("inputSchema")
-                    .cloned()
-                    .unwrap_or_else(|| json!({"type":"object","properties":{}}));
+                let input_schema =
+                    tool.get("inputSchema").cloned().unwrap_or_else(|| json!({"type":"object","properties":{}}));
                 output.push(ListedTool { name, description, input_schema });
             }
             cursor = result["nextCursor"].as_str().map(str::to_owned);
@@ -310,10 +290,7 @@ impl McpClient {
 
 impl StdioClient {
     async fn spawn(name: &str, config: &McpServerConfig, workspace: &Path) -> Result<Self> {
-        let command = config
-            .command
-            .as_deref()
-            .with_context(|| format!("stdio MCP `{name}` is missing command"))?;
+        let command = config.command.as_deref().with_context(|| format!("stdio MCP `{name}` is missing command"))?;
         let mut process = Command::new(command);
         process
             .args(&config.args)
@@ -325,9 +302,7 @@ impl StdioClient {
         for (key, value) in &config.env {
             process.env(key, expand_env(value)?);
         }
-        let mut child = process
-            .spawn()
-            .with_context(|| format!("could not start MCP `{name}` command `{command}`"))?;
+        let mut child = process.spawn().with_context(|| format!("could not start MCP `{name}` command `{command}`"))?;
         let stdin = child.stdin.take().context("MCP stdin was not captured")?;
         let stdout = child.stdout.take().context("MCP stdout was not captured")?;
         let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
@@ -408,10 +383,7 @@ impl HttpClient {
         let url = config.url.clone().context("HTTP MCP is missing url")?;
         let mut headers = HeaderMap::new();
         for (name, value) in &config.headers {
-            headers.insert(
-                HeaderName::from_bytes(name.as_bytes())?,
-                HeaderValue::from_str(&expand_env(value)?)?,
-            );
+            headers.insert(HeaderName::from_bytes(name.as_bytes())?, HeaderValue::from_str(&expand_env(value)?)?);
         }
         Ok(Self {
             client: reqwest::Client::builder()
@@ -454,12 +426,9 @@ impl HttpClient {
         if let Some(session) = self.session_id.lock().await.clone() {
             request = request.header("mcp-session-id", session);
         }
-        let response = timeout(self.timeout, request.send())
-            .await
-            .map_err(|_| anyhow!("HTTP MCP request timed out"))??;
-        if let Some(session) =
-            response.headers().get("mcp-session-id").and_then(|value| value.to_str().ok())
-        {
+        let response =
+            timeout(self.timeout, request.send()).await.map_err(|_| anyhow!("HTTP MCP request timed out"))??;
+        if let Some(session) = response.headers().get("mcp-session-id").and_then(|value| value.to_str().ok()) {
             *self.session_id.lock().await = Some(session.to_owned());
         }
         let status = response.status();
@@ -469,12 +438,8 @@ impl HttpClient {
         if status.as_u16() == 202 {
             return Ok(Value::Null);
         }
-        let content_type = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default()
-            .to_owned();
+        let content_type =
+            response.headers().get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default().to_owned();
         let body = response.text().await?;
         if content_type.contains("text/event-stream") {
             for line in body.lines() {
@@ -510,8 +475,7 @@ fn expand_env(value: &str) -> Result<String> {
         let after = &rest[start + 2..];
         let end = after.find('}').context("unterminated ${ENV} reference")?;
         let name = &after[..end];
-        let resolved = std::env::var(name)
-            .with_context(|| format!("environment variable `{name}` is not set"))?;
+        let resolved = std::env::var(name).with_context(|| format!("environment variable `{name}` is not set"))?;
         output.push_str(&resolved);
         rest = &after[end + 1..];
     }
@@ -524,10 +488,7 @@ fn namespaced(server: &str, tool: &str) -> String {
 }
 
 fn sanitize(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' { ch } else { '_' })
-        .collect()
+    value.chars().map(|ch| if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' { ch } else { '_' }).collect()
 }
 
 fn format_tool_result(result: &Value) -> Result<String> {
@@ -536,10 +497,8 @@ fn format_tool_result(result: &Value) -> Result<String> {
         for block in content {
             match block["type"].as_str().unwrap_or_default() {
                 "text" => parts.push(block["text"].as_str().unwrap_or_default().to_owned()),
-                "image" => parts
-                    .push(format!("[image: {}]", block["mimeType"].as_str().unwrap_or("unknown"))),
-                "audio" => parts
-                    .push(format!("[audio: {}]", block["mimeType"].as_str().unwrap_or("unknown"))),
+                "image" => parts.push(format!("[image: {}]", block["mimeType"].as_str().unwrap_or("unknown"))),
+                "audio" => parts.push(format!("[audio: {}]", block["mimeType"].as_str().unwrap_or("unknown"))),
                 _ => parts.push(serde_json::to_string_pretty(block)?),
             }
         }
@@ -551,11 +510,7 @@ fn format_tool_result(result: &Value) -> Result<String> {
         parts.push(serde_json::to_string_pretty(result)?);
     }
     let output = parts.join("\n");
-    if result["isError"].as_bool().unwrap_or(false) {
-        Ok(format!("Error: {output}"))
-    } else {
-        Ok(output)
-    }
+    if result["isError"].as_bool().unwrap_or(false) { Ok(format!("Error: {output}")) } else { Ok(output) }
 }
 
 #[cfg(test)]

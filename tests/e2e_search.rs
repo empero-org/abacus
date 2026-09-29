@@ -7,10 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 /// Serve one canned response, recording the request line it was asked for.
-async fn instance(
-    body: &'static str,
-    content_type: &'static str,
-) -> (String, Arc<std::sync::Mutex<String>>) {
+async fn instance(body: &'static str, content_type: &'static str) -> (String, Arc<std::sync::Mutex<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let seen: Arc<std::sync::Mutex<String>> = Arc::default();
@@ -64,8 +61,7 @@ async fn a_searxng_instance_answers_and_is_asked_for_json() {
 /// serving scraped results would leave a broken instance broken indefinitely.
 #[tokio::test]
 async fn an_instance_without_json_enabled_says_exactly_that() {
-    let (url, _seen) =
-        instance("<!DOCTYPE html><html><body>results</body></html>", "text/html").await;
+    let (url, _seen) = instance("<!DOCTYPE html><html><body>results</body></html>", "text/html").await;
     let settings = SearchSettings { instance_url: Some(url), ..SearchSettings::default() };
     let config = settings.resolve_with(|_| None);
     // The chain is searxng then bing; with no network in CI both may miss, so

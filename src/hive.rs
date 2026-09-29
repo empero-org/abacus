@@ -287,19 +287,14 @@ pub struct HiveStats {
 
 impl HiveStats {
     pub fn tier(&self) -> HiveTier {
-        let failure_rate = if self.workers == 0 {
-            0.0
-        } else {
-            f64::from(self.worker_failures) / f64::from(self.workers)
-        };
+        let failure_rate =
+            if self.workers == 0 { 0.0 } else { f64::from(self.worker_failures) / f64::from(self.workers) };
         // A rate computed from a handful of workers says little, so it only
         // starts counting once there is enough of a record to mean something.
         let rate_is_meaningful = self.workers >= RATE_MEANINGFUL_AFTER;
         if self.clean_runs >= HIVE_AT && failure_rate < HIVE_MAX_FAILURE_RATE {
             HiveTier::Hive
-        } else if self.clean_runs >= SWARM_AT
-            && !(rate_is_meaningful && failure_rate >= SWARM_MAX_FAILURE_RATE)
-        {
+        } else if self.clean_runs >= SWARM_AT && !(rate_is_meaningful && failure_rate >= SWARM_MAX_FAILURE_RATE) {
             HiveTier::Swarm
         } else {
             HiveTier::Probing
@@ -471,10 +466,7 @@ mod tests {
         assert!(guidance.contains("recon"), "names them: {guidance}");
         assert!(guidance.contains("builder"), "{guidance}");
         assert!(guidance.contains("scout"), "with their roles");
-        assert!(
-            guidance.contains("Do NOT spawn more workers"),
-            "and says what to do about it: {guidance}"
-        );
+        assert!(guidance.contains("Do NOT spawn more workers"), "and says what to do about it: {guidance}");
         // The warning leads, ahead of the encouragement to delegate.
         let warn = guidance.find("ALREADY RUNNING").unwrap();
         let tier = guidance.find("Delegation experience").unwrap();
@@ -566,10 +558,7 @@ mod tests {
         let roster = registry.roster();
         assert_eq!(roster.len(), RESUMABLE_WORKERS, "retention is bounded");
         assert!(registry.channel("w0").is_none(), "oldest evicted first");
-        assert!(
-            registry.channel(&format!("w{}", RESUMABLE_WORKERS + 2)).is_some(),
-            "newest retained"
-        );
+        assert!(registry.channel(&format!("w{}", RESUMABLE_WORKERS + 2)).is_some(), "newest retained");
     }
 
     #[test]
@@ -602,11 +591,7 @@ mod tests {
         assert_eq!(states, vec![WorkerState::Done, WorkerState::Failed]);
 
         for index in 0..5 {
-            board.begin(
-                &format!("worker-{index}"),
-                "worker",
-                Arc::new(crate::provider::TokenLedger::default()),
-            );
+            board.begin(&format!("worker-{index}"), "worker", Arc::new(crate::provider::TokenLedger::default()));
         }
         // The new batch replaced the settled one, and five workers cluster.
         assert_eq!(board.snapshot().len(), 5);

@@ -126,14 +126,12 @@ impl Renderer {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
             Event::Text(text) => self.text(&text),
-            Event::Code(code) => self.span(
-                code.into_string(),
-                self.style().fg(self.theme.code).bg(self.theme.code_background),
-            ),
-            Event::InlineMath(math) => self.span(
-                prettify_math(&math),
-                self.style().fg(self.theme.accent).add_modifier(Modifier::ITALIC),
-            ),
+            Event::Code(code) => {
+                self.span(code.into_string(), self.style().fg(self.theme.code).bg(self.theme.code_background))
+            }
+            Event::InlineMath(math) => {
+                self.span(prettify_math(&math), self.style().fg(self.theme.accent).add_modifier(Modifier::ITALIC))
+            }
             Event::DisplayMath(math) => {
                 self.flush_line(false);
                 self.blank_line();
@@ -158,10 +156,7 @@ impl Renderer {
             Event::HardBreak => self.flush_line(true),
             Event::Rule => {
                 self.flush_line(false);
-                self.lines.push(Line::from(Span::styled(
-                    "─".repeat(48),
-                    Style::default().fg(self.theme.muted),
-                )));
+                self.lines.push(Line::from(Span::styled("─".repeat(48), Style::default().fg(self.theme.muted))));
                 self.blank_line();
             }
             Event::TaskListMarker(checked) => {
@@ -223,13 +218,10 @@ impl Renderer {
             }
             Tag::Emphasis => self.styles.push(self.style().add_modifier(Modifier::ITALIC)),
             Tag::Strong => self.styles.push(self.style().add_modifier(Modifier::BOLD)),
-            Tag::Strikethrough => {
-                self.styles.push(self.style().add_modifier(Modifier::CROSSED_OUT))
-            }
+            Tag::Strikethrough => self.styles.push(self.style().add_modifier(Modifier::CROSSED_OUT)),
             Tag::Link { dest_url, .. } => {
                 self.links.push((dest_url.into_string(), false));
-                self.styles
-                    .push(self.style().fg(self.theme.link).add_modifier(Modifier::UNDERLINED));
+                self.styles.push(self.style().fg(self.theme.link).add_modifier(Modifier::UNDERLINED));
             }
             Tag::Image { dest_url, .. } => {
                 self.images.push(dest_url.into_string());
@@ -239,9 +231,7 @@ impl Renderer {
                 self.flush_line(false);
                 self.span(format!("[^{name}] "), self.style().fg(self.theme.accent));
             }
-            Tag::Table(alignments) => {
-                self.table = Some(TableState { alignments, ..TableState::default() })
-            }
+            Tag::Table(alignments) => self.table = Some(TableState { alignments, ..TableState::default() }),
             Tag::HtmlBlock
             | Tag::MetadataBlock(_)
             | Tag::DefinitionList
@@ -336,10 +326,7 @@ impl Renderer {
                 }
                 if !line.is_empty() {
                     self.ensure_code_prefix();
-                    self.span(
-                        line.to_owned(),
-                        Style::default().fg(self.theme.code).bg(self.theme.code_background),
-                    );
+                    self.span(line.to_owned(), Style::default().fg(self.theme.code).bg(self.theme.code_background));
                 }
             }
             return;
@@ -415,11 +402,8 @@ impl Renderer {
         let budget = self.width.unwrap_or(88).saturating_sub(overhead).max(4 * columns);
         let mut total: usize = widths.iter().sum();
         while total > budget {
-            let Some((widest, _)) = widths
-                .iter()
-                .enumerate()
-                .max_by_key(|(_, width)| **width)
-                .filter(|(_, width)| **width > 4)
+            let Some((widest, _)) =
+                widths.iter().enumerate().max_by_key(|(_, width)| **width).filter(|(_, width)| **width > 4)
             else {
                 break;
             };
@@ -429,20 +413,14 @@ impl Renderer {
 
         let muted = Style::default().fg(self.theme.muted);
         let rule = |left: char, junction: char, right: char| {
-            let bars = widths
-                .iter()
-                .map(|width| "─".repeat(width + 2))
-                .collect::<Vec<_>>()
-                .join(&junction.to_string());
+            let bars = widths.iter().map(|width| "─".repeat(width + 2)).collect::<Vec<_>>().join(&junction.to_string());
             format!("{left}{bars}{right}")
         };
 
         self.lines.push(Line::from(Span::styled(rule('┌', '┬', '┐'), muted)));
         for (row_index, row) in table.rows.iter().enumerate() {
             let cells: Vec<Vec<String>> = (0..columns)
-                .map(|column| {
-                    wrap_cell(row.get(column).map(String::as_str).unwrap_or(""), widths[column])
-                })
+                .map(|column| wrap_cell(row.get(column).map(String::as_str).unwrap_or(""), widths[column]))
                 .collect();
             let height = cells.iter().map(Vec::len).max().unwrap_or(1).max(1);
             let style = if row_index < table.head_rows {
@@ -460,14 +438,8 @@ impl Renderer {
                         Some(Alignment::Center) => (pad / 2, pad - pad / 2),
                         _ => (0, pad),
                     };
-                    spans.push(Span::styled(
-                        format!("{}{}{}", " ".repeat(left), value, " ".repeat(right)),
-                        style,
-                    ));
-                    spans.push(Span::styled(
-                        if column + 1 == columns { " │" } else { " │ " },
-                        muted,
-                    ));
+                    spans.push(Span::styled(format!("{}{}{}", " ".repeat(left), value, " ".repeat(right)), style));
+                    spans.push(Span::styled(if column + 1 == columns { " │" } else { " │ " }, muted));
                 }
                 self.lines.push(Line::from(spans));
             }
@@ -482,10 +454,8 @@ impl Renderer {
     fn ensure_prefix(&mut self) {
         if self.current.is_empty() {
             for _ in 0..self.quote_depth {
-                self.current.push(Span::styled(
-                    format!("{} ", self.theme.quote_rail),
-                    Style::default().fg(self.theme.quote),
-                ));
+                self.current
+                    .push(Span::styled(format!("{} ", self.theme.quote_rail), Style::default().fg(self.theme.quote)));
             }
             if let Some(prefix) = self.item_prefix_pending.take() {
                 self.current.push(Span::styled(prefix, Style::default().fg(self.theme.accent)));
@@ -523,13 +493,10 @@ impl Renderer {
             if self.current.is_empty() {
                 self.ensure_code_prefix();
             }
-            let used: usize =
-                self.current.iter().map(|span| UnicodeWidthStr::width(span.content.as_ref())).sum();
+            let used: usize = self.current.iter().map(|span| UnicodeWidthStr::width(span.content.as_ref())).sum();
             if used < width {
-                self.current.push(Span::styled(
-                    " ".repeat(width - used),
-                    Style::default().bg(self.theme.code_background),
-                ));
+                self.current
+                    .push(Span::styled(" ".repeat(width - used), Style::default().bg(self.theme.code_background)));
             }
         }
         self.lines.push(Line::from(std::mem::take(&mut self.current)));
@@ -543,11 +510,7 @@ impl Renderer {
 }
 
 fn heading_style(level: HeadingLevel, theme: MarkdownTheme) -> Style {
-    let color = if matches!(level, HeadingLevel::H1 | HeadingLevel::H2) {
-        theme.heading
-    } else {
-        theme.text
-    };
+    let color = if matches!(level, HeadingLevel::H1 | HeadingLevel::H2) { theme.heading } else { theme.text };
     Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
 
@@ -638,14 +601,13 @@ fn prettify_math(tex: &str) -> String {
                         out.push('√');
                         out.push_str(&fraction_part(&prettify_math(&inner)));
                     }
-                    "text" | "mathrm" | "mathit" | "mathbf" | "mathsf" | "mathcal" | "mathbb"
-                    | "operatorname" | "textrm" | "textbf" | "textit" => {
+                    "text" | "mathrm" | "mathit" | "mathbf" | "mathsf" | "mathcal" | "mathbb" | "operatorname"
+                    | "textrm" | "textbf" | "textit" => {
                         let (inner, next) = read_group(&chars, index);
                         index = next;
                         out.push_str(&prettify_math(&inner));
                     }
-                    "left" | "right" | "big" | "Big" | "bigg" | "Bigg" | "displaystyle"
-                    | "limits" => {}
+                    "left" | "right" | "big" | "Big" | "bigg" | "Bigg" | "displaystyle" | "limits" => {}
                     "quad" | "qquad" => out.push_str("  "),
                     other => match math_symbol(other) {
                         Some(symbol) => out.push_str(symbol),
@@ -724,11 +686,7 @@ fn read_group(chars: &[char], index: usize) -> (String, usize) {
 /// `\frac{p_i}{\sum p_k}` reads `pᵢ/(Σ pₖ)` rather than `pᵢ/Σ pₖ`.
 fn fraction_part(part: &str) -> String {
     let compound = part.contains(' ') || part.chars().any(|ch| "+-±·×/=".contains(ch));
-    if compound && !(part.starts_with('(') && part.ends_with(')')) {
-        format!("({part})")
-    } else {
-        part.to_owned()
-    }
+    if compound && !(part.starts_with('(') && part.ends_with(')')) { format!("({part})") } else { part.to_owned() }
 }
 
 fn map_script(text: &str, map: fn(char) -> Option<char>) -> Option<String> {
@@ -958,26 +916,21 @@ mod tests {
             "# Release\n\nUse **bold**, *care*, `cargo test`, and [docs](https://example.test).\n\n> Important\n\n- [x] tested\n- shipped",
             MarkdownTheme::default(),
         );
-        let plain = text
-            .lines
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
+        let plain =
+            text.lines.iter().flat_map(|line| line.spans.iter()).map(|span| span.content.as_ref()).collect::<String>();
         assert!(plain.contains("Release"));
         assert!(plain.contains("[✓]"));
         assert!(plain.contains("https://example.test"));
         assert!(!plain.contains("**bold**"));
-        assert!(text.lines.iter().any(|line| line.spans.iter().any(|span| {
-            span.content.contains("bold") && span.style.add_modifier.contains(Modifier::BOLD)
-        })));
+        assert!(text.lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.contains("bold") && span.style.add_modifier.contains(Modifier::BOLD))
+        }));
     }
 
     fn plain_lines(text: &Text<'static>) -> Vec<String> {
-        text.lines
-            .iter()
-            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
-            .collect()
+        text.lines.iter().map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>()).collect()
     }
 
     #[test]
@@ -988,10 +941,7 @@ mod tests {
         let text = render_at(markdown, MarkdownTheme::default(), 72);
         let lines = plain_lines(&text);
         for line in &lines {
-            assert!(
-                UnicodeWidthStr::width(line.as_str()) <= 72,
-                "line exceeds the measure: {line:?}"
-            );
+            assert!(UnicodeWidthStr::width(line.as_str()) <= 72, "line exceeds the measure: {line:?}");
         }
         // The long Fix cell wrapped onto continuation rows inside its column,
         // so the table is taller than one physical line per row…
@@ -1018,10 +968,8 @@ mod tests {
 
     #[test]
     fn inline_math_renders_as_unicode_without_dollar_signs() {
-        let text = render(
-            r"The weight is $w_i = p_i / \sum_k p_k$ with $\alpha^2 \cdot \beta$.",
-            MarkdownTheme::default(),
-        );
+        let text =
+            render(r"The weight is $w_i = p_i / \sum_k p_k$ with $\alpha^2 \cdot \beta$.", MarkdownTheme::default());
         let plain = plain_lines(&text).join("\n");
         assert!(plain.contains("wᵢ = pᵢ / Σₖ pₖ"), "{plain}");
         assert!(plain.contains("α² · β"), "{plain}");
@@ -1030,10 +978,8 @@ mod tests {
 
     #[test]
     fn display_math_becomes_an_indented_unicode_block() {
-        let text = render(
-            "$$\\mathcal{L} = \\frac{\\alpha}{N} \\sum_{i=1}^{N} f_i \\cdot P_i$$",
-            MarkdownTheme::default(),
-        );
+        let text =
+            render("$$\\mathcal{L} = \\frac{\\alpha}{N} \\sum_{i=1}^{N} f_i \\cdot P_i$$", MarkdownTheme::default());
         let plain = plain_lines(&text).join("\n");
         assert!(plain.contains("L = α/N Σ"), "{plain}");
         assert!(plain.contains("fᵢ · Pᵢ"), "{plain}");
@@ -1067,12 +1013,8 @@ mod tests {
             "```rust\nfn main() {}\n```\n\n| Name | State |\n|---|---|\n| tests | green |",
             MarkdownTheme::default(),
         );
-        let plain = text
-            .lines
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
+        let plain =
+            text.lines.iter().flat_map(|line| line.spans.iter()).map(|span| span.content.as_ref()).collect::<String>();
         assert!(plain.contains("╭─ rust"));
         assert!(plain.contains("fn main() {}"));
         assert!(plain.contains("╰─"));

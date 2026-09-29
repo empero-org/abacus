@@ -96,8 +96,7 @@ mod tests {
                     break;
                 }
                 request.extend_from_slice(&buffer[..read]);
-                if let Some(header_end) = request.windows(4).position(|value| value == b"\r\n\r\n")
-                {
+                if let Some(header_end) = request.windows(4).position(|value| value == b"\r\n\r\n") {
                     let headers = String::from_utf8_lossy(&request[..header_end]);
                     let length = headers
                         .lines()

@@ -129,11 +129,7 @@ impl PluginRegistry {
         self.plugins
             .values()
             .flat_map(|plugin| {
-                plugin
-                    .hooks
-                    .iter()
-                    .filter(move |hook| hook.event == event)
-                    .map(move |hook| (plugin, hook))
+                plugin.hooks.iter().filter(move |hook| hook.event == event).map(move |hook| (plugin, hook))
             })
             .collect()
     }
@@ -160,8 +156,7 @@ impl PluginRegistry {
             copy_tree(&source, &staged, 0)?;
             load_plugin(&staged, "staged")?;
             if destination.exists() {
-                let backup =
-                    plugins_root.join(format!(".backup-{}-{}", plugin.name, Uuid::new_v4()));
+                let backup = plugins_root.join(format!(".backup-{}-{}", plugin.name, Uuid::new_v4()));
                 fs::rename(&destination, &backup)?;
                 if let Err(error) = fs::rename(&staged, &destination) {
                     let _ = fs::rename(&backup, &destination);
@@ -225,10 +220,8 @@ impl PluginRegistry {
         for plugin in self.plugins.values() {
             for command in &plugin.commands {
                 if self.commands.contains_key(&command.name) {
-                    self.diagnostics.push(format!(
-                        "plugin command collision for /{}; {} ignored",
-                        command.name, plugin.name
-                    ));
+                    self.diagnostics
+                        .push(format!("plugin command collision for /{}; {} ignored", command.name, plugin.name));
                     continue;
                 }
                 self.commands.insert(command.name.clone(), (plugin.name.clone(), command.clone()));
@@ -246,8 +239,7 @@ fn load_plugin(root: &Path, source: &str) -> Result<Plugin> {
     if manifest_path.metadata()?.len() > 256_000 {
         bail!("plugin.toml exceeds 256 KB");
     }
-    let manifest: Manifest =
-        toml::from_str(&fs::read_to_string(&manifest_path)?).context("invalid plugin.toml")?;
+    let manifest: Manifest = toml::from_str(&fs::read_to_string(&manifest_path)?).context("invalid plugin.toml")?;
     if manifest.manifest_version != 1 {
         bail!("unsupported plugin manifest version {}", manifest.manifest_version);
     }
@@ -259,11 +251,7 @@ fn load_plugin(root: &Path, source: &str) -> Result<Plugin> {
     if directory != manifest.name {
         bail!("plugin name `{}` must match directory `{directory}`", manifest.name);
     }
-    let skill_dirs = manifest
-        .skills
-        .iter()
-        .map(|path| confined_path(&root, path))
-        .collect::<Result<Vec<_>>>()?;
+    let skill_dirs = manifest.skills.iter().map(|path| confined_path(&root, path)).collect::<Result<Vec<_>>>()?;
     for command in &manifest.commands {
         super::validate_name("name", &command.name)?;
         if command.description.trim().is_empty() || command.prompt.trim().is_empty() {
@@ -271,10 +259,7 @@ fn load_plugin(root: &Path, source: &str) -> Result<Plugin> {
         }
     }
     for hook in &manifest.hooks {
-        if !matches!(
-            hook.event.as_str(),
-            "session_start" | "session_end" | "before_tool" | "after_tool"
-        ) {
+        if !matches!(hook.event.as_str(), "session_start" | "session_end" | "before_tool" | "after_tool") {
             bail!("unsupported plugin hook event `{}`", hook.event);
         }
         if hook.command.trim().is_empty() {
@@ -296,9 +281,7 @@ fn load_plugin(root: &Path, source: &str) -> Result<Plugin> {
 
 fn confined_path(root: &Path, relative: &Path) -> Result<PathBuf> {
     if relative.is_absolute()
-        || relative
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
+        || relative.components().any(|component| matches!(component, std::path::Component::ParentDir))
     {
         bail!("plugin paths must stay inside the plugin root");
     }

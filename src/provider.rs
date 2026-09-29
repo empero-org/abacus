@@ -283,20 +283,14 @@ impl Provider {
     /// context-size gauge is fresh so an aux call over the whole history does
     /// not overwrite the main conversation's "window full" figure.
     pub fn with_model(&self, model: &str) -> Provider {
-        Provider {
-            model: model.to_owned(),
-            context_tokens: Arc::new(AtomicU64::new(0)),
-            ..self.clone()
-        }
+        Provider { model: model.to_owned(), context_tokens: Arc::new(AtomicU64::new(0)), ..self.clone() }
     }
 
     /// This provider for a role: on the role's model when one is assigned and
     /// differs from the current one, otherwise as it is.
     pub fn for_role(&self, assigned: Option<&str>) -> Provider {
         match assigned {
-            Some(model) if !model.trim().is_empty() && model != self.model => {
-                self.with_model(model)
-            }
+            Some(model) if !model.trim().is_empty() && model != self.model => self.with_model(model),
             _ => self.clone(),
         }
     }
@@ -382,24 +376,14 @@ impl Provider {
 
     /// Complete without an audience, for a call whose answer Abacus reads
     /// itself rather than shows as it arrives.
-    pub async fn ask(
-        &self,
-        messages: &[Value],
-        tools: &[Value],
-        cancel: &AtomicBool,
-    ) -> Result<Completion> {
+    pub async fn ask(&self, messages: &[Value], tools: &[Value], cancel: &AtomicBool) -> Result<Completion> {
         let (deltas, _unread) = mpsc::unbounded_channel();
         self.complete(messages, tools, deltas, cancel).await
     }
 
     /// What a quiet completion said, or `None` when it failed, was cancelled,
     /// or said nothing.
-    pub async fn answer(
-        &self,
-        messages: &[Value],
-        tools: &[Value],
-        cancel: &AtomicBool,
-    ) -> Option<String> {
+    pub async fn answer(&self, messages: &[Value], tools: &[Value], cancel: &AtomicBool) -> Option<String> {
         let completion = self.ask(messages, tools, cancel).await.ok()?;
         let text = completion.content.trim();
         (!completion.cancelled && !text.is_empty()).then(|| text.to_owned())
@@ -455,17 +439,11 @@ impl Provider {
             }
         // History stores `reasoning_content` because some endpoints require
         // it; the ones that reject it get it stripped from then on.
-        } else if chat
-            && format!("{error:#}").contains("reasoning_content")
-            && first(&self.strips_reasoning)
-        {
+        } else if chat && format!("{error:#}").contains("reasoning_content") && first(&self.strips_reasoning) {
             rebuild_messages = true;
         // Claude 4.7+ reject manual extended thinking. The family check
         // catches the models we know; this catches the ones we do not.
-        } else if anthropic
-            && is_manual_thinking_rejection(error)
-            && first(&self.prefers_adaptive_thinking)
-        {
+        } else if anthropic && is_manual_thinking_rejection(error) && first(&self.prefers_adaptive_thinking) {
             if let Some(effort) = self.reasoning_effort {
                 self.apply_anthropic_thinking(body, effort);
                 self.apply_scripted_body(body);
@@ -483,17 +461,11 @@ impl Provider {
         // An Anthropic-compatible gateway that does not know `cache_control`.
         // Caching is an optimisation, so it is dropped rather than allowed to
         // fail the turn.
-        } else if anthropic
-            && is_cache_control_rejection(error)
-            && self.caches_prompt.swap(false, Ordering::Relaxed)
-        {
+        } else if anthropic && is_cache_control_rejection(error) && self.caches_prompt.swap(false, Ordering::Relaxed) {
             rebuild_messages = true;
         // A strict chat template wants every system block at the front. This
         // session gives up the stable prefix that the cache needs.
-        } else if (chat || anthropic)
-            && is_leading_system_rejection(error)
-            && first(&self.prefers_leading_system)
-        {
+        } else if (chat || anthropic) && is_leading_system_rejection(error) && first(&self.prefers_leading_system) {
             rebuild_messages = true;
         } else {
             return false;
@@ -639,11 +611,7 @@ impl Provider {
     /// Which output-cap parameter this endpoint accepts. Starts optimistic and
     /// is flipped by the first rejection (see `complete`).
     fn output_tokens_field(&self) -> &'static str {
-        if self.prefers_max_completion_tokens.load(Ordering::Relaxed) {
-            "max_completion_tokens"
-        } else {
-            "max_tokens"
-        }
+        if self.prefers_max_completion_tokens.load(Ordering::Relaxed) { "max_completion_tokens" } else { "max_tokens" }
     }
 
     /// Write the thinking configuration for an Anthropic request.
@@ -685,8 +653,7 @@ impl Provider {
     /// guessing "new" is the safe direction, since the manual shape is a hard
     /// 400 on current models while adaptive is what the rest accept.
     fn uses_adaptive_thinking(&self) -> bool {
-        self.prefers_adaptive_thinking.load(Ordering::Relaxed)
-            || !is_legacy_thinking_model(&self.model)
+        self.prefers_adaptive_thinking.load(Ordering::Relaxed) || !is_legacy_thinking_model(&self.model)
     }
 
     /// Fold in a scripted endpoint's body overrides and removals, if any.
@@ -700,11 +667,7 @@ impl Provider {
         let mut attempt = 0_u32;
         let response = loop {
             attempt += 1;
-            let mut request = self
-                .client
-                .post(&self.endpoint)
-                .header(header::ACCEPT, "text/event-stream")
-                .json(&body);
+            let mut request = self.client.post(&self.endpoint).header(header::ACCEPT, "text/event-stream").json(&body);
             // The Messages API requires a version header on every request.
             if self.protocol == ProviderProtocol::Anthropic {
                 request = request.header("anthropic-version", "2023-06-01");
@@ -738,9 +701,7 @@ impl Provider {
             }
             match request.send().await {
                 Ok(response)
-                    if attempt < 3
-                        && (response.status().as_u16() == 429
-                            || response.status().is_server_error()) =>
+                    if attempt < 3 && (response.status().as_u16() == 429 || response.status().is_server_error()) =>
                 {
                     let delay = response
                         .headers()
@@ -826,12 +787,7 @@ impl Assembly {
         let _ = deltas.send(Chunk::Reasoning(piece.to_owned()));
     }
 
-    fn chat_event(
-        &mut self,
-        data: &str,
-        deltas: &mpsc::UnboundedSender<Chunk>,
-        format: ToolFormat,
-    ) -> Result<()> {
+    fn chat_event(&mut self, data: &str, deltas: &mpsc::UnboundedSender<Chunk>, format: ToolFormat) -> Result<()> {
         let Some(value) = parse_event(data)? else {
             return Ok(());
         };
@@ -847,17 +803,12 @@ impl Assembly {
             self.upstream = value.get("provider").and_then(Value::as_str).map(str::to_owned);
         }
         let choices = value.get("choices").and_then(Value::as_array);
-        self.truncated |=
-            choices.into_iter().flatten().any(|choice| choice["finish_reason"] == "length");
+        self.truncated |= choices.into_iter().flatten().any(|choice| choice["finish_reason"] == "length");
         let Some(delta) = value.pointer("/choices/0/delta") else {
             return Ok(());
         };
 
-        if let Some(piece) = delta
-            .get("reasoning_content")
-            .or_else(|| delta.get("reasoning"))
-            .and_then(Value::as_str)
-        {
+        if let Some(piece) = delta.get("reasoning_content").or_else(|| delta.get("reasoning")).and_then(Value::as_str) {
             self.think(piece, deltas);
         }
         if let Some(piece) = delta.get("content").and_then(Value::as_str) {
@@ -887,21 +838,14 @@ impl Assembly {
             }
             // Arguments are the one field genuinely streamed in fragments, so
             // they always accumulate.
-            if let Some(arguments) =
-                tool_delta.pointer("/function/arguments").and_then(Value::as_str)
-            {
+            if let Some(arguments) = tool_delta.pointer("/function/arguments").and_then(Value::as_str) {
                 call.arguments.push_str(arguments);
             }
         }
         Ok(())
     }
 
-    fn responses_event(
-        &mut self,
-        data: &str,
-        deltas: &mpsc::UnboundedSender<Chunk>,
-        format: ToolFormat,
-    ) -> Result<()> {
+    fn responses_event(&mut self, data: &str, deltas: &mpsc::UnboundedSender<Chunk>, format: ToolFormat) -> Result<()> {
         let Some(value) = parse_event(data)? else {
             return Ok(());
         };
@@ -927,9 +871,7 @@ impl Assembly {
             "response.output_text.delta" => {
                 delta.into_iter().for_each(|piece| self.say(piece, deltas, format));
             }
-            "response.output_item.added" | "response.output_item.done"
-                if value["item"]["type"] == "function_call" =>
-            {
+            "response.output_item.added" | "response.output_item.done" if value["item"]["type"] == "function_call" => {
                 let call = self.calls.entry(index).or_default();
                 if let Some(id) = item("call_id").or_else(|| item("id")) {
                     call.id = id;
@@ -954,12 +896,7 @@ impl Assembly {
 
     /// The content-block `index` keys the tool-call map, exactly as the OpenAI
     /// paths key on their delta index.
-    fn anthropic_event(
-        &mut self,
-        data: &str,
-        deltas: &mpsc::UnboundedSender<Chunk>,
-        format: ToolFormat,
-    ) -> Result<()> {
+    fn anthropic_event(&mut self, data: &str, deltas: &mpsc::UnboundedSender<Chunk>, format: ToolFormat) -> Result<()> {
         let Some(value) = parse_event(data)? else {
             return Ok(());
         };
@@ -992,9 +929,7 @@ impl Assembly {
                     // empty (the real CoT is in the `signature` ciphertext,
                     // whose own delta is ignored).
                     "thinking_delta" => {
-                        if let Some(piece) =
-                            delta["thinking"].as_str().filter(|piece| !piece.is_empty())
-                        {
+                        if let Some(piece) = delta["thinking"].as_str().filter(|piece| !piece.is_empty()) {
                             self.think(piece, deltas);
                         }
                     }
@@ -1012,8 +947,7 @@ impl Assembly {
                 // and cache counts captured at message_start.
                 if let Some(output) = value["usage"]["output_tokens"].as_u64() {
                     let start = self.usage.unwrap_or_default();
-                    self.usage =
-                        Some(Usage { total: start.prompt + output, completion: output, ..start });
+                    self.usage = Some(Usage { total: start.prompt + output, completion: output, ..start });
                 }
             }
             "error" => bail!("provider stream error: {}", value["error"]),
@@ -1147,8 +1081,8 @@ fn is_legacy_thinking_model(model: &str) -> bool {
     // Claude 3.x, and the 4.0–4.5 generation in either naming style
     // (`claude-opus-4-5`, `claude-3-7-sonnet`, `claude-sonnet-4`).
     const LEGACY: [&str; 12] = [
-        "claude-3", "claude-4", "-3-5-", "-3-7-", "-4-0", "-4-1", "-4-5", "opus-4", "sonnet-4",
-        "haiku-4", "-4-20", "-4.5",
+        "claude-3", "claude-4", "-3-5-", "-3-7-", "-4-0", "-4-1", "-4-5", "opus-4", "sonnet-4", "haiku-4", "-4-20",
+        "-4.5",
     ];
     // A 4.6-or-later marker wins outright: `claude-opus-4-6` contains
     // `opus-4`, but it is emphatically not legacy.
@@ -1174,8 +1108,7 @@ fn is_max_tokens_rejection(error: &anyhow::Error) -> bool {
 /// on the two parts that phrasing keeps: the role, and the position.
 fn is_leading_system_rejection(error: &anyhow::Error) -> bool {
     let text = format!("{error:#}").to_ascii_lowercase();
-    text.contains("system message")
-        && (text.contains("beginning") || text.contains("first") || text.contains("start"))
+    text.contains("system message") && (text.contains("beginning") || text.contains("first") || text.contains("start"))
 }
 
 /// Whether the endpoint refused the prompt-cache markers. Anthropic-compatible
@@ -1415,16 +1348,8 @@ impl CacheLog {
     /// a detached side call gets its own.
     fn conversation(messages: &[Value]) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        messages
-            .iter()
-            .find(|message| message["role"] == "system")
-            .map(Value::to_string)
-            .hash(&mut hasher);
-        messages
-            .iter()
-            .find(|message| message["role"] != "system")
-            .map(Value::to_string)
-            .hash(&mut hasher);
+        messages.iter().find(|message| message["role"] == "system").map(Value::to_string).hash(&mut hasher);
+        messages.iter().find(|message| message["role"] != "system").map(Value::to_string).hash(&mut hasher);
         hasher.finish()
     }
 
@@ -1445,12 +1370,7 @@ impl CacheLog {
             return (0, total);
         };
         let stable = prefixes.get(&conversation).map_or(0, |previous| {
-            previous
-                .iter()
-                .zip(&current)
-                .take_while(|(before, now)| before.0 == now.0)
-                .map(|(_, now)| now.1)
-                .sum()
+            previous.iter().zip(&current).take_while(|(before, now)| before.0 == now.0).map(|(_, now)| now.1).sum()
         });
         if prefixes.len() >= CACHE_LOG_CONVERSATIONS && !prefixes.contains_key(&conversation) {
             prefixes.clear();
@@ -1484,8 +1404,7 @@ impl CacheLog {
             "stable_pct": (prompt_chars > 0).then(|| stable_chars * 100 / prompt_chars),
         });
         // Telemetry must never fail a request, so write errors are dropped.
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&self.path)
-        {
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&self.path) {
             let _ = writeln!(file, "{line}");
         }
     }
@@ -1498,16 +1417,10 @@ fn parse_responses_usage(value: &Value) -> Option<Usage> {
 
 fn usage_total(usage: &Value) -> Option<Usage> {
     let field = |name: &str| usage.get(name).and_then(Value::as_u64).unwrap_or(0);
-    let reported_prompt = usage
-        .get("prompt_tokens")
-        .or_else(|| usage.get("input_tokens"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let completion = usage
-        .get("completion_tokens")
-        .or_else(|| usage.get("output_tokens"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
+    let reported_prompt =
+        usage.get("prompt_tokens").or_else(|| usage.get("input_tokens")).and_then(Value::as_u64).unwrap_or(0);
+    let completion =
+        usage.get("completion_tokens").or_else(|| usage.get("output_tokens")).and_then(Value::as_u64).unwrap_or(0);
     // Three spellings of "served from cache", in decreasing specificity:
     // Anthropic's own field, OpenAI's nested detail, DeepSeek's flat pair.
     let cache_read = usage
@@ -1520,8 +1433,7 @@ fn usage_total(usage: &Value) -> Option<Usage> {
     // Anthropic's `input_tokens` counts only what it read uncached — cached and
     // cache-written input are reported beside it. Everywhere else the prompt
     // figure is already the whole prompt and the cache count is a subset of it.
-    let prompt = if usage.get("cache_read_input_tokens").is_some()
-        || usage.get("cache_creation_input_tokens").is_some()
+    let prompt = if usage.get("cache_read_input_tokens").is_some() || usage.get("cache_creation_input_tokens").is_some()
     {
         reported_prompt + cache_read + cache_write
     } else {
@@ -1646,11 +1558,7 @@ const DEFAULT_ANTHROPIC_MAX_TOKENS: usize = 32_000;
 /// system blocks, and the end of the request. The history is append-only, so
 /// the whole request is the prefix of the next one: each turn reads everything
 /// the last one wrote and writes only its own delta.
-fn anthropic_messages(
-    messages: &[Value],
-    system_prefix: Option<&str>,
-    cache: bool,
-) -> (Vec<Value>, Vec<Value>) {
+fn anthropic_messages(messages: &[Value], system_prefix: Option<&str>, cache: bool) -> (Vec<Value>, Vec<Value>) {
     let mut system: Vec<Value> = Vec::new();
     if let Some(prefix) = system_prefix.filter(|prefix| !prefix.trim().is_empty()) {
         system.push(json!({"type": "text", "text": prefix}));
@@ -1697,10 +1605,7 @@ fn anthropic_messages(
                 let mut blocks = anthropic_content_blocks(&message["content"]);
                 if let Some(tool_calls) = message["tool_calls"].as_array() {
                     for call in tool_calls {
-                        let arguments = call
-                            .pointer("/function/arguments")
-                            .and_then(Value::as_str)
-                            .unwrap_or("{}");
+                        let arguments = call.pointer("/function/arguments").and_then(Value::as_str).unwrap_or("{}");
                         blocks.push(json!({
                             "type": "tool_use",
                             "id": call["id"],
@@ -1733,10 +1638,7 @@ fn anthropic_messages(
         }
         mark_history_breakpoint(&mut turns);
     }
-    let converted = turns
-        .into_iter()
-        .map(|(role, content)| json!({"role": role, "content": content}))
-        .collect();
+    let converted = turns.into_iter().map(|(role, content)| json!({"role": role, "content": content})).collect();
     (system, converted)
 }
 
@@ -1869,8 +1771,7 @@ mod tests {
                        "function": {"name": "read_file", "arguments": "{\"path\":\"a.rs\"}"}}]}),
             json!({"role": "tool", "tool_call_id": "call_1", "content": "fn a() {}"}),
         ];
-        let (system, messages) =
-            anthropic_messages(&history, Some("x-anthropic-billing-header: cc"), false);
+        let (system, messages) = anthropic_messages(&history, Some("x-anthropic-billing-header: cc"), false);
 
         // Billing prefix is the first system block, then the system prompt.
         assert_eq!(system[0]["text"], "x-anthropic-billing-header: cc");
@@ -2137,9 +2038,7 @@ mod tests {
         // Unrelated 400s must not trigger the adaptive fallback.
         let error = anyhow!("provider returned 400: model not found: claude-opus-9");
         assert!(!is_manual_thinking_rejection(&error));
-        let error = anyhow!(
-            "provider returned 400: max_tokens: 393216 > 128000, which is the maximum allowed"
-        );
+        let error = anyhow!("provider returned 400: max_tokens: 393216 > 128000, which is the maximum allowed");
         assert!(!is_manual_thinking_rejection(&error));
     }
 
@@ -2154,9 +2053,7 @@ mod tests {
         assert_eq!(rejected_output_cap(&error, Some(262_144)), Some(131_072));
 
         // OpenAI-style phrasing.
-        let error = anyhow!(
-            "provider returned 400: max_tokens must be less than or equal to 65536, got 262144"
-        );
+        let error = anyhow!("provider returned 400: max_tokens must be less than or equal to 65536, got 262144");
         assert_eq!(rejected_output_cap(&error, Some(262_144)), Some(65_536));
 
         // Anthropic Messages API phrasing (claude-opus-4-8, 128k ceiling).
@@ -2187,11 +2084,7 @@ mod tests {
         let mut calls = BTreeMap::new();
         calls.insert(
             0,
-            PartialToolCall {
-                id: "done".into(),
-                name: "read_file".into(),
-                arguments: "{\"path\":\"a\"}".into(),
-            },
+            PartialToolCall { id: "done".into(), name: "read_file".into(), arguments: "{\"path\":\"a\"}".into() },
         );
         calls.insert(
             1,
@@ -2316,10 +2209,7 @@ mod tests {
     #[test]
     fn parses_reported_usage_for_both_protocols() {
         let chat = json!({"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 5}});
-        assert_eq!(
-            parse_chat_usage(&chat),
-            Some(Usage { total: 15, prompt: 10, completion: 5, ..Usage::default() })
-        );
+        assert_eq!(parse_chat_usage(&chat), Some(Usage { total: 15, prompt: 10, completion: 5, ..Usage::default() }));
         // A total with no breakdown still gives a usable session count, and the
         // context gauge simply keeps its previous value.
         let chat_total = json!({"usage": {"total_tokens": 99}});
@@ -2370,13 +2260,7 @@ mod tests {
     fn ledger_splits_directions_and_reports_a_cache_rate() {
         let ledger = TokenLedger::new(1_000);
         assert_eq!(ledger.snapshot().cache_rate(), None, "nothing counted yet");
-        ledger.record(&Usage {
-            total: 1_100,
-            prompt: 1_000,
-            completion: 100,
-            cache_read: 800,
-            cache_write: 200,
-        });
+        ledger.record(&Usage { total: 1_100, prompt: 1_000, completion: 100, cache_read: 800, cache_write: 200 });
         let usage = ledger.snapshot();
         assert_eq!(usage.total, 2_100, "resumed total is carried, not replaced");
         assert_eq!((usage.input, usage.output), (1_000, 100));
@@ -2437,10 +2321,8 @@ mod tests {
 
     #[test]
     fn cache_breakpoints_are_absent_when_caching_is_off() {
-        let history = vec![
-            json!({"role": "system", "content": "You are Abacus."}),
-            json!({"role": "user", "content": "hi"}),
-        ];
+        let history =
+            vec![json!({"role": "system", "content": "You are Abacus."}), json!({"role": "user", "content": "hi"})];
         let (system, messages) = anthropic_messages(&history, None, false);
         assert!(system[0].get("cache_control").is_none());
         assert!(messages[0]["content"][0].get("cache_control").is_none());
@@ -2479,8 +2361,7 @@ mod tests {
     fn the_cache_log_tells_a_stable_prefix_from_a_rewritten_one() {
         let directory = tempfile::tempdir().unwrap();
         let log = CacheLog::open(directory.path().join(CACHE_LOG_FILE));
-        let usage =
-            Usage { total: 110, prompt: 100, completion: 10, cache_read: 60, cache_write: 0 };
+        let usage = Usage { total: 110, prompt: 100, completion: 10, cache_read: 60, cache_write: 0 };
         let request = |messages: &[Value]| {
             log.request(RequestRecord {
                 model: "m",

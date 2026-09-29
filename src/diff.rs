@@ -26,11 +26,8 @@ pub struct DiffFile {
 
 impl DiffFile {
     pub fn display_path(&self) -> &str {
-        let path = if self.new_path == "/dev/null" || self.new_path.is_empty() {
-            &self.old_path
-        } else {
-            &self.new_path
-        };
+        let path =
+            if self.new_path == "/dev/null" || self.new_path.is_empty() { &self.old_path } else { &self.new_path };
         path.strip_prefix("a/").or_else(|| path.strip_prefix("b/")).unwrap_or(path)
     }
 }
@@ -44,9 +41,7 @@ pub struct DiffDocument {
 
 impl DiffDocument {
     pub fn parse(input: &str) -> Option<Self> {
-        if !input.lines().any(|line| line.starts_with("--- "))
-            || !input.lines().any(|line| line.starts_with("+++ "))
-        {
+        if !input.lines().any(|line| line.starts_with("--- ")) || !input.lines().any(|line| line.starts_with("+++ ")) {
             return None;
         }
         let mut document = Self::default();
@@ -116,12 +111,7 @@ impl DiffDocument {
             } else {
                 (DiffLineKind::Metadata, None, None, raw)
             };
-            current.lines.push(DiffLine {
-                kind,
-                old_line: old,
-                new_line: new,
-                text: text.to_owned(),
-            });
+            current.lines.push(DiffLine { kind, old_line: old, new_line: new, text: text.to_owned() });
         }
         if let Some(current) = file {
             push_file(&mut document, current);
@@ -170,17 +160,9 @@ mod tests {
         assert_eq!(document.additions, 3);
         assert_eq!(document.deletions, 1);
         assert_eq!(document.files[0].display_path(), "src/a.rs");
-        let deletion = document.files[0]
-            .lines
-            .iter()
-            .find(|line| line.kind == DiffLineKind::Deletion)
-            .unwrap();
+        let deletion = document.files[0].lines.iter().find(|line| line.kind == DiffLineKind::Deletion).unwrap();
         assert_eq!(deletion.old_line, Some(3));
-        let addition = document.files[0]
-            .lines
-            .iter()
-            .find(|line| line.kind == DiffLineKind::Addition)
-            .unwrap();
+        let addition = document.files[0].lines.iter().find(|line| line.kind == DiffLineKind::Addition).unwrap();
         assert_eq!(addition.new_line, Some(3));
     }
 
