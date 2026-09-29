@@ -126,45 +126,33 @@ impl SearchSettings {
         // `Auto` prefers a backend that can actually answer: a self-hosted
         // SearXNG first, then a keyed API, then the shared instance if it was
         // opted into, and Bing's public page as the zero-config floor.
-        let instance = self
+        let mut instance = self
             .instance_url
             .as_deref()
             .map(str::trim)
             .filter(|url| !url.is_empty())
             .map(|url| url.trim_end_matches('/').to_owned());
+        let named = self.api_key_env.as_deref();
         let (backend, api_key) = match self.backend {
             // Someone who has stood up a SearXNG instance meant it: no quota,
             // no key, and nothing leaves their own infrastructure.
             SearchBackend::Auto if instance.is_some() => (SearchBackend::Searxng, None),
-            SearchBackend::Auto => {
-                if let Some(key) = self.api_key_env.as_deref().and_then(&read) {
-                    // A named variable is an explicit choice; honour it.
-                    (SearchBackend::Brave, Some(key))
-                } else if let Some(key) = read("BRAVE_API_KEY") {
-                    (SearchBackend::Brave, Some(key))
-                } else if self.use_shared_instance {
-                    // Explicitly asked for: a real JSON API beats scraping,
-                    // but it is someone else's host, so it is never assumed.
-                    return WebConfig {
-                        enabled: self.enabled,
-                        backend: SearchBackend::Searxng,
-                        api_key: None,
-                        instance_url: Some(SHARED_SEARXNG.to_owned()),
-                        extractor: None,
-                    };
-                } else {
-                    // No key, no instance, no permission to borrow one: Bing's
-                    // public page, best effort.
-                    (SearchBackend::Bing, None)
+            // A named variable is an explicit choice; honour it first.
+            SearchBackend::Auto => match named.and_then(&read).or_else(|| read("BRAVE_API_KEY")) {
+                Some(key) => (SearchBackend::Brave, Some(key)),
+                // Explicitly asked for: a real JSON API beats scraping, but it
+                // is someone else's host, so it is never assumed.
+                None if self.use_shared_instance => {
+                    instance = Some(SHARED_SEARXNG.to_owned());
+                    (SearchBackend::Searxng, None)
                 }
-            }
+                // No key, no instance, no permission to borrow one: Bing's
+                // public page, best effort.
+                None => (SearchBackend::Bing, None),
+            },
             chosen => {
-                let default_env = match chosen {
-                    SearchBackend::Brave => Some("BRAVE_API_KEY"),
-                    _ => None,
-                };
-                let key = self.api_key_env.as_deref().or(default_env).and_then(&read);
-                (chosen, key)
+                let default_env = matches!(chosen, SearchBackend::Brave).then_some("BRAVE_API_KEY");
+                (chosen, named.or(default_env).and_then(&read))
             }
         };
         WebConfig {
@@ -176,7 +164,6 @@ impl SearchSettings {
         }
     }
 }
-
 /// Resolved, ready-to-use web configuration.
 #[derive(Debug, Clone, Default)]
 pub struct WebConfig {

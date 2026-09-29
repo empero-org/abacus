@@ -18,7 +18,6 @@ pub struct Preset {
     pub name: &'static str,
     pub base_url: &'static str,
     pub env_key: Option<&'static str>,
-    pub fallback_model: &'static str,
     pub protocol: ProviderProtocol,
     /// One-line orientation shown beside the name.
     pub hint: &'static str,
@@ -32,7 +31,6 @@ pub const PRESETS: &[Preset] = &[
         name: "OpenAI",
         base_url: "https://api.openai.com/v1",
         env_key: Some("OPENAI_API_KEY"),
-        fallback_model: "",
         protocol: ProviderProtocol::Responses,
         hint: "GPT and reasoning models",
     },
@@ -41,7 +39,6 @@ pub const PRESETS: &[Preset] = &[
         name: "xAI",
         base_url: "https://api.x.ai/v1",
         env_key: Some("XAI_API_KEY"),
-        fallback_model: "",
         protocol: ProviderProtocol::Responses,
         hint: "Grok",
     },
@@ -50,7 +47,6 @@ pub const PRESETS: &[Preset] = &[
         name: "OpenRouter",
         base_url: "https://openrouter.ai/api/v1",
         env_key: Some("OPENROUTER_API_KEY"),
-        fallback_model: "",
         protocol: ProviderProtocol::ChatCompletions,
         hint: "one key, most models",
     },
@@ -59,7 +55,6 @@ pub const PRESETS: &[Preset] = &[
         name: "Groq",
         base_url: "https://api.groq.com/openai/v1",
         env_key: Some("GROQ_API_KEY"),
-        fallback_model: "",
         protocol: ProviderProtocol::ChatCompletions,
         hint: "fast open-weight inference",
     },
@@ -68,7 +63,6 @@ pub const PRESETS: &[Preset] = &[
         name: "DeepSeek",
         base_url: "https://api.deepseek.com/v1",
         env_key: Some("DEEPSEEK_API_KEY"),
-        fallback_model: "",
         protocol: ProviderProtocol::ChatCompletions,
         hint: "DeepSeek chat and reasoning",
     },
@@ -77,7 +71,6 @@ pub const PRESETS: &[Preset] = &[
         name: "Mistral",
         base_url: "https://api.mistral.ai/v1",
         env_key: Some("MISTRAL_API_KEY"),
-        fallback_model: "",
         protocol: ProviderProtocol::ChatCompletions,
         hint: "Mistral and code models",
     },
@@ -86,7 +79,6 @@ pub const PRESETS: &[Preset] = &[
         name: "Together",
         base_url: "https://api.together.xyz/v1",
         env_key: Some("TOGETHER_API_KEY"),
-        fallback_model: "",
         protocol: ProviderProtocol::ChatCompletions,
         hint: "hosted open-weight models",
     },
@@ -95,7 +87,6 @@ pub const PRESETS: &[Preset] = &[
         name: "Fireworks",
         base_url: "https://api.fireworks.ai/inference/v1",
         env_key: Some("FIREWORKS_API_KEY"),
-        fallback_model: "",
         protocol: ProviderProtocol::ChatCompletions,
         hint: "hosted open-weight models",
     },
@@ -104,7 +95,6 @@ pub const PRESETS: &[Preset] = &[
         name: "Cerebras",
         base_url: "https://api.cerebras.ai/v1",
         env_key: Some("CEREBRAS_API_KEY"),
-        fallback_model: "",
         protocol: ProviderProtocol::ChatCompletions,
         hint: "very high throughput",
     },
@@ -113,7 +103,6 @@ pub const PRESETS: &[Preset] = &[
         name: "Ollama",
         base_url: "http://localhost:11434/v1",
         env_key: None,
-        fallback_model: "",
         protocol: ProviderProtocol::ChatCompletions,
         hint: "local models, no key",
     },
@@ -122,7 +111,6 @@ pub const PRESETS: &[Preset] = &[
         name: "llama.cpp / vLLM",
         base_url: "http://localhost:8000/v1",
         env_key: None,
-        fallback_model: "",
         protocol: ProviderProtocol::ChatCompletions,
         hint: "local OpenAI-compatible server",
     },
@@ -223,14 +211,13 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
     console::blank();
 
     let selection = console::prompt_index("Provider", 1, PRESETS.len() + 1)?;
-    let (profile_id, display_name, base_url, env_key, fallback_model, protocol) =
+    let (profile_id, display_name, base_url, env_key, protocol) =
         if let Some(preset) = PRESETS.get(selection - 1) {
             (
                 preset.id.to_owned(),
                 preset.name.to_owned(),
                 preset.base_url.to_owned(),
                 preset.env_key.map(str::to_owned),
-                preset.fallback_model.to_owned(),
                 preset.protocol,
             )
         } else {
@@ -251,27 +238,22 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
                     "2" | "responses" => ProviderProtocol::Responses,
                     _ => ProviderProtocol::ChatCompletions,
                 };
+            let slug = Some(slug(&name)).filter(|slug| !slug.is_empty());
             (
-                {
-                    let slug = slug(&name);
-                    if slug.is_empty() { "custom".to_owned() } else { slug }
-                },
+                slug.unwrap_or_else(|| "custom".to_owned()),
                 name,
                 base,
                 (!env.is_empty()).then_some(env),
-                String::new(),
                 protocol,
             )
         };
 
-    let mut key = env_key
+    let exported = env_key
         .as_deref()
         .and_then(|name| std::env::var(name).ok())
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| credentials.keys.get(&profile_id).cloned());
-    let key_from_env = env_key
-        .as_deref()
-        .is_some_and(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()));
+        .filter(|value| !value.trim().is_empty());
+    let key_from_env = exported.is_some();
+    let mut key = exported.or_else(|| credentials.keys.get(&profile_id).cloned());
     if key_from_env {
         console::blank();
         println!(
@@ -307,12 +289,12 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
     let model = match discovered {
         Ok(models) if !models.is_empty() => {
             println!("{}", console::ok(&format!("{} found", models.len())));
-            choose_model(&models, &fallback_model)?
+            choose_model(&models)?
         }
         Ok(_) => {
             println!("{}", console::warn("none returned"));
             console::note("The endpoint answered but listed no models; enter one by hand.");
-            prompt_model(&fallback_model)?
+            prompt_model()?
         }
         Err(error) => {
             println!("{}", console::err("unavailable"));
@@ -320,7 +302,7 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
             console::note(
                 "You can save now and fix connectivity later with /config or `abacus doctor`.",
             );
-            prompt_model(&fallback_model)?
+            prompt_model()?
         }
     };
 
@@ -552,7 +534,7 @@ pub(crate) async fn get_json(
 /// Present the discovered models. A provider can list hundreds, so the list is
 /// filterable: typing a fragment narrows it rather than forcing a scroll
 /// through everything, and an empty filter shows a bounded first page.
-fn choose_model(models: &[String], preferred: &str) -> Result<String> {
+fn choose_model(models: &[String]) -> Result<String> {
     const PAGE: usize = 24;
     let mut filter = String::new();
     loop {
@@ -568,9 +550,7 @@ fn choose_model(models: &[String], preferred: &str) -> Result<String> {
             println!("      {}", console::warn("Nothing matches that filter."));
         }
         for (index, model) in matched.iter().take(PAGE).enumerate() {
-            let marker =
-                if *model == preferred { console::ok(" (current)") } else { String::new() };
-            println!("    {}  {}{marker}", console::accent(&format!("{:>2}", index + 1)), model);
+            println!("    {}  {model}", console::accent(&format!("{:>2}", index + 1)));
         }
         let hidden = matched.len().saturating_sub(PAGE);
         if hidden > 0 {
@@ -586,7 +566,7 @@ fn choose_model(models: &[String], preferred: &str) -> Result<String> {
         );
         let answer = console::prompt("Model", None)?;
         if answer.is_empty() {
-            return prompt_model(preferred);
+            return prompt_model();
         }
         if let Ok(index) = answer.parse::<usize>() {
             if index >= 1 && index <= matched.len().min(PAGE) {
@@ -601,10 +581,9 @@ fn choose_model(models: &[String], preferred: &str) -> Result<String> {
 
 /// Ask for a model ID, re-asking on an empty answer. Bailing here would throw
 /// away everything already chosen, which is a harsh penalty for pressing enter.
-fn prompt_model(fallback: &str) -> Result<String> {
+fn prompt_model() -> Result<String> {
     loop {
-        let model =
-            console::prompt("Model ID", if fallback.is_empty() { None } else { Some(fallback) })?;
+        let model = console::prompt("Model ID", None)?;
         if !model.trim().is_empty() {
             return Ok(model.trim().to_owned());
         }

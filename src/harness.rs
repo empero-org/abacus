@@ -660,14 +660,7 @@ impl HarnessStore {
 
     /// Everything applying to this workspace, for `/harness`.
     pub fn snapshot(&self) -> Vec<HarnessEntry> {
-        let merged = self.merged();
-        let mut entries: Vec<HarnessEntry> = EntryKind::ALL
-            .iter()
-            .flat_map(|kind| merged.entries.of(*kind).values().cloned())
-            .filter(|entry| entry.in_scope(&self.workspace))
-            .collect();
-        entries.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at));
-        entries
+        self.applying(&EntryKind::ALL)
     }
 
     /// Render the durable prompt entries into the workspace `AGENTS.md` block.
@@ -691,11 +684,14 @@ impl HarnessStore {
 
     /// Entries of one kind applying to this workspace, newest first.
     pub fn snapshot_of(&self, kind: EntryKind) -> Vec<HarnessEntry> {
+        self.applying(&[kind])
+    }
+
+    fn applying(&self, kinds: &[EntryKind]) -> Vec<HarnessEntry> {
         let merged = self.merged();
-        let mut entries: Vec<HarnessEntry> = merged
-            .entries
-            .of(kind)
-            .values()
+        let mut entries: Vec<HarnessEntry> = kinds
+            .iter()
+            .flat_map(|kind| merged.entries.of(*kind).values())
             .filter(|entry| entry.in_scope(&self.workspace))
             .cloned()
             .collect();
