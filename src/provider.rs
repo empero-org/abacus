@@ -1063,10 +1063,10 @@ fn strip_tool_names(messages: &[Value]) -> Vec<Value> {
         .iter()
         .map(|message| {
             let mut message = message.clone();
-            if message["role"] == "tool" {
-                if let Some(object) = message.as_object_mut() {
-                    object.remove("name");
-                }
+            if message["role"] == "tool"
+                && let Some(object) = message.as_object_mut()
+            {
+                object.remove("name");
             }
             message
         })

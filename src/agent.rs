@@ -1910,7 +1910,7 @@ mod tests {
             recent_budget_chars: 40_000,
             summary_budget_chars: 12_000,
         };
-        let unchanged = compression_budget(normal.clone(), false);
+        let unchanged = compression_budget(normal, false);
         assert_eq!(unchanged.compact_at_chars, normal.compact_at_chars);
         assert_eq!(unchanged.recent_budget_chars, normal.recent_budget_chars);
         assert_eq!(unchanged.summary_budget_chars, normal.summary_budget_chars);
