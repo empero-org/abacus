@@ -54,46 +54,12 @@ use crate::{
     services::AgentServices,
     session::{Session, SessionStore, SessionUsage},
     task::TaskList,
-    theme::ThemeMode,
-    ui::{self, Entry, EntryKind, ToolCall, ToolStatus},
+    theme::{
+        ThemeMode, border, danger, inverse, muted, primary, rail, secondary, success, surface,
+        text, warning,
+    },
+    ui::{self, Entry, EntryKind, ToolCall, ToolStatus, bold, emphasis, fg},
 };
-
-// Colors resolve from the active (Empero-derived) theme so the UI adapts to a
-// dark or light terminal. These thin accessors keep the many draw helpers terse
-// while reading the process-global theme on each frame.
-fn primary() -> Color {
-    crate::theme::active().primary
-}
-fn secondary() -> Color {
-    crate::theme::active().secondary
-}
-fn success() -> Color {
-    crate::theme::active().success
-}
-fn warning() -> Color {
-    crate::theme::active().warning
-}
-fn danger() -> Color {
-    crate::theme::active().danger
-}
-fn muted() -> Color {
-    crate::theme::active().muted
-}
-fn border() -> Color {
-    crate::theme::active().border
-}
-fn surface() -> Color {
-    crate::theme::active().surface
-}
-fn text() -> Color {
-    crate::theme::active().text
-}
-fn inverse() -> Color {
-    crate::theme::active().inverse
-}
-fn rail() -> Color {
-    crate::theme::active().rail
-}
 
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/goal", "Set or manage a persistent goal"),
@@ -6401,27 +6367,18 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let mut left = vec![
         ui::badge("ABACUS", secondary()),
-        Span::styled(
-            format!("  {}", app.config.workspace_name()),
-            Style::default().fg(text()).add_modifier(Modifier::BOLD),
-        ),
+        bold(format!("  {}", app.config.workspace_name()), text()),
     ];
     if let Some(branch) = &app.git_branch {
-        left.push(Span::styled(
-            format!("  {} {}", ui::glyphs().branch, ui::truncate(branch, 24)),
-            Style::default().fg(muted()),
-        ));
+        left.push(fg(format!("  {} {}", ui::glyphs().branch, ui::truncate(branch, 24)), muted()));
     }
     if app.config.profile != "default" {
         left.push(ui::dot());
-        left.push(Span::styled(
-            ui::truncate(&app.config.profile, 18),
-            Style::default().fg(muted()),
-        ));
+        left.push(fg(ui::truncate(&app.config.profile, 18), muted()));
     }
 
     let right = vec![
-        Span::styled(ui::truncate(&app.config.model, 34), Style::default().fg(muted())),
+        fg(ui::truncate(&app.config.model, 34), muted()),
         Span::raw("  "),
         ui::badge(mode.label(), mode_color(mode)),
     ];
@@ -6609,7 +6566,7 @@ fn draw_scrollbar(frame: &mut Frame<'_>, area: Rect, total: usize, position: usi
         let set = ui::glyphs();
         let (glyph, color) = if inside { (set.thumb, primary()) } else { (set.track, rail()) };
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(glyph, Style::default().fg(color)))),
+            Paragraph::new(Line::from(fg(glyph, color))),
             Rect { x, y: area.y + row as u16, width: 1, height: 1 },
         );
     }
@@ -6675,12 +6632,9 @@ fn draw_task_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
             crate::goal::GoalStatus::Cancelled => (set.failed, muted()),
         };
         lines.push(Line::from(vec![
-            Span::styled(
-                format!(" {glyph} GOAL  "),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(ui::truncate(&goal.objective, 72), Style::default().fg(text())),
-            Span::styled("   /goal pause · edit · clear", Style::default().fg(rail())),
+            bold(format!(" {glyph} GOAL  "), color),
+            fg(ui::truncate(&goal.objective, 72), text()),
+            fg("   /goal pause · edit · clear", rail()),
         ]));
     }
     if let Some(state) = &app.ralph_loop {
@@ -6693,17 +6647,11 @@ fn draw_task_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
         let limit =
             state.max_iterations.map(|value| value.to_string()).unwrap_or_else(|| "∞".to_owned());
         lines.push(Line::from(vec![
-            Span::styled(
-                format!(" {} LOOP  ", ui::glyphs().repeat),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("{} / {limit}", state.iteration), Style::default().fg(text())),
+            bold(format!(" {} LOOP  ", ui::glyphs().repeat), color),
+            fg(format!("{} / {limit}", state.iteration), text()),
             ui::dot(),
-            Span::styled(
-                format!("promise: {}", ui::truncate(&state.completion_promise, 32)),
-                Style::default().fg(muted()),
-            ),
-            Span::styled("   /cancel-loop", Style::default().fg(rail())),
+            fg(format!("promise: {}", ui::truncate(&state.completion_promise, 32)), muted()),
+            fg("   /cancel-loop", rail()),
         ]));
     }
     let tasks = app.tasks.snapshot();
@@ -6711,18 +6659,12 @@ fn draw_task_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
         let done = tasks.iter().filter(|task| task.done).count();
         let percent = ((done * 100) / tasks.len().max(1)) as u16;
         let mut spans = vec![
-            Span::styled(
-                format!(" {} TASKS  ", ui::glyphs().tasks),
-                Style::default().fg(secondary()).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("{done}/{} ", tasks.len()), Style::default().fg(text())),
+            bold(format!(" {} TASKS  ", ui::glyphs().tasks), secondary()),
+            fg(format!("{done}/{} ", tasks.len()), text()),
         ];
         spans.extend(ui::meter(percent, 10, success()));
         if let Some(next) = tasks.iter().find(|task| !task.done) {
-            spans.push(Span::styled(
-                format!("   next: {}", ui::truncate(&next.text, 52)),
-                Style::default().fg(muted()),
-            ));
+            spans.push(fg(format!("   next: {}", ui::truncate(&next.text, 52)), muted()));
         }
         lines.push(Line::from(spans));
     }
@@ -6743,26 +6685,17 @@ fn draw_task_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     crate::hive::WorkerState::Failed => (set.failed, danger()),
                 };
                 lines.push(Line::from(vec![
-                    Span::styled(
-                        format!(" {glyph} "),
-                        Style::default().fg(color).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!("{} {}  ", worker.role, worker.name),
-                        Style::default().fg(text()).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
+                    bold(format!(" {glyph} "), color),
+                    bold(format!("{} {}  ", worker.role, worker.name), text()),
+                    fg(
                         ui::truncate(
                             &worker.activity,
                             (area.width as usize)
                                 .saturating_sub(worker.role.len() + worker.name.len() + 20),
                         ),
-                        Style::default().fg(muted()),
+                        muted(),
                     ),
-                    Span::styled(
-                        format!("  {}", ui::format_count(worker.tokens_used())),
-                        Style::default().fg(rail()),
-                    ),
+                    fg(format!("  {}", ui::format_count(worker.tokens_used())), rail()),
                 ]));
             }
         } else {
@@ -6777,19 +6710,16 @@ fn draw_task_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
             let done = workers.len() - running - failed;
             let swarm_tokens: u64 = workers.iter().map(|worker| worker.tokens_used()).sum();
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" {} HIVE  ", set.tasks),
-                    Style::default().fg(primary()).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
+                bold(format!(" {} HIVE  ", set.tasks), primary()),
+                fg(
                     format!(
                         "{} subagent(s) · {running} running · {done} done · {failed} failed · {}",
                         workers.len(),
                         ui::format_count(swarm_tokens)
                     ),
-                    Style::default().fg(text()),
+                    text(),
                 ),
-                Span::styled("   ^P details", Style::default().fg(rail())),
+                fg("   ^P details", rail()),
             ]));
         }
     }
@@ -6817,9 +6747,9 @@ fn draw_hive(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let set = ui::glyphs();
     let mut lines: Vec<Line<'static>> = Vec::new();
     if workers.is_empty() {
-        lines.push(Line::from(Span::styled(
+        lines.push(Line::from(fg(
             "No subagents in this turn yet. The board fills when the model calls spawn_subagents.",
-            Style::default().fg(muted()),
+            muted(),
         )));
     }
     for worker in &workers {
@@ -6833,35 +6763,23 @@ fn draw_hive(frame: &mut Frame<'_>, area: Rect, app: &App) {
             crate::hive::WorkerState::Failed => (set.failed, danger(), "failed"),
         };
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("{glyph} "),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{} ", worker.role),
-                Style::default().fg(secondary()).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                worker.name.clone(),
-                Style::default().fg(text()).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
+            bold(format!("{glyph} "), color),
+            bold(format!("{} ", worker.role), secondary()),
+            bold(worker.name.clone(), text()),
+            fg(
                 format!(
                     "  {state} · {} · {} tok",
                     ui::format_elapsed(worker.started.elapsed().as_millis() as u64),
                     ui::format_count(worker.tokens_used())
                 ),
-                Style::default().fg(muted()),
+                muted(),
             ),
         ]));
-        lines.push(Line::from(Span::styled(
-            format!("    {}", ui::truncate(&worker.activity, 90)),
-            Style::default().fg(muted()),
-        )));
+        lines.push(Line::from(fg(format!("    {}", ui::truncate(&worker.activity, 90)), muted())));
         lines.push(Line::from(""));
     }
     let stats = app.hive.stats();
-    lines.push(Line::from(Span::styled(
+    lines.push(Line::from(fg(
         format!(
             "delegation record: {} swarm(s), {} clean · {} worker(s), {} failed · tier {}",
             stats.runs,
@@ -6870,7 +6788,7 @@ fn draw_hive(frame: &mut Frame<'_>, area: Rect, app: &App) {
             stats.worker_failures,
             stats.tier().label()
         ),
-        Style::default().fg(rail()),
+        rail(),
     )));
     frame.render_widget(Paragraph::new(Text::from(lines)).scroll((app.hive_scroll, 0)), inner);
 }
@@ -6954,10 +6872,7 @@ fn draw_completion_popup(frame: &mut Frame<'_>, input_area: Rect, app: &App) {
         ui::overlay_hints(&[("↑↓", "select"), ("⇥", "insert"), ("esc", "dismiss")])
             .spans
             .into_iter()
-            .chain(std::iter::once(Span::styled(
-                format!("   +{hidden} more"),
-                Style::default().fg(rail()),
-            )))
+            .chain(std::iter::once(fg(format!("   +{hidden} more"), rail())))
             .collect::<Vec<_>>()
             .into()
     } else {
@@ -6989,10 +6904,7 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
     let frame_color = if running { rail() } else { accent };
 
-    let mut top_right = vec![Span::styled(
-        if running { " ⏎ steer" } else { " ⏎ send" },
-        Style::default().fg(rail()),
-    )];
+    let mut top_right = vec![fg(if running { " ⏎ steer" } else { " ⏎ send" }, rail())];
     // Count `@file` mentions so the composer can say what will be attached
     // before the prompt is sent.
     let mentions = app
@@ -7002,13 +6914,8 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .filter(|token| token.len() > 1 && token.starts_with('@'))
         .count();
     if mentions > 0 {
-        top_right.insert(
-            0,
-            Span::styled(
-                format!(" {} {mentions} attached ", ui::glyphs().attached),
-                Style::default().fg(primary()),
-            ),
-        );
+        top_right
+            .insert(0, fg(format!(" {} {mentions} attached ", ui::glyphs().attached), primary()));
     }
     top_right.push(Span::raw(" "));
 
@@ -7033,10 +6940,7 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
     // The prompt arrow sits in its own column so wrapped and continuation rows
     // hang under the text rather than under the marker.
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            ui::glyphs().prompt,
-            Style::default().fg(frame_color).add_modifier(Modifier::BOLD),
-        ))),
+        Paragraph::new(Line::from(bold(ui::glyphs().prompt, frame_color))),
         Rect { width: 1, height: 1, ..inner },
     );
     let text_area = Rect { x: inner.x + 2, width: inner.width - 2, ..inner };
@@ -7068,16 +6972,14 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     ui::truncate(draft, inner.width.saturating_sub(14) as usize),
                     Style::default().fg(muted()).add_modifier(Modifier::ITALIC),
                 ),
-                Span::styled("  ⇥ use", Style::default().fg(rail())),
+                fg("  ⇥ use", rail()),
             ])),
-            (_, true) => Paragraph::new(Span::styled(
-                "Type to steer — delivered after the current step…",
-                Style::default().fg(rail()),
-            )),
-            (None, false) => Paragraph::new(Span::styled(
-                "Ask Abacus to inspect, explain, or change the code…",
-                Style::default().fg(rail()),
-            )),
+            (_, true) => {
+                Paragraph::new(fg("Type to steer — delivered after the current step…", rail()))
+            }
+            (None, false) => {
+                Paragraph::new(fg("Ask Abacus to inspect, explain, or change the code…", rail()))
+            }
         }
     } else {
         // One rendered line per wrapped row, with any selection tinted so
@@ -7091,7 +6993,7 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
                         slice,
                         Style::default().fg(text()).bg(crate::theme::active().selection),
                     )),
-                    _ => Line::from(Span::styled(slice, Style::default().fg(text()))),
+                    _ => Line::from(fg(slice, text())),
                 }
             })
             .collect();
@@ -7127,20 +7029,17 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 ui::badge("APPROVAL", warning()),
-                Span::styled(
-                    format!(" {}  ", approval.tool),
-                    Style::default().fg(warning()).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
+                bold(format!(" {}  ", approval.tool), warning()),
+                fg(
                     ui::truncate(&approval.summary, area.width.saturating_sub(46) as usize),
-                    Style::default().fg(muted()),
+                    muted(),
                 ),
-                Span::styled("  y", Style::default().fg(success()).add_modifier(Modifier::BOLD)),
-                Span::styled(" once ", Style::default().fg(muted())),
-                Span::styled("a", Style::default().fg(primary()).add_modifier(Modifier::BOLD)),
-                Span::styled(" session ", Style::default().fg(muted())),
-                Span::styled("n", Style::default().fg(danger()).add_modifier(Modifier::BOLD)),
-                Span::styled(" reject", Style::default().fg(muted())),
+                bold("  y", success()),
+                fg(" once ", muted()),
+                bold("a", primary()),
+                fg(" session ", muted()),
+                bold("n", danger()),
+                fg(" reject", muted()),
             ])),
             area,
         );
@@ -7173,18 +7072,12 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let usage = app.provider.usage();
     let cached = usage.cache_rate().is_some();
     let mut right = vec![
-        Span::styled(
-            format!("↑ {}", ui::format_count(usage.input)),
-            Style::default().fg(if cached { rail() } else { muted() }),
-        ),
-        Span::styled(
-            format!("  ↓ {}", ui::format_count(usage.output)),
-            Style::default().fg(muted()),
-        ),
+        fg(format!("↑ {}", ui::format_count(usage.input)), if cached { rail() } else { muted() }),
+        fg(format!("  ↓ {}", ui::format_count(usage.output)), muted()),
         ui::dot(),
-        Span::styled(
+        fg(
             format!("ctx {}/{} ", ui::format_count(ctx_tokens), ui::format_count(ctx_window)),
-            Style::default().fg(ctx_color),
+            ctx_color,
         ),
     ];
     right.extend(ui::meter(percent, 8, ctx_color));
@@ -7200,9 +7093,9 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let running = app.running.is_some();
     let mut left = if running {
         let elapsed = app.turn_started.map(|started| started.elapsed()).unwrap_or_default();
-        let mut spans = vec![Span::styled(
+        let mut spans = vec![bold(
             format!(" {} ", ui::spinner_frame(elapsed, app.settings.ui.animations)),
-            Style::default().fg(primary()).add_modifier(Modifier::BOLD),
+            primary(),
         )];
         // Wide enough for a reasoning-derived header, which carries real
         // information; hints yield first when the row runs out of room.
@@ -7211,14 +7104,11 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
             elapsed,
             app.settings.ui.animations,
         ));
-        spans.push(Span::styled(
-            format!("  {}", ui::format_elapsed(elapsed.as_millis() as u64)),
-            Style::default().fg(muted()),
-        ));
+        spans.push(fg(format!("  {}", ui::format_elapsed(elapsed.as_millis() as u64)), muted()));
         if app.settings.ui.show_token_rate
             && let Some(rate) = app.token_rate()
         {
-            spans.push(Span::styled(format!("  {rate:.0} tok/s"), Style::default().fg(rail())));
+            spans.push(fg(format!("  {rate:.0} tok/s"), rail()));
         }
         spans
     } else {
@@ -7228,13 +7118,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Some(TurnOutcome::Interrupted) => (set.paused, warning()),
             None => (set.still, success()),
         };
-        vec![
-            Span::styled(
-                format!(" {glyph} "),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(ui::truncate(&app.status, 28), Style::default().fg(muted())),
-        ]
+        vec![bold(format!(" {glyph} "), color), fg(ui::truncate(&app.status, 28), muted())]
     };
 
     // Contextual hints: only the keys that do something in the current state.
@@ -7322,8 +7206,8 @@ fn draw_usage_tooltip(
         .iter()
         .map(|(label, value, color)| {
             Line::from(vec![
-                Span::styled(format!("{label:<label_width$}  "), Style::default().fg(muted())),
-                Span::styled(format!("{value:>value_width$}"), Style::default().fg(*color)),
+                fg(format!("{label:<label_width$}  "), muted()),
+                fg(format!("{value:>value_width$}"), *color),
             ])
         })
         .collect();
@@ -7492,16 +7376,11 @@ fn draw_hub_sidebar(
         }
         let label_width =
             width.saturating_sub(2 + ui::spans_width(&content) + annotation.chars().count() + 1);
-        content.push(Span::styled(
-            ui::truncate(&label, label_width),
-            Style::default()
-                .fg(if selected { text() } else { muted() })
-                .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
-        ));
+        content.push(Span::styled(ui::truncate(&label, label_width), emphasis(selected)));
         let used = ui::spans_width(&content) + 2;
         let gap = width.saturating_sub(used + annotation.chars().count()).max(1);
         content.push(Span::raw(" ".repeat(gap)));
-        content.push(Span::styled(annotation, Style::default().fg(rail())));
+        content.push(fg(annotation, rail()));
         lines.push(ui::list_row(state, width, content));
     }
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
@@ -7538,12 +7417,7 @@ fn draw_hub_roles(frame: &mut Frame<'_>, area: Rect, app: &App, hub: &crate::mod
             state,
             width,
             vec![
-                Span::styled(
-                    format!("{:<label_width$}  ", row.label),
-                    Style::default()
-                        .fg(if selected { text() } else { muted() })
-                        .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
-                ),
+                Span::styled(format!("{:<label_width$}  ", row.label), emphasis(selected)),
                 Span::styled(
                     ui::truncate(&model, width.saturating_sub(label_width + 5)),
                     model_style,
@@ -7558,9 +7432,9 @@ fn draw_hub_roles(frame: &mut Frame<'_>, area: Rect, app: &App, hub: &crate::mod
     }
     lines.truncate(area.height.saturating_sub(2) as usize);
     lines.push(ui::rule(area.width));
-    lines.push(Line::from(Span::styled(
+    lines.push(Line::from(fg(
         format!("  {}", ui::truncate(&detail, width.saturating_sub(2))),
-        Style::default().fg(muted()),
+        muted(),
     )));
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
@@ -7580,17 +7454,11 @@ fn draw_hub_models(
     // The search row is always live — there is no mode to enter, so there is
     // none to forget to leave.
     let query = if hub.search.is_empty() {
-        Span::styled("type to filter", Style::default().fg(rail()))
+        fg("type to filter", rail())
     } else {
-        Span::styled(hub.search.clone(), Style::default().fg(text()))
+        fg(hub.search.clone(), text())
     };
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!("{} ", ui::glyphs().prompt),
-            Style::default().fg(primary()).add_modifier(Modifier::BOLD),
-        ),
-        query,
-    ]));
+    lines.push(Line::from(vec![bold(format!("{} ", ui::glyphs().prompt), primary()), query]));
     lines.push(Line::default());
 
     let list_height = area.height.saturating_sub(lines.len() as u16 + HUB_DETAIL_ROWS) as usize;
@@ -7614,7 +7482,7 @@ fn draw_hub_models(
     let metrics = ui::metrics_width(&widths);
 
     if visible.is_empty() {
-        lines.push(Line::from(Span::styled(
+        lines.push(Line::from(fg(
             match catalog {
                 Catalog::Loading => "  Asking the endpoint what it serves…".to_owned(),
                 Catalog::Failed(error) => format!("  {error}"),
@@ -7624,11 +7492,7 @@ fn draw_hub_models(
                 }
                 Catalog::Ready(_) => "  The endpoint listed no models.".to_owned(),
             },
-            Style::default().fg(if matches!(catalog, Catalog::Failed(_)) {
-                danger()
-            } else {
-                muted()
-            }),
+            if matches!(catalog, Catalog::Failed(_)) { danger() } else { muted() },
         )));
     }
     for (offset, card) in visible.iter().enumerate() {
@@ -7641,7 +7505,7 @@ fn draw_hub_models(
         // The supplier is a dim prefix rather than an indent level: it groups
         // a long list visually while every id still starts at the same column.
         if let Some(provider) = &card.provider {
-            content.push(Span::styled(format!("{provider}/"), Style::default().fg(rail())));
+            content.push(fg(format!("{provider}/"), rail()));
         }
         content.push(Span::styled(
             card.short_id().to_owned(),
@@ -7650,10 +7514,7 @@ fn draw_hub_models(
                 .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
         ));
         if card.id == current {
-            content.push(Span::styled(
-                format!(" {}", ui::glyphs().ok),
-                Style::default().fg(success()),
-            ));
+            content.push(fg(format!(" {}", ui::glyphs().ok), success()));
         }
         let label_width = width.saturating_sub(metrics + 4);
         let mut row = ui::fit(content, label_width);
@@ -7777,31 +7638,22 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
 
     let mut lines = Vec::new();
     for (heading, keys) in SECTIONS {
-        lines.push(Line::from(Span::styled(
-            *heading,
-            Style::default().fg(muted()).add_modifier(Modifier::BOLD),
-        )));
+        lines.push(Line::from(bold(*heading, muted())));
         for (key, description) in *keys {
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {key:<30}"),
-                    Style::default().fg(primary()).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled((*description).to_owned(), Style::default().fg(text())),
+                bold(format!("  {key:<30}"), primary()),
+                fg((*description).to_owned(), text()),
             ]));
         }
         lines.push(Line::from(""));
     }
-    lines.push(Line::from(Span::styled(
-        "COMMANDS",
-        Style::default().fg(muted()).add_modifier(Modifier::BOLD),
-    )));
+    lines.push(Line::from(bold("COMMANDS", muted())));
     // Built from the same table that drives the palette, so the two can never
     // drift apart.
     let commands =
         SLASH_COMMANDS.iter().map(|(command, _)| *command).collect::<Vec<_>>().join("  ");
     lines.extend(ui::wrap(
-        &[Span::styled(commands, Style::default().fg(primary()))],
+        &[fg(commands, primary())],
         measure,
         &[Span::raw("  ")],
         &[Span::raw("  ")],
@@ -7848,10 +7700,7 @@ fn draw_usage(frame: &mut Frame<'_>, area: Rect, app: &App) {
             lines.push(Line::from(""));
             let stats = usage_stats(&records, today);
             if records.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    " No activity in this date range yet.",
-                    Style::default().fg(muted()),
-                )));
+                lines.push(Line::from(fg(" No activity in this date range yet.", muted())));
             } else if inner_width >= 70 {
                 lines.extend(usage_stats_wide(&stats, inner_width));
             } else {
@@ -7901,9 +7750,9 @@ fn usage_range_line(selected: UsageRange) -> Line<'static> {
     Line::from(vec![
         Span::raw(" "),
         choice("All time", UsageRange::AllTime),
-        Span::styled("  ·  ", Style::default().fg(border())),
+        fg("  ·  ", border()),
         choice("Last 7 days", UsageRange::Last7Days),
-        Span::styled("  ·  ", Style::default().fg(border())),
+        fg("  ·  ", border()),
         choice("Last 30 days", UsageRange::Last30Days),
     ])
 }
@@ -7934,10 +7783,7 @@ fn usage_heatmap_lines(records: &[&SessionUsage], width: usize) -> Vec<Line<'sta
         }
         previous_month = date.month();
     }
-    let mut lines = vec![Line::from(Span::styled(
-        months.into_iter().collect::<String>(),
-        Style::default().fg(muted()),
-    ))];
+    let mut lines = vec![Line::from(fg(months.into_iter().collect::<String>(), muted()))];
     for weekday in 0..7 {
         let label = match weekday {
             0 => "Mon ",
@@ -7945,7 +7791,7 @@ fn usage_heatmap_lines(records: &[&SessionUsage], width: usize) -> Vec<Line<'sta
             4 => "Fri ",
             _ => "    ",
         };
-        let mut spans = vec![Span::styled(label, Style::default().fg(muted()))];
+        let mut spans = vec![fg(label, muted())];
         for week in 0..weeks {
             let date = start + ChronoDuration::weeks(week as i64) + ChronoDuration::days(weekday);
             if date > today {
@@ -7954,7 +7800,7 @@ fn usage_heatmap_lines(records: &[&SessionUsage], width: usize) -> Vec<Line<'sta
             }
             let value = daily.get(&date).copied().unwrap_or(0);
             if value == 0 {
-                spans.push(Span::styled("· ", Style::default().fg(border())));
+                spans.push(fg("· ", border()));
                 continue;
             }
             let level = ((value.saturating_mul(4).saturating_sub(1)) / maximum).clamp(0, 3);
@@ -7973,13 +7819,13 @@ fn usage_heatmap_lines(records: &[&SessionUsage], width: usize) -> Vec<Line<'sta
 
 fn usage_legend() -> Line<'static> {
     Line::from(vec![
-        Span::styled("    Less  ", Style::default().fg(muted())),
-        Span::styled("· ", Style::default().fg(border())),
-        Span::styled("▪ ", Style::default().fg(border())),
-        Span::styled("▪ ", Style::default().fg(secondary())),
-        Span::styled("■ ", Style::default().fg(secondary())),
-        Span::styled("■ ", Style::default().fg(primary()).add_modifier(Modifier::BOLD)),
-        Span::styled("More", Style::default().fg(muted())),
+        fg("    Less  ", muted()),
+        fg("· ", border()),
+        fg("▪ ", border()),
+        fg("▪ ", secondary()),
+        fg("■ ", secondary()),
+        bold("■ ", primary()),
+        fg("More", muted()),
     ])
 }
 
@@ -8083,17 +7929,11 @@ fn usage_stat_pair(
     let left_used = 2 + 17 + left_value.chars().count();
     let gap = left_width.saturating_sub(left_used).max(2);
     Line::from(vec![
-        Span::styled(format!(" {left_label:<17}"), Style::default().fg(muted())),
-        Span::styled(
-            left_value.to_owned(),
-            Style::default().fg(primary()).add_modifier(Modifier::BOLD),
-        ),
+        fg(format!(" {left_label:<17}"), muted()),
+        bold(left_value.to_owned(), primary()),
         Span::raw(" ".repeat(gap)),
-        Span::styled(format!("{right_label:<17}"), Style::default().fg(muted())),
-        Span::styled(
-            right_value.to_owned(),
-            Style::default().fg(primary()).add_modifier(Modifier::BOLD),
-        ),
+        fg(format!("{right_label:<17}"), muted()),
+        bold(right_value.to_owned(), primary()),
     ])
 }
 
@@ -8114,10 +7954,7 @@ fn usage_stats_compact(stats: &UsageStats) -> Vec<Line<'static>> {
 }
 
 fn usage_stat_line(label: &str, value: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!(" {label:<18}"), Style::default().fg(muted())),
-        Span::styled(value.to_owned(), Style::default().fg(primary()).add_modifier(Modifier::BOLD)),
-    ])
+    Line::from(vec![fg(format!(" {label:<18}"), muted()), bold(value.to_owned(), primary())])
 }
 
 fn usage_model_lines(
@@ -8126,10 +7963,7 @@ fn usage_model_lines(
     width: usize,
 ) -> Vec<Line<'static>> {
     if records.is_empty() {
-        return vec![Line::from(Span::styled(
-            " No model activity in this date range yet.",
-            Style::default().fg(muted()),
-        ))];
+        return vec![Line::from(fg(" No model activity in this date range yet.", muted()))];
     }
     let mut models = HashMap::<String, (usize, u64, u64)>::new();
     for record in records {
@@ -8143,26 +7977,20 @@ fn usage_model_lines(
     let maximum = models.iter().map(|(_, (_, tokens, _))| *tokens).max().unwrap_or(1).max(1);
     let bar_width = width.saturating_sub(55).clamp(6, 28);
     let mut lines = vec![Line::from(vec![
-        Span::styled("   Model", Style::default().fg(muted())),
-        Span::styled("                    Sessions   Tokens", Style::default().fg(muted())),
+        fg("   Model", muted()),
+        fg("                    Sessions   Tokens", muted()),
     ])];
     for (model, (sessions, tokens, duration)) in models.into_iter().take(12) {
         let filled = ((tokens as u128 * bar_width as u128) / maximum as u128) as usize;
         let marker = if model == current_model { "●" } else { " " };
         lines.push(Line::from(vec![
-            Span::styled(
-                format!(" {marker} "),
-                Style::default().fg(if model == current_model { primary() } else { muted() }),
-            ),
-            Span::styled(
-                format!("{:<24}", single_line(&model, 23)),
-                Style::default().fg(text()).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("{sessions:>8}  "), Style::default().fg(muted())),
-            Span::styled(format!("{:>8}  ", format_count(tokens)), Style::default().fg(primary())),
-            Span::styled("█".repeat(filled.max(1)), Style::default().fg(secondary())),
-            Span::styled("░".repeat(bar_width - filled.max(1)), Style::default().fg(border())),
-            Span::styled(format!("  {}", format_duration(duration)), Style::default().fg(muted())),
+            fg(format!(" {marker} "), if model == current_model { primary() } else { muted() }),
+            bold(format!("{:<24}", single_line(&model, 23)), text()),
+            fg(format!("{sessions:>8}  "), muted()),
+            fg(format!("{:>8}  ", format_count(tokens)), primary()),
+            fg("█".repeat(filled.max(1)), secondary()),
+            fg("░".repeat(bar_width - filled.max(1)), border()),
+            fg(format!("  {}", format_duration(duration)), muted()),
         ]));
     }
     lines
@@ -8269,13 +8097,9 @@ fn draw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let mut rows: Vec<(Option<usize>, Vec<Span<'static>>)> = Vec::new();
     for row in CONFIG_ROWS {
         match row {
-            ConfigRow::Heading(title) => rows.push((
-                None,
-                vec![Span::styled(
-                    format!("  {title}"),
-                    Style::default().fg(rail()).add_modifier(Modifier::BOLD),
-                )],
-            )),
+            ConfigRow::Heading(title) => {
+                rows.push((None, vec![bold(format!("  {title}"), rail())]))
+            }
             ConfigRow::Key(key) => {
                 let index = key_index;
                 key_index += 1;
@@ -8283,12 +8107,8 @@ fn draw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 if selected {
                     selected_row = rows.len();
                 }
-                let mut content = vec![Span::styled(
-                    format!("{:<26}", config_label(*key)),
-                    Style::default()
-                        .fg(if selected { text() } else { muted() })
-                        .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
-                )];
+                let mut content =
+                    vec![Span::styled(format!("{:<26}", config_label(*key)), emphasis(selected))];
                 content.extend(config_value_spans(
                     &app.config_value(*key),
                     width.saturating_sub(30),
@@ -8321,10 +8141,7 @@ fn draw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
         frame.render_widget(
             Paragraph::new(Text::from(vec![
                 ui::rule(inner.width),
-                Line::from(Span::styled(
-                    ui::truncate(config_help(key), inner.width as usize),
-                    Style::default().fg(muted()),
-                )),
+                Line::from(fg(ui::truncate(config_help(key), inner.width as usize), muted())),
             ])),
             help,
         );
@@ -8372,14 +8189,8 @@ fn draw_raw_config(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if let Some(error) = &editor.error {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(
-                    format!("{} ", ui::glyphs().failed),
-                    Style::default().fg(danger()).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    ui::truncate(error, inner.width.saturating_sub(3) as usize),
-                    Style::default().fg(danger()),
-                ),
+                bold(format!("{} ", ui::glyphs().failed), danger()),
+                fg(ui::truncate(error, inner.width.saturating_sub(3) as usize), danger()),
             ])),
             Rect { height: 1, ..inner },
         );
@@ -8427,12 +8238,9 @@ fn draw_feedback(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("Category  ", Style::default().fg(muted())),
-            Span::styled(
-                FEEDBACK_CATEGORIES[form.category],
-                Style::default().fg(primary()).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("   tab to change", Style::default().fg(rail())),
+            fg("Category  ", muted()),
+            bold(FEEDBACK_CATEGORIES[form.category], primary()),
+            fg("   tab to change", rail()),
         ])),
         sections[0],
     );
@@ -8447,9 +8255,9 @@ fn draw_feedback(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(field, sections[1]);
     frame.render_widget(
         Paragraph::new(if body.is_empty() {
-            Text::from(Span::styled(
+            Text::from(fg(
                 "What should we improve? Please avoid secrets or sensitive source code.",
-                Style::default().fg(rail()),
+                rail(),
             ))
         } else {
             Text::from(body.as_str())
@@ -8460,22 +8268,22 @@ fn draw_feedback(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(
+            fg(
                 if form.include_diagnostics { "[x]" } else { "[ ]" },
-                Style::default().fg(if form.include_diagnostics { success() } else { muted() }),
+                if form.include_diagnostics { success() } else { muted() },
             ),
-            Span::styled(" Include extension diagnostics", Style::default().fg(text())),
+            fg(" Include extension diagnostics", text()),
             ui::dot(),
-            Span::styled("your transcript is never included", Style::default().fg(muted())),
+            fg("your transcript is never included", muted()),
         ])),
         sections[2],
     );
 
     if let Some(error) = &form.error {
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
+            Paragraph::new(Line::from(fg(
                 ui::truncate(error, sections[3].width as usize),
-                Style::default().fg(danger()),
+                danger(),
             ))),
             sections[3],
         );
@@ -8541,10 +8349,7 @@ fn draw_user_question(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     frame.render_widget(
         Paragraph::new(Text::from(ui::wrap(
-            &[Span::styled(
-                question.question.clone(),
-                Style::default().fg(text()).add_modifier(Modifier::BOLD),
-            )],
+            &[bold(question.question.clone(), text())],
             sections[0].width as usize,
             &[],
             &[],
@@ -8555,10 +8360,7 @@ fn draw_user_question(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let width = sections[1].width as usize;
     let mut lines = Vec::new();
     if question.options.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  No options — type an answer below and press Enter.",
-            Style::default().fg(muted()),
-        )));
+        lines.push(Line::from(fg("  No options — type an answer below and press Enter.", muted())));
     }
     for (index, option) in question.options.iter().enumerate() {
         let on_cursor = index == question.cursor && !question.editing_custom;
@@ -8573,16 +8375,8 @@ fn draw_user_question(frame: &mut Frame<'_>, area: Rect, app: &App) {
             ui::RowState::selected(on_cursor),
             width,
             vec![
-                Span::styled(
-                    format!("{marker} "),
-                    Style::default().fg(if checked { success() } else { muted() }),
-                ),
-                Span::styled(
-                    ui::truncate(option, width.saturating_sub(7)),
-                    Style::default()
-                        .fg(if on_cursor { text() } else { muted() })
-                        .add_modifier(if on_cursor { Modifier::BOLD } else { Modifier::empty() }),
-                ),
+                fg(format!("{marker} "), if checked { success() } else { muted() }),
+                Span::styled(ui::truncate(option, width.saturating_sub(7)), emphasis(on_cursor)),
             ],
         ));
     }
@@ -8595,19 +8389,19 @@ fn draw_user_question(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(accent))
         .padding(Padding::horizontal(1))
-        .title_top(Line::from(Span::styled(" your answer ", Style::default().fg(accent))));
+        .title_top(Line::from(fg(" your answer ", accent)));
     let field_inner = field.inner(sections[3]);
     frame.render_widget(field, sections[3]);
 
     let value = question.custom.text();
     let line = if value.is_empty() && !focused {
-        Line::from(Span::styled(
+        Line::from(fg(
             if question.options.is_empty() {
                 "press t to type an answer"
             } else {
                 "optional — press t to add your own answer"
             },
-            Style::default().fg(rail()),
+            rail(),
         ))
     } else {
         // Window the cursor's line horizontally: an answer longer than the
@@ -8618,7 +8412,7 @@ fn draw_user_question(frame: &mut Frame<'_>, area: Rect, app: &App) {
         let current_line = value.split('\n').nth(cursor_row).unwrap_or("");
         let skip = cursor_column.saturating_sub(field_width.saturating_sub(1));
         let visible: String = current_line.chars().skip(skip).take(field_width).collect();
-        Line::from(Span::styled(visible, Style::default().fg(text())))
+        Line::from(fg(visible, text()))
     };
     frame.render_widget(Paragraph::new(line), field_inner);
 
@@ -8663,47 +8457,33 @@ fn draw_approval(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .split(inner);
 
     let mut header = vec![Line::from(vec![
-        Span::styled(
-            format!("{}  ", approval.tool),
-            Style::default().fg(warning()).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            ui::truncate(&approval.summary, sections[0].width.saturating_sub(20) as usize),
-            Style::default().fg(text()),
-        ),
+        bold(format!("{}  ", approval.tool), warning()),
+        fg(ui::truncate(&approval.summary, sections[0].width.saturating_sub(20) as usize), text()),
     ])];
     if let Some(diff) = &approval.diff {
         header.push(Line::from(vec![
-            Span::styled(
+            fg(
                 format!(
                     "{} file{}",
                     diff.file_count(),
                     if diff.file_count() == 1 { "" } else { "s" }
                 ),
-                Style::default().fg(muted()),
+                muted(),
             ),
-            Span::styled(
-                format!("   +{}", diff.additions),
-                Style::default().fg(success()).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  -{}", diff.deletions),
-                Style::default().fg(danger()).add_modifier(Modifier::BOLD),
-            ),
+            bold(format!("   +{}", diff.additions), success()),
+            bold(format!("  -{}", diff.deletions), danger()),
             ui::dot(),
-            Span::styled(
+            fg(
                 match approval.view {
                     ApprovalView::Unified => "unified view",
                     ApprovalView::Raw => "raw view",
                 },
-                Style::default().fg(muted()),
+                muted(),
             ),
         ]));
     } else {
-        header.push(Line::from(Span::styled(
-            "Review the operation below before allowing it to run.",
-            Style::default().fg(muted()),
-        )));
+        header
+            .push(Line::from(fg("Review the operation below before allowing it to run.", muted())));
     }
     frame.render_widget(Paragraph::new(Text::from(header)), sections[0]);
 
@@ -8722,9 +8502,9 @@ fn draw_approval(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(rail()))
-                .title_top(Line::from(Span::styled(
+                .title_top(Line::from(fg(
                     if approval.diff.is_some() { " changes " } else { " operation " },
-                    Style::default().fg(muted()),
+                    muted(),
                 ))),
         ),
         sections[1],
@@ -8734,16 +8514,8 @@ fn draw_approval(frame: &mut Frame<'_>, area: Rect, app: &App) {
     // saying what rejection *leads to* keeps it from reading as a dead end.
     let option = |key: &str, label: &str, lead: bool| {
         Line::from(vec![
-            Span::styled(
-                format!("  {key}  "),
-                Style::default()
-                    .fg(if lead { success() } else { primary() })
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                label.to_owned(),
-                Style::default().fg(if lead { text() } else { muted() }),
-            ),
+            bold(format!("  {key}  "), if lead { success() } else { primary() }),
+            fg(label.to_owned(), if lead { text() } else { muted() }),
         ])
     };
     frame.render_widget(
@@ -8782,10 +8554,7 @@ fn diff_text(diff: &DiffDocument) -> Text<'static> {
                 // the first get a quiet elision mark for the skipped lines.
                 DiffLineKind::Hunk => {
                     if past_first_hunk {
-                        lines.push(Line::from(Span::styled(
-                            format!("     {}", ui::glyphs().gap),
-                            Style::default().fg(muted()),
-                        )));
+                        lines.push(Line::from(fg(format!("     {}", ui::glyphs().gap), muted())));
                     }
                     past_first_hunk = true;
                 }
@@ -8811,10 +8580,9 @@ fn diff_text(diff: &DiffDocument) -> Text<'static> {
                         ),
                     ]));
                 }
-                DiffLineKind::Metadata => lines.push(Line::from(Span::styled(
-                    format!("     {}", line.text),
-                    Style::default().fg(muted()),
-                ))),
+                DiffLineKind::Metadata => {
+                    lines.push(Line::from(fg(format!("     {}", line.text), muted())))
+                }
             }
         }
     }
@@ -8871,8 +8639,7 @@ fn draw_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let start = picker.selected.saturating_sub(rows.saturating_sub(1));
     let mut lines = Vec::new();
     if picker.items.is_empty() {
-        lines
-            .push(Line::from(Span::styled("  Nothing to show yet.", Style::default().fg(muted()))));
+        lines.push(Line::from(fg("  Nothing to show yet.", muted())));
     }
     for (index, (label, _)) in picker.items.iter().enumerate().skip(start).take(rows) {
         let selected = index == picker.selected;
@@ -8882,12 +8649,7 @@ fn draw_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
         lines.push(ui::list_row(
             app.row_state(rect, selected),
             width,
-            vec![Span::styled(
-                ui::truncate(label, width.saturating_sub(3)),
-                Style::default()
-                    .fg(if selected { text() } else { muted() })
-                    .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
-            )],
+            vec![Span::styled(ui::truncate(label, width.saturating_sub(3)), emphasis(selected))],
         ));
     }
     let list = Rect { height: inner.height.saturating_sub(prompt_rows as u16), ..inner };
@@ -8899,14 +8661,8 @@ fn draw_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 frame.render_widget(
                     Paragraph::new(Text::from(vec![
                         ui::rule(inner.width),
-                        Line::from(Span::styled(
-                            format!(" rename {id} →"),
-                            Style::default().fg(muted()),
-                        )),
-                        Line::from(Span::styled(
-                            format!(" {}", input.text()),
-                            Style::default().fg(text()),
-                        )),
+                        Line::from(fg(format!(" rename {id} →"), muted())),
+                        Line::from(fg(format!(" {}", input.text()), text())),
                     ])),
                     field,
                 );
@@ -8920,14 +8676,8 @@ fn draw_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 frame.render_widget(
                     Paragraph::new(Text::from(vec![
                         ui::rule(inner.width),
-                        Line::from(Span::styled(
-                            format!(" delete {id}?"),
-                            Style::default().fg(danger()).add_modifier(Modifier::BOLD),
-                        )),
-                        Line::from(Span::styled(
-                            " enter confirms · esc cancels",
-                            Style::default().fg(muted()),
-                        )),
+                        Line::from(bold(format!(" delete {id}?"), danger())),
+                        Line::from(fg(" enter confirms · esc cancels", muted())),
                     ])),
                     field,
                 );

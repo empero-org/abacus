@@ -625,6 +625,17 @@ fn distance(a: (u8, u8, u8), b: (u8, u8, u8)) -> i32 {
 static ACTIVE: RwLock<Theme> = RwLock::new(Theme::DARK);
 
 /// The active theme, copied out (cheap — `Theme` is `Copy`).
+/// The active palette's roles as plain functions, so draw code reads
+/// `muted()` rather than `theme::active().muted` at every call site.
+macro_rules! roles {
+    ($($role:ident),*) => {
+        $(pub fn $role() -> Color {
+            active().$role
+        })*
+    };
+}
+roles!(primary, secondary, success, warning, danger, muted, border, surface, text, inverse, rail);
+
 pub fn active() -> Theme {
     *ACTIVE.read().expect("theme lock poisoned")
 }

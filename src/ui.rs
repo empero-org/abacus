@@ -24,7 +24,9 @@ use ratatui::widgets::{Block, Borders, Padding};
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
-use crate::theme;
+use crate::theme::{
+    self, danger, muted, primary, rail, secondary, success, text as text_color, warning,
+};
 
 /// Content is inset two columns from the marker gutter.
 pub const GUTTER: usize = 2;
@@ -337,7 +339,7 @@ pub fn glyphs() -> &'static Glyphs {
 pub fn shimmer(text: &str, elapsed: std::time::Duration, animated: bool) -> Vec<Span<'static>> {
     let palette = theme::active();
     if !animated || text.is_empty() {
-        return vec![Span::styled(text.to_owned(), Style::default().fg(palette.text))];
+        return vec![fg(text.to_owned(), palette.text)];
     }
     const PERIOD_MS: u128 = 2_000;
     const HALF_WIDTH: f64 = 5.0;
@@ -392,29 +394,23 @@ pub fn spinner_frame(elapsed: std::time::Duration, animated: bool) -> &'static s
 /// Number of spinner frames, for callers keying a cache on the current phase.
 pub const SPINNER_FRAMES: usize = 10;
 
-fn primary() -> Color {
-    theme::active().primary
+/// Text in a palette colour — the span most of the interface is made of.
+pub fn fg<'a>(text: impl Into<std::borrow::Cow<'a, str>>, color: Color) -> Span<'a> {
+    Span::styled(text, Style::default().fg(color))
 }
-fn secondary() -> Color {
-    theme::active().secondary
+
+/// [`fg`], in bold.
+pub fn bold<'a>(text: impl Into<std::borrow::Cow<'a, str>>, color: Color) -> Span<'a> {
+    Span::styled(text, Style::default().fg(color).add_modifier(Modifier::BOLD))
 }
-fn success() -> Color {
-    theme::active().success
-}
-fn warning() -> Color {
-    theme::active().warning
-}
-fn danger() -> Color {
-    theme::active().danger
-}
-fn muted() -> Color {
-    theme::active().muted
-}
-fn text_color() -> Color {
-    theme::active().text
-}
-fn rail() -> Color {
-    theme::active().rail
+
+/// Label style for a list row: bright and bold under the cursor, muted elsewhere.
+pub fn emphasis(selected: bool) -> Style {
+    if selected {
+        Style::default().fg(text_color()).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(muted())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -440,7 +436,7 @@ pub fn fill_style(fill: Color) -> Style {
 /// The `·` used to separate inline metadata. Dim enough to group without
 /// competing with the values on either side.
 pub fn dot() -> Span<'static> {
-    Span::styled(format!("  {}  ", glyphs().separator), Style::default().fg(rail()))
+    fg(format!("  {}  ", glyphs().separator), rail())
 }
 
 /// Spell a key name for the active preset.
@@ -477,11 +473,8 @@ pub fn hints(pairs: &[(&str, &str)]) -> Vec<Span<'static>> {
         if index > 0 {
             spans.push(Span::styled("   ", Style::default()));
         }
-        spans.push(Span::styled(
-            key_label(key),
-            Style::default().fg(primary()).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(format!(" {label}"), Style::default().fg(muted())));
+        spans.push(bold(key_label(key), primary()));
+        spans.push(fg(format!(" {label}"), muted()));
     }
     spans
 }
@@ -489,7 +482,7 @@ pub fn hints(pairs: &[(&str, &str)]) -> Vec<Span<'static>> {
 /// A horizontal hairline in the rail colour, used to separate the header and
 /// footer from the transcript without boxing anything in.
 pub fn rule(width: u16) -> Line<'static> {
-    Line::from(Span::styled(glyphs().rule.repeat(width as usize), Style::default().fg(rail())))
+    Line::from(fg(glyphs().rule.repeat(width as usize), rail()))
 }
 
 /// A segmented capacity meter, e.g. `▰▰▰▱▱▱▱▱`. Filled cells take `color`,
@@ -498,8 +491,8 @@ pub fn meter(percent: u16, cells: usize, color: Color) -> Vec<Span<'static>> {
     let set = glyphs();
     let filled = ((percent as usize * cells) / 100).min(cells);
     vec![
-        Span::styled(set.meter_full.repeat(filled), Style::default().fg(color)),
-        Span::styled(set.meter_empty.repeat(cells - filled), Style::default().fg(rail())),
+        fg(set.meter_full.repeat(filled), color),
+        fg(set.meter_empty.repeat(cells - filled), rail()),
     ]
 }
 
@@ -761,7 +754,7 @@ pub fn fit(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
         }
         break;
     }
-    out.push(Span::styled("…", Style::default().fg(muted())));
+    out.push(fg("…", muted()));
     if used + 1 < width {
         out.push(Span::raw(" ".repeat(width - used - 1)));
     }
@@ -832,9 +825,9 @@ pub fn facts(items: &[String]) -> Line<'static> {
     let mut spans = Vec::new();
     for item in items.iter().filter(|item| !item.trim().is_empty()) {
         if !spans.is_empty() {
-            spans.push(Span::styled(format!(" {separator} "), Style::default().fg(rail())));
+            spans.push(fg(format!(" {separator} "), rail()));
         }
-        spans.push(Span::styled(item.clone(), Style::default().fg(muted())));
+        spans.push(fg(item.clone(), muted()));
     }
     Line::from(spans)
 }
@@ -842,11 +835,7 @@ pub fn facts(items: &[String]) -> Line<'static> {
 /// The `[x]` / `[/]` state mark for a row that is on or off.
 pub fn state_mark(on: bool) -> Span<'static> {
     let set = glyphs();
-    if on {
-        Span::styled(set.enabled.to_owned(), Style::default().fg(success()))
-    } else {
-        Span::styled(set.disabled.to_owned(), Style::default().fg(rail()))
-    }
+    if on { fg(set.enabled.to_owned(), success()) } else { fg(set.disabled.to_owned(), rail()) }
 }
 
 // ---------------------------------------------------------------------------
@@ -1108,13 +1097,10 @@ pub fn transcript(
 /// repeats on wrapped rows so a long prompt stays visually bounded.
 fn user_block(body: &str, width: usize) -> Vec<Line<'static>> {
     let tint = theme::active().user_bg;
-    let bar = vec![Span::styled(
-        format!("{} ", glyphs().bar),
-        Style::default().fg(primary()).add_modifier(Modifier::BOLD),
-    )];
+    let bar = vec![bold(format!("{} ", glyphs().bar), primary())];
     let mut lines = Vec::new();
     for paragraph in body.split('\n') {
-        let spans = vec![Span::styled(paragraph.to_owned(), Style::default().fg(text_color()))];
+        let spans = vec![fg(paragraph.to_owned(), text_color())];
         lines.extend(wrap(&spans, width, &bar, &bar));
     }
     // The prompt renders as a card: a quiet tint band behind the whole block,
@@ -1147,8 +1133,7 @@ fn user_block(body: &str, width: usize) -> Vec<Line<'static>> {
 /// and must not compete with it.
 fn thinking_block(body: &str, width: usize) -> Vec<Line<'static>> {
     let quiet = rail();
-    let marker =
-        vec![Span::styled(format!("{} ", glyphs().quote_rail), Style::default().fg(quiet))];
+    let marker = vec![fg(format!("{} ", glyphs().quote_rail), quiet)];
     let style = Style::default().fg(quiet).add_modifier(Modifier::ITALIC);
     let mut lines = Vec::new();
     for paragraph in body.split('\n') {
@@ -1280,7 +1265,7 @@ fn tool_block(call: &ToolCall, width: usize, spinner: &str, selected: bool) -> V
         if lines.len() > MAX_EXPANDED_ROWS {
             lines.push(Line::from(vec![
                 Span::raw(" ".repeat(indent)),
-                Span::styled("… output truncated".to_owned(), Style::default().fg(rail())),
+                fg("… output truncated".to_owned(), rail()),
             ]));
             break;
         }
@@ -1313,16 +1298,13 @@ fn rule_line(label: &str, width: usize) -> Line<'static> {
     let mut text = format!("{bar} {label} ");
     let used = UnicodeWidthStr::width(text.as_str());
     text.push_str(&bar.repeat(width.saturating_sub(used).max(2) / bar.width().max(1)));
-    Line::from(Span::styled(text, Style::default().fg(muted())))
+    Line::from(fg(text, muted()))
 }
 
 fn notice_block(body: &str, width: usize, color: Color, glyph: &str) -> Vec<Line<'static>> {
-    let first = vec![
-        Span::raw(" ".repeat(GUTTER)),
-        Span::styled(format!("{glyph} "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
-    ];
+    let first = vec![Span::raw(" ".repeat(GUTTER)), bold(format!("{glyph} "), color)];
     let cont = vec![Span::raw(" ".repeat(GUTTER + 2))];
-    let spans = vec![Span::styled(body.to_owned(), Style::default().fg(color))];
+    let spans = vec![fg(body.to_owned(), color)];
     wrap(&spans, width, &first, &cont)
 }
 
@@ -1358,10 +1340,7 @@ fn wordmark(width: usize) -> Vec<Line<'static>> {
 /// A `label   value` row for the splash screen's facts block, with the labels
 /// aligned into a column.
 fn fact(label: &str, value: String, value_color: Color) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{label:<11}"), Style::default().fg(muted())),
-        Span::styled(value, Style::default().fg(value_color)),
-    ])
+    Line::from(vec![fg(format!("{label:<11}"), muted()), fg(value, value_color)])
 }
 
 /// The empty-transcript splash: wordmark, a facts block naming exactly what
@@ -1369,10 +1348,7 @@ fn fact(label: &str, value: String, value_color: Color) -> Line<'static> {
 pub fn welcome(info: &Welcome<'_>, width: usize) -> Vec<Line<'static>> {
     let mut lines = wordmark(width);
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "A focused coding agent for your terminal",
-        Style::default().fg(muted()),
-    )));
+    lines.push(Line::from(fg("A focused coding agent for your terminal", muted())));
     lines.push(Line::from(""));
 
     let workspace = match info.branch {
@@ -1393,18 +1369,15 @@ pub fn welcome(info: &Welcome<'_>, width: usize) -> Vec<Line<'static>> {
             ("Loop", "/loop runs promise-driven iteration.", secondary()),
         ] {
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{key:<7}"),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(label.to_owned(), Style::default().fg(muted())),
+                bold(format!("{key:<7}"), color),
+                fg(label.to_owned(), muted()),
             ]));
         }
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
+    lines.push(Line::from(fg(
         "Type / for commands  ·  @file to attach context  ·  F1 for help",
-        Style::default().fg(rail()),
+        rail(),
     )));
     lines
 }
@@ -1584,8 +1557,7 @@ mod tests {
         let joined: String = cut.iter().map(|span| span.content.as_ref()).collect();
         assert_eq!(joined, "abc…");
         // Styles survive a cut that lands mid-run.
-        let styled =
-            vec![Span::styled("abcdef", Style::default().fg(Color::Red)), Span::raw("ghi")];
+        let styled = vec![fg("abcdef", Color::Red), Span::raw("ghi")];
         let cut = fit(styled, 4);
         assert_eq!(cut[0].style.fg, Some(Color::Red));
     }
