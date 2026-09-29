@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, RwLock},
@@ -13,7 +12,7 @@ use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
 use crate::{
     config::{AbacusPaths, ProjectExtensions, Settings},
     extensions::{PluginRegistry, SkillRegistry},
-    mcp::{McpManager, McpServerConfig},
+    mcp::McpManager,
     tools::{ToolCall, tool_specs},
 };
 
@@ -424,15 +423,6 @@ fn resolve_hook_command(root: &Path, command: &str) -> Result<PathBuf> {
         bail!("plugin hook command escapes plugin root");
     }
     Ok(canonical)
-}
-
-pub fn merge_mcp_configs(
-    base: &BTreeMap<String, McpServerConfig>,
-    additions: BTreeMap<String, McpServerConfig>,
-) -> BTreeMap<String, McpServerConfig> {
-    let mut output = base.clone();
-    output.extend(additions);
-    output
 }
 
 // The plugin-hook test relies on Unix executable permissions, so the whole

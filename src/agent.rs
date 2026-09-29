@@ -1372,12 +1372,6 @@ pub async fn draft_reply(provider: &Provider, messages: &[Value]) -> Option<Stri
     Some(draft)
 }
 
-/// An assistant message built from a completion, for the refine pass's own
-/// private conversation.
-pub fn assistant_reflection_message(completion: &crate::provider::Completion) -> Value {
-    assistant_message(&completion.content, &completion.reasoning, &completion.tool_calls)
-}
-
 fn assistant_message(content: &str, reasoning: &str, calls: &[ToolCall]) -> Value {
     let tool_calls = calls
         .iter()

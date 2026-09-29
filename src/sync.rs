@@ -369,10 +369,6 @@ pub async fn push_all_updated_local(paths: &AbacusPaths) -> Result<usize> {
     push_all_updated_local_inner(paths, false).await
 }
 
-pub async fn push_all_local_force(paths: &AbacusPaths) -> Result<usize> {
-    push_all_updated_local_inner(paths, true).await
-}
-
 async fn push_all_updated_local_inner(paths: &AbacusPaths, force: bool) -> Result<usize> {
     let Some(client) = optional_client(paths)? else {
         return Ok(0);
@@ -450,14 +446,6 @@ pub async fn pull_workspace(
         pulled += 1;
     }
     Ok(pulled)
-}
-
-pub async fn push_session_now(paths: &AbacusPaths, session: &Session) -> Result<()> {
-    let Some(client) = optional_client(paths)? else {
-        return Ok(());
-    };
-    push_one(&client, paths, session).await?;
-    Ok(())
 }
 
 fn optional_client(paths: &AbacusPaths) -> Result<Option<SyncClient>> {
