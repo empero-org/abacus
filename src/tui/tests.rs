@@ -162,6 +162,21 @@ async fn a_background_report_arriving_while_idle_starts_a_delivery_turn() {
 }
 
 #[tokio::test]
+async fn reports_queued_behind_the_one_that_starts_a_turn_are_kept() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    app.state.injections.push(crate::agent::Injection::SubagentReport("alpha: done".into()));
+    app.state.injections.push(crate::agent::Injection::SubagentReport("beta: done".into()));
+    assert!(app.deliver_pending_injections());
+    // The first report started the turn; the second waits for it rather than
+    // being dropped with the drained queue.
+    let waiting = app.state.injections.drain();
+    assert!(
+        matches!(waiting.as_slice(), [crate::agent::Injection::SubagentReport(report)] if report == "beta: done"),
+        "{waiting:?}"
+    );
+}
+
+#[tokio::test]
 async fn aux_model_drives_the_secondary_provider_and_defaults_to_main() {
     let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
     // No aux model set → the aux provider mirrors the main model.

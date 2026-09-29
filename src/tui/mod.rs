@@ -2510,38 +2510,34 @@ impl App {
     /// report to deliver. Start a turn to hand it over, the same way a running
     /// turn would have picked it up between tool calls.
     fn deliver_pending_injections(&mut self) -> bool {
-        if self.running.is_some() || self.state.injections.is_empty() {
+        use crate::agent::Injection;
+        if self.running.is_some() {
             return false;
         }
-        let pending = self.state.injections.drain();
-        let mut delivered = false;
-        for injection in pending {
-            let crate::agent::Injection::SubagentReport(report) = injection else {
-                match injection {
-                    // A steering message with no turn to steer is just a prompt.
-                    crate::agent::Injection::UserMessage(text) => {
-                        self.submit_prompt(text);
-                        delivered = true;
-                    }
-                    // A side note whose turn ended before it landed has nothing
-                    // to nudge; surface it rather than dropping it silently.
-                    crate::agent::Injection::SideNote(note) => {
-                        self.say(format!("Side note not delivered — the turn ended first: {note}"));
-                        delivered = true;
-                    }
-                    crate::agent::Injection::SubagentReport(_) => {}
+        let mut pending = self.state.injections.drain().into_iter();
+        let delivered = pending.len() > 0;
+        // One turn at a time: once one has started, it takes what is left.
+        while self.running.is_none()
+            && let Some(injection) = pending.next()
+        {
+            match injection {
+                // A steering message with no turn to steer is just a prompt.
+                Injection::UserMessage(text) => self.submit_prompt(text),
+                // A side note whose turn ended before it landed has nothing
+                // to nudge; surface it rather than dropping it silently.
+                Injection::SideNote(note) => {
+                    self.say(format!("Side note not delivered — the turn ended first: {note}"))
                 }
-                continue;
-            };
-            self.say("A background subagent finished.");
-            self.submit_prompt(format!(
-                "[background subagent finished] {report}\n\nFold this into the work; if it \
-                 changes the plan, say so."
-            ));
-            delivered = true;
-            // One turn at a time: anything still queued rides the next idle tick.
-            break;
+                Injection::SubagentReport(report) => {
+                    self.say("A background subagent finished.");
+                    self.submit_prompt(format!(
+                        "[background subagent finished] {report}\n\nFold this into the work; if \
+                         it changes the plan, say so."
+                    ));
+                }
+            }
         }
+        pending.for_each(|injection| self.state.injections.push(injection));
         delivered
     }
 }
