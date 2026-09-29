@@ -1,3 +1,4 @@
+use crate::schema::{boolean, integer, req, tool};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result, bail};
@@ -90,40 +91,28 @@ impl TaskList {
 
     pub fn tool_specs() -> Vec<Value> {
         vec![
-            function(
+            tool(
                 "task_create",
                 "Add one or more tasks to the session task list for tracking multi-step work the agent will complete itself. NOT for asking the user questions — respond in plain text for that. Each entry is a concrete action item with a verifiable outcome.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "tasks": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Action items the agent will complete. Each must describe concrete work with a verifiable outcome, not a question for the user.",
-                            "minItems": 1,
-                            "maxItems": 50
-                        }
-                    },
-                    "required": ["tasks"]
-                }),
+                [req(
+                    "tasks",
+                    json!({"type": "array", "items": {"type": "string"}, "description": "Action items the agent will complete. Each must describe concrete work with a verifiable outcome, not a question for the user.", "minItems": 1, "maxItems": 50}),
+                )],
             ),
-            function(
+            tool(
                 "task_update",
                 "Mark a task complete or pending by its 1-based index in the task list. Mark a task done only after its outcome is verified (test passed, file written, build green, etc.).",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "index": {"type": "integer", "description": "1-based position from task_list"},
-                        "done": {"type": "boolean", "description": "true to mark complete after verifying the outcome, false to reopen"}
-                    },
-                    "required": ["index", "done"]
-                }),
+                [
+                    req("index", integer("1-based position from task_list")),
+                    req(
+                        "done",
+                        boolean(
+                            "true to mark complete after verifying the outcome, false to reopen",
+                        ),
+                    ),
+                ],
             ),
-            function(
-                "task_list",
-                "Read the current session task list with completion state.",
-                json!({"type": "object", "properties": {}}),
-            ),
+            tool("task_list", "Read the current session task list with completion state.", []),
         ]
     }
 
@@ -180,13 +169,6 @@ fn render_tasks(tasks: &[Task]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn function(name: &str, description: &str, parameters: Value) -> Value {
-    json!({
-        "type": "function",
-        "function": {"name": name, "description": description, "parameters": parameters}
-    })
 }
 
 #[cfg(test)]

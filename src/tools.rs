@@ -1,3 +1,4 @@
+use crate::schema::{boolean, integer, opt, req, string, strings, tool};
 use std::{
     fs::{self, File},
     io::Write,
@@ -1303,335 +1304,248 @@ impl ToolExecutor {
 
 pub fn tool_specs() -> Vec<Value> {
     vec![
-        function(
+        tool(
             "list_files",
             "List workspace files while respecting gitignore.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Workspace-relative directory; defaults to ."},
-                    "depth": {"type": "integer", "description": "Maximum traversal depth, 1-8"}
-                }
-            }),
+            [
+                opt("path", string("Workspace-relative directory; defaults to .")),
+                opt("depth", integer("Maximum traversal depth, 1-8")),
+            ],
         ),
-        function(
+        tool(
             "grep",
             "Fast gitignore-aware regex search across workspace text files. Use this before opening files.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Rust-compatible regular expression"},
-                    "path": {"type": "string", "description": "Workspace-relative path; defaults to ."},
-                    "glob": {"type": "array", "items": {"type": "string"}, "description": "Optional include globs such as **/*.rs"},
-                    "case_sensitive": {"type": "boolean", "description": "Defaults to true"},
-                    "max_results": {"type": "integer", "description": "Defaults to 200, maximum 2000"},
-                    "context": {"type": "integer", "description": "Lines of context around each match, 0-10; defaults to 0"}
-                },
-                "required": ["query"]
-            }),
+            [
+                req("query", string("Rust-compatible regular expression")),
+                opt("path", string("Workspace-relative path; defaults to .")),
+                opt("glob", strings("Optional include globs such as **/*.rs")),
+                opt("case_sensitive", boolean("Defaults to true")),
+                opt("max_results", integer("Defaults to 200, maximum 2000")),
+                opt("context", integer("Lines of context around each match, 0-10; defaults to 0")),
+            ],
         ),
-        function(
+        tool(
             "glob",
             "Find files and directories by gitignore-aware glob pattern.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "pattern": {"type": "string", "description": "Glob such as src/**/*.rs"},
-                    "path": {"type": "string", "description": "Workspace-relative search root; defaults to ."},
-                    "max_results": {"type": "integer", "description": "Defaults to 500"}
-                },
-                "required": ["pattern"]
-            }),
+            [
+                req("pattern", string("Glob such as src/**/*.rs")),
+                opt("path", string("Workspace-relative search root; defaults to .")),
+                opt("max_results", integer("Defaults to 500")),
+            ],
         ),
-        function(
+        tool(
             "read_file",
             "Read a UTF-8 text file with line numbers.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Workspace-relative file path"},
-                    "offset": {"type": "integer", "description": "First line, one-based"},
-                    "limit": {"type": "integer", "description": "Maximum lines, defaults to 400"}
-                },
-                "required": ["path"]
-            }),
+            [
+                req("path", string("Workspace-relative file path")),
+                opt("offset", integer("First line, one-based")),
+                opt("limit", integer("Maximum lines, defaults to 400")),
+            ],
         ),
-        function(
+        tool(
             "read_files",
             "Read up to 20 UTF-8 text files in one call with line numbers. Use this instead of repeated read_file calls when inspecting several files.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "paths": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Workspace-relative file paths",
-                        "maxItems": 20
-                    },
-                    "limit": {"type": "integer", "description": "Maximum lines per file, defaults to 400"}
-                },
-                "required": ["paths"]
-            }),
+            [
+                req(
+                    "paths",
+                    json!({"type": "array", "items": {"type": "string"}, "description": "Workspace-relative file paths", "maxItems": 20}),
+                ),
+                opt("limit", integer("Maximum lines per file, defaults to 400")),
+            ],
         ),
-        function(
+        tool(
             "edit_file",
             "Replace one exact text occurrence in an existing file.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Workspace-relative file path"},
-                    "old_text": {"type": "string", "description": "Exact text that occurs once"},
-                    "new_text": {"type": "string", "description": "Replacement text"},
-                    "edits": {
-                        "type": "array",
-                        "description": "Optional ordered batch of exact replacements",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "old_text": {"type": "string"},
-                                "new_text": {"type": "string"}
-                            },
-                            "required": ["old_text", "new_text"]
-                        }
-                    }
-                },
-                "required": ["path"]
-            }),
+            [
+                req("path", string("Workspace-relative file path")),
+                opt("old_text", string("Exact text that occurs once")),
+                opt("new_text", string("Replacement text")),
+                opt(
+                    "edits",
+                    json!({"type": "array", "description": "Optional ordered batch of exact replacements", "items": {"type": "object", "properties": {"old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["old_text", "new_text"]}}),
+                ),
+            ],
         ),
-        function(
+        tool(
             "write_file",
             "Create or completely replace a UTF-8 text file.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Workspace-relative file path"},
-                    "content": {"type": "string", "description": "Complete file content"}
-                },
-                "required": ["path", "content"]
-            }),
+            [
+                req("path", string("Workspace-relative file path")),
+                req("content", string("Complete file content")),
+            ],
         ),
-        function(
+        tool(
             "apply_patch",
             "Apply a unified diff to one or more workspace files. Prefer this for precise multi-file changes.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "patch": {"type": "string", "description": "Complete unified diff, including ---/+++ file headers and @@ hunks"}
-                },
-                "required": ["patch"]
-            }),
+            [req(
+                "patch",
+                string("Complete unified diff, including ---/+++ file headers and @@ hunks"),
+            )],
         ),
-        function(
+        tool(
             "delete_file",
             "Delete a workspace file or, with recursive=true, a directory.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Workspace-relative path"},
-                    "recursive": {"type": "boolean", "description": "Required when deleting a directory"}
-                },
-                "required": ["path"]
-            }),
+            [
+                req("path", string("Workspace-relative path")),
+                opt("recursive", boolean("Required when deleting a directory")),
+            ],
         ),
-        function(
+        tool(
             "move_file",
             "Move or rename a file or directory inside the workspace.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "source": {"type": "string", "description": "Existing workspace-relative path"},
-                    "destination": {"type": "string", "description": "New workspace-relative path"},
-                    "overwrite": {"type": "boolean", "description": "Replace an existing destination; defaults to false"}
-                },
-                "required": ["source", "destination"]
-            }),
+            [
+                req("source", string("Existing workspace-relative path")),
+                req("destination", string("New workspace-relative path")),
+                opt("overwrite", boolean("Replace an existing destination; defaults to false")),
+            ],
         ),
-        function(
+        tool(
             "create_directory",
             "Create a directory and any missing parents inside the workspace.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Workspace-relative directory path"}
-                },
-                "required": ["path"]
-            }),
+            [req("path", string("Workspace-relative directory path"))],
         ),
-        function(
+        tool(
             "git_diff",
             "Show a repository diff without modifying anything. Defaults to the working tree against HEAD; pass base/head to diff a commit or revision range.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "staged": {"type": "boolean", "description": "Show staged changes (against the index, or against base when set)"},
-                    "path": {"type": "string", "description": "Optional workspace-relative path filter"},
-                    "base": {"type": "string", "description": "Optional revision to diff from, such as HEAD~1, a commit sha, or a branch"},
-                    "head": {"type": "string", "description": "Optional revision to diff to; requires base. base+head shows what changed between two revisions"}
-                }
-            }),
+            [
+                opt(
+                    "staged",
+                    boolean("Show staged changes (against the index, or against base when set)"),
+                ),
+                opt("path", string("Optional workspace-relative path filter")),
+                opt(
+                    "base",
+                    string(
+                        "Optional revision to diff from, such as HEAD~1, a commit sha, or a branch",
+                    ),
+                ),
+                opt(
+                    "head",
+                    string(
+                        "Optional revision to diff to; requires base. base+head shows what changed between two revisions",
+                    ),
+                ),
+            ],
         ),
-        function(
-            "git_status",
-            "Show branch state plus staged, unstaged, and untracked files.",
-            json!({"type": "object", "properties": {}}),
-        ),
-        function(
+        tool("git_status", "Show branch state plus staged, unstaged, and untracked files.", []),
+        tool(
             "git_log",
             "Show recent commits, optionally restricted to a workspace path.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "max_count": {"type": "integer", "description": "Number of commits, defaults to 10 and caps at 50"},
-                    "path": {"type": "string", "description": "Optional workspace-relative path filter"}
-                }
-            }),
+            [
+                opt("max_count", integer("Number of commits, defaults to 10 and caps at 50")),
+                opt("path", string("Optional workspace-relative path filter")),
+            ],
         ),
-        function(
+        tool(
             "git_commit",
             "Stage optional workspace paths and create a git commit. Never pushes. Approval-gated.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "message": {"type": "string", "description": "Commit message, 1-2000 characters"},
-                    "paths": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Optional workspace-relative paths to stage before committing; omit to commit already-staged changes",
-                        "maxItems": 100
-                    }
-                },
-                "required": ["message"]
-            }),
+            [
+                req("message", string("Commit message, 1-2000 characters")),
+                opt(
+                    "paths",
+                    json!({"type": "array", "items": {"type": "string"}, "description": "Optional workspace-relative paths to stage before committing; omit to commit already-staged changes", "maxItems": 100}),
+                ),
+            ],
         ),
-        function(
+        tool(
             "git_restore",
             "Restore workspace paths from HEAD, discarding staged and working-tree changes. Approval-gated and destructive.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "paths": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Workspace-relative paths to restore",
-                        "maxItems": 100
-                    },
-                    "staged_only": {"type": "boolean", "description": "Only unstage (restore to index), keep working-tree changes; defaults to false"}
-                },
-                "required": ["paths"]
-            }),
+            [
+                req(
+                    "paths",
+                    json!({"type": "array", "items": {"type": "string"}, "description": "Workspace-relative paths to restore", "maxItems": 100}),
+                ),
+                opt(
+                    "staged_only",
+                    boolean(
+                        "Only unstage (restore to index), keep working-tree changes; defaults to false",
+                    ),
+                ),
+            ],
         ),
-        function(
+        tool(
             "git_show",
             "Show a file's contents at a past revision. Read-only; use it to compare before and after changes.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Workspace-relative file path"},
-                    "revision": {"type": "string", "description": "Git revision such as HEAD, HEAD~1, a commit sha, or a branch; defaults to HEAD"}
-                },
-                "required": ["path"]
-            }),
+            [
+                req("path", string("Workspace-relative file path")),
+                opt(
+                    "revision",
+                    string(
+                        "Git revision such as HEAD, HEAD~1, a commit sha, or a branch; defaults to HEAD",
+                    ),
+                ),
+            ],
         ),
-        function(
+        tool(
             "git_blame",
             "Show per-line authorship for a file at a revision. Read-only.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Workspace-relative file path"},
-                    "revision": {"type": "string", "description": "Git revision; defaults to HEAD"}
-                },
-                "required": ["path"]
-            }),
+            [
+                req("path", string("Workspace-relative file path")),
+                opt("revision", string("Git revision; defaults to HEAD")),
+            ],
         ),
-        function(
+        tool(
             "git_checkout",
             "Create and switch to a new branch, or switch to an existing one. Approval-gated.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "branch": {"type": "string", "description": "Branch name to create or switch to"},
-                    "create": {"type": "boolean", "description": "Create the branch with -b before switching; defaults to false"}
-                },
-                "required": ["branch"]
-            }),
+            [
+                req("branch", string("Branch name to create or switch to")),
+                opt(
+                    "create",
+                    boolean("Create the branch with -b before switching; defaults to false"),
+                ),
+            ],
         ),
-        function(
+        tool(
             "append_file",
             "Append text to an existing file, or create it if it is missing. Atomic and approval-gated.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Workspace-relative file path"},
-                    "content": {"type": "string", "description": "Text to append"}
-                },
-                "required": ["path", "content"]
-            }),
+            [
+                req("path", string("Workspace-relative file path")),
+                req("content", string("Text to append")),
+            ],
         ),
-        function(
+        tool(
             "run_command",
             "Run a shell command in the workspace.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string", "description": "Shell command"},
-                    "timeout_seconds": {"type": "integer", "description": "Timeout, defaults to 120 and caps at 600; a declared `sleep` in the command raises the floor automatically"}
-                },
-                "required": ["command"]
-            }),
+            [
+                req("command", string("Shell command")),
+                opt(
+                    "timeout_seconds",
+                    integer(
+                        "Timeout, defaults to 120 and caps at 600; a declared `sleep` in the command raises the floor automatically",
+                    ),
+                ),
+            ],
         ),
-        function(
+        tool(
             "tool_search",
             "Discover Abacus tools by capability keyword and learn when to use them.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Capability such as search, files, diff, or shell"}
-                }
-            }),
+            [opt("query", string("Capability such as search, files, diff, or shell"))],
         ),
         // ask_user is exposed alongside the regular tool specs but has special
         // dispatch in the TUI: it pops a modal asking the user a multi-choice
         // or free-text question, returning the answer as the tool output.
-        function(
+        tool(
             "ask_user",
             "Ask the user a question when a decision, clarification, or sign-off is needed before continuing. Provide 2-4 mutually exclusive options; the user can pick one or type a custom answer. Use sparingly — only when the answer genuinely blocks progress or a major preference is at stake.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "question": {"type": "string", "description": "The question to ask the user; shown at the top of the prompt."},
-                    "header": {"type": "string", "description": "Short topic label shown on the modal border (e.g. \"Test framework\")."},
-                    "options": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "label": {"type": "string", "description": "1-5 word choice label shown to the user."},
-                                "description": {"type": "string", "description": "One sentence explaining the option."},
-                                "preview": {"type": "string", "description": "Optional longer preview of what the option implies."}
-                            },
-                            "required": ["label"]
-                        },
-                        "minItems": 2,
-                        "maxItems": 4
-                    },
-                    "multi_select": {"type": "boolean", "description": "Allow picking multiple options (default false)."}
-                },
-                "required": ["question", "options"]
-            }),
+            [
+                req(
+                    "question",
+                    string("The question to ask the user; shown at the top of the prompt."),
+                ),
+                opt(
+                    "header",
+                    string(
+                        "Short topic label shown on the modal border (e.g. \"Test framework\").",
+                    ),
+                ),
+                req(
+                    "options",
+                    json!({"type": "array", "items": {"type": "object", "properties": {"label": {"type": "string", "description": "1-5 word choice label shown to the user."}, "description": {"type": "string", "description": "One sentence explaining the option."}, "preview": {"type": "string", "description": "Optional longer preview of what the option implies."}}, "required": ["label"]}, "minItems": 2, "maxItems": 4}),
+                ),
+                opt("multi_select", boolean("Allow picking multiple options (default false).")),
+            ],
         ),
     ]
-}
-
-fn function(name: &str, description: &str, parameters: Value) -> Value {
-    json!({
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": parameters
-        }
-    })
 }
 
 fn workspace_join(root: &Path, raw: &str) -> Result<PathBuf> {

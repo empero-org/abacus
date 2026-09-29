@@ -40,6 +40,7 @@
 //! on the theory that repetition across sessions is exactly the evidence that
 //! a lesson is real — the same principle papercut strength already encodes.
 
+use crate::schema::{opt, req, string, tool};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -807,44 +808,34 @@ impl HarnessStore {
     /// trained on costs adherence for no benefit. What changed is underneath.
     pub fn tool_specs() -> Vec<Value> {
         vec![
-            json!({
-                "type": "function",
-                "function": {
-                    "name": "memory_record",
-                    "description": "Save a durable memory for future sessions: an architecture fact, a decision and its reason, a convention, a roadmap change, or something figured out the hard way. Re-recording an existing title replaces its body — use that to keep memories current. Not for failure lessons; those go to papercut_record.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "title": {"type": "string", "description": "Short stable name, e.g. 'auth flow uses one-shot tokens'"},
-                            "body": {"type": "string", "description": "The memory itself, concise and self-contained (max ~1200 chars)"},
-                            "scope": {"type": "string", "enum": ["workspace", "global"], "description": "Which projects it applies to: workspace (default) or global"}
-                        },
-                        "required": ["title", "body"]
-                    }
-                }
-            }),
-            json!({
-                "type": "function",
-                "function": {
-                    "name": "memory_list",
-                    "description": "List the stored memories for this workspace, with their titles as handles for memory_record (update) and memory_forget.",
-                    "parameters": {"type": "object", "properties": {}}
-                }
-            }),
-            json!({
-                "type": "function",
-                "function": {
-                    "name": "memory_forget",
-                    "description": "Delete a memory that is stale or wrong, by its exact title.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "title": {"type": "string", "description": "Exact title of the memory to delete"}
-                        },
-                        "required": ["title"]
-                    }
-                }
-            }),
+            tool(
+                "memory_record",
+                "Save a durable memory for future sessions: an architecture fact, a decision and its reason, a convention, a roadmap change, or something figured out the hard way. Re-recording an existing title replaces its body — use that to keep memories current. Not for failure lessons; those go to papercut_record.",
+                [
+                    req(
+                        "title",
+                        string("Short stable name, e.g. 'auth flow uses one-shot tokens'"),
+                    ),
+                    req(
+                        "body",
+                        string("The memory itself, concise and self-contained (max ~1200 chars)"),
+                    ),
+                    opt(
+                        "scope",
+                        json!({"type": "string", "enum": ["workspace", "global"], "description": "Which projects it applies to: workspace (default) or global"}),
+                    ),
+                ],
+            ),
+            tool(
+                "memory_list",
+                "List the stored memories for this workspace, with their titles as handles for memory_record (update) and memory_forget.",
+                [],
+            ),
+            tool(
+                "memory_forget",
+                "Delete a memory that is stale or wrong, by its exact title.",
+                [req("title", string("Exact title of the memory to delete"))],
+            ),
         ]
     }
 

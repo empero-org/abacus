@@ -1,3 +1,4 @@
+use crate::schema::{opt, req, tool};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result, bail};
@@ -126,22 +127,17 @@ impl GoalState {
 
     pub fn tool_specs() -> Vec<Value> {
         vec![
-            function(
-                "goal_status",
-                "Read the active persistent goal and its progress state.",
-                json!({"type":"object","properties":{}}),
-            ),
-            function(
+            tool("goal_status", "Read the active persistent goal and its progress state.", []),
+            tool(
                 "goal_update",
                 "Update the active persistent goal. Mark complete only after verifying the objective.",
-                json!({
-                    "type":"object",
-                    "properties":{
-                        "status":{"type":"string","enum":["active","paused","complete","cancelled"]},
-                        "note":{"type":"string"}
-                    },
-                    "required":["status"]
-                }),
+                [
+                    req(
+                        "status",
+                        json!({"type": "string", "enum": ["active", "paused", "complete", "cancelled"]}),
+                    ),
+                    opt("note", json!({"type": "string"})),
+                ],
             ),
         ]
     }
@@ -195,13 +191,6 @@ fn validate_objective(objective: &str) -> Result<String> {
         bail!("goal objective exceeds 4,000 characters");
     }
     Ok(objective.to_owned())
-}
-
-fn function(name: &str, description: &str, parameters: Value) -> Value {
-    json!({
-        "type":"function",
-        "function":{"name":name,"description":description,"parameters":parameters}
-    })
 }
 
 #[cfg(test)]

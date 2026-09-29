@@ -1,3 +1,4 @@
+use crate::schema::{opt, req, string, tool};
 use std::{
     collections::BTreeMap,
     fs,
@@ -116,35 +117,23 @@ impl SkillRegistry {
 
     pub fn tool_specs() -> Vec<Value> {
         vec![
-            function(
+            tool(
                 "skill_search",
                 "Search installed Agent Skills by capability. Skills are reusable instruction bundles.",
-                json!({
-                    "type":"object",
-                    "properties":{"query":{"type":"string"}},
-                    "required":["query"]
-                }),
+                [req("query", json!({"type": "string"}))],
             ),
-            function(
+            tool(
                 "skill_load",
                 "Load the complete SKILL.md instructions for one installed skill.",
-                json!({
-                    "type":"object",
-                    "properties":{"name":{"type":"string"}},
-                    "required":["name"]
-                }),
+                [req("name", json!({"type": "string"}))],
             ),
-            function(
+            tool(
                 "skill_read",
                 "Read a referenced text resource inside an installed skill directory.",
-                json!({
-                    "type":"object",
-                    "properties":{
-                        "name":{"type":"string"},
-                        "path":{"type":"string","description":"Skill-relative resource path"}
-                    },
-                    "required":["name","path"]
-                }),
+                [
+                    req("name", json!({"type": "string"})),
+                    req("path", string("Skill-relative resource path")),
+                ],
             ),
         ]
     }
@@ -158,37 +147,47 @@ impl SkillRegistry {
     /// plugin.
     pub fn author_tool_specs() -> Vec<Value> {
         vec![
-            function(
+            tool(
                 "skill_create",
                 "Write a new Agent Skill so a procedure you have worked out becomes reusable. Use this once you have done something non-obvious that will recur — the skill is loadable by name in this and every later session. Not for one-off work, and not a place for failure lessons (use papercut_record).",
-                json!({
-                    "type":"object",
-                    "properties":{
-                        "name":{"type":"string","description":"1-64 lowercase letters, digits, or hyphens; becomes the directory name"},
-                        "description":{"type":"string","description":"One line saying when to reach for this skill — this is all the model sees until it loads it"},
-                        "instructions":{"type":"string","description":"The full skill body in markdown: the procedure, its steps, and any gotchas"},
-                        "scope":{"type":"string","enum":["project","user"],"description":"project (default) writes to .abacus/skills in this workspace; user writes to ~/.abacus/skills for every project"}
-                    },
-                    "required":["name","description","instructions"]
-                }),
+                [
+                    req(
+                        "name",
+                        string(
+                            "1-64 lowercase letters, digits, or hyphens; becomes the directory name",
+                        ),
+                    ),
+                    req(
+                        "description",
+                        string(
+                            "One line saying when to reach for this skill — this is all the model sees until it loads it",
+                        ),
+                    ),
+                    req(
+                        "instructions",
+                        string(
+                            "The full skill body in markdown: the procedure, its steps, and any gotchas",
+                        ),
+                    ),
+                    opt(
+                        "scope",
+                        json!({"type": "string", "enum": ["project", "user"], "description": "project (default) writes to .abacus/skills in this workspace; user writes to ~/.abacus/skills for every project"}),
+                    ),
+                ],
             ),
-            function(
+            tool(
                 "skill_update",
                 "Rewrite an existing skill you or the user authored. Only skills under this workspace's .abacus/skills or ~/.abacus/skills can be changed; plugin-provided skills are read-only.",
-                json!({
-                    "type":"object",
-                    "properties":{
-                        "name":{"type":"string"},
-                        "description":{"type":"string","description":"Optional replacement one-liner"},
-                        "instructions":{"type":"string","description":"The full new body, which replaces the old one"}
-                    },
-                    "required":["name","instructions"]
-                }),
+                [
+                    req("name", json!({"type": "string"})),
+                    opt("description", string("Optional replacement one-liner")),
+                    req("instructions", string("The full new body, which replaces the old one")),
+                ],
             ),
-            function(
+            tool(
                 "skill_reload",
                 "Rediscover skills from disk so one just written is callable now, without waiting for a restart.",
-                json!({"type":"object","properties":{}}),
+                [],
             ),
         ]
     }
@@ -420,13 +419,6 @@ pub fn write_skill(
     load_skill(&directory, "project")
         .with_context(|| format!("wrote {} but it does not load", path.display()))?;
     Ok(path)
-}
-
-fn function(name: &str, description: &str, parameters: Value) -> Value {
-    json!({
-        "type":"function",
-        "function":{"name":name,"description":description,"parameters":parameters}
-    })
 }
 
 #[cfg(test)]

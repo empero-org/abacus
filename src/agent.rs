@@ -1,3 +1,4 @@
+use crate::schema::{req, string, tool};
 use std::{
     collections::HashMap,
     fs,
@@ -1413,21 +1414,14 @@ fn assistant_message(content: &str, reasoning: &str, calls: &[ToolCall]) -> Valu
 }
 
 fn mode_tool_spec() -> Value {
-    json!({
-        "type": "function",
-        "function": {
-            "name": "mode_set",
-            "description": "Record the workflow mode for the current AUTO turn. Required before any file mutation, shell command, or subagent run. Pass mode=plan or mode=build with a brief reason; see the active AUTO-mode instruction for how to choose between them.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "mode": {"type": "string", "enum": ["plan", "build"]},
-                    "reason": {"type": "string", "description": "Brief reason this mode fits the user's request"}
-                },
-                "required": ["mode", "reason"]
-            }
-        }
-    })
+    tool(
+        "mode_set",
+        "Record the workflow mode for the current AUTO turn. Required before any file mutation, shell command, or subagent run. Pass mode=plan or mode=build with a brief reason; see the active AUTO-mode instruction for how to choose between them.",
+        [
+            req("mode", json!({"type": "string", "enum": ["plan", "build"]})),
+            req("reason", string("Brief reason this mode fits the user's request")),
+        ],
+    )
 }
 
 fn set_auto_mode(

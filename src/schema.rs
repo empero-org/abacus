@@ -17,7 +17,65 @@
 //! belongs, an object where an array belongs.
 
 use anyhow::{Result, bail};
-use serde_json::Value;
+use serde_json::{Value, json};
+
+/// One parameter of a tool: its name, its schema, and whether the model must
+/// supply it.
+pub struct Param(&'static str, Value, bool);
+
+pub fn req(name: &'static str, schema: Value) -> Param {
+    Param(name, schema, true)
+}
+
+pub fn opt(name: &'static str, schema: Value) -> Param {
+    Param(name, schema, false)
+}
+
+fn scalar(kind: &str, description: &str) -> Value {
+    json!({"type": kind, "description": description})
+}
+
+pub fn string(description: &str) -> Value {
+    scalar("string", description)
+}
+
+pub fn integer(description: &str) -> Value {
+    scalar("integer", description)
+}
+
+pub fn boolean(description: &str) -> Value {
+    scalar("boolean", description)
+}
+
+/// A list of strings.
+pub fn strings(description: &str) -> Value {
+    json!({"type": "array", "items": {"type": "string"}, "description": description})
+}
+
+/// A tool declaration in the shape every provider dialect is translated from.
+pub fn tool(name: &str, description: &str, params: impl IntoIterator<Item = Param>) -> Value {
+    let mut properties = serde_json::Map::new();
+    let mut required = Vec::new();
+    for Param(name, schema, needed) in params {
+        if needed {
+            required.push(name);
+        }
+        properties.insert(name.to_owned(), schema);
+    }
+    let mut parameters = json!({"type": "object", "properties": properties});
+    if !required.is_empty() {
+        parameters["required"] = json!(required);
+    }
+    function(name, description, parameters)
+}
+
+/// [`tool`], for a parameter schema too irregular for the builder.
+pub fn function(name: &str, description: &str, parameters: Value) -> Value {
+    json!({
+        "type": "function",
+        "function": {"name": name, "description": description, "parameters": parameters}
+    })
+}
 
 /// Check `value` against `schema`, naming the offending path on failure.
 pub fn validate(value: &Value, schema: &Value) -> Result<()> {

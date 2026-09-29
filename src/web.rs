@@ -9,6 +9,7 @@
 //! bounded; `read_page` refuses non-HTTP schemes and private / loopback hosts
 //! to avoid being steered into the local network (SSRF).
 
+use crate::schema::{integer, opt, req, string, tool};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
@@ -503,38 +504,34 @@ async fn extract_from(
 
 pub fn tool_specs() -> Vec<Value> {
     vec![
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "web_search",
-                "description": "Search the web for current information. Without `extract` you get the top results (title, URL, snippet) to follow up on. With `extract`, the top few results are opened and read for you, and you get an answer with its sources — one call instead of a search plus several reads.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Search query"},
-                        "extract": {"type": "string", "description": "What you want answered from the results. Opens the top few pages and answers from them, with sources."},
-                        "max_results": {"type": "integer", "description": "Number of results, 1-10 (default 5)"}
-                    },
-                    "required": ["query"]
-                }
-            }
-        }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "read_page",
-                "description": "Fetch an http(s) URL and read it. Pass `extract` describing what you need — 'the exact signature of Client::builder', 'the breaking changes in v3' — and a reader model answers that from the page, so you get the facts instead of the whole document. Omit `extract` only when you genuinely want the full text. Private/loopback addresses are refused.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "description": "Absolute http or https URL"},
-                        "extract": {"type": "string", "description": "What you need from the page, in a sentence. Strongly preferred: you get the answer instead of the whole document."},
-                        "max_chars": {"type": "integer", "description": "Maximum characters to return (default 20000)"}
-                    },
-                    "required": ["url"]
-                }
-            }
-        }),
+        tool(
+            "web_search",
+            "Search the web for current information. Without `extract` you get the top results (title, URL, snippet) to follow up on. With `extract`, the top few results are opened and read for you, and you get an answer with its sources — one call instead of a search plus several reads.",
+            [
+                req("query", string("Search query")),
+                opt(
+                    "extract",
+                    string(
+                        "What you want answered from the results. Opens the top few pages and answers from them, with sources.",
+                    ),
+                ),
+                opt("max_results", integer("Number of results, 1-10 (default 5)")),
+            ],
+        ),
+        tool(
+            "read_page",
+            "Fetch an http(s) URL and read it. Pass `extract` describing what you need — 'the exact signature of Client::builder', 'the breaking changes in v3' — and a reader model answers that from the page, so you get the facts instead of the whole document. Omit `extract` only when you genuinely want the full text. Private/loopback addresses are refused.",
+            [
+                req("url", string("Absolute http or https URL")),
+                opt(
+                    "extract",
+                    string(
+                        "What you need from the page, in a sentence. Strongly preferred: you get the answer instead of the whole document.",
+                    ),
+                ),
+                opt("max_chars", integer("Maximum characters to return (default 20000)")),
+            ],
+        ),
     ]
 }
 

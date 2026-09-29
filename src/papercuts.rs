@@ -14,6 +14,7 @@
 //! with a two-week half-life, so a papercut that stops being encountered
 //! fades to an occasional reminder instead of permanent noise.
 
+use crate::schema::{opt, req, string, strings, tool};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -203,33 +204,37 @@ impl PapercutStore {
 
     pub fn tool_specs() -> Vec<Value> {
         vec![
-            json!({
-                "type": "function",
-                "function": {
-                    "name": "papercut_record",
-                    "description": "Record a lesson learned from a snag you just worked through: what went wrong, the fix that worked, and tripwires — distinctive strings from the error output that will identify the same snag next time. Call this after recovering from repeated failures or a non-obvious error so future sessions get the fix immediately.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "title": {"type": "string", "description": "Short name for the lesson, e.g. 'sqlx tests need DATABASE_URL'"},
-                            "description": {"type": "string", "description": "What went wrong and why"},
-                            "fix": {"type": "string", "description": "The fix that actually worked, as an instruction"},
-                            "references": {"type": "array", "items": {"type": "string"}, "description": "Optional file paths, URLs, or commands worth consulting"},
-                            "tripwires": {"type": "array", "items": {"type": "string"}, "description": "1-6 distinctive substrings of the failure that should trigger this reminder. Each at least 8 characters, and never a generic phrase alone ('not found', 'permission denied') — include the identifier the error names, e.g. 'frobnicate: not found'."},
-                            "scope": {"type": "string", "enum": ["workspace", "global"], "description": "workspace (default) limits recall to this project; global recalls everywhere"}
-                        },
-                        "required": ["title", "description", "fix", "tripwires"]
-                    }
-                }
-            }),
-            json!({
-                "type": "function",
-                "function": {
-                    "name": "papercut_list",
-                    "description": "List the recorded papercuts (lessons from past snags) relevant to this workspace.",
-                    "parameters": {"type": "object", "properties": {}}
-                }
-            }),
+            tool(
+                "papercut_record",
+                "Record a lesson learned from a snag you just worked through: what went wrong, the fix that worked, and tripwires — distinctive strings from the error output that will identify the same snag next time. Call this after recovering from repeated failures or a non-obvious error so future sessions get the fix immediately.",
+                [
+                    req(
+                        "title",
+                        string("Short name for the lesson, e.g. 'sqlx tests need DATABASE_URL'"),
+                    ),
+                    req("description", string("What went wrong and why")),
+                    req("fix", string("The fix that actually worked, as an instruction")),
+                    opt(
+                        "references",
+                        strings("Optional file paths, URLs, or commands worth consulting"),
+                    ),
+                    req(
+                        "tripwires",
+                        strings(
+                            "1-6 distinctive substrings of the failure that should trigger this reminder. Each at least 8 characters, and never a generic phrase alone ('not found', 'permission denied') — include the identifier the error names, e.g. 'frobnicate: not found'.",
+                        ),
+                    ),
+                    opt(
+                        "scope",
+                        json!({"type": "string", "enum": ["workspace", "global"], "description": "workspace (default) limits recall to this project; global recalls everywhere"}),
+                    ),
+                ],
+            ),
+            tool(
+                "papercut_list",
+                "List the recorded papercuts (lessons from past snags) relevant to this workspace.",
+                [],
+            ),
         ]
     }
 
