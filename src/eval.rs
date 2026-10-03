@@ -30,17 +30,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use crate::agent::{
-    AgentEvent, AgentMode, ApprovalDecision, TurnOptions, UserAnswer, compression_budget,
-    initial_messages, run_turn,
-};
+use crate::agent::{AgentEvent, AgentMode, ApprovalDecision, TurnOptions, UserAnswer, initial_messages, run_turn};
 use crate::compaction::CompactionState;
 use crate::config::{AbacusPaths, Config, EvalState, Settings};
-use crate::goal::GoalState;
 use crate::model_info::ModelLimits;
 use crate::provider::Provider;
 use crate::services::AgentServices;
-use crate::task::TaskList;
 
 /// Where task definitions live, relative to the workspace.
 const TASKS_DIR: &str = "examples/evals";
@@ -56,7 +51,6 @@ const CHECK_TIMEOUT_SECONDS: u64 = 120;
 #[serde(deny_unknown_fields)]
 struct TaskFile {
     prompt: String,
-    #[serde(default)]
     description: Option<String>,
     #[serde(default = "default_max_steps")]
     max_steps: usize,
@@ -65,7 +59,6 @@ struct TaskFile {
     /// `plan`, `build`, or `auto`. Defaults to `build` — most tasks are
     /// scored on a mutation, and AUTO would make the mode-selection step part
     /// of what is being measured.
-    #[serde(default)]
     mode: Option<String>,
     #[serde(default)]
     allow_subagents: bool,
@@ -88,17 +81,15 @@ pub struct EvalTask {
 
 impl EvalTask {
     fn mode(&self) -> Result<AgentMode> {
-        Ok(match self.file.mode.as_deref() {
-            None | Some("build") => AgentMode::Build,
-            Some("plan") => AgentMode::Plan,
-            Some("auto") => AgentMode::Auto,
-            Some(other) => bail!("task `{}`: unknown mode `{other}`", self.name),
-        })
+        let Some(mode) = self.file.mode.as_deref() else {
+            return Ok(AgentMode::Build);
+        };
+        AgentMode::parse(mode).with_context(|| format!("task `{}`: unknown mode `{mode}`", self.name))
     }
 }
 
 /// One task, one state setting, one repetition.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct RunOutcome {
     pub task: String,
     /// "on" or "off" — whether `~/.abacus` learned state was visible.
@@ -154,24 +145,15 @@ pub fn discover(workspace: &Path, filter: Option<&str>) -> Result<Vec<EvalTask>>
         if !manifest.is_file() {
             continue;
         }
-        let name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
         if let Some(filter) = filter
             && !name.contains(filter)
         {
             continue;
         }
-        let raw = std::fs::read_to_string(&manifest)
-            .with_context(|| format!("read {}", manifest.display()))?;
-        let file: TaskFile =
-            toml::from_str(&raw).with_context(|| format!("parse {}", manifest.display()))?;
-        tasks.push(EvalTask {
-            name,
-            root: path,
-            file,
-        });
+        let raw = std::fs::read_to_string(&manifest).with_context(|| format!("read {}", manifest.display()))?;
+        let file: TaskFile = toml::from_str(&raw).with_context(|| format!("parse {}", manifest.display()))?;
+        tasks.push(EvalTask { name, root: path, file });
     }
     if tasks.is_empty() {
         bail!("no eval tasks matched");
@@ -191,11 +173,7 @@ pub async fn run(config: Config, settings: Settings, options: EvalOptions) -> Re
         EvalState::Both => vec![true, false],
     };
 
-    let run_id = format!(
-        "{}-{}",
-        chrono::Utc::now().format("%Y%m%d-%H%M%S"),
-        &uuid::Uuid::new_v4().to_string()[..8]
-    );
+    let run_id = format!("{}-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"), &uuid::Uuid::new_v4().to_string()[..8]);
     let run_root = config.paths.root.join("evals").join(&run_id);
     std::fs::create_dir_all(&run_root).with_context(|| format!("create {}", run_root.display()))?;
 
@@ -224,17 +202,10 @@ pub async fn run(config: Config, settings: Settings, options: EvalOptions) -> Re
     for task in &tasks {
         for &state_on in &states {
             for repetition in 1..=options.repeat {
-                let outcome = run_once(
-                    &config,
-                    &settings,
-                    task,
-                    state_on,
-                    repetition,
-                    &run_root,
-                    options.model.as_deref(),
-                )
-                .await
-                .unwrap_or_else(|error| failed_outcome(task, state_on, repetition, error));
+                let outcome =
+                    run_once(&config, &settings, task, state_on, repetition, &run_root, options.model.as_deref())
+                        .await
+                        .unwrap_or_else(|error| failed_outcome(task, state_on, repetition, error));
                 if options.json {
                     println!("{}", serde_json::to_string(&outcome)?);
                 } else {
@@ -266,29 +237,16 @@ pub async fn run(config: Config, settings: Settings, options: EvalOptions) -> Re
     Ok(())
 }
 
-fn failed_outcome(
-    task: &EvalTask,
-    state_on: bool,
-    repetition: usize,
-    error: anyhow::Error,
-) -> RunOutcome {
+fn failed_outcome(task: &EvalTask, state_on: bool, repetition: usize, error: anyhow::Error) -> RunOutcome {
     RunOutcome {
         task: task.name.clone(),
         state: if state_on { "on" } else { "off" },
         repetition,
-        passed: false,
-        tool_calls: 0,
-        assistant_steps: 0,
-        tokens: 0,
-        wall_ms: 0,
-        papercut_recalls: 0,
-        timed_out: false,
         error: Some(format!("{error:#}")),
-        check_output: String::new(),
+        ..Default::default()
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_once(
     config: &Config,
     settings: &Settings,
@@ -298,15 +256,10 @@ async fn run_once(
     run_root: &Path,
     model_override: Option<&str>,
 ) -> Result<RunOutcome> {
-    let label = format!(
-        "{}-{}-{repetition}",
-        task.name,
-        if state_on { "on" } else { "off" }
-    );
+    let label = format!("{}-{}-{repetition}", task.name, if state_on { "on" } else { "off" });
     let case_root = run_root.join(&label);
     let workspace = case_root.join("workspace");
-    std::fs::create_dir_all(&workspace)
-        .with_context(|| format!("create {}", workspace.display()))?;
+    std::fs::create_dir_all(&workspace).with_context(|| format!("create {}", workspace.display()))?;
 
     let fixture = task.root.join("fixture");
     if fixture.is_dir() {
@@ -341,9 +294,7 @@ async fn run_once(
     }
 
     let services = Arc::new(
-        AgentServices::discover(&config.workspace, &config.paths, settings)
-            .await
-            .context("discover extensions")?,
+        AgentServices::discover(&config.workspace, &config.paths, settings).await.context("discover extensions")?,
     );
     let tokens = Arc::new(crate::provider::TokenLedger::default());
     let provider = Provider::with_tokens(&config, tokens.clone())?;
@@ -354,49 +305,24 @@ async fn run_once(
     let cancel = Arc::new(AtomicBool::new(false));
     let (events, mut receiver) = mpsc::unbounded_channel();
     let turn = TurnOptions {
-        workspace: config.workspace.clone(),
-        max_steps: config.max_steps,
-        tool_output_limit: config.tool_output_limit,
         mode: config.mode.unwrap_or(AgentMode::Build),
         allow_mutations: Arc::new(AtomicBool::new(true)),
-        services: services.clone(),
-        session_id: None,
-        goal: GoalState::default(),
-        tasks: TaskList::default(),
         compaction: CompactionState::new(None),
-        compaction_budget: compression_budget(
-            config.model_limits.compaction_budget(),
-            config.token_compression,
-        ),
-        token_compression: config.token_compression,
         allow_subagents: task.file.allow_subagents,
-        web_search: config.web_search.clone(),
-        papercuts: crate::papercuts::PapercutStore::load(
-            config.paths.papercuts_file.clone(),
-            &config.workspace,
-        ),
         harness: crate::harness::HarnessStore::load_migrated(
             config.paths.harness_dir.clone(),
             &config.workspace,
             &config.paths.memories_file,
         ),
-        handles: crate::handles::HandleStore::default(),
-        tether: crate::tether::TetherState::default(),
-        hive: crate::hive::HiveHandle::load(config.paths.hive_file.clone()),
-        aux_model: config.aux_model.clone(),
-        subagent_model: config.subagent_model.clone(),
-        compaction_model: config.compaction_model.clone(),
-        injections: crate::agent::InjectionQueue::default(),
-        modes: crate::modes::ModeCoach::load(config.paths.modes_file.clone()),
-        safety: crate::safety::SafetyCache::default(),
-        safety_uses_main: false,
-        trace: None,
         cancel: cancel.clone(),
+        ..TurnOptions::for_config(&config, services.clone()).with_workspace_stores(&config)
     };
 
     let started = Instant::now();
     let handle = tokio::spawn(run_turn(provider, messages, turn, events));
 
+    let replies =
+        |messages: &[serde_json::Value]| messages.iter().filter(|message| message["role"] == "assistant").count();
     let mut tool_calls = 0_usize;
     let mut papercut_recalls = 0_usize;
     let mut assistant_steps = 0_usize;
@@ -405,8 +331,7 @@ async fn run_once(
     let deadline = Duration::from_secs(task.file.timeout_seconds);
 
     loop {
-        let next =
-            tokio::time::timeout(deadline.saturating_sub(started.elapsed()), receiver.recv()).await;
+        let next = tokio::time::timeout(deadline.saturating_sub(started.elapsed()), receiver.recv()).await;
         let event = match next {
             // A timed-out run is data, not an error: ask the turn to stop and
             // score whatever it managed to produce.
@@ -440,20 +365,11 @@ async fn run_once(
                 });
             }
             AgentEvent::Done { messages, .. } => {
-                assistant_steps = messages
-                    .iter()
-                    .filter(|message| message["role"] == "assistant")
-                    .count();
+                assistant_steps = replies(&messages);
                 break;
             }
-            AgentEvent::Failed {
-                error: failure,
-                messages,
-            } => {
-                assistant_steps = messages
-                    .iter()
-                    .filter(|message| message["role"] == "assistant")
-                    .count();
+            AgentEvent::Failed { error: failure, messages } => {
+                assistant_steps = replies(&messages);
                 error = Some(failure);
                 break;
             }
@@ -507,29 +423,7 @@ async fn run_check(task: &EvalTask, workspace: &Path) -> Result<(bool, String)> 
     let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
     combined.push_str(&String::from_utf8_lossy(&output.stderr));
     let passed = output.status.success();
-    Ok((
-        passed,
-        if passed {
-            String::new()
-        } else {
-            truncate(&combined, 2_000)
-        },
-    ))
-}
-
-fn truncate(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.trim().to_owned();
-    }
-    let mut boundary = text
-        .char_indices()
-        .nth(limit)
-        .map(|(index, _)| index)
-        .unwrap_or(text.len());
-    while !text.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    format!("{}…", &text[..boundary])
+    Ok((passed, if passed { String::new() } else { crate::text::clip(combined.trim(), 2_000, "…") }))
 }
 
 /// A fresh git repository, so `git_diff` and `git_status` work and the model
@@ -544,24 +438,13 @@ async fn init_git(workspace: &Path) -> Result<()> {
         vec!["init", "-q"],
         vec!["add", "-A"],
         vec![
-            "-c",
-            "user.email=eval@abacus.local",
-            "-c",
-            "user.name=abacus eval",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
+            "-c", "user.email=eval@abacus.local", "-c", "user.name=abacus eval", "commit", "-q", "--allow-empty", "-m",
             "fixture",
         ],
     ] {
         let status = run(args).output().await.context("run git")?;
         if !status.status.success() {
-            bail!(
-                "git setup failed in {}: {}",
-                workspace.display(),
-                String::from_utf8_lossy(&status.stderr).trim()
-            );
+            bail!("git setup failed in {}: {}", workspace.display(), String::from_utf8_lossy(&status.stderr).trim());
         }
     }
     Ok(())
@@ -575,8 +458,7 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
             std::fs::create_dir_all(&target)?;
             copy_tree(&entry.path(), &target)?;
         } else {
-            std::fs::copy(entry.path(), &target)
-                .with_context(|| format!("copy into {}", target.display()))?;
+            std::fs::copy(entry.path(), &target).with_context(|| format!("copy into {}", target.display()))?;
         }
     }
     Ok(())
@@ -599,17 +481,12 @@ fn print_summary(outcomes: &[RunOutcome], repeat: usize, state: EvalState) {
     }
 
     println!("\n{:-<72}", "");
-    println!(
-        "{:<28} {:>10} {:>10} {:>10} {:>10}",
-        "task", "state", "pass", "calls", "tokens"
-    );
+    println!("{:<28} {:>10} {:>10} {:>10} {:>10}", "task", "state", "pass", "calls", "tokens");
     println!("{:-<72}", "");
     for name in &names {
         for arm in ["on", "off"] {
-            let runs: Vec<&RunOutcome> = outcomes
-                .iter()
-                .filter(|outcome| outcome.task == *name && outcome.state == arm)
-                .collect();
+            let runs: Vec<&RunOutcome> =
+                outcomes.iter().filter(|outcome| outcome.task == *name && outcome.state == arm).collect();
             if runs.is_empty() {
                 continue;
             }
@@ -627,14 +504,8 @@ fn print_summary(outcomes: &[RunOutcome], repeat: usize, state: EvalState) {
     println!("{:-<72}", "");
 
     let rate = |arm: &str| -> (usize, usize) {
-        let runs: Vec<&RunOutcome> = outcomes
-            .iter()
-            .filter(|outcome| outcome.state == arm)
-            .collect();
-        (
-            runs.iter().filter(|outcome| outcome.passed).count(),
-            runs.len(),
-        )
+        let runs: Vec<&RunOutcome> = outcomes.iter().filter(|outcome| outcome.state == arm).collect();
+        (runs.iter().filter(|outcome| outcome.passed).count(), runs.len())
     };
     if state == EvalState::Both {
         let (on_passed, on_total) = rate("on");
@@ -666,12 +537,7 @@ mod tests {
     #[test]
     fn discovers_and_parses_tasks_with_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        write_task(
-            dir.path(),
-            "fix-importer",
-            "prompt = \"fix it\"\n",
-            "exit 0\n",
-        );
+        write_task(dir.path(), "fix-importer", "prompt = \"fix it\"\n", "exit 0\n");
         let tasks = discover(dir.path(), None).unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].name, "fix-importer");
@@ -699,24 +565,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // deny_unknown_fields: a typo'd key must fail loudly rather than
         // silently score a task that is not the one that was written.
-        write_task(
-            dir.path(),
-            "typo",
-            "prompt = \"x\"\nmax_step = 3\n",
-            "exit 0\n",
-        );
+        write_task(dir.path(), "typo", "prompt = \"x\"\nmax_step = 3\n", "exit 0\n");
         assert!(discover(dir.path(), None).is_err());
     }
 
     #[test]
     fn unknown_mode_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
-        write_task(
-            dir.path(),
-            "weird",
-            "prompt = \"x\"\nmode = \"turbo\"\n",
-            "exit 0\n",
-        );
+        write_task(dir.path(), "weird", "prompt = \"x\"\nmode = \"turbo\"\n", "exit 0\n");
         let tasks = discover(dir.path(), None).unwrap();
         assert!(tasks[0].mode().is_err());
     }
@@ -731,31 +587,15 @@ mod tests {
         let destination = dir.path().join("dst");
         std::fs::create_dir_all(&destination).unwrap();
         copy_tree(&source, &destination).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(destination.join("top.txt")).unwrap(),
-            "top"
-        );
-        assert_eq!(
-            std::fs::read_to_string(destination.join("nested/deep/leaf.txt")).unwrap(),
-            "leaf"
-        );
+        assert_eq!(std::fs::read_to_string(destination.join("top.txt")).unwrap(), "top");
+        assert_eq!(std::fs::read_to_string(destination.join("nested/deep/leaf.txt")).unwrap(), "leaf");
     }
 
     #[tokio::test]
     async fn check_script_decides_pass_and_keeps_output_only_on_failure() {
         let dir = tempfile::tempdir().unwrap();
-        write_task(
-            dir.path(),
-            "passing",
-            "prompt = \"x\"\n",
-            "echo looks-good\nexit 0\n",
-        );
-        write_task(
-            dir.path(),
-            "failing",
-            "prompt = \"x\"\n",
-            "echo what-went-wrong >&2\nexit 1\n",
-        );
+        write_task(dir.path(), "passing", "prompt = \"x\"\n", "echo looks-good\nexit 0\n");
+        write_task(dir.path(), "failing", "prompt = \"x\"\n", "echo what-went-wrong >&2\nexit 1\n");
         let workspace = dir.path().join("ws");
         std::fs::create_dir_all(&workspace).unwrap();
         let tasks = discover(dir.path(), None).unwrap();
@@ -775,12 +615,7 @@ mod tests {
     #[tokio::test]
     async fn a_check_script_reads_the_mutated_workspace() {
         let dir = tempfile::tempdir().unwrap();
-        write_task(
-            dir.path(),
-            "reads-workspace",
-            "prompt = \"x\"\n",
-            "test -f done.txt\n",
-        );
+        write_task(dir.path(), "reads-workspace", "prompt = \"x\"\n", "test -f done.txt\n");
         let workspace = dir.path().join("ws");
         std::fs::create_dir_all(&workspace).unwrap();
         let task = &discover(dir.path(), None).unwrap()[0];
@@ -817,18 +652,9 @@ mod tests {
         let tasks = discover(repo, None).expect("shipped eval suite must parse");
         assert!(!tasks.is_empty());
         for task in &tasks {
-            assert!(
-                task.root.join("check.sh").is_file(),
-                "task `{}` has no check.sh",
-                task.name
-            );
-            assert!(
-                !task.file.prompt.trim().is_empty(),
-                "task `{}` has an empty prompt",
-                task.name
-            );
-            task.mode()
-                .unwrap_or_else(|error| panic!("task `{}`: {error}", task.name));
+            assert!(task.root.join("check.sh").is_file(), "task `{}` has no check.sh", task.name);
+            assert!(!task.file.prompt.trim().is_empty(), "task `{}` has an empty prompt", task.name);
+            task.mode().unwrap_or_else(|error| panic!("task `{}`: {error}", task.name));
         }
     }
 
@@ -838,14 +664,5 @@ mod tests {
         assert_eq!(median(vec![5]), 5);
         assert_eq!(median(vec![9, 1, 5]), 5);
         assert_eq!(median(vec![4, 1]), 4);
-    }
-
-    #[test]
-    fn truncate_keeps_a_char_boundary() {
-        let text = "é".repeat(50);
-        let cut = truncate(&text, 10);
-        assert!(cut.chars().count() <= 11);
-        assert!(cut.ends_with('…'));
-        assert_eq!(truncate("short", 100), "short");
     }
 }

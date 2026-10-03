@@ -88,11 +88,7 @@ impl SubagentBoard {
     /// remain replaces them, so the strip always shows the current swarm.
     pub fn begin(&self, name: &str, role: &str, tokens: Arc<crate::provider::TokenLedger>) -> u64 {
         let mut inner = self.inner.write().expect("board lock");
-        if inner
-            .workers
-            .iter()
-            .all(|worker| worker.state != WorkerState::Running)
-        {
+        if inner.workers.iter().all(|worker| worker.state != WorkerState::Running) {
             inner.workers.clear();
         }
         inner.next_id += 1;
@@ -132,11 +128,7 @@ impl SubagentBoard {
     pub fn finish(&self, id: u64, ok: bool) {
         let mut inner = self.inner.write().expect("board lock");
         if let Some(worker) = inner.workers.iter_mut().find(|worker| worker.id == id) {
-            worker.state = if ok {
-                WorkerState::Done
-            } else {
-                WorkerState::Failed
-            };
+            worker.state = if ok { WorkerState::Done } else { WorkerState::Failed };
             inner.version = inner.version.wrapping_add(1);
         }
     }
@@ -260,10 +252,7 @@ impl WorkerRegistry {
     /// Known worker names with their state, for error messages and listings.
     pub fn roster(&self) -> Vec<(String, bool)> {
         let inner = self.inner.read().expect("worker registry lock");
-        inner
-            .iter()
-            .map(|(name, entry)| (name.clone(), entry.running))
-            .collect()
+        inner.iter().map(|(name, entry)| (name.clone(), entry.running)).collect()
     }
 }
 
@@ -298,19 +287,14 @@ pub struct HiveStats {
 
 impl HiveStats {
     pub fn tier(&self) -> HiveTier {
-        let failure_rate = if self.workers == 0 {
-            0.0
-        } else {
-            f64::from(self.worker_failures) / f64::from(self.workers)
-        };
+        let failure_rate =
+            if self.workers == 0 { 0.0 } else { f64::from(self.worker_failures) / f64::from(self.workers) };
         // A rate computed from a handful of workers says little, so it only
         // starts counting once there is enough of a record to mean something.
         let rate_is_meaningful = self.workers >= RATE_MEANINGFUL_AFTER;
         if self.clean_runs >= HIVE_AT && failure_rate < HIVE_MAX_FAILURE_RATE {
             HiveTier::Hive
-        } else if self.clean_runs >= SWARM_AT
-            && !(rate_is_meaningful && failure_rate >= SWARM_MAX_FAILURE_RATE)
-        {
+        } else if self.clean_runs >= SWARM_AT && !(rate_is_meaningful && failure_rate >= SWARM_MAX_FAILURE_RATE) {
             HiveTier::Swarm
         } else {
             HiveTier::Probing
@@ -331,10 +315,7 @@ pub struct HiveHandle {
 
 impl HiveHandle {
     pub fn load(file: PathBuf) -> Self {
-        let stats = std::fs::read_to_string(&file)
-            .ok()
-            .and_then(|content| serde_json::from_str::<HiveStats>(&content).ok())
-            .unwrap_or_default();
+        let stats: HiveStats = crate::config::read_json(&file);
         Self {
             stats: Arc::new(RwLock::new(stats)),
             file: Some(file),
@@ -357,10 +338,8 @@ impl HiveHandle {
         if failures == 0 {
             stats.clean_runs += 1;
         }
-        if let Some(file) = &self.file
-            && let Ok(serialized) = serde_json::to_vec_pretty(&*stats)
-        {
-            let _ = crate::config::atomic_write(file, &serialized, false);
+        if let Some(file) = &self.file {
+            crate::config::write_json(file, &*stats);
         }
         format!(
             "Hive record: {} swarm(s) run in total, {} clean; {} worker(s), {} failed. Tier: {}.",
@@ -388,7 +367,10 @@ impl HiveHandle {
             .snapshot()
             .into_iter()
             .filter(|worker| worker.state == WorkerState::Running)
-            .map(|worker| format!("{} ({}, {})", worker.name, worker.role, worker.activity))
+            // Name and role only. The live activity line changes on every tool
+            // call a worker makes, and this guidance is conversation context:
+            // a text that changes that often is re-sent on every step.
+            .map(|worker| format!("{} ({})", worker.name, worker.role))
             .collect();
         let in_flight = if running.is_empty() {
             String::new()
@@ -451,21 +433,11 @@ mod tests {
     /// half of every worker it started was failing — and asked for more.
     #[test]
     fn a_workspace_where_most_workers_fail_is_not_promoted() {
-        let losing = HiveStats {
-            runs: 12,
-            clean_runs: 3,
-            workers: 30,
-            worker_failures: 16,
-        };
+        let losing = HiveStats { runs: 12, clean_runs: 3, workers: 30, worker_failures: 16 };
         assert_eq!(losing.tier(), HiveTier::Probing, "53% of workers failed");
 
         // The same clean-run count with workers that mostly succeed does earn it.
-        let winning = HiveStats {
-            runs: 12,
-            clean_runs: 3,
-            workers: 30,
-            worker_failures: 4,
-        };
+        let winning = HiveStats { runs: 12, clean_runs: 3, workers: 30, worker_failures: 4 };
         assert_eq!(winning.tier(), HiveTier::Swarm);
     }
 
@@ -473,12 +445,7 @@ mod tests {
     /// not pin a workspace to probing forever.
     #[test]
     fn a_thin_record_is_not_judged_on_its_failure_rate() {
-        let thin = HiveStats {
-            runs: 3,
-            clean_runs: 3,
-            workers: 4,
-            worker_failures: 2,
-        };
+        let thin = HiveStats { runs: 3, clean_runs: 3, workers: 4, worker_failures: 2 };
         assert_eq!(thin.tier(), HiveTier::Swarm, "too few workers to demote on");
     }
 
@@ -487,10 +454,7 @@ mod tests {
     #[test]
     fn guidance_names_the_workers_already_in_flight() {
         let hive = HiveHandle::default();
-        assert!(
-            !hive.guidance().contains("ALREADY RUNNING"),
-            "nothing running, nothing to say"
-        );
+        assert!(!hive.guidance().contains("ALREADY RUNNING"), "nothing running, nothing to say");
 
         let tokens = Arc::new(crate::provider::TokenLedger::default());
         let id = hive.board.begin("recon", "scout", tokens.clone());
@@ -502,10 +466,7 @@ mod tests {
         assert!(guidance.contains("recon"), "names them: {guidance}");
         assert!(guidance.contains("builder"), "{guidance}");
         assert!(guidance.contains("scout"), "with their roles");
-        assert!(
-            guidance.contains("Do NOT spawn more workers"),
-            "and says what to do about it: {guidance}"
-        );
+        assert!(guidance.contains("Do NOT spawn more workers"), "and says what to do about it: {guidance}");
         // The warning leads, ahead of the encouragement to delegate.
         let warn = guidance.find("ALREADY RUNNING").unwrap();
         let tier = guidance.find("Delegation experience").unwrap();
@@ -525,9 +486,12 @@ mod tests {
         stats.workers = 40;
         stats.worker_failures = 2;
         assert_eq!(stats.tier(), HiveTier::Hive);
-        // A high failure rate holds a veteran at swarm tier.
-        stats.worker_failures = 20;
+        // A high failure rate holds a veteran at swarm tier, and one where
+        // workers mostly fail sends it back to probing.
+        stats.worker_failures = 14;
         assert_eq!(stats.tier(), HiveTier::Swarm);
+        stats.worker_failures = 20;
+        assert_eq!(stats.tier(), HiveTier::Probing);
     }
 
     #[test]
@@ -566,19 +530,14 @@ mod tests {
         // Running: a message steers the live worker.
         match registry.channel("recon") {
             Some(WorkerChannel::Live(live)) => {
-                live.push(crate::agent::Injection::UserMessage(
-                    "also check tests".into(),
-                ));
+                live.push(crate::agent::Injection::UserMessage("also check tests".into()));
             }
             other => panic!("expected a live channel, got {}", other.is_some()),
         }
         assert_eq!(queue.drain().len(), 1, "the worker's own turn receives it");
 
         // Finished: the channel switches to its conversation.
-        registry.close(
-            "recon",
-            vec![serde_json::json!({"role":"assistant","content":"found it"})],
-        );
+        registry.close("recon", vec![serde_json::json!({"role":"assistant","content":"found it"})]);
         match registry.channel("recon") {
             Some(WorkerChannel::Finished(transcript)) => {
                 assert_eq!(transcript.len(), 1, "context is kept for a follow-up");
@@ -599,12 +558,7 @@ mod tests {
         let roster = registry.roster();
         assert_eq!(roster.len(), RESUMABLE_WORKERS, "retention is bounded");
         assert!(registry.channel("w0").is_none(), "oldest evicted first");
-        assert!(
-            registry
-                .channel(&format!("w{}", RESUMABLE_WORKERS + 2))
-                .is_some(),
-            "newest retained"
-        );
+        assert!(registry.channel(&format!("w{}", RESUMABLE_WORKERS + 2)).is_some(), "newest retained");
     }
 
     #[test]
@@ -617,10 +571,7 @@ mod tests {
             registry.close(&name, vec![serde_json::json!({"role":"assistant"})]);
         }
         assert!(
-            matches!(
-                registry.channel("long-runner"),
-                Some(WorkerChannel::Live(_))
-            ),
+            matches!(registry.channel("long-runner"), Some(WorkerChannel::Live(_))),
             "eviction only takes finished workers"
         );
     }
@@ -629,16 +580,8 @@ mod tests {
     fn board_tracks_workers_and_clusters_at_scale() {
         let board = SubagentBoard::default();
         assert_eq!(board.strip_rows(), 0);
-        let a = board.begin(
-            "alpha",
-            "scout",
-            Arc::new(crate::provider::TokenLedger::default()),
-        );
-        let b = board.begin(
-            "beta",
-            "drone",
-            Arc::new(crate::provider::TokenLedger::default()),
-        );
+        let a = board.begin("alpha", "scout", Arc::new(crate::provider::TokenLedger::default()));
+        let b = board.begin("beta", "drone", Arc::new(crate::provider::TokenLedger::default()));
         assert_eq!(board.strip_rows(), 2, "small swarms list individually");
         board.activity(a, "running tests\npass 3 of 9");
         assert_eq!(board.snapshot()[0].activity, "pass 3 of 9");
@@ -648,11 +591,7 @@ mod tests {
         assert_eq!(states, vec![WorkerState::Done, WorkerState::Failed]);
 
         for index in 0..5 {
-            board.begin(
-                &format!("worker-{index}"),
-                "worker",
-                Arc::new(crate::provider::TokenLedger::default()),
-            );
+            board.begin(&format!("worker-{index}"), "worker", Arc::new(crate::provider::TokenLedger::default()));
         }
         // The new batch replaced the settled one, and five workers cluster.
         assert_eq!(board.snapshot().len(), 5);

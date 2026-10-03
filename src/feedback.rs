@@ -21,9 +21,7 @@ pub struct FeedbackPayload {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FeedbackReceipt {
-    #[serde(default)]
     pub id: Option<String>,
-    #[serde(default)]
     pub message: Option<String>,
 }
 
@@ -70,10 +68,7 @@ impl FeedbackClient {
             bail!("feedback service returned {status}: {detail}");
         }
         if body.trim().is_empty() {
-            return Ok(FeedbackReceipt {
-                id: None,
-                message: None,
-            });
+            return Ok(FeedbackReceipt { id: None, message: None });
         }
         serde_json::from_str(&body).context("feedback service returned invalid JSON")
     }
@@ -101,8 +96,7 @@ mod tests {
                     break;
                 }
                 request.extend_from_slice(&buffer[..read]);
-                if let Some(header_end) = request.windows(4).position(|value| value == b"\r\n\r\n")
-                {
+                if let Some(header_end) = request.windows(4).position(|value| value == b"\r\n\r\n") {
                     let headers = String::from_utf8_lossy(&request[..header_end]);
                     let length = headers
                         .lines()

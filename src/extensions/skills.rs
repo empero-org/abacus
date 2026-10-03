@@ -1,3 +1,4 @@
+use crate::schema::{opt, req, string, tool};
 use std::{
     collections::BTreeMap,
     fs,
@@ -34,19 +35,12 @@ pub struct SkillRegistry {
 struct Frontmatter {
     name: String,
     description: String,
-    #[serde(default)]
     license: Option<String>,
-    #[serde(default)]
     compatibility: Option<String>,
 }
 
 impl SkillRegistry {
-    pub fn discover(
-        paths: &AbacusPaths,
-        workspace: &Path,
-        plugin_roots: &[PathBuf],
-        extra_paths: &[PathBuf],
-    ) -> Self {
+    pub fn discover(paths: &AbacusPaths, workspace: &Path, plugin_roots: &[PathBuf], extra_paths: &[PathBuf]) -> Self {
         let mut registry = Self::default();
         for root in plugin_roots {
             registry.scan_root(root, "plugin");
@@ -76,33 +70,18 @@ impl SkillRegistry {
     }
 
     pub fn search(&self, query: &str) -> Vec<&Skill> {
-        let words = query
-            .to_ascii_lowercase()
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
+        let words = query.to_ascii_lowercase().split_whitespace().map(str::to_owned).collect::<Vec<_>>();
         let mut matches = self
             .skills
             .values()
             .filter_map(|skill| {
-                let haystack = format!(
-                    "{} {}",
-                    skill.name.to_ascii_lowercase(),
-                    skill.description.to_ascii_lowercase()
-                );
-                let score = words
-                    .iter()
-                    .filter(|word| haystack.contains(word.as_str()))
-                    .count();
+                let haystack =
+                    format!("{} {}", skill.name.to_ascii_lowercase(), skill.description.to_ascii_lowercase());
+                let score = words.iter().filter(|word| haystack.contains(word.as_str())).count();
                 (words.is_empty() || score > 0).then_some((score, skill))
             })
             .collect::<Vec<_>>();
-        matches.sort_by(|left, right| {
-            right
-                .0
-                .cmp(&left.0)
-                .then_with(|| left.1.name.cmp(&right.1.name))
-        });
+        matches.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.name.cmp(&right.1.name)));
         matches.into_iter().map(|(_, skill)| skill).collect()
     }
 
@@ -114,10 +93,7 @@ impl SkillRegistry {
             "<available_skills>\nLoad a relevant skill with skill_load before following it. Only metadata is shown here.\n",
         );
         for skill in self.skills.values() {
-            output.push_str(&format!(
-                "- {}: {} [source={}]\n",
-                skill.name, skill.description, skill.source
-            ));
+            output.push_str(&format!("- {}: {} [source={}]\n", skill.name, skill.description, skill.source));
         }
         output.push_str("</available_skills>");
         output
@@ -125,35 +101,20 @@ impl SkillRegistry {
 
     pub fn tool_specs() -> Vec<Value> {
         vec![
-            function(
+            tool(
                 "skill_search",
                 "Search installed Agent Skills by capability. Skills are reusable instruction bundles.",
-                json!({
-                    "type":"object",
-                    "properties":{"query":{"type":"string"}},
-                    "required":["query"]
-                }),
+                [req("query", json!({"type": "string"}))],
             ),
-            function(
+            tool(
                 "skill_load",
                 "Load the complete SKILL.md instructions for one installed skill.",
-                json!({
-                    "type":"object",
-                    "properties":{"name":{"type":"string"}},
-                    "required":["name"]
-                }),
+                [req("name", json!({"type": "string"}))],
             ),
-            function(
+            tool(
                 "skill_read",
                 "Read a referenced text resource inside an installed skill directory.",
-                json!({
-                    "type":"object",
-                    "properties":{
-                        "name":{"type":"string"},
-                        "path":{"type":"string","description":"Skill-relative resource path"}
-                    },
-                    "required":["name","path"]
-                }),
+                [req("name", json!({"type": "string"})), req("path", string("Skill-relative resource path"))],
             ),
         ]
     }
@@ -167,37 +128,40 @@ impl SkillRegistry {
     /// plugin.
     pub fn author_tool_specs() -> Vec<Value> {
         vec![
-            function(
+            tool(
                 "skill_create",
                 "Write a new Agent Skill so a procedure you have worked out becomes reusable. Use this once you have done something non-obvious that will recur — the skill is loadable by name in this and every later session. Not for one-off work, and not a place for failure lessons (use papercut_record).",
-                json!({
-                    "type":"object",
-                    "properties":{
-                        "name":{"type":"string","description":"1-64 lowercase letters, digits, or hyphens; becomes the directory name"},
-                        "description":{"type":"string","description":"One line saying when to reach for this skill — this is all the model sees until it loads it"},
-                        "instructions":{"type":"string","description":"The full skill body in markdown: the procedure, its steps, and any gotchas"},
-                        "scope":{"type":"string","enum":["project","user"],"description":"project (default) writes to .abacus/skills in this workspace; user writes to ~/.abacus/skills for every project"}
-                    },
-                    "required":["name","description","instructions"]
-                }),
+                [
+                    req("name", string("1-64 lowercase letters, digits, or hyphens; becomes the directory name")),
+                    req(
+                        "description",
+                        string(
+                            "One line saying when to reach for this skill — this is all the model sees until it loads it",
+                        ),
+                    ),
+                    req(
+                        "instructions",
+                        string("The full skill body in markdown: the procedure, its steps, and any gotchas"),
+                    ),
+                    opt(
+                        "scope",
+                        json!({"type": "string", "enum": ["project", "user"], "description": "project (default) writes to .abacus/skills in this workspace; user writes to ~/.abacus/skills for every project"}),
+                    ),
+                ],
             ),
-            function(
+            tool(
                 "skill_update",
                 "Rewrite an existing skill you or the user authored. Only skills under this workspace's .abacus/skills or ~/.abacus/skills can be changed; plugin-provided skills are read-only.",
-                json!({
-                    "type":"object",
-                    "properties":{
-                        "name":{"type":"string"},
-                        "description":{"type":"string","description":"Optional replacement one-liner"},
-                        "instructions":{"type":"string","description":"The full new body, which replaces the old one"}
-                    },
-                    "required":["name","instructions"]
-                }),
+                [
+                    req("name", json!({"type": "string"})),
+                    opt("description", string("Optional replacement one-liner")),
+                    req("instructions", string("The full new body, which replaces the old one")),
+                ],
             ),
-            function(
+            tool(
                 "skill_reload",
                 "Rediscover skills from disk so one just written is callable now, without waiting for a restart.",
-                json!({"type":"object","properties":{}}),
+                [],
             ),
         ]
     }
@@ -218,10 +182,7 @@ impl SkillRegistry {
     }
 
     pub fn invocation(&self, name: &str, user_text: &str) -> Result<String> {
-        let skill = self
-            .skills
-            .get(name)
-            .with_context(|| format!("skill `{name}` is not installed"))?;
+        let skill = self.skills.get(name).with_context(|| format!("skill `{name}` is not installed"))?;
         Ok(format!(
             "The user explicitly invoked the `{}` skill. Follow these instructions for this request:\n\n<skill name=\"{}\" root=\"{}\">\n{}\n</skill>\n\nUser request: {}",
             skill.name,
@@ -239,16 +200,14 @@ impl SkillRegistry {
         let canonical_root = match root.canonicalize() {
             Ok(root) => root,
             Err(error) => {
-                self.diagnostics
-                    .push(format!("{}: {error}", root.display()));
+                self.diagnostics.push(format!("{}: {error}", root.display()));
                 return;
             }
         };
         let entries = match fs::read_dir(&canonical_root) {
             Ok(entries) => entries,
             Err(error) => {
-                self.diagnostics
-                    .push(format!("{}: {error}", canonical_root.display()));
+                self.diagnostics.push(format!("{}: {error}", canonical_root.display()));
                 return;
             }
         };
@@ -264,9 +223,7 @@ impl SkillRegistry {
                 Ok(skill) => {
                     self.skills.insert(skill.name.clone(), skill);
                 }
-                Err(error) => self
-                    .diagnostics
-                    .push(format!("{}: {error:#}", candidate.display())),
+                Err(error) => self.diagnostics.push(format!("{}: {error:#}", candidate.display())),
             }
         }
     }
@@ -294,10 +251,7 @@ impl SkillRegistry {
             name: String,
         }
         let args: Args = serde_json::from_str(arguments)?;
-        let skill = self
-            .skills
-            .get(&args.name)
-            .with_context(|| format!("skill `{}` is not installed", args.name))?;
+        let skill = self.skills.get(&args.name).with_context(|| format!("skill `{}` is not installed", args.name))?;
         Ok(format!(
             "<skill name=\"{}\" root=\"{}\">\n{}\n</skill>",
             skill.name,
@@ -313,15 +267,10 @@ impl SkillRegistry {
             path: String,
         }
         let args: Args = serde_json::from_str(arguments)?;
-        let skill = self
-            .skills
-            .get(&args.name)
-            .with_context(|| format!("skill `{}` is not installed", args.name))?;
+        let skill = self.skills.get(&args.name).with_context(|| format!("skill `{}` is not installed", args.name))?;
         let relative = Path::new(&args.path);
         if relative.is_absolute()
-            || relative
-                .components()
-                .any(|part| matches!(part, Component::ParentDir | Component::RootDir))
+            || relative.components().any(|part| matches!(part, Component::ParentDir | Component::RootDir))
         {
             bail!("skill resource path must stay inside the skill");
         }
@@ -347,16 +296,10 @@ fn load_skill(root: &Path, source: &str) -> Result<Skill> {
     let content = fs::read_to_string(&path).context("SKILL.md is not UTF-8")?;
     let (frontmatter, instructions) = split_frontmatter(&content)?;
     let metadata: Frontmatter = serde_yaml::from_str(frontmatter).context("invalid frontmatter")?;
-    validate_name(&metadata.name)?;
-    let directory = root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
+    super::validate_name("skill name", &metadata.name)?;
+    let directory = root.file_name().and_then(|name| name.to_str()).unwrap_or_default();
     if directory != metadata.name {
-        bail!(
-            "skill name `{}` must match directory `{directory}`",
-            metadata.name
-        );
+        bail!("skill name `{}` must match directory `{directory}`", metadata.name);
     }
     if metadata.description.trim().is_empty() || metadata.description.len() > 1_024 {
         bail!("skill description must contain 1-1024 bytes");
@@ -377,27 +320,10 @@ fn split_frontmatter(content: &str) -> Result<(&str, &str)> {
         .strip_prefix("---\n")
         .or_else(|| content.strip_prefix("---\r\n"))
         .context("SKILL.md must begin with YAML frontmatter")?;
-    let Some((frontmatter, body)) = content
-        .split_once("\n---\n")
-        .or_else(|| content.split_once("\r\n---\r\n"))
-    else {
+    let Some((frontmatter, body)) = content.split_once("\n---\n").or_else(|| content.split_once("\r\n---\r\n")) else {
         bail!("SKILL.md frontmatter is not terminated with ---");
     };
     Ok((frontmatter, body))
-}
-
-fn validate_name(name: &str) -> Result<()> {
-    if name.is_empty()
-        || name.len() > 64
-        || name.starts_with('-')
-        || name.ends_with('-')
-        || !name
-            .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
-    {
-        bail!("skill name must use 1-64 lowercase letters, digits, or hyphens");
-    }
-    Ok(())
 }
 
 /// Write `<root>/<name>/SKILL.md`, creating the directory.
@@ -405,13 +331,8 @@ fn validate_name(name: &str) -> Result<()> {
 /// `load_skill` is the reader for this format and enforces the same rules, so
 /// they are checked here rather than letting a malformed write surface later
 /// as a discovery diagnostic the model never sees.
-pub fn write_skill(
-    root: &Path,
-    name: &str,
-    description: &str,
-    instructions: &str,
-) -> Result<PathBuf> {
-    validate_name(name)?;
+pub fn write_skill(root: &Path, name: &str, description: &str, instructions: &str) -> Result<PathBuf> {
+    super::validate_name("skill name", name)?;
     let description = description.trim();
     if description.is_empty() || description.len() > 1_024 {
         bail!("skill description must contain 1-1024 bytes");
@@ -428,32 +349,20 @@ pub fn write_skill(
         "---\nname: {name}\ndescription: {}\n---\n\n{instructions}\n",
         // A description is a YAML scalar; quoting keeps a colon or a leading
         // special character from silently changing the parse.
-        serde_yaml::to_string(&description)
-            .unwrap_or_default()
-            .trim()
-            .to_owned()
+        serde_yaml::to_string(&description).unwrap_or_default().trim().to_owned()
     );
     if content.len() as u64 > MAX_SKILL_BYTES {
         bail!("skill exceeds the 1 MB limit");
     }
 
     let directory = root.join(name);
-    fs::create_dir_all(&directory)
-        .with_context(|| format!("could not create {}", directory.display()))?;
+    fs::create_dir_all(&directory).with_context(|| format!("could not create {}", directory.display()))?;
     let path = directory.join("SKILL.md");
     crate::config::atomic_write(&path, content.as_bytes(), false)?;
     // Round-trip through the reader: a skill that cannot be loaded back is a
     // broken write, and better to fail now than to leave it on disk.
-    load_skill(&directory, "project")
-        .with_context(|| format!("wrote {} but it does not load", path.display()))?;
+    load_skill(&directory, "project").with_context(|| format!("wrote {} but it does not load", path.display()))?;
     Ok(path)
-}
-
-fn function(name: &str, description: &str, parameters: Value) -> Value {
-    json!({
-        "type":"function",
-        "function":{"name":name,"description":description,"parameters":parameters}
-    })
 }
 
 #[cfg(test)]
@@ -476,16 +385,10 @@ mod tests {
         let registry = SkillRegistry::discover(&home, dir.path(), &[], &[]);
         assert!(registry.prompt_index().contains("Reviews code carefully"));
         assert!(!registry.prompt_index().contains("Always inspect"));
-        let loaded = registry
-            .execute("skill_load", r#"{"name":"review-helper"}"#)
-            .unwrap();
+        let loaded = registry.execute("skill_load", r#"{"name":"review-helper"}"#).unwrap();
         assert!(loaded.contains("Always inspect the diff"));
-        let resource = registry
-            .execute(
-                "skill_read",
-                r#"{"name":"review-helper","path":"references/checks.md"}"#,
-            )
-            .unwrap();
+        let resource =
+            registry.execute("skill_read", r#"{"name":"review-helper","path":"references/checks.md"}"#).unwrap();
         assert_eq!(resource, "Check errors.");
     }
 }

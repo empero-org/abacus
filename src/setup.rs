@@ -4,9 +4,7 @@ use anyhow::{Context, Result, bail};
 use reqwest::{Client, header};
 use serde_json::Value;
 
-use crate::config::{
-    AbacusPaths, Credentials, PermissionMode, ProviderProfile, ProviderProtocol, Settings,
-};
+use crate::config::{AbacusPaths, Credentials, PermissionMode, ProviderProfile, ProviderProtocol, Settings};
 use crate::console;
 use crate::web::SearchBackend;
 
@@ -18,7 +16,6 @@ pub struct Preset {
     pub name: &'static str,
     pub base_url: &'static str,
     pub env_key: Option<&'static str>,
-    pub fallback_model: &'static str,
     pub protocol: ProviderProtocol,
     /// One-line orientation shown beside the name.
     pub hint: &'static str,
@@ -32,7 +29,6 @@ pub const PRESETS: &[Preset] = &[
         name: "OpenAI",
         base_url: "https://api.openai.com/v1",
         env_key: Some("OPENAI_API_KEY"),
-        fallback_model: "",
         protocol: ProviderProtocol::Responses,
         hint: "GPT and reasoning models",
     },
@@ -41,7 +37,6 @@ pub const PRESETS: &[Preset] = &[
         name: "xAI",
         base_url: "https://api.x.ai/v1",
         env_key: Some("XAI_API_KEY"),
-        fallback_model: "",
         protocol: ProviderProtocol::Responses,
         hint: "Grok",
     },
@@ -50,7 +45,6 @@ pub const PRESETS: &[Preset] = &[
         name: "OpenRouter",
         base_url: "https://openrouter.ai/api/v1",
         env_key: Some("OPENROUTER_API_KEY"),
-        fallback_model: "",
         protocol: ProviderProtocol::ChatCompletions,
         hint: "one key, most models",
     },
@@ -59,7 +53,6 @@ pub const PRESETS: &[Preset] = &[
         name: "Groq",
         base_url: "https://api.groq.com/openai/v1",
         env_key: Some("GROQ_API_KEY"),
-        fallback_model: "",
         protocol: ProviderProtocol::ChatCompletions,
         hint: "fast open-weight inference",
     },
@@ -68,7 +61,6 @@ pub const PRESETS: &[Preset] = &[
         name: "DeepSeek",
         base_url: "https://api.deepseek.com/v1",
         env_key: Some("DEEPSEEK_API_KEY"),
-        fallback_model: "",
         protocol: ProviderProtocol::ChatCompletions,
         hint: "DeepSeek chat and reasoning",
     },
@@ -77,7 +69,6 @@ pub const PRESETS: &[Preset] = &[
         name: "Mistral",
         base_url: "https://api.mistral.ai/v1",
         env_key: Some("MISTRAL_API_KEY"),
-        fallback_model: "",
         protocol: ProviderProtocol::ChatCompletions,
         hint: "Mistral and code models",
     },
@@ -86,7 +77,6 @@ pub const PRESETS: &[Preset] = &[
         name: "Together",
         base_url: "https://api.together.xyz/v1",
         env_key: Some("TOGETHER_API_KEY"),
-        fallback_model: "",
         protocol: ProviderProtocol::ChatCompletions,
         hint: "hosted open-weight models",
     },
@@ -95,7 +85,6 @@ pub const PRESETS: &[Preset] = &[
         name: "Fireworks",
         base_url: "https://api.fireworks.ai/inference/v1",
         env_key: Some("FIREWORKS_API_KEY"),
-        fallback_model: "",
         protocol: ProviderProtocol::ChatCompletions,
         hint: "hosted open-weight models",
     },
@@ -104,7 +93,6 @@ pub const PRESETS: &[Preset] = &[
         name: "Cerebras",
         base_url: "https://api.cerebras.ai/v1",
         env_key: Some("CEREBRAS_API_KEY"),
-        fallback_model: "",
         protocol: ProviderProtocol::ChatCompletions,
         hint: "very high throughput",
     },
@@ -113,7 +101,6 @@ pub const PRESETS: &[Preset] = &[
         name: "Ollama",
         base_url: "http://localhost:11434/v1",
         env_key: None,
-        fallback_model: "",
         protocol: ProviderProtocol::ChatCompletions,
         hint: "local models, no key",
     },
@@ -122,7 +109,6 @@ pub const PRESETS: &[Preset] = &[
         name: "llama.cpp / vLLM",
         base_url: "http://localhost:8000/v1",
         env_key: None,
-        fallback_model: "",
         protocol: ProviderProtocol::ChatCompletions,
         hint: "local OpenAI-compatible server",
     },
@@ -131,26 +117,15 @@ pub const PRESETS: &[Preset] = &[
 /// Whether a preset's key is already exported, so the list can say so before
 /// the user picks and finds out.
 pub fn key_in_env(preset: &Preset) -> bool {
-    preset
-        .env_key
-        .and_then(|name| std::env::var(name).ok())
-        .is_some_and(|value| !value.trim().is_empty())
+    preset.env_key.and_then(|name| std::env::var(name).ok()).is_some_and(|value| !value.trim().is_empty())
 }
 
 /// Print the provider table: one row each, columns padded by display width so
 /// the hint and key columns line up regardless of name length.
 fn print_presets() {
     let marks = console::marks();
-    let name_width = PRESETS
-        .iter()
-        .map(|preset| preset.name.len())
-        .max()
-        .unwrap_or(10);
-    let hint_width = PRESETS
-        .iter()
-        .map(|preset| preset.hint.len())
-        .max()
-        .unwrap_or(20);
+    let name_width = PRESETS.iter().map(|preset| preset.name.len()).max().unwrap_or(10);
+    let hint_width = PRESETS.iter().map(|preset| preset.hint.len()).max().unwrap_or(20);
     for (index, preset) in PRESETS.iter().enumerate() {
         // A key already in the environment is the single most useful thing to
         // know here — it decides whether the next step will just work.
@@ -167,10 +142,7 @@ fn print_presets() {
             status,
         );
     }
-    println!(
-        "    {}  Custom OpenAI-compatible endpoint",
-        console::accent(&format!("{:>2}", PRESETS.len() + 1)),
-    );
+    println!("    {}  Custom OpenAI-compatible endpoint", console::accent(&format!("{:>2}", PRESETS.len() + 1)),);
 }
 
 /// Normalise what someone types into a base URL: add a scheme when it is
@@ -196,10 +168,7 @@ fn normalise_base_url(raw: &str) -> Result<String> {
 
 pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
     if !io::stdin().is_terminal() {
-        bail!(
-            "setup needs an interactive terminal; configure {} directly",
-            paths.config_file.display()
-        );
+        bail!("setup needs an interactive terminal; configure {} directly", paths.config_file.display());
     }
 
     let mut settings = Settings::load(paths)?;
@@ -223,76 +192,49 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
 
     // ---- 1/3 provider -----------------------------------------------------
     console::step(1, 3, "Choose a provider");
-    console::note(
-        "Credentials stay on this machine. Every option is an OpenAI-compatible endpoint.",
-    );
+    console::note("Credentials stay on this machine. Every option is an OpenAI-compatible endpoint.");
     console::blank();
     print_presets();
     console::blank();
 
     let selection = console::prompt_index("Provider", 1, PRESETS.len() + 1)?;
-    let (profile_id, display_name, base_url, env_key, fallback_model, protocol) =
-        if let Some(preset) = PRESETS.get(selection - 1) {
-            (
-                preset.id.to_owned(),
-                preset.name.to_owned(),
-                preset.base_url.to_owned(),
-                preset.env_key.map(str::to_owned),
-                preset.fallback_model.to_owned(),
-                preset.protocol,
-            )
-        } else {
-            console::blank();
-            let name = console::prompt("Profile name", Some("custom"))?;
-            let base = loop {
-                let raw = console::prompt("API base URL", Some("http://localhost:8000/v1"))?;
-                match normalise_base_url(&raw) {
-                    Ok(url) => break url,
-                    Err(error) => println!("      {}", console::err(&format!("{error}"))),
-                }
-            };
-            let env = console::prompt("API key environment variable (blank for none)", None)?;
-            let protocol =
-                match console::prompt("Protocol — 1 chat-completions, 2 responses", Some("1"))?
-                    .as_str()
-                {
-                    "2" | "responses" => ProviderProtocol::Responses,
-                    _ => ProviderProtocol::ChatCompletions,
-                };
-            (
-                {
-                    let slug = slug(&name);
-                    if slug.is_empty() {
-                        "custom".to_owned()
-                    } else {
-                        slug
-                    }
-                },
-                name,
-                base,
-                (!env.is_empty()).then_some(env),
-                String::new(),
-                protocol,
-            )
+    let (profile_id, display_name, base_url, env_key, protocol) = if let Some(preset) = PRESETS.get(selection - 1) {
+        (
+            preset.id.to_owned(),
+            preset.name.to_owned(),
+            preset.base_url.to_owned(),
+            preset.env_key.map(str::to_owned),
+            preset.protocol,
+        )
+    } else {
+        console::blank();
+        let name = console::prompt("Profile name", Some("custom"))?;
+        let base = loop {
+            let raw = console::prompt("API base URL", Some("http://localhost:8000/v1"))?;
+            match normalise_base_url(&raw) {
+                Ok(url) => break url,
+                Err(error) => println!("      {}", console::err(&format!("{error}"))),
+            }
         };
+        let env = console::prompt("API key environment variable (blank for none)", None)?;
+        let protocol = match console::prompt("Protocol — 1 chat-completions, 2 responses", Some("1"))?.as_str() {
+            "2" | "responses" => ProviderProtocol::Responses,
+            _ => ProviderProtocol::ChatCompletions,
+        };
+        let slug = Some(slug(&name)).filter(|slug| !slug.is_empty());
+        (slug.unwrap_or_else(|| "custom".to_owned()), name, base, (!env.is_empty()).then_some(env), protocol)
+    };
 
-    let mut key = env_key
-        .as_deref()
-        .and_then(|name| std::env::var(name).ok())
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| credentials.keys.get(&profile_id).cloned());
-    let key_from_env = env_key
-        .as_deref()
-        .is_some_and(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()));
+    let exported =
+        env_key.as_deref().and_then(|name| std::env::var(name).ok()).filter(|value| !value.trim().is_empty());
+    let key_from_env = exported.is_some();
+    let mut key = exported.or_else(|| credentials.keys.get(&profile_id).cloned());
     if key_from_env {
         console::blank();
         println!(
             "  {} {}",
             console::ok(console::marks().pass),
-            console::dim(&format!(
-                "Using {} from your environment.",
-                env_key.as_deref().unwrap_or("the API key")
-            ))
+            console::dim(&format!("Using {} from your environment.", env_key.as_deref().unwrap_or("the API key")))
         );
     } else if env_key.is_some() && key.is_none() {
         let env_name = env_key.as_deref().unwrap_or("API_KEY");
@@ -307,37 +249,30 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
         ))?;
         if !pasted.trim().is_empty() {
             key = Some(pasted.trim().to_owned());
-            credentials
-                .keys
-                .insert(profile_id.clone(), pasted.trim().to_owned());
+            credentials.keys.insert(profile_id.clone(), pasted.trim().to_owned());
         }
     }
 
     // ---- 2/3 model --------------------------------------------------------
     console::step(2, 3, "Connect and choose a model");
-    print!(
-        "       {}",
-        console::dim("Reaching the provider and discovering models… ")
-    );
+    print!("       {}", console::dim("Reaching the provider and discovering models… "));
     io::stdout().flush()?;
     let discovered = discover_models(&base_url, key.as_deref()).await;
     let model = match discovered {
         Ok(models) if !models.is_empty() => {
             println!("{}", console::ok(&format!("{} found", models.len())));
-            choose_model(&models, &fallback_model)?
+            choose_model(&models)?
         }
         Ok(_) => {
             println!("{}", console::warn("none returned"));
             console::note("The endpoint answered but listed no models; enter one by hand.");
-            prompt_model(&fallback_model)?
+            prompt_model()?
         }
         Err(error) => {
             println!("{}", console::err("unavailable"));
-            console::note(&one_line(&format!("{error:#}"), 200));
-            console::note(
-                "You can save now and fix connectivity later with /config or `abacus doctor`.",
-            );
-            prompt_model(&fallback_model)?
+            console::note(&crate::text::clip(&crate::text::flat(&format!("{error:#}")), 200, ""));
+            console::note("You can save now and fix connectivity later with /config or `abacus doctor`.");
+            prompt_model()?
         }
     };
 
@@ -349,14 +284,7 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
             model: model.clone(),
             protocol,
             api_key_env: env_key.clone(),
-            aux_model: None,
-            reasoning_effort: None,
-            endpoint: None,
-            providers: Vec::new(),
-            allow_fallbacks: true,
-            context_window: None,
-            max_output_tokens: None,
-            roles: Default::default(),
+            ..Default::default()
         },
     );
     settings.default_profile = profile_id.clone();
@@ -369,40 +297,21 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
         "Allow file edits and commands without asking each time?",
         settings.ui.permission_mode == PermissionMode::AlwaysApprove,
     )?;
-    settings.ui.permission_mode = if approve_automatically {
-        PermissionMode::AlwaysApprove
-    } else {
-        PermissionMode::Ask
-    };
-    settings.ui.vim_mode = console::confirm(
-        "Enable Vim keybindings in the composer?",
-        settings.ui.vim_mode,
-    )?;
-    settings.ui.show_tooltips = console::confirm(
-        "Show quick-start guidance on new sessions?",
-        settings.ui.show_tooltips,
-    )?;
-    settings.search.enabled = console::confirm(
-        "Enable web search (web_search / read_page tools)?",
-        settings.search.enabled,
-    )?;
+    settings.ui.permission_mode =
+        if approve_automatically { PermissionMode::AlwaysApprove } else { PermissionMode::Ask };
+    settings.ui.vim_mode = console::confirm("Enable Vim keybindings in the composer?", settings.ui.vim_mode)?;
+    settings.ui.show_tooltips =
+        console::confirm("Show quick-start guidance on new sessions?", settings.ui.show_tooltips)?;
+    settings.search.enabled =
+        console::confirm("Enable web search (web_search / read_page tools)?", settings.search.enabled)?;
     if settings.search.enabled {
         console::blank();
         for (index, (name, requirement)) in [
-            (
-                "Automatic",
-                "picks the best of the below that is configured",
-            ),
-            (
-                "SearXNG",
-                "no key — your own instance, the best option here",
-            ),
+            ("Automatic", "picks the best of the below that is configured"),
+            ("SearXNG", "no key — your own instance, the best option here"),
             ("Brave", "needs BRAVE_API_KEY — full web search"),
             ("Bing", "no key — public page, best effort"),
-            (
-                "Shared SearXNG",
-                "no key — a public instance; queries leave to a host you do not control",
-            ),
+            ("Shared SearXNG", "no key — a public instance; queries leave to a host you do not control"),
         ]
         .iter()
         .enumerate()
@@ -423,9 +332,7 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
         };
         // Option 5 is `auto` with the shared instance permitted, not a
         // backend of its own — a key the operator adds later still wins.
-        let choice = console::prompt("Search backend", Some(default))?
-            .trim()
-            .to_owned();
+        let choice = console::prompt("Search backend", Some(default))?.trim().to_owned();
         settings.search.use_shared_instance = choice == "5";
         let (backend, env_var) = match choice.as_str() {
             "2" => (SearchBackend::Searxng, None),
@@ -440,25 +347,18 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
             let entered = console::prompt("SearXNG instance URL", existing.as_deref())?;
             let entered = entered.trim().trim_end_matches('/').to_owned();
             if entered.is_empty() {
-                println!(
-                    "      {}",
-                    console::warn("no URL given — set `[search] instance_url` before searching.")
-                );
+                println!("      {}", console::warn("no URL given — set `[search] instance_url` before searching."));
             } else {
                 println!(
                     "      {}",
-                    console::dim(
-                        "the instance must allow JSON: `search: formats: [html, json]` in settings.yml"
-                    )
+                    console::dim("the instance must allow JSON: `search: formats: [html, json]` in settings.yml")
                 );
                 settings.search.instance_url = Some(entered);
             }
         }
         settings.search.backend = backend;
         if let Some(env_var) = env_var
-            && std::env::var(env_var)
-                .map(|value| value.trim().is_empty())
-                .unwrap_or(true)
+            && std::env::var(env_var).map(|value| value.trim().is_empty()).unwrap_or(true)
         {
             println!(
                 "      {}",
@@ -477,15 +377,8 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
 
     // ---- summary ----------------------------------------------------------
     console::blank();
-    println!(
-        "  {}",
-        console::dim(&console::marks().rule.repeat(console::WIDTH))
-    );
-    println!(
-        "  {} {}",
-        console::ok(console::marks().pass),
-        console::bold("Ready")
-    );
+    println!("  {}", console::dim(&console::marks().rule.repeat(console::WIDTH)));
+    println!("  {} {}", console::ok(console::marks().pass), console::bold("Ready"));
     console::blank();
     console::field("profile", &profile_id);
     console::field("model", &model);
@@ -502,16 +395,8 @@ pub async fn run(paths: &AbacusPaths, force: bool) -> Result<()> {
     );
     console::field("settings", &paths.config_file.display().to_string());
     console::blank();
-    println!(
-        "  {}  {}",
-        console::dim("start"),
-        console::accent("cd your-project && abacus")
-    );
-    println!(
-        "  {}  {}",
-        console::dim("check"),
-        console::accent("abacus doctor")
-    );
+    println!("  {}  {}", console::dim("start"), console::accent("cd your-project && abacus"));
+    println!("  {}  {}", console::dim("check"), console::accent("abacus doctor"));
     console::blank();
     Ok(())
 }
@@ -531,38 +416,12 @@ pub struct Endpoint {
 /// They differ in ways that matter — the same model can be offered at 1M
 /// context and fp8 by one and 96k at fp4 by another — so this exists to make
 /// the choice visible rather than something you accept by default.
-pub async fn discover_endpoints(
-    base_url: &str,
-    api_key: Option<&str>,
-    model: &str,
-) -> Result<Vec<Endpoint>> {
+pub async fn discover_endpoints(base_url: &str, api_key: Option<&str>, model: &str) -> Result<Vec<Endpoint>> {
     if !base_url.contains("openrouter.ai") {
         bail!("provider routing is an OpenRouter feature; this profile points at {base_url}");
     }
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(12))
-        .user_agent(concat!("abacus-agent/", env!("CARGO_PKG_VERSION")))
-        .build()?;
-    let mut request = client
-        .get(format!(
-            "{}/models/{}/endpoints",
-            base_url.trim_end_matches('/'),
-            model.trim_matches('/')
-        ))
-        .header(header::ACCEPT, "application/json");
-    if let Some(key) = api_key {
-        request = request.bearer_auth(key);
-    }
-    let response = request.send().await.context("could not reach provider")?;
-    let status = response.status();
-    if !status.is_success() {
-        let detail = response.text().await.unwrap_or_default();
-        bail!("provider returned {status}: {}", one_line(&detail, 240));
-    }
-    let value: Value = response
-        .json()
-        .await
-        .context("provider returned invalid JSON")?;
+    let url = format!("{}/models/{}/endpoints", base_url.trim_end_matches('/'), model.trim_matches('/'));
+    let value = get_json(&url, api_key, REQUEST_TIMEOUT).await?;
     Ok(value["data"]["endpoints"]
         .as_array()
         .into_iter()
@@ -572,10 +431,7 @@ pub async fn discover_endpoints(
                 name: endpoint["provider_name"].as_str()?.to_owned(),
                 tag: endpoint["tag"].as_str().unwrap_or_default().to_owned(),
                 context_length: endpoint["context_length"].as_u64().unwrap_or(0),
-                quantization: endpoint["quantization"]
-                    .as_str()
-                    .unwrap_or("unknown")
-                    .to_owned(),
+                quantization: endpoint["quantization"].as_str().unwrap_or("unknown").to_owned(),
             })
         })
         .collect())
@@ -588,41 +444,23 @@ pub async fn discover_endpoints(
 /// An OpenAI-compatible endpoint that reports nothing but ids still works: the
 /// cards come back with their optional fields empty and the interface drops the
 /// columns it has no data for.
-pub async fn discover_model_cards(
-    base_url: &str,
-    api_key: Option<&str>,
-) -> Result<Vec<crate::model_info::ModelCard>> {
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(12))
-        .user_agent(concat!("abacus-agent/", env!("CARGO_PKG_VERSION")))
-        .build()?;
-    let mut request = client
-        .get(format!("{}/models", base_url.trim_end_matches('/')))
-        .header(header::ACCEPT, "application/json");
-    if let Some(key) = api_key {
-        request = request.bearer_auth(key);
-    }
-    let response = request.send().await.context("could not reach provider")?;
-    let status = response.status();
-    if !status.is_success() {
-        let detail = response.text().await.unwrap_or_default();
-        bail!("provider returned {status}: {}", one_line(&detail, 240));
-    }
-    let value: Value = response
-        .json()
-        .await
-        .context("provider returned invalid JSON")?;
-    Ok(crate::model_info::parse_model_cards(&value))
+pub async fn discover_model_cards(base_url: &str, api_key: Option<&str>) -> Result<Vec<crate::model_info::ModelCard>> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    Ok(crate::model_info::parse_model_cards(&get_json(&url, api_key, REQUEST_TIMEOUT).await?))
 }
 
 pub async fn discover_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<String>> {
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(12))
-        .user_agent(concat!("abacus-agent/", env!("CARGO_PKG_VERSION")))
-        .build()?;
-    let mut request = client
-        .get(format!("{}/models", base_url.trim_end_matches('/')))
-        .header(header::ACCEPT, "application/json");
+    Ok(discover_model_cards(base_url, api_key).await?.into_iter().map(|card| card.id).collect())
+}
+
+/// How long a provider gets to answer a discovery request.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+
+/// GET `url` from a provider and parse the JSON it answers with.
+pub(crate) async fn get_json(url: &str, api_key: Option<&str>, timeout: std::time::Duration) -> Result<Value> {
+    let client =
+        Client::builder().timeout(timeout).user_agent(concat!("abacus-agent/", env!("CARGO_PKG_VERSION"))).build()?;
+    let mut request = client.get(url).header(header::ACCEPT, "application/json");
     if let Some(key) = api_key {
         request = request.bearer_auth(key);
     }
@@ -630,65 +468,38 @@ pub async fn discover_models(base_url: &str, api_key: Option<&str>) -> Result<Ve
     let status = response.status();
     if !status.is_success() {
         let detail = response.text().await.unwrap_or_default();
-        bail!("provider returned {status}: {}", one_line(&detail, 240));
+        bail!("provider returned {status}: {}", crate::text::clip(&crate::text::flat(&detail), 240, ""));
     }
-    let value: Value = response
-        .json()
-        .await
-        .context("provider returned invalid JSON")?;
-    Ok(crate::model_info::parse_model_cards(&value)
-        .into_iter()
-        .map(|card| card.id)
-        .collect())
+    response.json().await.context("provider returned invalid JSON")
 }
 
 /// Present the discovered models. A provider can list hundreds, so the list is
 /// filterable: typing a fragment narrows it rather than forcing a scroll
 /// through everything, and an empty filter shows a bounded first page.
-fn choose_model(models: &[String], preferred: &str) -> Result<String> {
+fn choose_model(models: &[String]) -> Result<String> {
     const PAGE: usize = 24;
     let mut filter = String::new();
     loop {
         let matched = models
             .iter()
-            .filter(|model| {
-                filter.is_empty()
-                    || model
-                        .to_ascii_lowercase()
-                        .contains(&filter.to_ascii_lowercase())
-            })
+            .filter(|model| filter.is_empty() || model.to_ascii_lowercase().contains(&filter.to_ascii_lowercase()))
             .collect::<Vec<_>>();
         console::blank();
         if matched.is_empty() {
             println!("      {}", console::warn("Nothing matches that filter."));
         }
         for (index, model) in matched.iter().take(PAGE).enumerate() {
-            let marker = if *model == preferred {
-                console::ok(" (current)")
-            } else {
-                String::new()
-            };
-            println!(
-                "    {}  {}{marker}",
-                console::accent(&format!("{:>2}", index + 1)),
-                model
-            );
+            println!("    {}  {model}", console::accent(&format!("{:>2}", index + 1)));
         }
         let hidden = matched.len().saturating_sub(PAGE);
         if hidden > 0 {
-            println!(
-                "        {}",
-                console::dim(&format!("+{hidden} more — type a fragment to filter"))
-            );
+            println!("        {}", console::dim(&format!("+{hidden} more — type a fragment to filter")));
         }
         console::blank();
-        println!(
-            "        {}",
-            console::dim("number to pick  ·  text to filter  ·  blank to type an ID")
-        );
+        println!("        {}", console::dim("number to pick  ·  text to filter  ·  blank to type an ID"));
         let answer = console::prompt("Model", None)?;
         if answer.is_empty() {
-            return prompt_model(preferred);
+            return prompt_model();
         }
         if let Ok(index) = answer.parse::<usize>() {
             if index >= 1 && index <= matched.len().min(PAGE) {
@@ -703,43 +514,22 @@ fn choose_model(models: &[String], preferred: &str) -> Result<String> {
 
 /// Ask for a model ID, re-asking on an empty answer. Bailing here would throw
 /// away everything already chosen, which is a harsh penalty for pressing enter.
-fn prompt_model(fallback: &str) -> Result<String> {
+fn prompt_model() -> Result<String> {
     loop {
-        let model = console::prompt(
-            "Model ID",
-            if fallback.is_empty() {
-                None
-            } else {
-                Some(fallback)
-            },
-        )?;
+        let model = console::prompt("Model ID", None)?;
         if !model.trim().is_empty() {
             return Ok(model.trim().to_owned());
         }
-        println!(
-            "      {}",
-            console::err("A model ID is required — for example gpt-5-codex or grok-4.")
-        );
+        println!("      {}", console::err("A model ID is required — for example gpt-5-codex or grok-4."));
     }
 }
 
 fn slug(value: &str) -> String {
     let value = value
         .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { '-' })
         .collect::<String>();
     value.trim_matches('-').to_owned()
-}
-
-fn one_line(value: &str, max: usize) -> String {
-    let value = value.replace(['\n', '\r'], " ");
-    value.chars().take(max).collect()
 }
 
 #[cfg(test)]
@@ -753,20 +543,11 @@ mod tests {
 
     #[test]
     fn base_urls_gain_a_scheme_and_lose_a_trailing_slash() {
-        assert_eq!(
-            normalise_base_url("api.example.com/v1/").unwrap(),
-            "https://api.example.com/v1"
-        );
+        assert_eq!(normalise_base_url("api.example.com/v1/").unwrap(), "https://api.example.com/v1");
         // A local address defaults to http — https on localhost is the rarer
         // case and produces a confusing TLS error rather than a clear one.
-        assert_eq!(
-            normalise_base_url("localhost:11434/v1").unwrap(),
-            "http://localhost:11434/v1"
-        );
-        assert_eq!(
-            normalise_base_url("http://127.0.0.1:8000/v1").unwrap(),
-            "http://127.0.0.1:8000/v1"
-        );
+        assert_eq!(normalise_base_url("localhost:11434/v1").unwrap(), "http://localhost:11434/v1");
+        assert_eq!(normalise_base_url("http://127.0.0.1:8000/v1").unwrap(), "http://127.0.0.1:8000/v1");
         assert!(normalise_base_url("  ").is_err());
         assert!(normalise_base_url("not a url").is_err());
     }
@@ -785,12 +566,7 @@ mod tests {
             assert!(!preset.hint.is_empty(), "{} has no hint", preset.id);
             // A hosted endpoint needs a key; a local one must not claim to.
             let local = preset.base_url.contains("localhost");
-            assert_eq!(
-                preset.env_key.is_none(),
-                local,
-                "{} disagrees about needing a key",
-                preset.id
-            );
+            assert_eq!(preset.env_key.is_none(), local, "{} disagrees about needing a key", preset.id);
         }
     }
 }

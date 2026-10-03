@@ -1,6 +1,27 @@
 # Changelog
 
-## Unreleased
+## 0.6.3 — 2026-10-03
+
+- **The codebase is a fifth smaller, with no feature removed.** Turn options,
+  configuration and provider profiles come from constructors; one session-state
+  type serves the TUI, headless mode and the app server; the provider streams
+  every protocol through one loop and one retry path; tool schemas, text
+  tool-call parsers, harness entries and JSON state files each have one
+  definition; and the 11,000-line TUI is split into modules. Along the way:
+  `/providers` pins apply to the running session instead of after a restart;
+  a prompt sent from a remote browser mid-turn steers the turn instead of being
+  dropped; worker reports that arrive together while idle are all delivered;
+  an unterminated text tool-call block no longer duplicates the text before it;
+  and a provider rejection can teach more than one correction per request.
+  Resuming a session reloads its intent snapshot, harness state and handles.
+  Overlay text fields gained word movement and Ctrl+U / Ctrl+K.
+
+- Fixed: a Qwen 3.x model served by LocalAI failed every request with a Jinja
+  exception, "System message must be at the beginning". LocalAI reports the
+  strict template's rejection as an error chunk on a successful stream rather
+  than as a failed request, so it bypassed the retry that merges the system
+  blocks. The rejection is now learned from the stream as well, and the request
+  is sent again with one leading system message, as before. (#2)
 
 - **`abacus app-server`**, a persistent machine-facing mode for desktop and
   editor front ends: JSON-RPC 2.0 over stdin/stdout, one process per workspace
@@ -112,6 +133,30 @@
   DeepSeek dialects, and Anthropic's context gauge counts cached input rather
   than only the uncached remainder. `app-server` reports the same breakdown as
   `usage` on `thread/tokenUsage/updated`.
+- **OpenRouter keeps a conversation on one upstream.** OpenRouter serves a
+  model from several providers, each with its own prompt cache, so a request
+  routed somewhere new misses however stable its prefix is. Requests now carry
+  the session's id as `session_id`, which pins the conversation to one
+  upstream from its first request instead of after OpenRouter happens to
+  observe a cache hit.
+- **Session context is appended, not rebuilt.** Goal, tasks, mode, harness
+  memory and the other context layers used to ride as one block rebuilt at the
+  end of every request and dropped before the next. The history ahead of it was
+  stable, but DeepSeek-style caches store units at request boundaries and hit
+  only on a whole unit — and every unit ended in a block the next request no
+  longer had, so each turn opened with a run of 0% hits until the provider
+  noticed the common prefix on its own. Each layer is now appended to the
+  conversation as its own message, only when its text changes (and marked
+  cleared when it stops applying), so every request is exactly the previous one
+  plus what followed. The delegation guidance names running workers without
+  their live activity line, which changed on every tool call.
+- **`~/.abacus/cache.jsonl`** records every request: the reported prompt and
+  cached tokens, the upstream that served it, and how much of the prompt was
+  byte-identical to the previous request in the same conversation. A stable
+  prefix that still came back uncached is a routing or provider miss; a
+  changed one is Abacus's own. The log rotates past 16 MB. The footer
+  tooltip's last row is now labelled `all runs`, since it includes earlier
+  runs of a resumed session while the rows above count this one.
 
 ## 0.6.1 — 2026-08-14
 

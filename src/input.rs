@@ -259,9 +259,7 @@ impl InputBuffer {
                 return (index, self.cursor - start);
             }
         }
-        rows.last()
-            .map(|&(start, end)| (rows.len().saturating_sub(1), end - start))
-            .unwrap_or((0, 0))
+        rows.last().map(|&(start, end)| (rows.len().saturating_sub(1), end - start)).unwrap_or((0, 0))
     }
 
     /// Move a visual row up/down, honouring wrapping. Returns false when the
@@ -305,35 +303,29 @@ impl InputBuffer {
 
     pub fn selected_text(&self) -> Option<String> {
         let (start, end) = self.selection?;
-        Some(
-            self.chars[start..end.min(self.chars.len())]
-                .iter()
-                .collect(),
-        )
+        Some(self.chars[start..end.min(self.chars.len())].iter().collect())
     }
 
     /// Restore the buffer to before the last edit. Runs of typed characters
     /// collapse into one step, so undo moves in words rather than keystrokes.
     pub fn undo(&mut self) -> bool {
-        let Some((chars, cursor)) = self.undo_stack.pop() else {
-            return false;
-        };
-        self.redo_stack
-            .push((std::mem::take(&mut self.chars), self.cursor));
-        self.chars = chars;
-        self.cursor = cursor.min(self.chars.len());
-        self.selection = None;
-        self.coalescing = false;
-        true
+        self.step(true)
     }
 
     pub fn redo(&mut self) -> bool {
-        let Some((chars, cursor)) = self.redo_stack.pop() else {
+        self.step(false)
+    }
+
+    /// Trade the buffer for the top of one history, keeping it on the other.
+    fn step(&mut self, back: bool) -> bool {
+        let (from, onto) = match back {
+            true => (&mut self.undo_stack, &mut self.redo_stack),
+            false => (&mut self.redo_stack, &mut self.undo_stack),
+        };
+        let Some((chars, cursor)) = from.pop() else {
             return false;
         };
-        self.undo_stack
-            .push((std::mem::take(&mut self.chars), self.cursor));
-        self.chars = chars;
+        onto.push((std::mem::replace(&mut self.chars, chars), self.cursor));
         self.cursor = cursor.min(self.chars.len());
         self.selection = None;
         self.coalescing = false;
@@ -386,14 +378,8 @@ mod tests {
         let rows = buffer.wrapped_rows(10);
         assert!(rows.len() >= 3, "{rows:?}");
         assert_eq!(buffer.wrapped_line_count(10), rows.len());
-        let text: Vec<String> = rows
-            .iter()
-            .map(|&(start, end)| buffer.chars[start..end].iter().collect())
-            .collect();
-        assert!(
-            text.iter().all(|row| row.len() <= 10),
-            "no row exceeds the width: {text:?}"
-        );
+        let text: Vec<String> = rows.iter().map(|&(start, end)| buffer.chars[start..end].iter().collect()).collect();
+        assert!(text.iter().all(|row| row.len() <= 10), "no row exceeds the width: {text:?}");
         assert!(text[0].starts_with("the"), "{text:?}");
 
         // The cursor at the very end sits on the last row.
@@ -458,10 +444,7 @@ mod tests {
         buffer.select_all();
         assert_eq!(buffer.selected_text().as_deref(), Some("copy me"));
         buffer.insert('!');
-        assert!(
-            buffer.selection().is_none(),
-            "typing dismisses the selection"
-        );
+        assert!(buffer.selection().is_none(), "typing dismisses the selection");
     }
 
     #[test]
@@ -473,10 +456,7 @@ mod tests {
         assert!(!buffer.move_up_wrapped(5) || buffer.wrapped_cursor(5).0 == 0);
         while buffer.move_up_wrapped(5) {}
         assert_eq!(buffer.wrapped_cursor(5).0, 0);
-        assert!(
-            !buffer.move_up_wrapped(5),
-            "edge reached — caller uses history"
-        );
+        assert!(!buffer.move_up_wrapped(5), "edge reached — caller uses history");
         assert!(buffer.move_down_wrapped(5));
     }
 

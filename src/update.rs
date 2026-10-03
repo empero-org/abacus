@@ -53,6 +53,22 @@ struct Cache {
     latest: Option<String>,
 }
 
+impl Cache {
+    fn seen(latest: &str, at: chrono::DateTime<chrono::Utc>) -> Self {
+        Self { checked_at: Some(at.to_rfc3339()), latest: Some(latest.to_owned()) }
+    }
+
+    /// Whether the last check is recent enough to answer from.
+    fn fresh(&self) -> bool {
+        self.checked_at.as_deref().and_then(|stamp| chrono::DateTime::parse_from_rfc3339(stamp).ok()).is_some_and(
+            |stamp| {
+                chrono::Utc::now().signed_duration_since(stamp.with_timezone(&chrono::Utc))
+                    < chrono::Duration::hours(CACHE_HOURS)
+            },
+        )
+    }
+}
+
 /// Check for a newer tag. `Ok(None)` means up to date (or checked recently and
 /// found nothing); every failure is an `Err` the caller is expected to drop.
 pub async fn check(cache_file: &Path, current: &str) -> Result<Option<Available>> {
@@ -63,44 +79,22 @@ pub async fn check(cache_file: &Path, current: &str) -> Result<Option<Available>
 /// driven against a local server. A parameter rather than an environment
 /// variable: tests run in parallel threads of one process, and a global would
 /// race between them.
-pub async fn check_against(
-    tags_url: &str,
-    cache_file: &Path,
-    current: &str,
-) -> Result<Option<Available>> {
-    let cache = read_cache(cache_file);
-    let fresh = cache
-        .checked_at
-        .as_deref()
-        .and_then(|stamp| chrono::DateTime::parse_from_rfc3339(stamp).ok())
-        .is_some_and(|stamp| {
-            chrono::Utc::now().signed_duration_since(stamp.with_timezone(&chrono::Utc))
-                < chrono::Duration::hours(CACHE_HOURS)
-        });
-
-    let latest = if fresh {
+pub async fn check_against(tags_url: &str, cache_file: &Path, current: &str) -> Result<Option<Available>> {
+    let cache: Cache = crate::config::read_json(cache_file);
+    let latest = if cache.fresh() {
         // Answer from cache rather than asking again — but still compare, so a
         // rebuild onto an older binary is still reported within the day.
-        match cache.latest.clone() {
+        match cache.latest {
             Some(latest) => latest,
             None => return Ok(None),
         }
     } else {
         let latest = newest_tag(tags_url).await?;
-        write_cache(
-            cache_file,
-            &Cache {
-                checked_at: Some(chrono::Utc::now().to_rfc3339()),
-                latest: Some(latest.clone()),
-            },
-        );
+        crate::config::write_json(cache_file, &Cache::seen(&latest, chrono::Utc::now()));
         latest
     };
 
-    Ok(is_newer(&latest, current).then(|| Available {
-        version: latest,
-        current: current.to_owned(),
-    }))
+    Ok(is_newer(&latest, current).then(|| Available { version: latest, current: current.to_owned() }))
 }
 
 async fn newest_tag(tags_url: &str) -> Result<String> {
@@ -156,19 +150,6 @@ fn is_newer(candidate: &str, current: &str) -> bool {
     }
 }
 
-fn read_cache(path: &Path) -> Cache {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_default()
-}
-
-fn write_cache(path: &Path, cache: &Cache) {
-    if let Ok(content) = serde_json::to_vec_pretty(cache) {
-        let _ = crate::config::atomic_write(path, &content, false);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,13 +179,7 @@ mod tests {
     fn a_fresh_cache_answers_without_a_request() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("update.json");
-        write_cache(
-            &file,
-            &Cache {
-                checked_at: Some(chrono::Utc::now().to_rfc3339()),
-                latest: Some("v9.9.9".into()),
-            },
-        );
+        crate::config::write_json(&file, &Cache::seen("v9.9.9", chrono::Utc::now()));
         // The URL is unreachable in tests; a result proves nothing was fetched.
         let found = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -217,39 +192,13 @@ mod tests {
 
     #[test]
     fn a_stale_cache_is_not_trusted() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("update.json");
-        write_cache(
-            &file,
-            &Cache {
-                checked_at: Some(
-                    (chrono::Utc::now() - chrono::Duration::hours(CACHE_HOURS + 1)).to_rfc3339(),
-                ),
-                latest: Some("v9.9.9".into()),
-            },
-        );
-        let cache = read_cache(&file);
-        let fresh = cache
-            .checked_at
-            .as_deref()
-            .and_then(|stamp| chrono::DateTime::parse_from_rfc3339(stamp).ok())
-            .is_some_and(|stamp| {
-                chrono::Utc::now().signed_duration_since(stamp.with_timezone(&chrono::Utc))
-                    < chrono::Duration::hours(CACHE_HOURS)
-            });
-        assert!(!fresh, "a day-old check is asked again");
+        let checked = chrono::Utc::now() - chrono::Duration::hours(CACHE_HOURS + 1);
+        assert!(!Cache::seen("v9.9.9", checked).fresh(), "a day-old check is asked again");
     }
 
     #[test]
     fn the_message_names_both_versions() {
-        let message = Available {
-            version: "v0.7.0".into(),
-            current: "0.6.0".into(),
-        }
-        .message();
-        assert!(
-            message.contains("v0.7.0") && message.contains("0.6.0"),
-            "{message}"
-        );
+        let message = Available { version: "v0.7.0".into(), current: "0.6.0".into() }.message();
+        assert!(message.contains("v0.7.0") && message.contains("0.6.0"), "{message}");
     }
 }

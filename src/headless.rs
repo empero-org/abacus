@@ -8,15 +8,12 @@ use tokio::sync::mpsc;
 
 use crate::{
     activity::ActivityReporter,
-    agent::{AgentEvent, AgentMode, ApprovalDecision, TurnOptions, compression_budget, run_turn},
-    compaction::CompactionState,
+    agent::{AgentEvent, ApprovalDecision, TurnOptions, run_turn},
     config::{Config, OutputFormat},
-    goal::GoalState,
     provider::Provider,
     ralph::{RalphLoop, RalphStatus},
     services::AgentServices,
-    session::{Session, SessionStore},
-    task::TaskList,
+    session::{Session, SessionState, SessionStore},
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -30,42 +27,17 @@ pub async fn run(
     loop_config: Option<RalphLoop>,
     reporter: Option<ActivityReporter>,
 ) -> Result<()> {
-    let initial_tokens = session
-        .as_ref()
-        .map(|session| session.tokens_used)
-        .unwrap_or(0);
-    let provider = Provider::with_tokens(
-        &config,
-        Arc::new(crate::provider::TokenLedger::new(initial_tokens)),
-    )?;
+    let initial_tokens = session.as_ref().map(|session| session.tokens_used).unwrap_or(0);
+    let tokens = Arc::new(crate::provider::TokenLedger::new(initial_tokens));
+    let provider = Provider::with_tokens(&config, tokens.clone())?;
     let session_id = session.as_ref().map(|session| session.id.to_string());
     services
-        .run_hooks(
-            "session_start",
-            session_id.as_deref(),
-            &json!({"workspace":config.workspace,"mode":"headless"}),
-        )
+        .run_hooks("session_start", session_id.as_deref(), &json!({"workspace":config.workspace,"mode":"headless"}))
         .await?;
     let started = Instant::now();
-    let activity_session = session_id
-        .clone()
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    // Migration from the pre-harness stores runs once, here. Keyed by the
-    // session id so promotion counts distinct sessions rather than distinct
-    // processes.
-    let harness = crate::harness::HarnessStore::load_migrated(
-        config.paths.harness_dir.clone(),
-        &config.workspace,
-        &config.paths.memories_file,
-    )
-    .with_session(activity_session.clone());
-    if let Some(state) = session.as_ref().and_then(|session| session.harness.clone()) {
-        harness.restore_session(state);
-    }
-    let handles = crate::handles::HandleStore::default();
-    if crate::sync::is_configured(
-        &crate::config::Credentials::load(&config.paths).unwrap_or_default(),
-    ) && let Ok(count) = crate::sync::pull_workspace(&config.paths, &config.workspace).await
+    let activity_session = session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    if crate::sync::is_configured(&crate::config::Credentials::load(&config.paths).unwrap_or_default())
+        && let Ok(count) = crate::sync::pull_workspace(&config.paths, &config.workspace).await
         && count > 0
         && let (Some(current), Some(store)) = (session.as_ref(), store.as_ref())
         && let Ok(updated) = store.load(&current.id.to_string())
@@ -73,41 +45,14 @@ pub async fn run(
         session = Some(updated);
     }
     if let Some(reporter) = &reporter {
-        reporter
-            .report_start(&activity_session, &config.model)
-            .await;
+        reporter.report_start(&activity_session, &config.model).await;
     }
-    // Keep long-running headless sessions (e.g. loops) visible with live tokens,
-    // and let them drop off "active" if the process is killed.
-    let heartbeat = reporter.clone().map(|reporter| {
-        let provider = provider.clone();
-        let session = activity_session.clone();
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
-                crate::activity::HEARTBEAT_INTERVAL_SECS,
-            ));
-            ticker.tick().await;
-            loop {
-                ticker.tick().await;
-                reporter
-                    .report_heartbeat(&session, provider.tokens_used())
-                    .await;
-            }
-        })
-    });
+    let heartbeat = reporter.as_ref().map(|reporter| reporter.heartbeat(activity_session.clone(), tokens));
     let (events, mut receiver) = mpsc::unbounded_channel();
     let allow = Arc::new(AtomicBool::new(config.yes));
-    let goal = GoalState::new(session.as_ref().and_then(|session| session.goal.clone()));
-    let tasks = TaskList::new(
-        session
-            .as_ref()
-            .map(|session| session.tasks.clone())
-            .unwrap_or_default(),
-    );
-    let compaction = session
-        .as_ref()
-        .and_then(|session| session.compaction.clone())
-        .unwrap_or_default();
+    // Keyed by the session id so promotion counts distinct sessions rather
+    // than distinct processes.
+    let state = SessionState::open(&config, session.as_ref(), activity_session.clone());
 
     let mut ralph = loop_config;
     let mut text = String::new();
@@ -122,11 +67,7 @@ pub async fn run(
         && session.is_none()
         && let Some(store) = &store
     {
-        match store.create(
-            config.profile.clone(),
-            config.model.clone(),
-            final_messages.clone(),
-        ) {
+        match store.create(config.profile.clone(), config.model.clone(), final_messages.clone()) {
             Ok(created) => session = Some(created),
             Err(error) => eprintln!("warning: could not create session — {error:#}"),
         }
@@ -143,10 +84,6 @@ pub async fn run(
         _ => None,
     };
 
-    let tether = crate::tether::TetherState::new(
-        session.as_ref().and_then(|session| session.intent.clone()),
-    );
-
     let mut failure: Option<String> = None;
 
     // Loop mode drives its own prompt replay; non-loop mode expects the caller to
@@ -159,201 +96,107 @@ pub async fn run(
         final_messages.push(json!({"role": "user", "content": state.prompt.clone()}));
     }
 
-    let mut current_task = if failure.is_none() {
-        Some(tokio::spawn(run_turn(
-            provider.clone(),
-            final_messages.clone(),
-            turn_options(
-                &config,
-                &allow,
-                &services,
-                &goal,
-                &tasks,
-                &compaction,
-                session_id.clone(),
-                trace.clone(),
-                &tether,
-                &harness,
-                &handles,
-            ),
-            events.clone(),
-        )))
-    } else {
-        None
+    let start = |messages: Vec<Value>| {
+        let options = turn_options(&config, &allow, &services, &state, session_id.clone(), trace.clone());
+        tokio::spawn(run_turn(provider.clone(), messages, options, events.clone()))
     };
+    let mut current_task = failure.is_none().then(|| start(final_messages.clone()));
 
-    if failure.is_none() {
-        'outer: loop {
-            let mut next_messages: Option<Vec<Value>> = None;
-            while let Some(event) = receiver.recv().await {
-                match event {
-                    AgentEvent::Delta(delta) => {
-                        text.push_str(&delta);
-                        match format {
-                            OutputFormat::Plain => {
-                                print!("{delta}");
-                                io::stdout().flush()?;
-                            }
-                            OutputFormat::StreamingJson => emit(json!({
-                                "type": "assistant.delta",
-                                "text": delta
-                            }))?,
-                            OutputFormat::Json => {}
-                        }
+    while failure.is_none()
+        && let Some(event) = receiver.recv().await
+    {
+        match event {
+            AgentEvent::Delta(delta) => {
+                text.push_str(&delta);
+                match format {
+                    OutputFormat::Plain => {
+                        print!("{delta}");
+                        io::stdout().flush()?;
                     }
-                    AgentEvent::Approval(request) => {
-                        let tool = request.tool.clone();
-                        let summary = request.summary.clone();
-                        let _ = request.respond.send(ApprovalDecision::Reject);
-                        match format {
-                            OutputFormat::Plain => eprintln!(
-                                "\n[rejected {tool}: {summary}; use --always-approve for headless mutations]"
-                            ),
-                            OutputFormat::StreamingJson => emit(json!({
-                                "type": "approval.rejected",
-                                "tool": tool,
-                                "summary": summary
-                            }))?,
-                            OutputFormat::Json => {}
-                        }
+                    OutputFormat::StreamingJson => emit(json!({"type": "assistant.delta", "text": delta}))?,
+                    OutputFormat::Json => {}
+                }
+            }
+            AgentEvent::Approval(request) => {
+                let _ = request.respond.send(ApprovalDecision::Reject);
+                let (tool, summary) = (request.tool, request.summary);
+                announce(
+                    format,
+                    &format!("rejected {tool}: {summary}; use --always-approve for headless mutations"),
+                    json!({"type": "approval.rejected", "tool": tool, "summary": summary}),
+                )?;
+            }
+            AgentEvent::UserQuestion(request) => {
+                // Headless mode can't show a modal — auto-pick the first
+                // option so the agent loop can continue without blocking.
+                let first = request.options.first().filter(|option| !option.is_empty()).cloned();
+                let _ = request
+                    .respond
+                    .send(crate::agent::UserAnswer { selected_labels: first.into_iter().collect(), custom_text: None });
+                announce(
+                    format,
+                    &format!("auto-answered question: {}", request.header),
+                    json!({"type": "user_question.auto_answered", "header": request.header}),
+                )?;
+            }
+            AgentEvent::ToolStarted { name, summary } => announce(
+                format,
+                &format!("{name}: {summary}"),
+                json!({"type": "tool.started", "tool": name, "summary": summary}),
+            )?,
+            AgentEvent::ToolFinished { name, output } => {
+                if format == OutputFormat::StreamingJson {
+                    emit(json!({"type": "tool.finished", "tool": name, "output": output}))?;
+                }
+            }
+            AgentEvent::ModeChanged { mode, reason } => announce(
+                format,
+                &format!("mode: {} · {reason}", mode.label()),
+                json!({
+                    "type": "mode.changed",
+                    "mode": mode.label().to_ascii_lowercase(),
+                    "reason": reason
+                }),
+            )?,
+            AgentEvent::Done { messages, .. } => {
+                final_messages = messages;
+                let Some(state) = ralph.as_mut() else { break };
+                if state.observe_output(crate::text::last_reply(&final_messages)) {
+                    aside(format, &format!("loop completed after {} iteration(s)", state.iteration));
+                } else if state.status == RalphStatus::MaxIterations {
+                    aside(format, &format!("loop stopped at {} iteration(s)", state.iteration));
+                }
+                if !state.is_active() {
+                    break;
+                }
+                match state.begin_iteration() {
+                    Ok(iteration) => {
+                        aside(format, &format!("loop · iteration {iteration}"));
+                        final_messages.push(json!({"role": "user", "content": state.prompt.clone()}));
+                        current_task = Some(start(final_messages.clone()));
                     }
-                    AgentEvent::UserQuestion(request) => {
-                        // Headless mode can't show a modal — auto-pick the first
-                        // option so the agent loop can continue without blocking.
-                        let header = request.header.clone();
-                        let first = request.options.first().cloned().unwrap_or_default();
-                        let _ = request.respond.send(crate::agent::UserAnswer {
-                            selected_labels: if first.is_empty() {
-                                Vec::new()
-                            } else {
-                                vec![first]
-                            },
-                            custom_text: None,
-                        });
-                        match format {
-                            OutputFormat::Plain => {
-                                eprintln!("\n[auto-answered question: {header}]")
-                            }
-                            OutputFormat::StreamingJson => emit(json!({
-                                "type": "user_question.auto_answered",
-                                "header": header
-                            }))?,
-                            OutputFormat::Json => {}
-                        }
-                    }
-                    AgentEvent::ToolStarted { name, summary } => match format {
-                        OutputFormat::Plain => eprintln!("\n[{name}: {summary}]"),
-                        OutputFormat::StreamingJson => emit(json!({
-                            "type": "tool.started",
-                            "tool": name,
-                            "summary": summary
-                        }))?,
-                        OutputFormat::Json => {}
-                    },
-                    AgentEvent::ToolFinished { name, output } => {
-                        if format == OutputFormat::StreamingJson {
-                            emit(json!({
-                                "type": "tool.finished",
-                                "tool": name,
-                                "output": output
-                            }))?;
-                        }
-                    }
-                    AgentEvent::ModeChanged { mode, reason } => match format {
-                        OutputFormat::Plain => eprintln!("\n[mode: {} · {reason}]", mode.label()),
-                        OutputFormat::StreamingJson => emit(json!({
-                            "type": "mode.changed",
-                            "mode": mode.label().to_ascii_lowercase(),
-                            "reason": reason
-                        }))?,
-                        OutputFormat::Json => {}
-                    },
-                    AgentEvent::Done { messages, .. } => {
-                        final_messages = messages;
-                        if let Some(state) = ralph.as_mut() {
-                            let completed =
-                                state.observe_output(&latest_assistant_text(&final_messages));
-                            if format == OutputFormat::Plain {
-                                if completed {
-                                    eprintln!(
-                                        "\n[loop completed after {} iteration(s)]",
-                                        state.iteration
-                                    );
-                                } else if state.status == RalphStatus::MaxIterations {
-                                    eprintln!(
-                                        "\n[loop stopped at {} iteration(s)]",
-                                        state.iteration
-                                    );
-                                }
-                            }
-                            if state.is_active() {
-                                match state.begin_iteration() {
-                                    Ok(iteration) => {
-                                        if format == OutputFormat::Plain {
-                                            eprintln!("\n[loop · iteration {iteration}]");
-                                        }
-                                        let mut messages = final_messages.clone();
-                                        messages.push(json!({"role": "user", "content": state.prompt.clone()}));
-                                        next_messages = Some(messages);
-                                    }
-                                    Err(error) => {
-                                        if format == OutputFormat::Plain {
-                                            eprintln!("\n[loop stopped: {error}]");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        break;
-                    }
-                    // Headless output is the answer, not the deliberation.
-                    AgentEvent::Reasoning(_) => {}
-                    AgentEvent::Notice(notice) => {
-                        eprintln!("note: {notice}");
-                    }
-                    AgentEvent::TraceFailed { error } => {
-                        eprintln!("warning: training trace disabled — {error}");
-                    }
-                    AgentEvent::Failed { error, messages } => {
-                        final_messages = messages;
-                        failure = Some(error.clone());
-                        if let Some(state) = ralph.as_mut() {
-                            let _ = state.pause();
-                        }
-                        if format == OutputFormat::Plain && ralph.is_some() {
-                            eprintln!("\n[loop paused after failure]");
-                        }
+                    Err(error) => {
+                        aside(format, &format!("loop stopped: {error}"));
                         break;
                     }
                 }
             }
-
-            if let Some(messages) = next_messages {
-                final_messages = messages.clone();
-                current_task = Some(tokio::spawn(run_turn(
-                    provider.clone(),
-                    messages,
-                    turn_options(
-                        &config,
-                        &allow,
-                        &services,
-                        &goal,
-                        &tasks,
-                        &compaction,
-                        session_id.clone(),
-                        trace.clone(),
-                        &tether,
-                        &harness,
-                        &handles,
-                    ),
-                    events.clone(),
-                )));
-                continue 'outer;
+            // Headless output is the answer, not the deliberation.
+            AgentEvent::Reasoning(_) => {}
+            AgentEvent::Notice(notice) => eprintln!("note: {notice}"),
+            AgentEvent::TraceFailed { error } => {
+                eprintln!("warning: training trace disabled — {error}");
             }
-            break 'outer;
+            AgentEvent::Failed { error, messages } => {
+                final_messages = messages;
+                failure = Some(error);
+                if let Some(state) = ralph.as_mut() {
+                    let _ = state.pause();
+                    aside(format, "loop paused after failure");
+                }
+            }
         }
     }
-
     if let Some(task) = current_task {
         let _ = task.await;
     }
@@ -363,11 +206,7 @@ pub async fn run(
         store,
         PersistedRun {
             messages: final_messages,
-            intent: tether.intent(),
-            harness: Some(harness.session_snapshot()),
-            goal: &goal,
-            tasks: &tasks,
-            compaction: &compaction,
+            state: &state,
             ralph: &ralph,
             profile: &config.profile,
             model: &config.model,
@@ -393,13 +232,7 @@ pub async fn run(
         handle.abort();
     }
     if let Some(reporter) = &reporter {
-        reporter
-            .report_end(
-                &activity_session,
-                provider.tokens_used(),
-                started.elapsed().as_secs(),
-            )
-            .await;
+        reporter.report_end(&activity_session, provider.tokens_used(), started.elapsed().as_secs()).await;
     }
     if format == OutputFormat::Plain && !text.ends_with('\n') {
         println!();
@@ -446,11 +279,7 @@ pub async fn run(
 
 struct PersistedRun<'a> {
     messages: Vec<Value>,
-    intent: Option<String>,
-    harness: Option<crate::harness::HarnessState>,
-    goal: &'a GoalState,
-    tasks: &'a TaskList,
-    compaction: &'a CompactionState,
+    state: &'a SessionState,
     ralph: &'a Option<RalphLoop>,
     profile: &'a str,
     model: &'a str,
@@ -469,18 +298,10 @@ fn persist_session(
     let mut session_value = if let Some(session_value) = session.take() {
         session_value
     } else {
-        store.create(
-            run.profile.to_owned(),
-            run.model.to_owned(),
-            run.messages.clone(),
-        )?
+        store.create(run.profile.to_owned(), run.model.to_owned(), run.messages.clone())?
     };
     session_value.update_messages(run.messages);
-    session_value.intent = run.intent;
-    session_value.harness = run.harness;
-    session_value.goal = run.goal.snapshot();
-    session_value.tasks = run.tasks.snapshot();
-    session_value.compaction = Some(run.compaction.clone());
+    run.state.save(&mut session_value);
     session_value.ralph_loop = run.ralph.clone();
     session_value.tokens_used = run.tokens_used;
     session_value.active_secs = session_value.active_secs.saturating_add(run.active_secs);
@@ -491,68 +312,39 @@ fn persist_session(
     Ok(Some(session_value.id.to_string()))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn turn_options(
     config: &Config,
     allow: &Arc<AtomicBool>,
     services: &Arc<AgentServices>,
-    goal: &GoalState,
-    tasks: &TaskList,
-    compaction: &CompactionState,
+    state: &SessionState,
     session_id: Option<String>,
     trace: Option<crate::sft::TraceWriter>,
-    tether: &crate::tether::TetherState,
-    harness: &crate::harness::HarnessStore,
-    handles: &crate::handles::HandleStore,
 ) -> TurnOptions {
+    // A headless run defaults to AUTO so the model chooses; `--mode` pins it,
+    // which is what makes a read-only CI check expressible.
     TurnOptions {
-        safety: crate::safety::SafetyCache::default(),
-        safety_uses_main: false,
         trace,
-        cancel: Arc::new(AtomicBool::new(false)),
-        workspace: config.workspace.clone(),
-        max_steps: config.max_steps,
-        tool_output_limit: config.tool_output_limit,
-        // A headless run defaults to AUTO so the model chooses; `--mode`
-        // pins it, which is what makes a read-only CI check expressible.
-        mode: config.mode.unwrap_or(AgentMode::Auto),
         allow_mutations: allow.clone(),
-        services: services.clone(),
         session_id,
-        goal: goal.clone(),
-        tasks: tasks.clone(),
-        compaction: compaction.clone(),
-        compaction_budget: compression_budget(
-            config.model_limits.compaction_budget(),
-            config.token_compression,
-        ),
-        token_compression: config.token_compression,
-        allow_subagents: true,
-        papercuts: crate::papercuts::PapercutStore::load(
-            config.paths.papercuts_file.clone(),
-            &config.workspace,
-        ),
-        harness: harness.clone(),
-        handles: handles.clone(),
-        tether: tether.clone(),
-        hive: crate::hive::HiveHandle::load(config.paths.hive_file.clone()),
-        aux_model: config.aux_model.clone(),
-        subagent_model: config.subagent_model.clone(),
-        compaction_model: config.compaction_model.clone(),
-        injections: crate::agent::InjectionQueue::default(),
-        modes: crate::modes::ModeCoach::load(config.paths.modes_file.clone()),
-        web_search: config.web_search.clone(),
+        ..state.turn(config, services.clone()).with_workspace_stores(config)
     }
 }
 
-fn latest_assistant_text(messages: &[Value]) -> String {
-    messages
-        .iter()
-        .rev()
-        .find(|message| message["role"] == "assistant" && message["content"].is_string())
-        .and_then(|message| message["content"].as_str())
-        .unwrap_or_default()
-        .to_owned()
+/// A bracketed aside on stderr, in the plain format only.
+fn aside(format: OutputFormat, text: &str) {
+    if format == OutputFormat::Plain {
+        eprintln!("\n[{text}]");
+    }
+}
+
+/// Reports something that happened alongside the answer: an aside in the plain
+/// format, an event line when streaming, nothing when only the result is wanted.
+fn announce(format: OutputFormat, text: &str, event: Value) -> Result<()> {
+    aside(format, text);
+    if format == OutputFormat::StreamingJson {
+        emit(event)?;
+    }
+    Ok(())
 }
 
 fn emit(value: Value) -> Result<()> {
@@ -573,10 +365,8 @@ mod tests {
         let directory = tempdir().unwrap();
         let workspace = directory.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
-        let store = SessionStore::new(
-            &AbacusPaths::under(directory.path().join("home")),
-            workspace.canonicalize().unwrap(),
-        );
+        let store =
+            SessionStore::new(&AbacusPaths::under(directory.path().join("home")), workspace.canonicalize().unwrap());
         let messages = vec![
             json!({"role":"system","content":"x"}),
             json!({"role":"user","content":"count this"}),
@@ -588,11 +378,7 @@ mod tests {
             Some(store.clone()),
             PersistedRun {
                 messages,
-                intent: None,
-                harness: None,
-                goal: &GoalState::default(),
-                tasks: &TaskList::default(),
-                compaction: &CompactionState::default(),
+                state: &SessionState::default(),
                 ralph: &None,
                 profile: "local",
                 model: "model",
@@ -614,17 +400,10 @@ mod tests {
         let directory = tempdir().unwrap();
         let workspace = directory.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
-        let store = SessionStore::new(
-            &AbacusPaths::under(directory.path().join("home")),
-            workspace.canonicalize().unwrap(),
-        );
-        let mut session = store
-            .create(
-                "local".into(),
-                "old-model".into(),
-                vec![json!({"role":"system","content":"x"})],
-            )
-            .unwrap();
+        let store =
+            SessionStore::new(&AbacusPaths::under(directory.path().join("home")), workspace.canonicalize().unwrap());
+        let mut session =
+            store.create("local".into(), "old-model".into(), vec![json!({"role":"system","content":"x"})]).unwrap();
         session.tokens_used = 12_000;
         session.active_secs = 30;
         store.save(&session).unwrap();
@@ -633,15 +412,8 @@ mod tests {
             Some(session),
             Some(store.clone()),
             PersistedRun {
-                messages: vec![
-                    json!({"role":"system","content":"x"}),
-                    json!({"role":"user","content":"continue"}),
-                ],
-                intent: None,
-                harness: None,
-                goal: &GoalState::default(),
-                tasks: &TaskList::default(),
-                compaction: &CompactionState::default(),
+                messages: vec![json!({"role":"system","content":"x"}), json!({"role":"user","content":"continue"})],
+                state: &SessionState::default(),
                 ralph: &None,
                 profile: "ignored",
                 model: "ignored",

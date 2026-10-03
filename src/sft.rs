@@ -121,8 +121,7 @@ struct Inner {
 impl TraceWriter {
     /// Open (creating if needed) the trace for `session` under `directory`.
     pub fn open(directory: &Path, session: &str) -> Result<Self> {
-        std::fs::create_dir_all(directory)
-            .with_context(|| format!("could not create {}", directory.display()))?;
+        std::fs::create_dir_all(directory).with_context(|| format!("could not create {}", directory.display()))?;
         let path = directory.join(format!("{session}.jsonl"));
         let file = OpenOptions::new()
             .create(true)
@@ -134,14 +133,7 @@ impl TraceWriter {
         let step = std::fs::read_to_string(&path)
             .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count() as u64)
             .unwrap_or(0);
-        Ok(Self {
-            inner: Arc::new(Mutex::new(Inner {
-                file,
-                path,
-                step,
-                broken: false,
-            })),
-        })
+        Ok(Self { inner: Arc::new(Mutex::new(Inner { file, path, step, broken: false })) })
     }
 
     pub fn path(&self) -> PathBuf {
@@ -156,17 +148,6 @@ impl TraceWriter {
     /// Append one model call. Returns the error only the first time, so a
     /// caller can surface it once; later failures are silent.
     pub fn record(&self, sample: Sample<'_>) -> Result<()> {
-        let Sample {
-            session,
-            model,
-            mode,
-            messages,
-            tools,
-            content,
-            reasoning,
-            tool_calls,
-            cancelled,
-        } = sample;
         let mut inner = self.lock();
         if inner.broken {
             return Ok(());
@@ -175,24 +156,22 @@ impl TraceWriter {
         let record = Record {
             version: TRACE_VERSION,
             timestamp: chrono::Utc::now().to_rfc3339(),
-            session,
-            model,
+            session: sample.session,
+            model: sample.model,
             source: "live",
             step: inner.step,
-            mode,
-            messages,
-            tools: tools
+            mode: sample.mode,
+            messages: sample.messages,
+            tools: sample
+                .tools
                 .iter()
-                .filter_map(|tool| {
-                    tool.pointer("/function/name")
-                        .or_else(|| tool.get("name"))
-                        .and_then(Value::as_str)
-                })
+                .filter_map(|tool| tool.pointer("/function/name").or_else(|| tool.get("name")).and_then(Value::as_str))
                 .collect(),
             completion: Completion {
-                content,
-                reasoning,
-                tool_calls: tool_calls
+                content: sample.content,
+                reasoning: sample.reasoning,
+                tool_calls: sample
+                    .tool_calls
                     .iter()
                     .map(|call| {
                         json!({
@@ -205,16 +184,12 @@ impl TraceWriter {
                         })
                     })
                     .collect(),
-                cancelled,
+                cancelled: sample.cancelled,
             },
         };
         let mut line = serde_json::to_vec(&record).context("could not encode trace record")?;
         line.push(b'\n');
-        match inner
-            .file
-            .write_all(&line)
-            .and_then(|()| inner.file.flush())
-        {
+        match inner.file.write_all(&line).and_then(|()| inner.file.flush()) {
             Ok(()) => Ok(()),
             Err(error) => {
                 inner.broken = true;
@@ -224,9 +199,7 @@ impl TraceWriter {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -310,8 +283,7 @@ pub fn pull_sessions(
     if !sessions_root.exists() {
         return Ok(Vec::new());
     }
-    std::fs::create_dir_all(destination)
-        .with_context(|| format!("could not create {}", destination.display()))?;
+    std::fs::create_dir_all(destination).with_context(|| format!("could not create {}", destination.display()))?;
 
     let mut pulled = Vec::new();
     // Sessions live one directory deep, keyed by workspace.
@@ -343,36 +315,12 @@ pub fn pull_sessions(
                 continue;
             }
             let records = records_from_session(&session);
-            if records.is_empty() {
-                pulled.push(PullEntry {
-                    name,
-                    records: 0,
-                    bytes: 0,
-                    outcome: Pulled::Empty,
-                });
-                continue;
-            }
             let mut body = Vec::new();
             for record in &records {
                 body.extend_from_slice(&serde_json::to_vec(record)?);
                 body.push(b'\n');
             }
-            let into = destination.join(&name);
-            let outcome = match std::fs::read(&into) {
-                Ok(existing) if existing == body => Pulled::Unchanged,
-                Ok(_) => Pulled::Updated,
-                Err(_) => Pulled::Copied,
-            };
-            if outcome != Pulled::Unchanged {
-                std::fs::write(&into, &body)
-                    .with_context(|| format!("could not write {}", into.display()))?;
-            }
-            pulled.push(PullEntry {
-                name,
-                records: records.len(),
-                bytes: body.len() as u64,
-                outcome,
-            });
+            pulled.push(place(destination, name, records.len(), &body)?);
         }
     }
     pulled.sort_by(|a, b| a.name.cmp(&b.name));
@@ -401,6 +349,23 @@ pub struct PullEntry {
     pub outcome: Pulled,
 }
 
+/// Put a trace of `records` records at `directory/name` unless the same bytes
+/// are already there, and say what that took. One that records nothing is not
+/// written: it is not useful as training data.
+fn place(directory: &Path, name: String, records: usize, body: &[u8]) -> Result<PullEntry> {
+    let into = directory.join(&name);
+    let outcome = match std::fs::read(&into) {
+        _ if records == 0 => Pulled::Empty,
+        Ok(existing) if existing == body => Pulled::Unchanged,
+        Ok(_) => Pulled::Updated,
+        Err(_) => Pulled::Copied,
+    };
+    if matches!(outcome, Pulled::Updated | Pulled::Copied) {
+        std::fs::write(&into, body).with_context(|| format!("could not write {}", into.display()))?;
+    }
+    Ok(PullEntry { name, records, bytes: body.len() as u64, outcome })
+}
+
 /// Copy every trace from `source` into `destination`, leaving the originals
 /// exactly where they are.
 ///
@@ -416,25 +381,15 @@ pub fn pull(source: &Path, destination: &Path) -> Result<Vec<PullEntry>> {
     if !source.exists() {
         return Ok(Vec::new());
     }
-    let source = source
-        .canonicalize()
-        .with_context(|| format!("could not resolve {}", source.display()))?;
-    std::fs::create_dir_all(destination)
-        .with_context(|| format!("could not create {}", destination.display()))?;
-    let target = destination
-        .canonicalize()
-        .with_context(|| format!("could not resolve {}", destination.display()))?;
+    let source = source.canonicalize().with_context(|| format!("could not resolve {}", source.display()))?;
+    std::fs::create_dir_all(destination).with_context(|| format!("could not create {}", destination.display()))?;
+    let target = destination.canonicalize().with_context(|| format!("could not resolve {}", destination.display()))?;
     if target == source {
-        anyhow::bail!(
-            "that is where the traces already live ({}) — run this somewhere else",
-            source.display()
-        );
+        anyhow::bail!("that is where the traces already live ({}) — run this somewhere else", source.display());
     }
 
     let mut pulled = Vec::new();
-    for entry in std::fs::read_dir(&source)
-        .with_context(|| format!("could not read {}", source.display()))?
-    {
+    for entry in std::fs::read_dir(&source).with_context(|| format!("could not read {}", source.display()))? {
         let entry = entry?;
         let path = entry.path();
         if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
@@ -449,36 +404,9 @@ pub fn pull(source: &Path, destination: &Path) -> Result<Vec<PullEntry>> {
             // than aborting a pull that has already copied others.
             Err(_) => continue,
         };
-        let records = contents
-            .split(|byte| *byte == b'\n')
-            .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
-            .count();
-        let bytes = contents.len() as u64;
-        if records == 0 {
-            pulled.push(PullEntry {
-                name: name.to_owned(),
-                records,
-                bytes,
-                outcome: Pulled::Empty,
-            });
-            continue;
-        }
-        let into = target.join(name);
-        let outcome = match std::fs::read(&into) {
-            Ok(existing) if existing == contents => Pulled::Unchanged,
-            Ok(_) => Pulled::Updated,
-            Err(_) => Pulled::Copied,
-        };
-        if outcome != Pulled::Unchanged {
-            std::fs::write(&into, &contents)
-                .with_context(|| format!("could not write {}", into.display()))?;
-        }
-        pulled.push(PullEntry {
-            name: name.to_owned(),
-            records,
-            bytes,
-            outcome,
-        });
+        let records =
+            contents.split(|byte| *byte == b'\n').filter(|line| !line.iter().all(u8::is_ascii_whitespace)).count();
+        pulled.push(place(&target, name.to_owned(), records, &contents)?);
     }
     pulled.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(pulled)
@@ -491,18 +419,12 @@ mod tests {
     use tempfile::tempdir;
 
     fn call(name: &str, arguments: &str) -> ToolCall {
-        ToolCall {
-            id: "call_1".into(),
-            name: name.into(),
-            arguments: arguments.into(),
-        }
+        ToolCall { id: "call_1".into(), name: name.into(), arguments: arguments.into() }
     }
 
     fn write_one(writer: &TraceWriter, content: &str) {
-        let messages = [
-            json!({"role":"system","content":"be careful"}),
-            json!({"role":"user","content":"fix the parser"}),
-        ];
+        let messages =
+            [json!({"role":"system","content":"be careful"}), json!({"role":"user","content":"fix the parser"})];
         let tools = [json!({"type":"function","function":{"name":"read_file"}})];
         let calls = [call("read_file", r#"{"path":"src/parser.rs"}"#)];
         writer
@@ -545,17 +467,11 @@ mod tests {
         assert_eq!(records[0]["step"], 1);
         assert_eq!(records[0]["source"], "session");
         assert_eq!(records[0]["messages"].as_array().unwrap().len(), 2);
-        assert_eq!(
-            records[0]["completion"]["tool_calls"][0]["name"],
-            "read_file"
-        );
+        assert_eq!(records[0]["completion"]["tool_calls"][0]["name"], "read_file");
 
         // Second: the tool result is now part of the prompt.
         assert_eq!(records[1]["messages"].as_array().unwrap().len(), 4);
-        assert_eq!(
-            records[1]["completion"]["content"],
-            "It is a main function."
-        );
+        assert_eq!(records[1]["completion"]["content"], "It is a main function.");
         // Honest about what a reconstruction cannot know.
         assert_eq!(records[1]["mode"], "UNKNOWN");
         assert!(records[1]["completion"].get("reasoning").is_none());
@@ -601,14 +517,10 @@ mod tests {
         let writer = TraceWriter::open(&traces, "session-1").unwrap();
         write_one(&writer, "live");
         let live = pull(&traces, out.path()).unwrap();
-        let captured: std::collections::HashSet<String> =
-            live.iter().map(|entry| entry.name.clone()).collect();
+        let captured: std::collections::HashSet<String> = live.iter().map(|entry| entry.name.clone()).collect();
 
         let rebuilt = pull_sessions(&home.path().join("sessions"), out.path(), &captured).unwrap();
-        assert!(
-            rebuilt.is_empty(),
-            "the session already had a live trace: {rebuilt:?}"
-        );
+        assert!(rebuilt.is_empty(), "the session already had a live trace: {rebuilt:?}");
         let kept = std::fs::read_to_string(out.path().join("session-1.jsonl")).unwrap();
         assert!(kept.contains("\"source\":\"live\""));
     }
@@ -632,12 +544,7 @@ mod tests {
         )
         .unwrap();
         let out = tempdir().unwrap();
-        let rebuilt = pull_sessions(
-            &home.path().join("sessions"),
-            out.path(),
-            &Default::default(),
-        )
-        .unwrap();
+        let rebuilt = pull_sessions(&home.path().join("sessions"), out.path(), &Default::default()).unwrap();
         assert_eq!(rebuilt.len(), 1);
         assert_eq!(rebuilt[0].records, 1);
         let body = std::fs::read_to_string(out.path().join("older.jsonl")).unwrap();
@@ -664,10 +571,7 @@ mod tests {
         assert!(original.exists(), "the source must survive a pull");
         let copy = out.path().join("session-1.jsonl");
         assert!(copy.exists());
-        assert_eq!(
-            std::fs::read(&original).unwrap(),
-            std::fs::read(&copy).unwrap()
-        );
+        assert_eq!(std::fs::read(&original).unwrap(), std::fs::read(&copy).unwrap());
     }
 
     /// Pulling twice is not an error and does not rewrite what already matches;
@@ -705,10 +609,7 @@ mod tests {
         let names: Vec<&str> = pulled.iter().map(|entry| entry.name.as_str()).collect();
         assert_eq!(names, vec!["empty.jsonl", "real.jsonl"]);
         assert_eq!(pulled[0].outcome, Pulled::Empty);
-        assert!(
-            !out.path().join("empty.jsonl").exists(),
-            "an empty trace is not training data"
-        );
+        assert!(!out.path().join("empty.jsonl").exists(), "an empty trace is not training data");
         assert!(!out.path().join("notes.txt").exists());
         assert!(out.path().join("real.jsonl").exists());
     }
@@ -727,11 +628,7 @@ mod tests {
     fn pulling_with_nothing_recorded_is_not_an_error() {
         let home = tempdir().unwrap();
         let out = tempdir().unwrap();
-        assert!(
-            pull(&home.path().join("missing"), out.path())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(pull(&home.path().join("missing"), out.path()).unwrap().is_empty());
     }
 
     #[test]
@@ -743,10 +640,7 @@ mod tests {
         let text = std::fs::read_to_string(writer.path()).unwrap();
         let record: Value = serde_json::from_str(text.trim()).unwrap();
         assert_eq!(record["version"], TRACE_VERSION);
-        assert_eq!(
-            record["source"], "live",
-            "a live capture must say so, to be told apart from a reconstruction"
-        );
+        assert_eq!(record["source"], "live", "a live capture must say so, to be told apart from a reconstruction");
         assert_eq!(record["step"], 1);
         assert_eq!(record["mode"], "BUILD");
         // The system message is the point: without it a sample cannot teach the
@@ -754,10 +648,7 @@ mod tests {
         assert_eq!(record["messages"][0]["role"], "system");
         assert_eq!(record["messages"][0]["content"], "be careful");
         assert_eq!(record["tools"][0], "read_file");
-        assert_eq!(
-            record["completion"]["reasoning"],
-            "let me check the file first"
-        );
+        assert_eq!(record["completion"]["reasoning"], "let me check the file first");
         assert_eq!(record["completion"]["tool_calls"][0]["name"], "read_file");
         assert_eq!(
             record["completion"]["tool_calls"][0]["arguments"], r#"{"path":"src/parser.rs"}"#,
@@ -798,11 +689,7 @@ mod tests {
         let steps: Vec<u64> = text
             .lines()
             .filter(|l| !l.trim().is_empty())
-            .map(|line| {
-                serde_json::from_str::<Value>(line).unwrap()["step"]
-                    .as_u64()
-                    .unwrap()
-            })
+            .map(|line| serde_json::from_str::<Value>(line).unwrap()["step"].as_u64().unwrap())
             .collect();
         assert_eq!(steps, vec![1, 2]);
     }

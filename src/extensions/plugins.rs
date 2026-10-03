@@ -104,10 +104,7 @@ impl PluginRegistry {
     }
 
     pub fn skill_roots(&self) -> Vec<PathBuf> {
-        self.plugins
-            .values()
-            .flat_map(|plugin| plugin.skill_dirs.iter().cloned())
-            .collect()
+        self.plugins.values().flat_map(|plugin| plugin.skill_dirs.iter().cloned()).collect()
     }
 
     pub fn command(&self, name: &str) -> Option<&PluginCommand> {
@@ -132,29 +129,20 @@ impl PluginRegistry {
         self.plugins
             .values()
             .flat_map(|plugin| {
-                plugin
-                    .hooks
-                    .iter()
-                    .filter(move |hook| hook.event == event)
-                    .map(move |hook| (plugin, hook))
+                plugin.hooks.iter().filter(move |hook| hook.event == event).map(move |hook| (plugin, hook))
             })
             .collect()
     }
 
     pub fn install(source: &Path, paths: &AbacusPaths, force: bool) -> Result<Plugin> {
-        let source = source
-            .canonicalize()
-            .context("plugin source does not exist")?;
+        let source = source.canonicalize().context("plugin source does not exist")?;
         let plugin = load_plugin(&source, "install-source")?;
         let plugins_root = paths.root.join("plugins");
         fs::create_dir_all(&plugins_root)?;
         let destination = plugins_root.join(&plugin.name);
         if destination.exists() {
             if !force {
-                bail!(
-                    "plugin `{}` is already installed; use --force to replace it",
-                    plugin.name
-                );
+                bail!("plugin `{}` is already installed; use --force to replace it", plugin.name);
             }
             let canonical_root = plugins_root.canonicalize()?;
             let canonical = destination.canonicalize()?;
@@ -168,8 +156,7 @@ impl PluginRegistry {
             copy_tree(&source, &staged, 0)?;
             load_plugin(&staged, "staged")?;
             if destination.exists() {
-                let backup =
-                    plugins_root.join(format!(".backup-{}-{}", plugin.name, Uuid::new_v4()));
+                let backup = plugins_root.join(format!(".backup-{}-{}", plugin.name, Uuid::new_v4()));
                 fs::rename(&destination, &backup)?;
                 if let Err(error) = fs::rename(&staged, &destination) {
                     let _ = fs::rename(&backup, &destination);
@@ -186,7 +173,7 @@ impl PluginRegistry {
     }
 
     pub fn remove(name: &str, paths: &AbacusPaths) -> Result<()> {
-        validate_name(name)?;
+        super::validate_name("name", name)?;
         let root = paths.root.join("plugins");
         let path = root.join(name);
         if !path.exists() {
@@ -223,9 +210,7 @@ impl PluginRegistry {
                     self.plugins.insert(plugin.name.clone(), plugin);
                 }
                 Ok(_) => {}
-                Err(error) => self
-                    .diagnostics
-                    .push(format!("{}: {error:#}", path.display())),
+                Err(error) => self.diagnostics.push(format!("{}: {error:#}", path.display())),
             }
         }
     }
@@ -235,14 +220,11 @@ impl PluginRegistry {
         for plugin in self.plugins.values() {
             for command in &plugin.commands {
                 if self.commands.contains_key(&command.name) {
-                    self.diagnostics.push(format!(
-                        "plugin command collision for /{}; {} ignored",
-                        command.name, plugin.name
-                    ));
+                    self.diagnostics
+                        .push(format!("plugin command collision for /{}; {} ignored", command.name, plugin.name));
                     continue;
                 }
-                self.commands
-                    .insert(command.name.clone(), (plugin.name.clone(), command.clone()));
+                self.commands.insert(command.name.clone(), (plugin.name.clone(), command.clone()));
             }
         }
     }
@@ -257,47 +239,27 @@ fn load_plugin(root: &Path, source: &str) -> Result<Plugin> {
     if manifest_path.metadata()?.len() > 256_000 {
         bail!("plugin.toml exceeds 256 KB");
     }
-    let manifest: Manifest =
-        toml::from_str(&fs::read_to_string(&manifest_path)?).context("invalid plugin.toml")?;
+    let manifest: Manifest = toml::from_str(&fs::read_to_string(&manifest_path)?).context("invalid plugin.toml")?;
     if manifest.manifest_version != 1 {
-        bail!(
-            "unsupported plugin manifest version {}",
-            manifest.manifest_version
-        );
+        bail!("unsupported plugin manifest version {}", manifest.manifest_version);
     }
-    validate_name(&manifest.name)?;
+    super::validate_name("name", &manifest.name)?;
     if manifest.version.trim().is_empty() || manifest.description.trim().is_empty() {
         bail!("plugin version and description are required");
     }
-    let directory = root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
+    let directory = root.file_name().and_then(|name| name.to_str()).unwrap_or_default();
     if directory != manifest.name {
-        bail!(
-            "plugin name `{}` must match directory `{directory}`",
-            manifest.name
-        );
+        bail!("plugin name `{}` must match directory `{directory}`", manifest.name);
     }
-    let skill_dirs = manifest
-        .skills
-        .iter()
-        .map(|path| confined_path(&root, path))
-        .collect::<Result<Vec<_>>>()?;
+    let skill_dirs = manifest.skills.iter().map(|path| confined_path(&root, path)).collect::<Result<Vec<_>>>()?;
     for command in &manifest.commands {
-        validate_name(&command.name)?;
+        super::validate_name("name", &command.name)?;
         if command.description.trim().is_empty() || command.prompt.trim().is_empty() {
-            bail!(
-                "plugin command /{} needs description and prompt",
-                command.name
-            );
+            bail!("plugin command /{} needs description and prompt", command.name);
         }
     }
     for hook in &manifest.hooks {
-        if !matches!(
-            hook.event.as_str(),
-            "session_start" | "session_end" | "before_tool" | "after_tool"
-        ) {
+        if !matches!(hook.event.as_str(), "session_start" | "session_end" | "before_tool" | "after_tool") {
             bail!("unsupported plugin hook event `{}`", hook.event);
         }
         if hook.command.trim().is_empty() {
@@ -319,9 +281,7 @@ fn load_plugin(root: &Path, source: &str) -> Result<Plugin> {
 
 fn confined_path(root: &Path, relative: &Path) -> Result<PathBuf> {
     if relative.is_absolute()
-        || relative
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
+        || relative.components().any(|component| matches!(component, std::path::Component::ParentDir))
     {
         bail!("plugin paths must stay inside the plugin root");
     }
@@ -355,20 +315,6 @@ fn copy_tree(source: &Path, destination: &Path, depth: usize) -> Result<()> {
             }
             fs::copy(entry.path(), target)?;
         }
-    }
-    Ok(())
-}
-
-fn validate_name(name: &str) -> Result<()> {
-    if name.is_empty()
-        || name.len() > 64
-        || name.starts_with('-')
-        || name.ends_with('-')
-        || !name
-            .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
-    {
-        bail!("name must use 1-64 lowercase letters, digits, or hyphens");
     }
     Ok(())
 }
@@ -418,12 +364,7 @@ prompt = "Inspect the demo."
             "manifest_version = 1\nname = \"demo\"\nversion = \"1.0.0\"\ndescription = \"first\"\n",
         )
         .unwrap();
-        assert_eq!(
-            PluginRegistry::install(&source, &paths, false)
-                .unwrap()
-                .description,
-            "first"
-        );
+        assert_eq!(PluginRegistry::install(&source, &paths, false).unwrap().description, "first");
         assert!(PluginRegistry::install(&source, &paths, false).is_err());
         fs::write(
             source.join("plugin.toml"),

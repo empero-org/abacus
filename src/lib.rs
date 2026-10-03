@@ -39,6 +39,7 @@ pub mod subagent;
 pub mod sync;
 pub mod task;
 pub mod tether;
+pub mod text;
 pub mod theme;
 pub mod tool_format;
 pub mod tools;

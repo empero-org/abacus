@@ -169,28 +169,9 @@ impl Theme {
     /// `NO_COLOR`. Structure — bold, the gutter rails, the badges' reverse
     /// video — carries the whole interface, so it stays legible rather than
     /// merely uncoloured.
-    pub const PLAIN: Theme = Theme {
-        primary: Color::Reset,
-        secondary: Color::Reset,
-        success: Color::Reset,
-        warning: Color::Reset,
-        danger: Color::Reset,
-        muted: Color::Reset,
-        border: Color::Reset,
-        surface: Color::Reset,
-        text: Color::Reset,
-        inverse: Color::Reset,
-        code_bg: Color::Reset,
-        add_fg: Color::Reset,
-        add_bg: Color::Reset,
-        del_fg: Color::Reset,
-        del_bg: Color::Reset,
-        rail: Color::Reset,
-        selection: Color::Reset,
-        user_bg: Color::Reset,
-        overlay: Color::Reset,
-        plain: true,
-    };
+    pub fn plain() -> Theme {
+        Theme { plain: true, ..Theme::DARK }.map(|_| Color::Reset)
+    }
 
     /// The built-in palette for a mode, before any depth adaptation.
     pub fn base(mode: ThemeMode) -> Theme {
@@ -221,7 +202,7 @@ impl Theme {
     /// the mapping at least keeps the interface's structure legible.
     pub fn adapt(self, mode: ThemeMode, depth: ColorDepth) -> Theme {
         match depth {
-            ColorDepth::None => Theme::PLAIN,
+            ColorDepth::None => Theme::plain(),
             ColorDepth::TrueColor => self,
             ColorDepth::Ansi256 => self.map(quantize_256),
             ColorDepth::Ansi16 => self.map_roles(mode),
@@ -229,29 +210,12 @@ impl Theme {
     }
 
     /// Apply `f` to every colour role, leaving `plain` alone.
-    fn map(self, f: impl Fn(Color) -> Color) -> Theme {
-        Theme {
-            primary: f(self.primary),
-            secondary: f(self.secondary),
-            success: f(self.success),
-            warning: f(self.warning),
-            danger: f(self.danger),
-            muted: f(self.muted),
-            border: f(self.border),
-            surface: f(self.surface),
-            text: f(self.text),
-            inverse: f(self.inverse),
-            code_bg: f(self.code_bg),
-            add_fg: f(self.add_fg),
-            add_bg: f(self.add_bg),
-            del_fg: f(self.del_fg),
-            del_bg: f(self.del_bg),
-            rail: f(self.rail),
-            selection: f(self.selection),
-            user_bg: f(self.user_bg),
-            overlay: f(self.overlay),
-            plain: self.plain,
+    fn map(mut self, f: impl Fn(Color) -> Color) -> Theme {
+        for role in THEME_ROLES {
+            let color = role_color(&self, role).expect("a listed role");
+            set_role(&mut self, role, f(color));
         }
+        self
     }
 
     /// The sixteen-colour palette, assigned by role rather than by nearest RGB.
@@ -264,25 +228,13 @@ impl Theme {
     /// depending on which side of the contrast the text sits on.
     fn map_roles(self, mode: ThemeMode) -> Theme {
         let dark = mode == ThemeMode::Dark;
-        let accent = if dark {
-            Color::LightMagenta
-        } else {
-            Color::Magenta
-        };
+        let accent = if dark { Color::LightMagenta } else { Color::Magenta };
         let second = if dark { Color::LightRed } else { Color::Red };
         Theme {
             primary: accent,
             secondary: second,
-            success: if dark {
-                Color::LightGreen
-            } else {
-                Color::Green
-            },
-            warning: if dark {
-                Color::LightYellow
-            } else {
-                Color::Yellow
-            },
+            success: if dark { Color::LightGreen } else { Color::Green },
+            warning: if dark { Color::LightYellow } else { Color::Yellow },
             danger: if dark { Color::LightRed } else { Color::Red },
             muted: if dark { Color::Gray } else { Color::DarkGray },
             border: if dark { Color::DarkGray } else { Color::Gray },
@@ -293,11 +245,7 @@ impl Theme {
             text: if dark { Color::White } else { Color::Black },
             inverse: if dark { Color::Black } else { Color::White },
             code_bg: Color::Reset,
-            add_fg: if dark {
-                Color::LightGreen
-            } else {
-                Color::Green
-            },
+            add_fg: if dark { Color::LightGreen } else { Color::Green },
             add_bg: Color::Reset,
             del_fg: if dark { Color::LightRed } else { Color::Red },
             del_bg: Color::Reset,
@@ -416,10 +364,7 @@ impl ThemeFile {
         for (role, value) in &self.colors {
             let color = self.resolve_value(value, &mut Vec::new())?;
             if !set_role(&mut theme, role, color) {
-                return Err(format!(
-                    "unknown colour role `{role}` — expected one of {}",
-                    THEME_ROLES.join(", ")
-                ));
+                return Err(format!("unknown colour role `{role}` — expected one of {}", THEME_ROLES.join(", ")));
             }
         }
         Ok(theme.adapt(mode, depth))
@@ -431,11 +376,7 @@ impl ThemeFile {
     /// `b: "a"` would otherwise recurse until the stack runs out, and a stack
     /// overflow is a much worse way to learn about a typo than a message
     /// naming the loop.
-    fn resolve_value(
-        &self,
-        value: &ColorValue,
-        visited: &mut Vec<String>,
-    ) -> Result<Color, String> {
+    fn resolve_value(&self, value: &ColorValue, visited: &mut Vec<String>) -> Result<Color, String> {
         let text = match value {
             ColorValue::Index(index) => return Ok(Color::Indexed(*index)),
             ColorValue::Text(text) => text.trim(),
@@ -448,10 +389,7 @@ impl ThemeFile {
         }
         if visited.iter().any(|seen| seen == text) {
             visited.push(text.to_owned());
-            return Err(format!(
-                "circular colour reference: {}",
-                visited.join(" → ")
-            ));
+            return Err(format!("circular colour reference: {}", visited.join(" → ")));
         }
         let Some(next) = self.vars.get(text) else {
             return Err(format!("no `{text}` in this theme's vars"));
@@ -518,9 +456,7 @@ pub fn available(themes_dir: &std::path::Path) -> Vec<String> {
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
-            (path.extension()? == "json")
-                .then(|| path.file_stem()?.to_str().map(str::to_owned))
-                .flatten()
+            (path.extension()? == "json").then(|| path.file_stem()?.to_str().map(str::to_owned)).flatten()
         })
         .collect();
     names.sort();
@@ -531,12 +467,10 @@ pub fn available(themes_dir: &std::path::Path) -> Vec<String> {
 /// Read and build a named theme.
 pub fn load(themes_dir: &std::path::Path, name: &str, depth: ColorDepth) -> Result<Theme, String> {
     let path = themes_dir.join(format!("{name}.json"));
-    let content = std::fs::read_to_string(&path)
-        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-    let file: ThemeFile =
-        serde_json::from_str(&content).map_err(|error| format!("{}: {error}", path.display()))?;
-    file.to_theme(depth)
-        .map_err(|error| format!("{}: {error}", path.display()))
+    let content =
+        std::fs::read_to_string(&path).map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    let file: ThemeFile = serde_json::from_str(&content).map_err(|error| format!("{}: {error}", path.display()))?;
+    file.to_theme(depth).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 /// The palette a choice selects, and what went wrong if anything did.
@@ -549,10 +483,7 @@ pub fn resolve(choice: &ThemeChoice, themes_dir: &std::path::Path) -> (Theme, Op
     match choice {
         ThemeChoice::Named(name) => match load(themes_dir, name, depth) {
             Ok(theme) => (theme, None),
-            Err(error) => (
-                Theme::for_mode_at(ThemeChoice::Auto.resolve(), depth),
-                Some(error),
-            ),
+            Err(error) => (Theme::for_mode_at(ThemeChoice::Auto.resolve(), depth), Some(error)),
         },
         other => (Theme::for_mode_at(other.resolve(), depth), None),
     }
@@ -631,11 +562,7 @@ fn quantize_256(color: Color) -> Color {
     let grey = 8 + level * 10;
     let grey_distance = distance((r, g, b), (grey, grey, grey));
 
-    if grey_distance < cube_distance {
-        Color::Indexed(232 + level)
-    } else {
-        Color::Indexed(cube_index)
-    }
+    if grey_distance < cube_distance { Color::Indexed(232 + level) } else { Color::Indexed(cube_index) }
 }
 
 fn distance(a: (u8, u8, u8), b: (u8, u8, u8)) -> i32 {
@@ -646,6 +573,17 @@ fn distance(a: (u8, u8, u8), b: (u8, u8, u8)) -> i32 {
 }
 
 static ACTIVE: RwLock<Theme> = RwLock::new(Theme::DARK);
+
+/// The active palette's roles as plain functions, so draw code reads
+/// `muted()` rather than `theme::active().muted` at every call site.
+macro_rules! roles {
+    ($($role:ident),*) => {
+        $(pub fn $role() -> Color {
+            active().$role
+        })*
+    };
+}
+roles!(primary, secondary, success, warning, danger, muted, border, surface, text, inverse, rail);
 
 /// The active theme, copied out (cheap — `Theme` is `Copy`).
 pub fn active() -> Theme {
@@ -681,28 +619,18 @@ fn mode_from_colorfgbg() -> Option<ThemeMode> {
     let value = std::env::var("COLORFGBG").ok()?;
     let background = value.split(';').next_back()?.trim();
     let index: u8 = background.parse().ok()?;
-    Some(if index == 7 || index >= 9 {
-        ThemeMode::Light
-    } else {
-        ThemeMode::Dark
-    })
+    Some(if index == 7 || index >= 9 { ThemeMode::Light } else { ThemeMode::Dark })
 }
 
 #[cfg(target_os = "macos")]
 fn mode_from_macos_appearance() -> Option<ThemeMode> {
     // `defaults read -g AppleInterfaceStyle` prints "Dark" in dark mode and
     // exits non-zero (key absent) in light mode. Safe, fast, no TTY probing.
-    let output = std::process::Command::new("defaults")
-        .args(["read", "-g", "AppleInterfaceStyle"])
-        .output()
-        .ok()?;
+    let output = std::process::Command::new("defaults").args(["read", "-g", "AppleInterfaceStyle"]).output().ok()?;
     if !output.status.success() {
         return Some(ThemeMode::Light);
     }
-    if String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .eq_ignore_ascii_case("dark")
-    {
+    if String::from_utf8_lossy(&output.stdout).trim().eq_ignore_ascii_case("dark") {
         Some(ThemeMode::Dark)
     } else {
         Some(ThemeMode::Light)
@@ -749,23 +677,10 @@ mod tests {
         // Collapsing the palette is only useful if the roles that carry meaning
         // survive as different indices.
         let theme = Theme::for_mode_at(ThemeMode::Dark, ColorDepth::Ansi256);
-        for role in [
-            theme.primary,
-            theme.success,
-            theme.warning,
-            theme.danger,
-            theme.text,
-        ] {
+        for role in [theme.primary, theme.success, theme.warning, theme.danger, theme.text] {
             assert!(matches!(role, Color::Indexed(_)), "{role:?} not quantized");
         }
-        let distinct = [
-            theme.primary,
-            theme.success,
-            theme.warning,
-            theme.danger,
-            theme.muted,
-            theme.text,
-        ];
+        let distinct = [theme.primary, theme.success, theme.warning, theme.danger, theme.muted, theme.text];
         for (index, first) in distinct.iter().enumerate() {
             for second in &distinct[index + 1..] {
                 assert_ne!(first, second, "roles collapsed onto the same index");
@@ -815,24 +730,9 @@ mod tests {
         for mode in [ThemeMode::Dark, ThemeMode::Light] {
             let theme = Theme::for_mode(mode);
             for role in [
-                theme.primary,
-                theme.secondary,
-                theme.success,
-                theme.warning,
-                theme.danger,
-                theme.muted,
-                theme.border,
-                theme.surface,
-                theme.text,
-                theme.inverse,
-                theme.code_bg,
-                theme.add_fg,
-                theme.add_bg,
-                theme.del_fg,
-                theme.del_bg,
-                theme.rail,
-                theme.selection,
-                theme.overlay,
+                theme.primary, theme.secondary, theme.success, theme.warning, theme.danger, theme.muted, theme.border,
+                theme.surface, theme.text, theme.inverse, theme.code_bg, theme.add_fg, theme.add_bg, theme.del_fg,
+                theme.del_bg, theme.rail, theme.selection, theme.overlay,
             ] {
                 assert_eq!(role, Color::Reset);
             }
@@ -840,10 +740,7 @@ mod tests {
         unsafe {
             std::env::remove_var("NO_COLOR");
         }
-        assert_ne!(
-            Theme::for_mode_at(ThemeMode::Dark, ColorDepth::TrueColor).text,
-            Color::Reset
-        );
+        assert_ne!(Theme::for_mode_at(ThemeMode::Dark, ColorDepth::TrueColor).text, Color::Reset);
     }
 
     fn theme_file(json: &str) -> ThemeFile {
@@ -873,33 +770,19 @@ mod tests {
     #[test]
     fn a_theme_file_reports_what_is_wrong_with_it() {
         // A cycle names the loop rather than overflowing the stack.
-        let cyclic =
-            theme_file(r##"{ "vars": { "a": "b", "b": "a" }, "colors": { "primary": "a" } }"##);
+        let cyclic = theme_file(r##"{ "vars": { "a": "b", "b": "a" }, "colors": { "primary": "a" } }"##);
         let error = cyclic.to_theme(ColorDepth::TrueColor).unwrap_err();
         assert!(error.contains("circular"), "{error}");
 
         let missing = theme_file(r##"{ "colors": { "primary": "nope" } }"##);
-        assert!(
-            missing
-                .to_theme(ColorDepth::TrueColor)
-                .unwrap_err()
-                .contains("vars")
-        );
+        assert!(missing.to_theme(ColorDepth::TrueColor).unwrap_err().contains("vars"));
 
         let unknown = theme_file(r##"{ "colors": { "primry": "#ffffff" } }"##);
         let error = unknown.to_theme(ColorDepth::TrueColor).unwrap_err();
-        assert!(
-            error.contains("primry") && error.contains("primary"),
-            "{error}"
-        );
+        assert!(error.contains("primry") && error.contains("primary"), "{error}");
 
         let bad_hex = theme_file(r##"{ "colors": { "primary": "#gg00zz" } }"##);
-        assert!(
-            bad_hex
-                .to_theme(ColorDepth::TrueColor)
-                .unwrap_err()
-                .contains("#rrggbb")
-        );
+        assert!(bad_hex.to_theme(ColorDepth::TrueColor).unwrap_err().contains("#rrggbb"));
     }
 
     #[test]
@@ -907,18 +790,9 @@ mod tests {
         let file = theme_file(r##"{ "colors": { "primary": "#b66bff" } }"##);
         // Truecolor keeps it; 256 quantizes it; sixteen falls back to the role
         // mapping, which cannot honour an arbitrary colour at all.
-        assert!(matches!(
-            file.to_theme(ColorDepth::TrueColor).unwrap().primary,
-            Color::Rgb(..)
-        ));
-        assert!(matches!(
-            file.to_theme(ColorDepth::Ansi256).unwrap().primary,
-            Color::Indexed(_)
-        ));
-        assert_eq!(
-            file.to_theme(ColorDepth::Ansi16).unwrap().primary,
-            Color::LightMagenta
-        );
+        assert!(matches!(file.to_theme(ColorDepth::TrueColor).unwrap().primary, Color::Rgb(..)));
+        assert!(matches!(file.to_theme(ColorDepth::Ansi256).unwrap().primary, Color::Indexed(_)));
+        assert_eq!(file.to_theme(ColorDepth::Ansi16).unwrap().primary, Color::LightMagenta);
         assert!(file.to_theme(ColorDepth::None).unwrap().plain);
     }
 
@@ -939,10 +813,7 @@ mod tests {
     #[test]
     fn shorthand_hex_is_accepted() {
         let file = theme_file(r##"{ "colors": { "primary": "#f0a" } }"##);
-        assert_eq!(
-            file.to_theme(ColorDepth::TrueColor).unwrap().primary,
-            Color::Rgb(0xff, 0x00, 0xaa)
-        );
+        assert_eq!(file.to_theme(ColorDepth::TrueColor).unwrap().primary, Color::Rgb(0xff, 0x00, 0xaa));
     }
 
     #[test]
@@ -965,11 +836,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("abacus-theme-{}", std::process::id()));
         std::fs::create_dir_all(&directory).expect("temp dir");
         std::fs::write(directory.join("broken.json"), "{ not json").expect("write");
-        std::fs::write(
-            directory.join("good.json"),
-            r##"{ "colors": { "primary": "#123456" } }"##,
-        )
-        .expect("write");
+        std::fs::write(directory.join("good.json"), r##"{ "colors": { "primary": "#123456" } }"##).expect("write");
 
         assert_eq!(available(&directory), vec!["broken", "good"]);
         let (_, error) = resolve(&ThemeChoice::Named("broken".to_owned()), &directory);

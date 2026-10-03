@@ -14,6 +14,7 @@
 //! with a two-week half-life, so a papercut that stops being encountered
 //! fades to an occasional reminder instead of permanent noise.
 
+use crate::schema::{opt, req, string, strings, tool};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -42,60 +43,21 @@ const MIN_TRIPWIRE_CHARS: usize = 8;
 /// A longer tripwire that merely *contains* one ("error: DATABASE_URL must be
 /// set") stays valid.
 const GENERIC_TRIPWIRES: &[&str] = &[
-    "not found",
-    "command not found",
-    "no such file",
-    "no such file or directory",
-    "does not exist",
-    "permission denied",
-    "operation not permitted",
-    "failed",
-    "failure",
-    "error occurred",
-    "an error occurred",
-    "syntax error",
-    "compilation error",
-    "compile error",
-    "build failed",
-    "test failed",
-    "tests failed",
-    "exit code",
-    "exit status",
-    "non-zero exit",
-    "timed out",
-    "timeout",
-    "connection refused",
-    "connection reset",
-    "broken pipe",
-    "out of memory",
-    "segmentation fault",
-    "stack overflow",
-    "panicked at",
-    "traceback",
-    "exception",
-    "unexpected",
-    "invalid argument",
-    "invalid input",
-    "undefined",
-    "null pointer",
-    "cannot open",
-    "cannot find",
-    "unable to",
-    "warning:",
-    "stderr:",
-    "stdout:",
+    "not found", "command not found", "no such file", "no such file or directory", "does not exist",
+    "permission denied", "operation not permitted", "failed", "failure", "error occurred", "an error occurred",
+    "syntax error", "compilation error", "compile error", "build failed", "test failed", "tests failed", "exit code",
+    "exit status", "non-zero exit", "timed out", "timeout", "connection refused", "connection reset", "broken pipe",
+    "out of memory", "segmentation fault", "stack overflow", "panicked at", "traceback", "exception", "unexpected",
+    "invalid argument", "invalid input", "undefined", "null pointer", "cannot open", "cannot find", "unable to",
+    "warning:", "stderr:", "stdout:",
 ];
 
 /// Whether a proposed tripwire is one of the generic phrases, once case and
 /// surrounding punctuation are stripped away.
 fn is_generic_tripwire(tripwire: &str) -> bool {
-    let normalized = tripwire
-        .trim()
-        .trim_matches(|ch: char| ch.is_ascii_punctuation() || ch.is_whitespace())
-        .to_ascii_lowercase();
-    GENERIC_TRIPWIRES
-        .iter()
-        .any(|generic| normalized == *generic)
+    let normalized =
+        tripwire.trim().trim_matches(|ch: char| ch.is_ascii_punctuation() || ch.is_whitespace()).to_ascii_lowercase();
+    GENERIC_TRIPWIRES.iter().any(|generic| normalized == *generic)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,7 +71,6 @@ pub struct Papercut {
     pub tripwires: Vec<String>,
     /// `None` applies everywhere; otherwise the canonical workspace path the
     /// lesson belongs to.
-    #[serde(default)]
     pub workspace: Option<String>,
     pub created_at: DateTime<Utc>,
     #[serde(default = "default_strength")]
@@ -118,9 +79,7 @@ pub struct Papercut {
     pub trip_count: u32,
     #[serde(default)]
     pub recall_count: u32,
-    #[serde(default)]
     pub last_tripped_at: Option<DateTime<Utc>>,
-    #[serde(default)]
     pub last_recalled_at: Option<DateTime<Utc>>,
 }
 
@@ -138,26 +97,34 @@ impl Papercut {
     }
 
     fn cooldown(&self, now: DateTime<Utc>) -> Duration {
-        let minutes =
-            (BASE_COOLDOWN_MINUTES / self.decayed_strength(now)).max(MIN_COOLDOWN_MINUTES);
+        let minutes = (BASE_COOLDOWN_MINUTES / self.decayed_strength(now)).max(MIN_COOLDOWN_MINUTES);
         Duration::seconds((minutes * 60.0) as i64)
     }
 
     fn off_cooldown(&self, now: DateTime<Utc>) -> bool {
-        self.last_recalled_at
-            .is_none_or(|last| now - last >= self.cooldown(now))
+        self.last_recalled_at.is_none_or(|last| now - last >= self.cooldown(now))
     }
 
     fn matches(&self, haystack_lower: &str) -> bool {
-        self.tripwires
-            .iter()
-            .any(|tripwire| haystack_lower.contains(&tripwire.to_ascii_lowercase()))
+        self.tripwires.iter().any(|tripwire| haystack_lower.contains(&tripwire.to_ascii_lowercase()))
     }
 
     fn in_scope(&self, workspace: &str) -> bool {
-        self.workspace
-            .as_deref()
-            .is_none_or(|scope| scope == workspace)
+        self.workspace.as_deref().is_none_or(|scope| scope == workspace)
+    }
+
+    /// The snag was met again: the lesson grows stronger.
+    fn trip(&mut self, now: DateTime<Utc>) {
+        self.strength = self.decayed_strength(now) + 1.0;
+        self.trip_count += 1;
+        self.last_tripped_at = Some(now);
+    }
+
+    /// Note that the lesson is being shown, and hand back its reminder.
+    fn recall(&mut self, now: DateTime<Utc>) -> String {
+        self.recall_count += 1;
+        self.last_recalled_at = Some(now);
+        self.reminder()
     }
 
     /// The reminder as the model sees it, inline in a tool result.
@@ -188,66 +155,53 @@ pub struct PapercutStore {
 impl PapercutStore {
     /// Load the store, applying time decay to every entry.
     pub fn load(file: PathBuf, workspace: &std::path::Path) -> Self {
-        let papercuts = std::fs::read_to_string(&file)
-            .ok()
-            .and_then(|content| serde_json::from_str::<Vec<Papercut>>(&content).ok())
-            .unwrap_or_default();
+        let papercuts: Vec<Papercut> = crate::config::read_json(&file);
         Self {
-            inner: Arc::new(RwLock::new(Inner {
-                papercuts,
-                file: Some(file),
-            })),
+            inner: Arc::new(RwLock::new(Inner { papercuts, file: Some(file) })),
             workspace: workspace.to_string_lossy().into_owned(),
         }
     }
 
     fn save_locked(inner: &Inner) {
-        if let Some(file) = &inner.file
-            && let Ok(serialized) = serde_json::to_vec_pretty(&inner.papercuts)
-        {
-            let _ = crate::config::atomic_write(file, &serialized, false);
+        if let Some(file) = &inner.file {
+            crate::config::write_json(file, &inner.papercuts);
         }
     }
 
     pub fn tool_specs() -> Vec<Value> {
         vec![
-            json!({
-                "type": "function",
-                "function": {
-                    "name": "papercut_record",
-                    "description": "Record a lesson learned from a snag you just worked through: what went wrong, the fix that worked, and tripwires — distinctive strings from the error output that will identify the same snag next time. Call this after recovering from repeated failures or a non-obvious error so future sessions get the fix immediately.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "title": {"type": "string", "description": "Short name for the lesson, e.g. 'sqlx tests need DATABASE_URL'"},
-                            "description": {"type": "string", "description": "What went wrong and why"},
-                            "fix": {"type": "string", "description": "The fix that actually worked, as an instruction"},
-                            "references": {"type": "array", "items": {"type": "string"}, "description": "Optional file paths, URLs, or commands worth consulting"},
-                            "tripwires": {"type": "array", "items": {"type": "string"}, "description": "1-6 distinctive substrings of the failure that should trigger this reminder. Each at least 8 characters, and never a generic phrase alone ('not found', 'permission denied') — include the identifier the error names, e.g. 'frobnicate: not found'."},
-                            "scope": {"type": "string", "enum": ["workspace", "global"], "description": "workspace (default) limits recall to this project; global recalls everywhere"}
-                        },
-                        "required": ["title", "description", "fix", "tripwires"]
-                    }
-                }
-            }),
-            json!({
-                "type": "function",
-                "function": {
-                    "name": "papercut_list",
-                    "description": "List the recorded papercuts (lessons from past snags) relevant to this workspace.",
-                    "parameters": {"type": "object", "properties": {}}
-                }
-            }),
+            tool(
+                "papercut_record",
+                "Record a lesson learned from a snag you just worked through: what went wrong, the fix that worked, and tripwires — distinctive strings from the error output that will identify the same snag next time. Call this after recovering from repeated failures or a non-obvious error so future sessions get the fix immediately.",
+                [
+                    req("title", string("Short name for the lesson, e.g. 'sqlx tests need DATABASE_URL'")),
+                    req("description", string("What went wrong and why")),
+                    req("fix", string("The fix that actually worked, as an instruction")),
+                    opt("references", strings("Optional file paths, URLs, or commands worth consulting")),
+                    req(
+                        "tripwires",
+                        strings(
+                            "1-6 distinctive substrings of the failure that should trigger this reminder. Each at least 8 characters, and never a generic phrase alone ('not found', 'permission denied') — include the identifier the error names, e.g. 'frobnicate: not found'.",
+                        ),
+                    ),
+                    opt(
+                        "scope",
+                        json!({"type": "string", "enum": ["workspace", "global"], "description": "workspace (default) limits recall to this project; global recalls everywhere"}),
+                    ),
+                ],
+            ),
+            tool(
+                "papercut_list",
+                "List the recorded papercuts (lessons from past snags) relevant to this workspace.",
+                [],
+            ),
         ]
     }
 
     /// Virtual-tool dispatch, mirroring `GoalState::execute`.
     pub fn execute(&self, name: &str, arguments: &str) -> Option<String> {
         match name {
-            "papercut_record" => Some(match self.record_from_arguments(arguments) {
-                Ok(message) => message,
-                Err(error) => format!("Error: {error:#}"),
-            }),
+            "papercut_record" => Some(crate::tools::reply(self.record_from_arguments(arguments))),
             "papercut_list" => Some(self.list_for_model()),
             _ => None,
         }
@@ -262,11 +216,9 @@ impl PapercutStore {
             #[serde(default)]
             references: Vec<String>,
             tripwires: Vec<String>,
-            #[serde(default)]
             scope: Option<String>,
         }
-        let arguments: Arguments =
-            serde_json::from_str(arguments).context("invalid papercut_record arguments")?;
+        let arguments: Arguments = serde_json::from_str(arguments).context("invalid papercut_record arguments")?;
         let title = arguments.title.trim().to_owned();
         if title.is_empty() || title.chars().count() > 120 {
             bail!("title must be 1-120 characters");
@@ -274,21 +226,14 @@ impl PapercutStore {
         if arguments.description.trim().is_empty() || arguments.fix.trim().is_empty() {
             bail!("description and fix must not be empty");
         }
-        let tripwires: Vec<String> = arguments
-            .tripwires
-            .iter()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-            .collect();
+        let tripwires: Vec<String> =
+            arguments.tripwires.iter().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()).collect();
         if tripwires.is_empty() || tripwires.len() > 6 {
             bail!("provide 1-6 tripwires");
         }
         // A too-short tripwire matches everything and turns the lesson into
         // spam; the floor forces something distinctive.
-        if let Some(short) = tripwires
-            .iter()
-            .find(|value| value.chars().count() < MIN_TRIPWIRE_CHARS)
-        {
+        if let Some(short) = tripwires.iter().find(|value| value.chars().count() < MIN_TRIPWIRE_CHARS) {
             bail!(
                 "tripwire `{short}` is too short — use a distinctive string of \
                  {MIN_TRIPWIRE_CHARS}+ characters from this specific failure"
@@ -309,20 +254,15 @@ impl PapercutStore {
         let mut inner = self.inner.write().expect("papercut lock");
         // Re-recording the same lesson strengthens it and merges tripwires
         // instead of duplicating the entry.
-        if let Some(existing) = inner.papercuts.iter_mut().find(|papercut| {
-            papercut.title.eq_ignore_ascii_case(&title) && papercut.workspace == workspace
-        }) {
-            let now = Utc::now();
-            existing.strength = existing.decayed_strength(now) + 1.0;
-            existing.trip_count += 1;
-            existing.last_tripped_at = Some(now);
+        if let Some(existing) = inner
+            .papercuts
+            .iter_mut()
+            .find(|papercut| papercut.title.eq_ignore_ascii_case(&title) && papercut.workspace == workspace)
+        {
+            existing.trip(Utc::now());
             existing.fix = arguments.fix.trim().to_owned();
             for tripwire in tripwires {
-                if !existing
-                    .tripwires
-                    .iter()
-                    .any(|known| known.eq_ignore_ascii_case(&tripwire))
-                {
+                if !existing.tripwires.iter().any(|known| known.eq_ignore_ascii_case(&tripwire)) {
                     existing.tripwires.push(tripwire);
                 }
             }
@@ -346,9 +286,7 @@ impl PapercutStore {
             last_recalled_at: None,
         });
         Self::save_locked(&inner);
-        Ok(format!(
-            "Papercut \"{title}\" recorded. It will be recalled when a tripwire matches."
-        ))
+        Ok(format!("Papercut \"{title}\" recorded. It will be recalled when a tripwire matches."))
     }
 
     fn list_for_model(&self) -> String {
@@ -385,21 +323,16 @@ impl PapercutStore {
         let mut inner = self.inner.write().expect("papercut lock");
         let haystack_lower = haystack.to_ascii_lowercase();
         let now = Utc::now();
-        let workspace = self.workspace.clone();
         let mut reminders = Vec::new();
         let mut changed = false;
         for papercut in &mut inner.papercuts {
-            if !papercut.in_scope(&workspace) || !papercut.matches(&haystack_lower) {
+            if !papercut.in_scope(&self.workspace) || !papercut.matches(&haystack_lower) {
                 continue;
             }
-            papercut.strength = papercut.decayed_strength(now) + 1.0;
-            papercut.trip_count += 1;
-            papercut.last_tripped_at = Some(now);
+            papercut.trip(now);
             changed = true;
             if papercut.off_cooldown(now) {
-                papercut.recall_count += 1;
-                papercut.last_recalled_at = Some(now);
-                reminders.push(papercut.reminder());
+                reminders.push(papercut.recall(now));
             }
         }
         if changed {
@@ -414,24 +347,15 @@ impl PapercutStore {
     pub fn force_recall_top(&self, limit: usize) -> Vec<String> {
         let mut inner = self.inner.write().expect("papercut lock");
         let now = Utc::now();
-        let workspace = self.workspace.clone();
-        let mut ranked: Vec<usize> = (0..inner.papercuts.len())
-            .filter(|&index| inner.papercuts[index].in_scope(&workspace))
-            .collect();
+        let mut ranked: Vec<usize> =
+            (0..inner.papercuts.len()).filter(|&index| inner.papercuts[index].in_scope(&self.workspace)).collect();
         ranked.sort_by(|&a, &b| {
             let strength_a = inner.papercuts[a].decayed_strength(now);
             let strength_b = inner.papercuts[b].decayed_strength(now);
-            strength_b
-                .partial_cmp(&strength_a)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            strength_b.partial_cmp(&strength_a).unwrap_or(std::cmp::Ordering::Equal)
         });
-        let mut reminders = Vec::new();
-        for index in ranked.into_iter().take(limit) {
-            let papercut = &mut inner.papercuts[index];
-            papercut.recall_count += 1;
-            papercut.last_recalled_at = Some(now);
-            reminders.push(papercut.reminder());
-        }
+        let top = ranked.into_iter().take(limit);
+        let reminders: Vec<String> = top.map(|index| inner.papercuts[index].recall(now)).collect();
         if !reminders.is_empty() {
             Self::save_locked(&inner);
         }
@@ -441,12 +365,7 @@ impl PapercutStore {
     /// Everything in scope for this workspace, for `/papercuts`.
     pub fn snapshot(&self) -> Vec<Papercut> {
         let inner = self.inner.read().expect("papercut lock");
-        inner
-            .papercuts
-            .iter()
-            .filter(|papercut| papercut.in_scope(&self.workspace))
-            .cloned()
-            .collect()
+        inner.papercuts.iter().filter(|papercut| papercut.in_scope(&self.workspace)).cloned().collect()
     }
 
     /// Delete by id. Returns whether anything was removed.
@@ -483,36 +402,20 @@ mod tests {
                 .to_string(),
             )
             .expect("papercut_record handled");
-        assert!(
-            output.contains("recorded") || output.contains("reinforced"),
-            "{output}"
-        );
+        assert!(output.contains("recorded") || output.contains("reinforced"), "{output}");
     }
 
     #[test]
     fn records_recalls_on_tripwire_and_persists() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
-        record(
-            &store,
-            "sqlx needs DATABASE_URL",
-            "error: DATABASE_URL must be set",
-        );
+        record(&store, "sqlx needs DATABASE_URL", "error: DATABASE_URL must be set");
 
-        let reminders =
-            store.touch_and_recall("exit: 1\nstderr: error: DATABASE_URL must be set to compile");
+        let reminders = store.touch_and_recall("exit: 1\nstderr: error: DATABASE_URL must be set to compile");
         assert_eq!(reminders.len(), 1);
-        assert!(
-            reminders[0].contains("export DATABASE_URL first"),
-            "{}",
-            reminders[0]
-        );
+        assert!(reminders[0].contains("export DATABASE_URL first"), "{}", reminders[0]);
         // Unrelated output trips nothing.
-        assert!(
-            store
-                .touch_and_recall("exit: 0\nall tests passed")
-                .is_empty()
-        );
+        assert!(store.touch_and_recall("exit: 0\nall tests passed").is_empty());
 
         // A fresh store from the same file sees the persisted lesson.
         let reloaded = store2(dir.path());
@@ -559,8 +462,7 @@ mod tests {
             store
                 .execute(
                     "papercut_record",
-                    &json!({"title": "x", "description": "d", "fix": "f", "tripwires": [tripwire]})
-                        .to_string(),
+                    &json!({"title": "x", "description": "d", "fix": "f", "tripwires": [tripwire]}).to_string(),
                 )
                 .unwrap()
         };
@@ -569,12 +471,7 @@ mod tests {
         assert!(attempt("ENOENT").starts_with("Error:"));
         // Long enough but generic — exactly the phrases models reach for.
         for generic in [
-            "not found",
-            "Not Found",
-            "'not found'",
-            "permission denied",
-            "command not found",
-            "segmentation fault",
+            "not found", "Not Found", "'not found'", "permission denied", "command not found", "segmentation fault",
             "  timed out  ",
         ] {
             let output = attempt(generic);
@@ -595,10 +492,7 @@ mod tests {
         let store = store(dir.path());
         record(&store, "lesson", "scoped-marker");
         // Same file, different workspace: not in scope.
-        let other = PapercutStore::load(
-            dir.path().join("papercuts.json"),
-            std::path::Path::new("/somewhere/else"),
-        );
+        let other = PapercutStore::load(dir.path().join("papercuts.json"), std::path::Path::new("/somewhere/else"));
         assert!(other.snapshot().is_empty());
         assert!(other.touch_and_recall("scoped-marker").is_empty());
     }
@@ -622,10 +516,7 @@ mod tests {
             last_recalled_at: None,
         };
         let decayed = papercut.decayed_strength(now);
-        assert!(
-            (decayed - 1.0).abs() < 0.05,
-            "two half-lives: 4.0 -> ~1.0, got {decayed}"
-        );
+        assert!((decayed - 1.0).abs() < 0.05, "two half-lives: 4.0 -> ~1.0, got {decayed}");
         // And the cooldown grows correspondingly (weaker => rarer reminders).
         assert!(papercut.cooldown(now) > Duration::minutes(180));
     }

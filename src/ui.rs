@@ -1,6 +1,6 @@
 //! Presentation primitives for the TUI.
 //!
-//! `tui.rs` owns application state and event handling; this module owns how
+//! `tui` owns application state and event handling; this module owns how
 //! things *look*. Everything here is pure — it takes plain data and returns
 //! ratatui `Line`/`Span`/`Text` values — so the visual language can be reasoned
 //! about (and unit-tested) without standing up an `App`.
@@ -24,7 +24,7 @@ use ratatui::widgets::{Block, Borders, Padding};
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
-use crate::theme;
+use crate::theme::{self, danger, muted, primary, rail, secondary, success, text as text_color, warning};
 
 /// Content is inset two columns from the marker gutter.
 pub const GUTTER: usize = 2;
@@ -275,14 +275,8 @@ impl GlyphChoice {
             GlyphChoice::Nerd => &Glyphs::NERD,
             GlyphChoice::Ascii => &Glyphs::ASCII,
             GlyphChoice::Auto => {
-                let bare = std::env::var("TERM")
-                    .map(|term| matches!(term.trim(), "dumb" | "linux"))
-                    .unwrap_or(false);
-                if bare {
-                    &Glyphs::ASCII
-                } else {
-                    &Glyphs::UNICODE
-                }
+                let bare = std::env::var("TERM").map(|term| matches!(term.trim(), "dumb" | "linux")).unwrap_or(false);
+                if bare { &Glyphs::ASCII } else { &Glyphs::UNICODE }
             }
         }
     }
@@ -298,9 +292,8 @@ fn glyph_override() -> Option<GlyphChoice> {
     {
         return Some(choice);
     }
-    let forced = std::env::var("ABACUS_ASCII")
-        .map(|value| matches!(value.trim(), "1" | "true" | "yes"))
-        .unwrap_or(false);
+    let forced =
+        std::env::var("ABACUS_ASCII").map(|value| matches!(value.trim(), "1" | "true" | "yes")).unwrap_or(false);
     forced.then_some(GlyphChoice::Ascii)
 }
 
@@ -341,10 +334,7 @@ pub fn glyphs() -> &'static Glyphs {
 pub fn shimmer(text: &str, elapsed: std::time::Duration, animated: bool) -> Vec<Span<'static>> {
     let palette = theme::active();
     if !animated || text.is_empty() {
-        return vec![Span::styled(
-            text.to_owned(),
-            Style::default().fg(palette.text),
-        )];
+        return vec![fg(text.to_owned(), palette.text)];
     }
     const PERIOD_MS: u128 = 2_000;
     const HALF_WIDTH: f64 = 5.0;
@@ -368,14 +358,11 @@ pub fn shimmer(text: &str, elapsed: std::time::Duration, animated: bool) -> Vec<
             let mut style = match blend {
                 Some(((br, bg, bb), (tr, tg, tb))) => {
                     let mix = |from: u8, to: u8| {
-                        (f64::from(from) + (f64::from(to) - f64::from(from)) * intensity).round()
-                            as u8
+                        (f64::from(from) + (f64::from(to) - f64::from(from)) * intensity).round() as u8
                     };
                     Style::default().fg(Color::Rgb(mix(br, tr), mix(bg, tg), mix(bb, tb)))
                 }
-                None if intensity < 0.33 => Style::default()
-                    .fg(palette.muted)
-                    .add_modifier(Modifier::DIM),
+                None if intensity < 0.33 => Style::default().fg(palette.muted).add_modifier(Modifier::DIM),
                 None => Style::default().fg(palette.text),
             };
             if intensity > 0.85 {
@@ -399,29 +386,19 @@ pub fn spinner_frame(elapsed: std::time::Duration, animated: bool) -> &'static s
 /// Number of spinner frames, for callers keying a cache on the current phase.
 pub const SPINNER_FRAMES: usize = 10;
 
-fn primary() -> Color {
-    theme::active().primary
+/// Text in a palette colour — the span most of the interface is made of.
+pub fn fg<'a>(text: impl Into<std::borrow::Cow<'a, str>>, color: Color) -> Span<'a> {
+    Span::styled(text, Style::default().fg(color))
 }
-fn secondary() -> Color {
-    theme::active().secondary
+
+/// [`fg`], in bold.
+pub fn bold<'a>(text: impl Into<std::borrow::Cow<'a, str>>, color: Color) -> Span<'a> {
+    Span::styled(text, Style::default().fg(color).add_modifier(Modifier::BOLD))
 }
-fn success() -> Color {
-    theme::active().success
-}
-fn warning() -> Color {
-    theme::active().warning
-}
-fn danger() -> Color {
-    theme::active().danger
-}
-fn muted() -> Color {
-    theme::active().muted
-}
-fn text_color() -> Color {
-    theme::active().text
-}
-fn rail() -> Color {
-    theme::active().rail
+
+/// Label style for a list row: bright and bold under the cursor, muted elsewhere.
+pub fn emphasis(selected: bool) -> Style {
+    if selected { Style::default().fg(text_color()).add_modifier(Modifier::BOLD) } else { Style::default().fg(muted()) }
 }
 
 // ---------------------------------------------------------------------------
@@ -441,19 +418,13 @@ pub fn fill_style(fill: Color) -> Style {
     if palette.plain {
         return Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD);
     }
-    Style::default()
-        .fg(palette.inverse)
-        .bg(fill)
-        .add_modifier(Modifier::BOLD)
+    Style::default().fg(palette.inverse).bg(fill).add_modifier(Modifier::BOLD)
 }
 
 /// The `·` used to separate inline metadata. Dim enough to group without
 /// competing with the values on either side.
 pub fn dot() -> Span<'static> {
-    Span::styled(
-        format!("  {}  ", glyphs().separator),
-        Style::default().fg(rail()),
-    )
+    fg(format!("  {}  ", glyphs().separator), rail())
 }
 
 /// Spell a key name for the active preset.
@@ -490,14 +461,8 @@ pub fn hints(pairs: &[(&str, &str)]) -> Vec<Span<'static>> {
         if index > 0 {
             spans.push(Span::styled("   ", Style::default()));
         }
-        spans.push(Span::styled(
-            key_label(key),
-            Style::default().fg(primary()).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            format!(" {label}"),
-            Style::default().fg(muted()),
-        ));
+        spans.push(bold(key_label(key), primary()));
+        spans.push(fg(format!(" {label}"), muted()));
     }
     spans
 }
@@ -505,10 +470,7 @@ pub fn hints(pairs: &[(&str, &str)]) -> Vec<Span<'static>> {
 /// A horizontal hairline in the rail colour, used to separate the header and
 /// footer from the transcript without boxing anything in.
 pub fn rule(width: u16) -> Line<'static> {
-    Line::from(Span::styled(
-        glyphs().rule.repeat(width as usize),
-        Style::default().fg(rail()),
-    ))
+    Line::from(fg(glyphs().rule.repeat(width as usize), rail()))
 }
 
 /// A segmented capacity meter, e.g. `▰▰▰▱▱▱▱▱`. Filled cells take `color`,
@@ -516,13 +478,7 @@ pub fn rule(width: u16) -> Line<'static> {
 pub fn meter(percent: u16, cells: usize, color: Color) -> Vec<Span<'static>> {
     let set = glyphs();
     let filled = ((percent as usize * cells) / 100).min(cells);
-    vec![
-        Span::styled(set.meter_full.repeat(filled), Style::default().fg(color)),
-        Span::styled(
-            set.meter_empty.repeat(cells - filled),
-            Style::default().fg(rail()),
-        ),
-    ]
+    vec![fg(set.meter_full.repeat(filled), color), fg(set.meter_empty.repeat(cells - filled), rail())]
 }
 
 /// Truncate to `max` display columns, appending `…` when it doesn't fit. Width
@@ -560,23 +516,17 @@ pub fn format_elapsed(ms: u64) -> String {
         format!("{}m {:02}s", total / 60, total % 60)
     } else {
         let total = ms / 1_000;
-        format!(
-            "{}h {:02}m {:02}s",
-            total / 3600,
-            (total % 3600) / 60,
-            total % 60
-        )
+        format!("{}h {:02}m {:02}s", total / 3600, (total % 3600) / 60, total % 60)
     }
 }
 
-/// Thousands-scaled counts for the token readout — `938`, `12.4k`, `3.1M`.
+/// Scaled counts for the token readouts — `938`, `12.4k`, `3.1M`, `1.2B`.
 pub fn format_count(value: u64) -> String {
-    if value < 1_000 {
-        value.to_string()
-    } else if value < 1_000_000 {
-        format!("{:.1}k", value as f64 / 1_000.0)
-    } else {
-        format!("{:.1}M", value as f64 / 1_000_000.0)
+    match value {
+        0..1_000 => value.to_string(),
+        1_000..1_000_000 => format!("{:.1}k", value as f64 / 1e3),
+        1_000_000..1_000_000_000 => format!("{:.1}M", value as f64 / 1e6),
+        _ => format!("{:.1}B", value as f64 / 1e9),
     }
 }
 
@@ -598,11 +548,7 @@ pub fn overlay_block(title: &str, accent: Color, footer: Option<Line<'static>>) 
         .border_style(Style::default().fg(palette.border))
         .style(Style::default().bg(palette.overlay))
         .padding(Padding::horizontal(1))
-        .title_top(Line::from(vec![
-            Span::raw(" "),
-            badge(title, accent),
-            Span::raw(" "),
-        ]));
+        .title_top(Line::from(vec![Span::raw(" "), badge(title, accent), Span::raw(" ")]));
     if let Some(footer) = footer {
         block = block.title_bottom(footer);
     }
@@ -654,11 +600,7 @@ pub fn measure(area: Rect, max: u16) -> Rect {
     if area.width <= max {
         return area;
     }
-    Rect {
-        x: area.x + (area.width - max) / 2,
-        width: max,
-        ..area
-    }
+    Rect { x: area.x + (area.width - max) / 2, width: max, ..area }
 }
 
 // ---------------------------------------------------------------------------
@@ -682,10 +624,7 @@ pub struct RowState {
 
 impl RowState {
     pub fn selected(selected: bool) -> Self {
-        Self {
-            selected,
-            hovered: false,
-        }
+        Self { selected, hovered: false }
     }
 }
 
@@ -696,21 +635,10 @@ impl RowState {
 /// or not the cursor is present.
 pub fn list_row(state: RowState, width: usize, content: Vec<Span<'static>>) -> Line<'static> {
     let palette = theme::active();
-    let fill = if state.hovered {
-        palette.selection
-    } else {
-        palette.overlay
-    };
+    let fill = if state.hovered { palette.selection } else { palette.overlay };
     let mut spans = vec![Span::styled(
-        if state.selected {
-            format!("{} ", glyphs().cursor)
-        } else {
-            "  ".to_owned()
-        },
-        Style::default()
-            .fg(primary())
-            .bg(fill)
-            .add_modifier(Modifier::BOLD),
+        if state.selected { format!("{} ", glyphs().cursor) } else { "  ".to_owned() },
+        Style::default().fg(primary()).bg(fill).add_modifier(Modifier::BOLD),
     )];
     for span in content {
         let mut style = span.style.bg(fill);
@@ -723,10 +651,7 @@ pub fn list_row(state: RowState, width: usize, content: Vec<Span<'static>>) -> L
     }
     let used = spans_width(&spans);
     if used < width {
-        spans.push(Span::styled(
-            " ".repeat(width - used),
-            Style::default().bg(fill),
-        ));
+        spans.push(Span::styled(" ".repeat(width - used), Style::default().bg(fill)));
     }
     Line::from(spans)
 }
@@ -761,16 +686,9 @@ pub fn split(inner: Rect, sidebar_width: u16) -> Split {
     let divider_x = inner.x + sidebar_width + 1;
     let body_x = divider_x + 2;
     Split {
-        sidebar: Rect {
-            width: sidebar_width,
-            ..inner
-        },
+        sidebar: Rect { width: sidebar_width, ..inner },
         divider_x,
-        body: Rect {
-            x: body_x,
-            width: inner.right().saturating_sub(body_x),
-            ..inner
-        },
+        body: Rect { x: body_x, width: inner.right().saturating_sub(body_x), ..inner },
     }
 }
 
@@ -820,7 +738,7 @@ pub fn fit(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
         }
         break;
     }
-    out.push(Span::styled("…", Style::default().fg(muted())));
+    out.push(fg("…", muted()));
     if used + 1 < width {
         out.push(Span::raw(" ".repeat(width - used - 1)));
     }
@@ -891,12 +809,9 @@ pub fn facts(items: &[String]) -> Line<'static> {
     let mut spans = Vec::new();
     for item in items.iter().filter(|item| !item.trim().is_empty()) {
         if !spans.is_empty() {
-            spans.push(Span::styled(
-                format!(" {separator} "),
-                Style::default().fg(rail()),
-            ));
+            spans.push(fg(format!(" {separator} "), rail()));
         }
-        spans.push(Span::styled(item.clone(), Style::default().fg(muted())));
+        spans.push(fg(item.clone(), muted()));
     }
     Line::from(spans)
 }
@@ -904,11 +819,7 @@ pub fn facts(items: &[String]) -> Line<'static> {
 /// The `[x]` / `[/]` state mark for a row that is on or off.
 pub fn state_mark(on: bool) -> Span<'static> {
     let set = glyphs();
-    if on {
-        Span::styled(set.enabled.to_owned(), Style::default().fg(success()))
-    } else {
-        Span::styled(set.disabled.to_owned(), Style::default().fg(rail()))
-    }
+    if on { fg(set.enabled.to_owned(), success()) } else { fg(set.disabled.to_owned(), rail()) }
 }
 
 // ---------------------------------------------------------------------------
@@ -917,10 +828,7 @@ pub fn state_mark(on: bool) -> Span<'static> {
 
 /// Total display width of a run of spans.
 pub fn spans_width(spans: &[Span<'_>]) -> usize {
-    spans
-        .iter()
-        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
-        .sum()
+    spans.iter().map(|span| UnicodeWidthStr::width(span.content.as_ref())).sum()
 }
 
 /// Word-wrap `spans` to `width` columns, prefixing the first produced row with
@@ -971,10 +879,7 @@ pub fn wrap(
                 }
                 _ => rows.push(std::mem::take(&mut row)),
             }
-            row_width = row
-                .iter()
-                .map(|(ch, _)| UnicodeWidthChar::width(*ch).unwrap_or(0))
-                .sum();
+            row_width = row.iter().map(|(ch, _)| UnicodeWidthChar::width(*ch).unwrap_or(0)).sum();
             last_space = None;
         }
         if ch == ' ' {
@@ -988,11 +893,7 @@ pub fn wrap(
     rows.into_iter()
         .enumerate()
         .map(|(index, cells)| {
-            let mut line: Vec<Span<'static>> = if index == 0 {
-                first.to_vec()
-            } else {
-                cont.to_vec()
-            };
+            let mut line: Vec<Span<'static>> = if index == 0 { first.to_vec() } else { cont.to_vec() };
             // Regroup consecutive cells that share a style back into spans, so
             // the buffer sees a handful of runs instead of one span per char.
             let mut current = String::new();
@@ -1078,6 +979,19 @@ pub const MAX_RETAINED_OUTPUT: usize = 64 * 1024;
 const MAX_EXPANDED_ROWS: usize = 400;
 
 impl ToolCall {
+    /// A call that has started and not reported back yet.
+    pub fn running(name: impl Into<String>, summary: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            summary: summary.into(),
+            status: ToolStatus::Running,
+            output: String::new(),
+            full: String::new(),
+            duration_ms: None,
+            expanded: false,
+        }
+    }
+
     /// Whether opening this row would show anything the collapsed row does not.
     pub fn has_more(&self) -> bool {
         self.full.trim() != self.output.trim() && !self.full.trim().is_empty()
@@ -1093,19 +1007,11 @@ pub struct Entry {
 
 impl Entry {
     pub fn new(kind: EntryKind, text: impl Into<String>) -> Self {
-        Self {
-            kind,
-            text: text.into(),
-            tool: None,
-        }
+        Self { kind, text: text.into(), tool: None }
     }
 
     pub fn tool(call: ToolCall) -> Self {
-        Self {
-            kind: EntryKind::Tool,
-            text: String::new(),
-            tool: Some(call),
-        }
+        Self { kind: EntryKind::Tool, text: String::new(), tool: Some(call) }
     }
 }
 
@@ -1164,12 +1070,8 @@ pub fn transcript(
                     lines.extend(tool_block(call, width, spinner, selected));
                 }
             }
-            EntryKind::System => {
-                lines.extend(notice_block(&entry.text, width, muted(), glyphs().notice))
-            }
-            EntryKind::Error => {
-                lines.extend(notice_block(&entry.text, width, danger(), glyphs().failed))
-            }
+            EntryKind::System => lines.extend(notice_block(&entry.text, width, muted(), glyphs().notice)),
+            EntryKind::Error => lines.extend(notice_block(&entry.text, width, danger(), glyphs().failed)),
             EntryKind::Rule => lines.push(rule_line(&entry.text, width)),
         }
         // Selected blocks are deliberately not tinted. A click used to paint a
@@ -1187,16 +1089,10 @@ pub fn transcript(
 /// repeats on wrapped rows so a long prompt stays visually bounded.
 fn user_block(body: &str, width: usize) -> Vec<Line<'static>> {
     let tint = theme::active().user_bg;
-    let bar = vec![Span::styled(
-        format!("{} ", glyphs().bar),
-        Style::default().fg(primary()).add_modifier(Modifier::BOLD),
-    )];
+    let bar = vec![bold(format!("{} ", glyphs().bar), primary())];
     let mut lines = Vec::new();
     for paragraph in body.split('\n') {
-        let spans = vec![Span::styled(
-            paragraph.to_owned(),
-            Style::default().fg(text_color()),
-        )];
+        let spans = vec![fg(paragraph.to_owned(), text_color())];
         lines.extend(wrap(&spans, width, &bar, &bar));
     }
     // The prompt renders as a card: a quiet tint band behind the whole block,
@@ -1210,19 +1106,12 @@ fn user_block(body: &str, width: usize) -> Vec<Line<'static>> {
     let pad_row = || Line::from(Span::styled(" ".repeat(width), Style::default().bg(tint)));
     let mut card = vec![pad_row()];
     for mut line in lines {
-        let used: usize = line
-            .spans
-            .iter()
-            .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
-            .sum();
+        let used: usize = line.spans.iter().map(|span| UnicodeWidthStr::width(span.content.as_ref())).sum();
         for span in &mut line.spans {
             span.style = span.style.bg(tint);
         }
         if used < width {
-            line.spans.push(Span::styled(
-                " ".repeat(width - used),
-                Style::default().bg(tint),
-            ));
+            line.spans.push(Span::styled(" ".repeat(width - used), Style::default().bg(tint)));
         }
         card.push(line);
     }
@@ -1235,22 +1124,14 @@ fn user_block(body: &str, width: usize) -> Vec<Line<'static>> {
 /// and must not compete with it.
 fn thinking_block(body: &str, width: usize) -> Vec<Line<'static>> {
     let quiet = rail();
-    let marker = vec![Span::styled(
-        format!("{} ", glyphs().quote_rail),
-        Style::default().fg(quiet),
-    )];
+    let marker = vec![fg(format!("{} ", glyphs().quote_rail), quiet)];
     let style = Style::default().fg(quiet).add_modifier(Modifier::ITALIC);
     let mut lines = Vec::new();
     for paragraph in body.split('\n') {
         if paragraph.trim().is_empty() {
             continue;
         }
-        lines.extend(wrap(
-            &[Span::styled(paragraph.to_owned(), style)],
-            width,
-            &marker,
-            &marker,
-        ));
+        lines.extend(wrap(&[Span::styled(paragraph.to_owned(), style)], width, &marker, &marker));
     }
     lines
 }
@@ -1315,14 +1196,7 @@ fn tool_block(call: &ToolCall, width: usize, spinner: &str, selected: bool) -> V
     };
     // Say that there is more to see, and which way the row is currently folded.
     if call.has_more() {
-        right = format!(
-            "{} {right}",
-            if call.expanded {
-                set.fold_open
-            } else {
-                set.fold_closed
-            }
-        );
+        right = format!("{} {right}", if call.expanded { set.fold_open } else { set.fold_closed });
     }
 
     // Budget the row: the glyph, name, and duration are fixed; whatever is left
@@ -1331,39 +1205,22 @@ fn tool_block(call: &ToolCall, width: usize, spinner: &str, selected: bool) -> V
     let name_width = UnicodeWidthStr::width(call.name.as_str());
     let right_width = UnicodeWidthStr::width(right.as_str());
     let fixed = 2 + name_width + 2 + right_width + 1;
-    let summary = if call.summary.is_empty() || inner <= fixed {
-        String::new()
-    } else {
-        truncate(&call.summary, inner - fixed)
-    };
+    let summary =
+        if call.summary.is_empty() || inner <= fixed { String::new() } else { truncate(&call.summary, inner - fixed) };
     let used = 2 + name_width + 2 + UnicodeWidthStr::width(summary.as_str());
     let pad = inner.saturating_sub(used + right_width).max(1);
 
     // The selected row is tinted end to end so the cursor is unmistakable even
     // when the transcript is a dense run of tool calls.
-    let fill = if selected {
-        theme::active().selection
-    } else {
-        Color::Reset
-    };
+    let fill = if selected { theme::active().selection } else { Color::Reset };
     let tint = |style: Style| {
         if selected { style.bg(fill) } else { style }
     };
 
     let mut header = vec![
         Span::styled(" ".repeat(GUTTER), tint(Style::default())),
-        Span::styled(
-            format!("{glyph} "),
-            tint(Style::default().fg(color).add_modifier(Modifier::BOLD)),
-        ),
-        Span::styled(
-            call.name.clone(),
-            tint(
-                Style::default()
-                    .fg(text_color())
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ),
+        Span::styled(format!("{glyph} "), tint(Style::default().fg(color).add_modifier(Modifier::BOLD))),
+        Span::styled(call.name.clone(), tint(Style::default().fg(text_color()).add_modifier(Modifier::BOLD))),
     ];
     if !summary.is_empty() {
         header.push(Span::styled("  ", tint(Style::default())));
@@ -1375,16 +1232,9 @@ fn tool_block(call: &ToolCall, width: usize, spinner: &str, selected: bool) -> V
     }
 
     let mut lines = vec![Line::from(header)];
-    let body_style = if call.status == ToolStatus::Failed {
-        Style::default().fg(danger())
-    } else {
-        Style::default().fg(muted())
-    };
-    let body = if call.expanded {
-        &call.full
-    } else {
-        &call.output
-    };
+    let body_style =
+        if call.status == ToolStatus::Failed { Style::default().fg(danger()) } else { Style::default().fg(muted()) };
+    let body = if call.expanded { &call.full } else { &call.output };
     let indent = GUTTER + 2;
     let measure = width.saturating_sub(indent);
     for raw in body.lines() {
@@ -1392,10 +1242,7 @@ fn tool_block(call: &ToolCall, width: usize, spinner: &str, selected: bool) -> V
             continue;
         }
         if lines.len() > MAX_EXPANDED_ROWS {
-            lines.push(Line::from(vec![
-                Span::raw(" ".repeat(indent)),
-                Span::styled("… output truncated".to_owned(), Style::default().fg(rail())),
-            ]));
+            lines.push(Line::from(vec![Span::raw(" ".repeat(indent)), fg("… output truncated".to_owned(), rail())]));
             break;
         }
         if call.expanded {
@@ -1417,8 +1264,6 @@ fn tool_block(call: &ToolCall, width: usize, spinner: &str, selected: bool) -> V
     lines
 }
 
-/// System notices and errors: a coloured glyph in the gutter and body text that
-/// hangs under the content column.
 /// A full-width dim rule with the label embedded near its left end:
 /// `─ Worked for 2m 03s ───────────…`. The label doubles as the information —
 /// the rule only appears where real work happened.
@@ -1427,19 +1272,15 @@ fn rule_line(label: &str, width: usize) -> Line<'static> {
     let mut text = format!("{bar} {label} ");
     let used = UnicodeWidthStr::width(text.as_str());
     text.push_str(&bar.repeat(width.saturating_sub(used).max(2) / bar.width().max(1)));
-    Line::from(Span::styled(text, Style::default().fg(muted())))
+    Line::from(fg(text, muted()))
 }
 
+/// System notices and errors: a coloured glyph in the gutter and body text that
+/// hangs under the content column.
 fn notice_block(body: &str, width: usize, color: Color, glyph: &str) -> Vec<Line<'static>> {
-    let first = vec![
-        Span::raw(" ".repeat(GUTTER)),
-        Span::styled(
-            format!("{glyph} "),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ),
-    ];
+    let first = vec![Span::raw(" ".repeat(GUTTER)), bold(format!("{glyph} "), color)];
     let cont = vec![Span::raw(" ".repeat(GUTTER + 2))];
-    let spans = vec![Span::styled(body.to_owned(), Style::default().fg(color))];
+    let spans = vec![fg(body.to_owned(), color)];
     wrap(&spans, width, &first, &cont)
 }
 
@@ -1461,9 +1302,7 @@ pub struct Welcome<'a> {
 /// Half-block wordmark. Falls back to plain text when the terminal is too
 /// narrow for the 22-column art.
 fn wordmark(width: usize) -> Vec<Line<'static>> {
-    let style = Style::default()
-        .fg(secondary())
-        .add_modifier(Modifier::BOLD);
+    let style = Style::default().fg(secondary()).add_modifier(Modifier::BOLD);
     let plain = || vec![Line::from(Span::styled("ABACUS", style))];
     let Some(rows) = glyphs().wordmark else {
         return plain();
@@ -1471,18 +1310,13 @@ fn wordmark(width: usize) -> Vec<Line<'static>> {
     if width < UnicodeWidthStr::width(rows[0]) + 4 {
         return plain();
     }
-    rows.into_iter()
-        .map(|row| Line::from(Span::styled(row, style)))
-        .collect()
+    rows.into_iter().map(|row| Line::from(Span::styled(row, style))).collect()
 }
 
 /// A `label   value` row for the splash screen's facts block, with the labels
 /// aligned into a column.
 fn fact(label: &str, value: String, value_color: Color) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{label:<11}"), Style::default().fg(muted())),
-        Span::styled(value, Style::default().fg(value_color)),
-    ])
+    Line::from(vec![fg(format!("{label:<11}"), muted()), fg(value, value_color)])
 }
 
 /// The empty-transcript splash: wordmark, a facts block naming exactly what
@@ -1490,18 +1324,11 @@ fn fact(label: &str, value: String, value_color: Color) -> Line<'static> {
 pub fn welcome(info: &Welcome<'_>, width: usize) -> Vec<Line<'static>> {
     let mut lines = wordmark(width);
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "A focused coding agent for your terminal",
-        Style::default().fg(muted()),
-    )));
+    lines.push(Line::from(fg("A focused coding agent for your terminal", muted())));
     lines.push(Line::from(""));
 
     let workspace = match info.branch {
-        Some(branch) => format!(
-            "{}  {} {branch}",
-            truncate(info.workspace, 44),
-            glyphs().branch
-        ),
+        Some(branch) => format!("{}  {} {branch}", truncate(info.workspace, 44), glyphs().branch),
         None => truncate(info.workspace, 52),
     };
     lines.push(fact("workspace", workspace, text_color()));
@@ -1512,37 +1339,16 @@ pub fn welcome(info: &Welcome<'_>, width: usize) -> Vec<Line<'static>> {
     if info.tips {
         lines.push(Line::from(""));
         for (key, label, color) in [
-            (
-                "Build",
-                "Describe a change; Abacus inspects, edits, verifies.",
-                success(),
-            ),
-            (
-                "Plan",
-                "AUTO picks the workflow — shift+tab pins a mode.",
-                warning(),
-            ),
-            (
-                "Goal",
-                "/goal sets a persistent definition of done.",
-                primary(),
-            ),
+            ("Build", "Describe a change; Abacus inspects, edits, verifies.", success()),
+            ("Plan", "AUTO picks the workflow — shift+tab pins a mode.", warning()),
+            ("Goal", "/goal sets a persistent definition of done.", primary()),
             ("Loop", "/loop runs promise-driven iteration.", secondary()),
         ] {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{key:<7}"),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(label.to_owned(), Style::default().fg(muted())),
-            ]));
+            lines.push(Line::from(vec![bold(format!("{key:<7}"), color), fg(label.to_owned(), muted())]));
         }
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Type / for commands  ·  @file to attach context  ·  F1 for help",
-        Style::default().fg(rail()),
-    )));
+    lines.push(Line::from(fg("Type / for commands  ·  @file to attach context  ·  F1 for help", rail())));
     lines
 }
 
@@ -1555,10 +1361,7 @@ mod tests {
     static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn plain(line: &Line<'_>) -> String {
-        line.spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect()
+        line.spans.iter().map(|span| span.content.as_ref()).collect()
     }
 
     #[test]
@@ -1571,21 +1374,9 @@ mod tests {
         let lines = user_block("hello there", 40);
         assert!(lines.len() >= 3, "padding row above and below the text");
         for line in &lines {
-            let width: usize = line
-                .spans
-                .iter()
-                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
-                .sum();
-            assert_eq!(
-                width,
-                40,
-                "every row pads to the measure: {:?}",
-                plain(line)
-            );
-            assert!(
-                line.spans.iter().all(|span| span.style.bg == Some(tint)),
-                "every span carries the tint"
-            );
+            let width: usize = line.spans.iter().map(|span| UnicodeWidthStr::width(span.content.as_ref())).sum();
+            assert_eq!(width, 40, "every row pads to the measure: {:?}", plain(line));
+            assert!(line.spans.iter().all(|span| span.style.bg == Some(tint)), "every span carries the tint");
         }
         assert_eq!(plain(&lines[0]).trim(), "", "top padding row is blank");
         assert!(plain(&lines[1]).contains("hello there"));
@@ -1601,11 +1392,7 @@ mod tests {
             assert!(plain(line).starts_with("▌ "), "{:?}", plain(line));
             assert!(spans_width(&line.spans) <= 14, "{:?}", plain(line));
         }
-        let joined: String = lines
-            .iter()
-            .map(|line| plain(line).replace("▌ ", ""))
-            .collect::<Vec<_>>()
-            .join(" ");
+        let joined: String = lines.iter().map(|line| plain(line).replace("▌ ", "")).collect::<Vec<_>>().join(" ");
         assert_eq!(joined, "alpha beta gamma delta");
     }
 
@@ -1632,55 +1419,31 @@ mod tests {
         let entries = vec![
             Entry::new(EntryKind::User, "please refactor the parser module"),
             Entry::tool(ToolCall {
-                name: "read_file".into(),
-                summary: "src/parser.rs".into(),
                 status: ToolStatus::Ok,
                 output: "1203 lines".into(),
                 full: "1203 lines".into(),
                 duration_ms: Some(240),
-                expanded: false,
+                ..ToolCall::running("read_file", "src/parser.rs")
             }),
         ];
         let text = transcript(&entries, 40, "⠋", None, true);
         for line in &text.lines {
-            assert!(
-                spans_width(&line.spans) <= 40,
-                "line overflows: {:?}",
-                plain(line)
-            );
+            assert!(spans_width(&line.spans) <= 40, "line overflows: {:?}", plain(line));
         }
     }
 
     #[test]
     fn running_tools_show_the_spinner_and_finished_tools_the_duration() {
-        let running = transcript(
-            &[Entry::tool(ToolCall {
-                name: "grep".into(),
-                summary: "fn parse".into(),
-                status: ToolStatus::Running,
-                output: String::new(),
-                full: String::new(),
-                duration_ms: None,
-                expanded: false,
-            })],
-            60,
-            "⠹",
-            None,
-            true,
-        );
+        let running = transcript(&[Entry::tool(ToolCall::running("grep", "fn parse"))], 60, "⠹", None, true);
         let row = plain(&running.lines[0]);
         assert!(row.contains('⠹'), "{row}");
         assert!(row.trim_end().ends_with("running"), "{row}");
 
         let done = transcript(
             &[Entry::tool(ToolCall {
-                name: "grep".into(),
-                summary: "fn parse".into(),
                 status: ToolStatus::Ok,
-                output: String::new(),
-                full: String::new(),
                 duration_ms: Some(1_500),
-                expanded: false,
+                ..ToolCall::running("grep", "fn parse")
             })],
             60,
             "⠹",
@@ -1694,17 +1457,8 @@ mod tests {
 
     #[test]
     fn consecutive_tool_rows_group_without_a_blank_between_them() {
-        let call = || {
-            Entry::tool(ToolCall {
-                name: "grep".into(),
-                summary: String::new(),
-                status: ToolStatus::Ok,
-                output: String::new(),
-                full: String::new(),
-                duration_ms: Some(5),
-                expanded: false,
-            })
-        };
+        let call =
+            || Entry::tool(ToolCall { status: ToolStatus::Ok, duration_ms: Some(5), ..ToolCall::running("grep", "") });
         let text = transcript(&[call(), call()], 60, "⠋", None, true);
         assert_eq!(text.lines.len(), 2, "tool rows should not be separated");
     }
@@ -1733,32 +1487,20 @@ mod tests {
     fn fit_pads_and_truncates_to_exactly_the_measure() {
         let spans = vec![Span::raw("abc"), Span::raw("def")];
         for width in [0, 1, 3, 6, 9] {
-            assert_eq!(
-                spans_width(&fit(spans.clone(), width)),
-                width,
-                "fit to {width} columns"
-            );
+            assert_eq!(spans_width(&fit(spans.clone(), width)), width, "fit to {width} columns");
         }
         let cut = fit(spans.clone(), 4);
         let joined: String = cut.iter().map(|span| span.content.as_ref()).collect();
         assert_eq!(joined, "abc…");
         // Styles survive a cut that lands mid-run.
-        let styled = vec![
-            Span::styled("abcdef", Style::default().fg(Color::Red)),
-            Span::raw("ghi"),
-        ];
+        let styled = vec![fg("abcdef", Color::Red), Span::raw("ghi")];
         let cut = fit(styled, 4);
         assert_eq!(cut[0].style.fg, Some(Color::Red));
     }
 
     #[test]
     fn split_leaves_a_divider_column_between_the_panes() {
-        let inner = Rect {
-            x: 10,
-            y: 4,
-            width: 80,
-            height: 20,
-        };
+        let inner = Rect { x: 10, y: 4, width: 80, height: 20 };
         let panes = split(inner, 20);
         assert_eq!(panes.sidebar.x, 10);
         assert_eq!(panes.sidebar.width, 20);
@@ -1773,19 +1515,13 @@ mod tests {
 
     #[test]
     fn metric_columns_collapse_one_at_a_time() {
-        let rows = [
-            vec!["200k ctx".to_owned(), String::new()],
-            vec!["1m ctx".to_owned(), String::new()],
-        ];
+        let rows = [vec!["200k ctx".to_owned(), String::new()], vec!["1m ctx".to_owned(), String::new()]];
         let widths = metric_widths(rows.iter().map(Vec::as_slice), 2);
         assert_eq!(widths, vec![8, 0], "the empty column collapses to nothing");
         assert_eq!(metrics_width(&widths), 8, "and takes its gap with it");
         let cells = metric_cells(&rows[1], &widths);
         let joined: String = cells.iter().map(|span| span.content.as_ref()).collect();
-        assert_eq!(
-            joined, "  1m ctx",
-            "values are right-aligned under the widest"
-        );
+        assert_eq!(joined, "  1m ctx", "values are right-aligned under the widest");
     }
 
     #[test]
@@ -1794,11 +1530,7 @@ mod tests {
         let joined = plain(&line);
         assert!(joined.contains("200k ctx"));
         assert!(joined.contains("reasoning"));
-        assert_eq!(
-            joined.matches(glyphs().separator).count(),
-            1,
-            "one separator, not two: {joined:?}"
-        );
+        assert_eq!(joined.matches(glyphs().separator).count(), 1, "one separator, not two: {joined:?}");
     }
 
     /// Every Nerd Font glyph must measure exactly one cell.
@@ -1843,11 +1575,7 @@ mod tests {
             ("tee_up", nerd.tee_up),
         ];
         for (name, glyph) in glyphs {
-            assert_eq!(
-                UnicodeWidthStr::width(glyph),
-                1,
-                "{name} ({glyph:?}) is not one cell"
-            );
+            assert_eq!(UnicodeWidthStr::width(glyph), 1, "{name} ({glyph:?}) is not one cell");
         }
         for frame in nerd.spinner {
             assert_eq!(UnicodeWidthStr::width(frame), 1);
@@ -1929,10 +1657,9 @@ mod tests {
         // The bracket marks hold a column rather than a cell, so they are
         // checked at their own width instead of against the one-cell rule.
         // The Nerd preset spends one cell on them and is checked below.
-        for (name, rich, plain) in [
-            ("enabled", unicode.enabled, ascii.enabled),
-            ("disabled", unicode.disabled, ascii.disabled),
-        ] {
+        for (name, rich, plain) in
+            [("enabled", unicode.enabled, ascii.enabled), ("disabled", unicode.disabled, ascii.disabled)]
+        {
             assert_eq!(
                 UnicodeWidthStr::width(rich),
                 UnicodeWidthStr::width(plain),

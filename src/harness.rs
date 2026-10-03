@@ -40,6 +40,7 @@
 //! on the theory that repetition across sessions is exactly the evidence that
 //! a lesson is real — the same principle papercut strength already encodes.
 
+use crate::schema::{opt, req, string, tool};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -127,7 +128,6 @@ pub struct HarnessEntry {
     pub path: String,
     pub lifetime: Lifetime,
     /// `None` applies everywhere; otherwise the canonical workspace path.
-    #[serde(default)]
     pub workspace: Option<String>,
     #[serde(default)]
     pub metadata: Map<String, Value>,
@@ -143,15 +143,38 @@ fn default_path() -> String {
 }
 
 impl HarnessEntry {
+    /// The next version of `before`, or the first version of a new entry, with
+    /// everything an entry keeps from one version to the next. A new entry is
+    /// durable, applies everywhere, and is titled by its id until told otherwise.
+    fn next(before: Option<&Self>, kind: EntryKind, id: &str, source: &str) -> Self {
+        let now = Utc::now();
+        let source = source.to_owned();
+        match before {
+            Some(entry) => Self { source, updated_at: now, version: entry.version + 1, ..entry.clone() },
+            None => Self {
+                id: id.to_owned(),
+                kind,
+                title: id.to_owned(),
+                content: String::new(),
+                path: default_path(),
+                lifetime: Lifetime::Durable,
+                workspace: None,
+                metadata: Map::new(),
+                source,
+                created_at: now,
+                updated_at: now,
+                version: 1,
+            },
+        }
+    }
+
     /// `session` or `durable`, for display.
     pub fn lifetime_label(&self) -> &'static str {
         self.lifetime.label()
     }
 
     fn in_scope(&self, workspace: &str) -> bool {
-        self.workspace
-            .as_deref()
-            .is_none_or(|scope| scope == workspace)
+        self.workspace.as_deref().is_none_or(|scope| scope == workspace)
     }
 }
 
@@ -215,12 +238,7 @@ pub struct HarnessState {
 
 impl Default for HarnessState {
     fn default() -> Self {
-        Self {
-            schema: 1,
-            entries: Entries::default(),
-            refinements: Vec::new(),
-            recurrence: BTreeMap::new(),
-        }
+        Self { schema: 1, entries: Entries::default(), refinements: Vec::new(), recurrence: BTreeMap::new() }
     }
 }
 
@@ -236,17 +254,11 @@ pub enum EditAction {
 pub struct RefinementEdit {
     pub action: EditAction,
     pub kind: EntryKind,
-    #[serde(default)]
     pub id: Option<String>,
-    #[serde(default)]
     pub title: Option<String>,
-    #[serde(default)]
     pub content: Option<String>,
-    #[serde(default)]
     pub path: Option<String>,
-    #[serde(default)]
     pub metadata: Option<Map<String, Value>>,
-    #[serde(default)]
     pub reason: Option<String>,
 }
 
@@ -263,12 +275,9 @@ pub struct AppliedEdit {
     pub action: EditAction,
     pub kind: EntryKind,
     pub id: String,
-    #[serde(default)]
     pub before: Option<HarnessEntry>,
-    #[serde(default)]
     pub after: Option<HarnessEntry>,
     pub applied: bool,
-    #[serde(default)]
     pub error: Option<String>,
 }
 
@@ -279,17 +288,13 @@ pub struct RefinementResult {
     pub rationale: String,
     pub expected_outcome: String,
     pub applied_edits: Vec<AppliedEdit>,
-    #[serde(default)]
     pub rollback_of: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
 impl RefinementResult {
     pub fn applied_count(&self) -> usize {
-        self.applied_edits
-            .iter()
-            .filter(|edit| edit.applied)
-            .count()
+        self.applied_edits.iter().filter(|edit| edit.applied).count()
     }
 
     pub fn changes(&self) -> Vec<String> {
@@ -319,11 +324,7 @@ impl RefinementResult {
 /// immediately after the edit it reverts, say — would otherwise collide and
 /// send the lookup to the wrong one.
 pub fn generate_refinement_id() -> String {
-    format!(
-        "refine_{}_{}",
-        Utc::now().format("%Y%m%d%H%M%S"),
-        &uuid::Uuid::new_v4().to_string()[..6]
-    )
+    format!("refine_{}_{}", Utc::now().format("%Y%m%d%H%M%S"), &uuid::Uuid::new_v4().to_string()[..6])
 }
 
 /// Normalise arbitrary text into a stable entry id.
@@ -343,33 +344,7 @@ pub fn slug(raw: &str, fallback: &str) -> String {
         }
     }
     let trimmed = out.trim_matches('_').to_owned();
-    if trimmed.is_empty() {
-        fallback.to_owned()
-    } else {
-        trimmed
-    }
-}
-
-fn truncate(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_owned();
-    }
-    let mut boundary = text
-        .char_indices()
-        .nth(limit)
-        .map(|(index, _)| index)
-        .unwrap_or(text.len());
-    while !text.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    format!("{}…", &text[..boundary])
-}
-
-fn compact(text: &str, limit: usize) -> String {
-    truncate(
-        &text.split_whitespace().collect::<Vec<_>>().join(" "),
-        limit,
-    )
+    if trimmed.is_empty() { fallback.to_owned() } else { trimmed }
 }
 
 fn validate_edit(edit: &RefinementEdit, id: &str) -> Option<String> {
@@ -377,22 +352,10 @@ fn validate_edit(edit: &RefinementEdit, id: &str) -> Option<String> {
         return Some("edit needs an id or a title to derive one from".to_owned());
     }
     if edit.action != EditAction::Delete {
-        if edit
-            .title
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or("")
-            .is_empty()
-        {
+        if edit.title.as_deref().map(str::trim).unwrap_or("").is_empty() {
             return Some(format!("{:?} needs a title", edit.action));
         }
-        if edit
-            .content
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or("")
-            .is_empty()
-        {
+        if edit.content.as_deref().map(str::trim).unwrap_or("").is_empty() {
             return Some(format!("{:?} needs content", edit.action));
         }
     }
@@ -461,12 +424,7 @@ pub fn apply_proposal(
                 _ => false,
             };
             if !same {
-                push(
-                    false,
-                    Some("entry changed during refinement planning".to_owned()),
-                    before,
-                    None,
-                );
+                push(false, Some("entry changed during refinement planning".to_owned()), before, None);
                 continue;
             }
         }
@@ -488,52 +446,26 @@ pub fn apply_proposal(
                 push(false, Some("entry not found".to_owned()), None, None);
             }
             EditAction::Create | EditAction::Update => {
-                let now = Utc::now();
-                let after = HarnessEntry {
-                    id: entry_id.clone(),
-                    kind: edit.kind,
-                    title: edit
-                        .title
-                        .clone()
-                        .or_else(|| before.as_ref().map(|entry| entry.title.clone()))
-                        .unwrap_or_else(|| entry_id.clone()),
-                    content: truncate(
-                        edit.content
-                            .as_deref()
-                            .or(before.as_ref().map(|entry| entry.content.as_str()))
-                            .unwrap_or_default()
-                            .trim(),
-                        MAX_CONTENT_CHARS,
-                    ),
-                    path: edit
-                        .path
-                        .clone()
-                        .or_else(|| before.as_ref().map(|entry| entry.path.clone()))
-                        .unwrap_or_else(default_path),
-                    // An existing entry keeps its lifetime: a refinement edits
-                    // content, it does not silently change blast radius.
-                    lifetime: before
-                        .as_ref()
-                        .map(|entry| entry.lifetime)
-                        .unwrap_or(lifetime),
-                    workspace: before
-                        .as_ref()
-                        .map(|entry| entry.workspace.clone())
-                        .unwrap_or_else(|| workspace.map(str::to_owned)),
-                    metadata: edit
-                        .metadata
-                        .clone()
-                        .or_else(|| before.as_ref().map(|entry| entry.metadata.clone()))
-                        .unwrap_or_default(),
-                    source: "refine".to_owned(),
-                    created_at: before.as_ref().map(|entry| entry.created_at).unwrap_or(now),
-                    updated_at: now,
-                    version: before.as_ref().map(|entry| entry.version + 1).unwrap_or(1),
+                // An existing entry keeps its lifetime and workspace: a
+                // refinement edits content, it does not silently change blast
+                // radius.
+                let base = match &before {
+                    Some(entry) => HarnessEntry::next(Some(entry), edit.kind, &entry_id, "refine"),
+                    None => HarnessEntry {
+                        lifetime,
+                        workspace: workspace.map(str::to_owned),
+                        ..HarnessEntry::next(None, edit.kind, &entry_id, "refine")
+                    },
                 };
-                state
-                    .entries
-                    .of_mut(edit.kind)
-                    .insert(entry_id.clone(), after.clone());
+                let content = edit.content.as_deref().unwrap_or(&base.content).trim();
+                let after = HarnessEntry {
+                    content: crate::text::clip(content, MAX_CONTENT_CHARS, "…"),
+                    title: edit.title.clone().unwrap_or(base.title),
+                    path: edit.path.clone().unwrap_or(base.path),
+                    metadata: edit.metadata.clone().unwrap_or(base.metadata),
+                    ..base
+                };
+                state.entries.of_mut(edit.kind).insert(entry_id.clone(), after.clone());
                 touched.insert(key);
                 push(true, None, before, Some(after));
             }
@@ -567,45 +499,30 @@ pub fn apply_proposal(
 /// Invert an applied refinement. Edits are undone in reverse so that a batch
 /// touching the same entry twice unwinds to where it started.
 pub fn rollback_proposal(target: &RefinementResult) -> RefinementProposal {
-    let mut edits = Vec::new();
-    for edit in target.applied_edits.iter().rev() {
-        if !edit.applied {
-            continue;
-        }
-        match (&edit.before, &edit.after) {
-            (Some(before), _) => edits.push(RefinementEdit {
-                action: if edit.after.is_some() {
-                    EditAction::Update
-                } else {
-                    EditAction::Create
-                },
-                kind: edit.kind,
-                id: Some(edit.id.clone()),
-                title: Some(before.title.clone()),
-                content: Some(before.content.clone()),
-                path: Some(before.path.clone()),
-                metadata: Some(before.metadata.clone()),
-                reason: Some(format!("rollback of {}", target.id)),
-            }),
-            (None, Some(_)) => edits.push(RefinementEdit {
-                action: EditAction::Delete,
-                kind: edit.kind,
-                id: Some(edit.id.clone()),
-                title: None,
-                content: None,
-                path: None,
-                metadata: None,
-                reason: Some(format!("rollback of {}", target.id)),
-            }),
-            (None, None) => {}
-        }
-    }
+    let undo = |edit: &AppliedEdit| {
+        let before = edit.before.as_ref();
+        let action = match (before, &edit.after) {
+            (Some(_), Some(_)) => EditAction::Update,
+            (Some(_), None) => EditAction::Create,
+            (None, Some(_)) => EditAction::Delete,
+            (None, None) => return None,
+        };
+        Some(RefinementEdit {
+            action,
+            kind: edit.kind,
+            id: Some(edit.id.clone()),
+            title: before.map(|entry| entry.title.clone()),
+            content: before.map(|entry| entry.content.clone()),
+            path: before.map(|entry| entry.path.clone()),
+            metadata: before.map(|entry| entry.metadata.clone()),
+            reason: Some(format!("rollback of {}", target.id)),
+        })
+    };
+    let edits = target.applied_edits.iter().rev().filter(|edit| edit.applied).filter_map(undo);
+    let edits = edits.collect();
     RefinementProposal {
         summary: format!("Roll back refinement {}", target.id),
-        rationale: format!(
-            "Restores the harness entries changed by {} from its recorded snapshots.",
-            target.id
-        ),
+        rationale: format!("Restores the harness entries changed by {} from its recorded snapshots.", target.id),
         expected_outcome: "The reverted entries are back to their previous content.".to_owned(),
         edits,
     }
@@ -635,16 +552,9 @@ impl HarnessStore {
     /// empty rather than failing: this is read on every prompt build, so a bad
     /// parse must never brick a session. The next save rewrites it cleanly.
     pub fn load(dir: PathBuf, workspace: &Path) -> Self {
-        let durable = std::fs::read_to_string(dir.join(STATE_FILE))
-            .ok()
-            .and_then(|content| serde_json::from_str::<HarnessState>(&content).ok())
-            .unwrap_or_default();
+        let durable: HarnessState = crate::config::read_json(&dir.join(STATE_FILE));
         Self {
-            inner: Arc::new(RwLock::new(Inner {
-                durable,
-                session: HarnessState::default(),
-                dir: Some(dir),
-            })),
+            inner: Arc::new(RwLock::new(Inner { durable, session: HarnessState::default(), dir: Some(dir) })),
             workspace: workspace.to_string_lossy().into_owned(),
             session: None,
         }
@@ -666,10 +576,8 @@ impl HarnessStore {
     }
 
     fn save_locked(inner: &Inner) {
-        if let Some(dir) = &inner.dir
-            && let Ok(serialized) = serde_json::to_vec_pretty(&inner.durable)
-        {
-            let _ = crate::config::atomic_write(&dir.join(STATE_FILE), &serialized, false);
+        if let Some(dir) = &inner.dir {
+            crate::config::write_json(&dir.join(STATE_FILE), &inner.durable);
         }
     }
 
@@ -709,10 +617,7 @@ impl HarnessStore {
         let mut merged = inner.durable.clone();
         for kind in EntryKind::ALL {
             for (id, entry) in inner.session.entries.of(kind) {
-                merged
-                    .entries
-                    .of_mut(kind)
-                    .insert(id.clone(), entry.clone());
+                merged.entries.of_mut(kind).insert(id.clone(), entry.clone());
             }
         }
         merged
@@ -730,14 +635,7 @@ impl HarnessStore {
 
     /// Everything applying to this workspace, for `/harness`.
     pub fn snapshot(&self) -> Vec<HarnessEntry> {
-        let merged = self.merged();
-        let mut entries: Vec<HarnessEntry> = EntryKind::ALL
-            .iter()
-            .flat_map(|kind| merged.entries.of(*kind).values().cloned())
-            .filter(|entry| entry.in_scope(&self.workspace))
-            .collect();
-        entries.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at));
-        entries
+        self.applying(&EntryKind::ALL)
     }
 
     /// Render the durable prompt entries into the workspace `AGENTS.md` block.
@@ -756,16 +654,19 @@ impl HarnessStore {
         if notes.is_empty() {
             return Ok(());
         }
-        write_notes_block(workspace, &truncate(&notes.join("\n"), MAX_NOTES_CHARS))
+        write_notes_block(workspace, &crate::text::clip(&notes.join("\n"), MAX_NOTES_CHARS, "…"))
     }
 
     /// Entries of one kind applying to this workspace, newest first.
     pub fn snapshot_of(&self, kind: EntryKind) -> Vec<HarnessEntry> {
+        self.applying(&[kind])
+    }
+
+    fn applying(&self, kinds: &[EntryKind]) -> Vec<HarnessEntry> {
         let merged = self.merged();
-        let mut entries: Vec<HarnessEntry> = merged
-            .entries
-            .of(kind)
-            .values()
+        let mut entries: Vec<HarnessEntry> = kinds
+            .iter()
+            .flat_map(|kind| merged.entries.of(*kind).values())
             .filter(|entry| entry.in_scope(&self.workspace))
             .cloned()
             .collect();
@@ -801,15 +702,7 @@ impl HarnessStore {
             Lifetime::Durable => &mut inner.durable,
             Lifetime::Session => &mut inner.session,
         };
-        let result = apply_proposal(
-            state,
-            proposal,
-            &id,
-            rollback_of,
-            lifetime,
-            workspace.as_deref(),
-            baseline,
-        );
+        let result = apply_proposal(state, proposal, &id, rollback_of, lifetime, workspace.as_deref(), baseline);
         if lifetime == Lifetime::Durable {
             Self::save_locked(&inner);
             Self::append_history(&inner, &result);
@@ -848,58 +741,36 @@ impl HarnessStore {
     /// trained on costs adherence for no benefit. What changed is underneath.
     pub fn tool_specs() -> Vec<Value> {
         vec![
-            json!({
-                "type": "function",
-                "function": {
-                    "name": "memory_record",
-                    "description": "Save a durable memory for future sessions: an architecture fact, a decision and its reason, a convention, a roadmap change, or something figured out the hard way. Re-recording an existing title replaces its body — use that to keep memories current. Not for failure lessons; those go to papercut_record.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "title": {"type": "string", "description": "Short stable name, e.g. 'auth flow uses one-shot tokens'"},
-                            "body": {"type": "string", "description": "The memory itself, concise and self-contained (max ~1200 chars)"},
-                            "scope": {"type": "string", "enum": ["workspace", "global"], "description": "Which projects it applies to: workspace (default) or global"}
-                        },
-                        "required": ["title", "body"]
-                    }
-                }
-            }),
-            json!({
-                "type": "function",
-                "function": {
-                    "name": "memory_list",
-                    "description": "List the stored memories for this workspace, with their titles as handles for memory_record (update) and memory_forget.",
-                    "parameters": {"type": "object", "properties": {}}
-                }
-            }),
-            json!({
-                "type": "function",
-                "function": {
-                    "name": "memory_forget",
-                    "description": "Delete a memory that is stale or wrong, by its exact title.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "title": {"type": "string", "description": "Exact title of the memory to delete"}
-                        },
-                        "required": ["title"]
-                    }
-                }
-            }),
+            tool(
+                "memory_record",
+                "Save a durable memory for future sessions: an architecture fact, a decision and its reason, a convention, a roadmap change, or something figured out the hard way. Re-recording an existing title replaces its body — use that to keep memories current. Not for failure lessons; those go to papercut_record.",
+                [
+                    req("title", string("Short stable name, e.g. 'auth flow uses one-shot tokens'")),
+                    req("body", string("The memory itself, concise and self-contained (max ~1200 chars)")),
+                    opt(
+                        "scope",
+                        json!({"type": "string", "enum": ["workspace", "global"], "description": "Which projects it applies to: workspace (default) or global"}),
+                    ),
+                ],
+            ),
+            tool(
+                "memory_list",
+                "List the stored memories for this workspace, with their titles as handles for memory_record (update) and memory_forget.",
+                [],
+            ),
+            tool(
+                "memory_forget",
+                "Delete a memory that is stale or wrong, by its exact title.",
+                [req("title", string("Exact title of the memory to delete"))],
+            ),
         ]
     }
 
     pub fn execute(&self, name: &str, arguments: &str) -> Option<String> {
         match name {
-            "memory_record" => Some(match self.record(arguments) {
-                Ok(message) => message,
-                Err(error) => format!("Error: {error:#}"),
-            }),
+            "memory_record" => Some(crate::tools::reply(self.record(arguments))),
             "memory_list" => Some(self.list_for_model()),
-            "memory_forget" => Some(match self.forget(arguments) {
-                Ok(message) => message,
-                Err(error) => format!("Error: {error:#}"),
-            }),
+            "memory_forget" => Some(crate::tools::reply(self.forget(arguments))),
             _ => None,
         }
     }
@@ -909,11 +780,9 @@ impl HarnessStore {
         struct Arguments {
             title: String,
             body: String,
-            #[serde(default)]
             scope: Option<String>,
         }
-        let arguments: Arguments =
-            serde_json::from_str(arguments).context("invalid memory_record arguments")?;
+        let arguments: Arguments = serde_json::from_str(arguments).context("invalid memory_record arguments")?;
         let title = arguments.title.trim().to_owned();
         if title.is_empty() || title.chars().count() > 120 {
             bail!("title must be 1-120 characters");
@@ -927,7 +796,6 @@ impl HarnessStore {
             _ => Some(self.workspace.clone()),
         };
         let id = slug(&title, "memory");
-        let now = Utc::now();
 
         let mut inner = self.inner.write().expect("harness lock");
         // An existing entry is updated where it already lives, so re-recording
@@ -954,34 +822,11 @@ impl HarnessStore {
             inner.session.entries.memory.get(&id).cloned()
         };
         let entry = HarnessEntry {
-            id: id.clone(),
-            kind: EntryKind::Memory,
             title: title.clone(),
-            content: truncate(body, MAX_CONTENT_CHARS),
-            path: existing
-                .as_ref()
-                .map(|entry| entry.path.clone())
-                .unwrap_or_else(default_path),
-            lifetime: if durable_hit || promoted {
-                Lifetime::Durable
-            } else {
-                Lifetime::Session
-            },
+            content: crate::text::clip(body, MAX_CONTENT_CHARS, "…"),
+            lifetime: if durable_hit || promoted { Lifetime::Durable } else { Lifetime::Session },
             workspace,
-            metadata: existing
-                .as_ref()
-                .map(|entry| entry.metadata.clone())
-                .unwrap_or_default(),
-            source: "model".to_owned(),
-            created_at: existing
-                .as_ref()
-                .map(|entry| entry.created_at)
-                .unwrap_or(now),
-            updated_at: now,
-            version: existing
-                .as_ref()
-                .map(|entry| entry.version + 1)
-                .unwrap_or(1),
+            ..HarnessEntry::next(existing.as_ref(), EntryKind::Memory, &id, "model")
         };
         let updated = existing.is_some();
 
@@ -1013,17 +858,9 @@ impl HarnessStore {
         struct Arguments {
             title: String,
         }
-        let arguments: Arguments =
-            serde_json::from_str(arguments).context("invalid memory_forget arguments")?;
+        let arguments: Arguments = serde_json::from_str(arguments).context("invalid memory_forget arguments")?;
         let title = arguments.title.trim();
-        let id = slug(title, "");
-        let mut inner = self.inner.write().expect("harness lock");
-        let from_session = inner.session.entries.memory.remove(&id).is_some();
-        let from_durable = inner.durable.entries.memory.remove(&id).is_some();
-        if from_durable {
-            Self::save_locked(&inner);
-        }
-        if !from_session && !from_durable {
+        if !self.remove(EntryKind::Memory, &slug(title, "")) {
             bail!("no memory titled `{title}` in this workspace");
         }
         Ok(format!("Memory \"{title}\" forgotten."))
@@ -1036,14 +873,7 @@ impl HarnessStore {
             .memory
             .values()
             .filter(|entry| entry.in_scope(&self.workspace))
-            .map(|entry| {
-                format!(
-                    "- {} [{}] — {}",
-                    entry.title,
-                    entry.lifetime.label(),
-                    entry.content
-                )
-            })
+            .map(|entry| format!("- {} [{}] — {}", entry.title, entry.lifetime.label(), entry.content))
             .collect();
         if lines.is_empty() {
             return "No memories stored for this workspace yet.".to_owned();
@@ -1057,12 +887,8 @@ impl HarnessStore {
         let merged = self.merged();
         let mut sections: Vec<String> = Vec::new();
         for kind in EntryKind::ALL {
-            let mut entries: Vec<&HarnessEntry> = merged
-                .entries
-                .of(kind)
-                .values()
-                .filter(|entry| entry.in_scope(&self.workspace))
-                .collect();
+            let mut entries: Vec<&HarnessEntry> =
+                merged.entries.of(kind).values().filter(|entry| entry.in_scope(&self.workspace)).collect();
             if entries.is_empty() {
                 continue;
             }
@@ -1074,9 +900,7 @@ impl HarnessStore {
                 EntryKind::Memory => {
                     "Memories from earlier sessions (keep them current with memory_record / memory_forget):"
                 }
-                EntryKind::Subagent => {
-                    "Delegation specs available as subagent roles (reference one by its id):"
-                }
+                EntryKind::Subagent => "Delegation specs available as subagent roles (reference one by its id):",
             });
             let mut used = 0_usize;
             for entry in entries.into_iter().take(INJECT_LIMIT) {
@@ -1098,12 +922,8 @@ impl HarnessStore {
         let merged = self.merged();
         let mut lines: Vec<String> = Vec::new();
         for kind in EntryKind::ALL {
-            let entries: Vec<&HarnessEntry> = merged
-                .entries
-                .of(kind)
-                .values()
-                .filter(|entry| entry.in_scope(&self.workspace))
-                .collect();
+            let entries: Vec<&HarnessEntry> =
+                merged.entries.of(kind).values().filter(|entry| entry.in_scope(&self.workspace)).collect();
             lines.push(format!("{}: {}", kind.label(), entries.len()));
             for entry in entries {
                 lines.push(format!(
@@ -1113,7 +933,7 @@ impl HarnessStore {
                     entry.path,
                     entry.version,
                     entry.lifetime.label(),
-                    compact(&entry.content, 180)
+                    crate::text::clip(&crate::text::squeeze(&entry.content), 180, "…")
                 ));
             }
         }
@@ -1121,15 +941,12 @@ impl HarnessStore {
         let refinements = &merged.refinements;
         lines.push(format!("recent refinements: {}", refinements.len()));
         for event in refinements.iter().rev().take(5).collect::<Vec<_>>() {
-            let changes = if event.changes.is_empty() {
-                "no applied edits".to_owned()
-            } else {
-                event.changes.join(", ")
-            };
+            let changes =
+                if event.changes.is_empty() { "no applied edits".to_owned() } else { event.changes.join(", ") };
             lines.push(format!(
                 "- [{}] {}: {}",
                 event.id,
-                compact(&event.trigger, 120),
+                crate::text::clip(&crate::text::squeeze(&event.trigger), 120, "…"),
                 changes
             ));
         }
@@ -1163,7 +980,6 @@ impl HarnessStore {
         struct LegacyMemory {
             title: String,
             body: String,
-            #[serde(default)]
             workspace: Option<String>,
             created_at: DateTime<Utc>,
             updated_at: DateTime<Utc>,
@@ -1173,46 +989,27 @@ impl HarnessStore {
         {
             for memory in legacy {
                 let id = slug(&memory.title, "memory");
-                inner.durable.entries.memory.insert(
-                    id.clone(),
-                    HarnessEntry {
-                        id,
-                        kind: EntryKind::Memory,
-                        title: memory.title,
-                        content: truncate(memory.body.trim(), MAX_CONTENT_CHARS),
-                        path: default_path(),
-                        lifetime: Lifetime::Durable,
-                        workspace: memory.workspace,
-                        metadata: Map::new(),
-                        source: "migration".to_owned(),
-                        created_at: memory.created_at,
-                        updated_at: memory.updated_at,
-                        version: 1,
-                    },
-                );
+                let entry = HarnessEntry {
+                    title: memory.title,
+                    content: crate::text::clip(memory.body.trim(), MAX_CONTENT_CHARS, "…"),
+                    workspace: memory.workspace,
+                    created_at: memory.created_at,
+                    updated_at: memory.updated_at,
+                    ..HarnessEntry::next(None, EntryKind::Memory, &id, "migration")
+                };
+                inner.durable.entries.memory.insert(id, entry);
                 imported += 1;
             }
         }
 
         if let Some(notes) = read_notes_block(workspace_dir) {
-            let now = Utc::now();
-            inner.durable.entries.prompt.insert(
-                "working_notes".to_owned(),
-                HarnessEntry {
-                    id: "working_notes".to_owned(),
-                    kind: EntryKind::Prompt,
-                    title: "Working notes".to_owned(),
-                    content: truncate(&notes, MAX_CONTENT_CHARS),
-                    path: default_path(),
-                    lifetime: Lifetime::Durable,
-                    workspace: Some(self.workspace.clone()),
-                    metadata: Map::new(),
-                    source: "migration".to_owned(),
-                    created_at: now,
-                    updated_at: now,
-                    version: 1,
-                },
-            );
+            let entry = HarnessEntry {
+                title: "Working notes".to_owned(),
+                content: crate::text::clip(&notes, MAX_CONTENT_CHARS, "…"),
+                workspace: Some(self.workspace.clone()),
+                ..HarnessEntry::next(None, EntryKind::Prompt, "working_notes", "migration")
+            };
+            inner.durable.entries.prompt.insert(entry.id.clone(), entry);
             imported += 1;
         }
 
@@ -1223,11 +1020,12 @@ impl HarnessStore {
     }
 }
 
-/// The delegation roles Abacus ships with, as ordinary entries.
+/// The delegation roles Abacus ships with, as ordinary entries: id, title,
+/// whether the role is read-only, and its prompt.
 ///
 /// `read_only` in the metadata is enforced mechanically, not just instructed:
 /// a spec carrying it runs its worker in PLAN with mutations locked off.
-const BUILT_IN_SUBAGENTS: [(&str, &str, bool, &str); 3] = [
+pub const BUILT_IN_SUBAGENTS: [(&str, &str, bool, &str); 3] = [
     (
         "drone",
         "Drone — builder",
@@ -1260,32 +1058,22 @@ const BUILT_IN_SUBAGENTS: [(&str, &str, bool, &str); 3] = [
 /// a user who deleted one keeps it deleted only until the next seed — which is
 /// the right trade for roles the tool schema still names.
 fn seed_subagents(state: &mut HarnessState) -> usize {
-    let now = Utc::now();
     let mut added = 0;
     for (id, title, read_only, prompt) in BUILT_IN_SUBAGENTS {
         if state.entries.subagent.contains_key(id) {
             continue;
         }
-        let mut metadata = Map::new();
-        metadata.insert("read_only".to_owned(), Value::Bool(read_only));
-        metadata.insert("built_in".to_owned(), Value::Bool(true));
-        state.entries.subagent.insert(
-            id.to_owned(),
-            HarnessEntry {
-                id: id.to_owned(),
-                kind: EntryKind::Subagent,
-                title: title.to_owned(),
-                content: prompt.to_owned(),
-                path: "roles".to_owned(),
-                lifetime: Lifetime::Durable,
-                workspace: None,
-                metadata,
-                source: "built-in".to_owned(),
-                created_at: now,
-                updated_at: now,
-                version: 1,
-            },
-        );
+        let entry = HarnessEntry {
+            title: title.to_owned(),
+            content: prompt.to_owned(),
+            path: "roles".to_owned(),
+            metadata: Map::from_iter([
+                ("read_only".to_owned(), Value::Bool(read_only)),
+                ("built_in".to_owned(), Value::Bool(true)),
+            ]),
+            ..HarnessEntry::next(None, EntryKind::Subagent, id, "built-in")
+        };
+        state.entries.subagent.insert(id.to_owned(), entry);
         added += 1;
     }
     added
@@ -1330,17 +1118,12 @@ pub fn write_notes_block(workspace: &Path, notes: &str) -> Result<()> {
             if existing.is_empty() {
                 format!("{block}\n")
             } else {
-                let separator = if existing.ends_with('\n') {
-                    "\n"
-                } else {
-                    "\n\n"
-                };
+                let separator = if existing.ends_with('\n') { "\n" } else { "\n\n" };
                 format!("{existing}{separator}{block}\n")
             }
         }
     };
-    crate::config::atomic_write(&path, updated.as_bytes(), false)
-        .context("write AGENTS.md working notes")
+    crate::config::atomic_write(&path, updated.as_bytes(), false).context("write AGENTS.md working notes")
 }
 
 /// Read the abacus-managed block out of a workspace `AGENTS.md`, stripped of
@@ -1393,10 +1176,7 @@ mod tests {
 
     #[test]
     fn slugs_are_stable_and_bounded() {
-        assert_eq!(
-            slug("Auth flow uses one-shot tokens", "x"),
-            "auth_flow_uses_one_shot_tokens"
-        );
+        assert_eq!(slug("Auth flow uses one-shot tokens", "x"), "auth_flow_uses_one_shot_tokens");
         assert_eq!(slug("  ", "fallback"), "fallback");
         assert_eq!(slug("!!!", "fallback"), "fallback");
         assert!(slug(&"a b ".repeat(200), "x").chars().count() <= 80);
@@ -1410,12 +1190,7 @@ mod tests {
         let store = store(dir.path());
 
         let created = store.apply(
-            &proposal(vec![edit(
-                EditAction::Create,
-                EntryKind::Memory,
-                "auth_flow",
-                "tokens are one-shot",
-            )]),
+            &proposal(vec![edit(EditAction::Create, EntryKind::Memory, "auth_flow", "tokens are one-shot")]),
             Lifetime::Durable,
             None,
             None,
@@ -1443,11 +1218,7 @@ mod tests {
         // A rollback is itself a refinement, so it can be rolled back too.
         let unrolled = store.rollback(&rolled.id).unwrap();
         assert_eq!(unrolled.applied_count(), 1);
-        assert!(
-            store.merged().entries.memory["auth_flow"]
-                .content
-                .contains("60s")
-        );
+        assert!(store.merged().entries.memory["auth_flow"].content.contains("60s"));
     }
 
     #[test]
@@ -1475,12 +1246,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         store.apply(
-            &proposal(vec![edit(
-                EditAction::Create,
-                EntryKind::Memory,
-                "shared",
-                "v1",
-            )]),
+            &proposal(vec![edit(EditAction::Create, EntryKind::Memory, "shared", "v1")]),
             Lifetime::Durable,
             None,
             None,
@@ -1489,37 +1255,22 @@ mod tests {
         let baseline = store.baseline(Lifetime::Durable);
         // Another session writes while the planning call is in flight.
         store.apply(
-            &proposal(vec![edit(
-                EditAction::Update,
-                EntryKind::Memory,
-                "shared",
-                "v2 from the other session",
-            )]),
+            &proposal(vec![edit(EditAction::Update, EntryKind::Memory, "shared", "v2 from the other session")]),
             Lifetime::Durable,
             None,
             None,
         );
 
         let stale = store.apply(
-            &proposal(vec![edit(
-                EditAction::Update,
-                EntryKind::Memory,
-                "shared",
-                "v2 from the stale plan",
-            )]),
+            &proposal(vec![edit(EditAction::Update, EntryKind::Memory, "shared", "v2 from the stale plan")]),
             Lifetime::Durable,
             None,
             Some(&baseline),
         );
         assert_eq!(stale.applied_count(), 0);
-        assert_eq!(
-            stale.applied_edits[0].error.as_deref(),
-            Some("entry changed during refinement planning")
-        );
+        assert_eq!(stale.applied_edits[0].error.as_deref(), Some("entry changed during refinement planning"));
         assert!(
-            store.merged().entries.memory["shared"]
-                .content
-                .contains("other session"),
+            store.merged().entries.memory["shared"].content.contains("other session"),
             "the concurrent write must survive"
         );
     }
@@ -1538,10 +1289,7 @@ mod tests {
             None,
         );
         assert_eq!(result.applied_count(), 1);
-        assert_eq!(
-            result.applied_edits[0].error.as_deref(),
-            Some("entry not found")
-        );
+        assert_eq!(result.applied_edits[0].error.as_deref(), Some("entry not found"));
         assert!(store.merged().entries.memory.contains_key("present"));
     }
 
@@ -1567,12 +1315,7 @@ mod tests {
         assert!(store.snapshot().is_empty());
         // And the next write repairs the file.
         store.apply(
-            &proposal(vec![edit(
-                EditAction::Create,
-                EntryKind::Memory,
-                "fresh",
-                "body",
-            )]),
+            &proposal(vec![edit(EditAction::Create, EntryKind::Memory, "fresh", "body")]),
             Lifetime::Durable,
             None,
             None,
@@ -1586,23 +1329,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         store.apply(
-            &proposal(vec![edit(
-                EditAction::Create,
-                EntryKind::Memory,
-                "kept",
-                "durable",
-            )]),
+            &proposal(vec![edit(EditAction::Create, EntryKind::Memory, "kept", "durable")]),
             Lifetime::Durable,
             None,
             None,
         );
         store.apply(
-            &proposal(vec![edit(
-                EditAction::Create,
-                EntryKind::Memory,
-                "transient",
-                "session only",
-            )]),
+            &proposal(vec![edit(EditAction::Create, EntryKind::Memory, "transient", "session only")]),
             Lifetime::Session,
             None,
             None,
@@ -1610,11 +1343,7 @@ mod tests {
         assert_eq!(store.snapshot().len(), 2);
 
         let next_session = HarnessStore::load(dir.path().join("harness"), dir.path());
-        let ids: Vec<String> = next_session
-            .snapshot()
-            .into_iter()
-            .map(|entry| entry.id)
-            .collect();
+        let ids: Vec<String> = next_session.snapshot().into_iter().map(|entry| entry.id).collect();
         assert_eq!(ids, vec!["kept".to_owned()]);
     }
 
@@ -1632,9 +1361,7 @@ mod tests {
             assert_eq!(store.snapshot().len(), 1, "visible within its own session");
         }
         assert!(
-            HarnessStore::load(harness.clone(), dir.path())
-                .snapshot()
-                .is_empty(),
+            HarnessStore::load(harness.clone(), dir.path()).snapshot().is_empty(),
             "a twice-seen lesson must not yet persist"
         );
 
@@ -1660,9 +1387,7 @@ mod tests {
         }
         // Five recordings in one session are one piece of evidence, not five.
         assert!(
-            HarnessStore::load(harness, dir.path())
-                .snapshot()
-                .is_empty(),
+            HarnessStore::load(harness, dir.path()).snapshot().is_empty(),
             "repeating within a session must not fake recurrence"
         );
     }
@@ -1673,35 +1398,19 @@ mod tests {
         let store = store(dir.path());
         let first = json!({"title": "auth flow", "body": "v1"}).to_string();
         let second = json!({"title": "Auth Flow", "body": "v2"}).to_string();
+        assert!(store.execute("memory_record", &first).unwrap().contains("recorded"));
         assert!(
-            store
-                .execute("memory_record", &first)
-                .unwrap()
-                .contains("recorded")
-        );
-        assert!(
-            store
-                .execute("memory_record", &second)
-                .unwrap()
-                .contains("updated"),
+            store.execute("memory_record", &second).unwrap().contains("updated"),
             "title casing must resolve to the same entry"
         );
         assert_eq!(store.snapshot().len(), 1);
         assert_eq!(store.snapshot()[0].content, "v2");
 
         let forget = json!({"title": "auth flow"}).to_string();
-        assert!(
-            store
-                .execute("memory_forget", &forget)
-                .unwrap()
-                .contains("forgotten")
-        );
+        assert!(store.execute("memory_forget", &forget).unwrap().contains("forgotten"));
         assert!(store.snapshot().is_empty());
         assert!(
-            store
-                .execute("memory_forget", &forget)
-                .unwrap()
-                .starts_with("Error:"),
+            store.execute("memory_forget", &forget).unwrap().starts_with("Error:"),
             "forgetting twice must report the miss"
         );
     }
@@ -1710,30 +1419,17 @@ mod tests {
     fn workspace_scoping_hides_other_projects() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
+        store.execute("memory_record", &json!({"title": "local fact", "body": "only here"}).to_string()).unwrap();
         store
             .execute(
                 "memory_record",
-                &json!({"title": "local fact", "body": "only here"}).to_string(),
-            )
-            .unwrap();
-        store
-            .execute(
-                "memory_record",
-                &json!({"title": "everywhere", "body": "all projects", "scope": "global"})
-                    .to_string(),
+                &json!({"title": "everywhere", "body": "all projects", "scope": "global"}).to_string(),
             )
             .unwrap();
 
-        let elsewhere = HarnessStore {
-            inner: store.inner.clone(),
-            workspace: "/somewhere/else".to_owned(),
-            session: None,
-        };
-        let visible: Vec<String> = elsewhere
-            .snapshot()
-            .into_iter()
-            .map(|entry| entry.title)
-            .collect();
+        let elsewhere =
+            HarnessStore { inner: store.inner.clone(), workspace: "/somewhere/else".to_owned(), session: None };
+        let visible: Vec<String> = elsewhere.snapshot().into_iter().map(|entry| entry.title).collect();
         assert_eq!(visible, vec!["everywhere".to_owned()]);
     }
 
@@ -1741,19 +1437,9 @@ mod tests {
     fn prompt_context_is_bounded_and_grouped_by_kind() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
-        let mut edits = vec![edit(
-            EditAction::Create,
-            EntryKind::Prompt,
-            "style",
-            "match surrounding code",
-        )];
+        let mut edits = vec![edit(EditAction::Create, EntryKind::Prompt, "style", "match surrounding code")];
         for index in 0..40 {
-            edits.push(edit(
-                EditAction::Create,
-                EntryKind::Memory,
-                &format!("memory_{index}"),
-                &"x".repeat(300),
-            ));
+            edits.push(edit(EditAction::Create, EntryKind::Memory, &format!("memory_{index}"), &"x".repeat(300)));
         }
         store.apply(&proposal(edits), Lifetime::Durable, None, None);
 
@@ -1797,19 +1483,10 @@ mod tests {
         // user's data arriving.
         assert_eq!(store.migrate(&memories, workspace).unwrap(), 2);
         let merged = store.merged();
-        assert_eq!(
-            merged.entries.memory["auth_flow"].content,
-            "tokens are one-shot"
-        );
-        assert_eq!(
-            merged.entries.prompt["working_notes"].content,
-            "Current focus: the importer."
-        );
+        assert_eq!(merged.entries.memory["auth_flow"].content, "tokens are one-shot");
+        assert_eq!(merged.entries.prompt["working_notes"].content, "Current focus: the importer.");
         // Both arrive durable — they were already cross-session state.
-        assert_eq!(
-            merged.entries.memory["auth_flow"].lifetime,
-            Lifetime::Durable
-        );
+        assert_eq!(merged.entries.memory["auth_flow"].lifetime, Lifetime::Durable);
         // The legacy file is left alone.
         assert!(memories.is_file());
         // Idempotent: a second run must not re-import over a pruned store.
@@ -1820,18 +1497,9 @@ mod tests {
     fn migration_ignores_an_absent_or_empty_notes_block() {
         let dir = tempfile::tempdir().unwrap();
         let workspace = dir.path();
-        std::fs::write(
-            workspace.join("AGENTS.md"),
-            format!("# House rules\n\n{NOTES_START}\n{NOTES_END}\n"),
-        )
-        .unwrap();
+        std::fs::write(workspace.join("AGENTS.md"), format!("# House rules\n\n{NOTES_START}\n{NOTES_END}\n")).unwrap();
         let store = store(workspace);
-        assert_eq!(
-            store
-                .migrate(&workspace.join("nonexistent.json"), workspace)
-                .unwrap(),
-            0
-        );
+        assert_eq!(store.migrate(&workspace.join("nonexistent.json"), workspace).unwrap(), 0);
     }
 
     #[test]
@@ -1843,12 +1511,7 @@ mod tests {
 
         // A session-lifetime note stays out of a file the user commits.
         store.apply(
-            &proposal(vec![edit(
-                EditAction::Create,
-                EntryKind::Prompt,
-                "transient",
-                "only for now",
-            )]),
+            &proposal(vec![edit(EditAction::Create, EntryKind::Prompt, "transient", "only for now")]),
             Lifetime::Session,
             None,
             None,
@@ -1858,22 +1521,14 @@ mod tests {
         assert!(!content.contains("only for now"), "{content}");
 
         store.apply(
-            &proposal(vec![edit(
-                EditAction::Create,
-                EntryKind::Prompt,
-                "style",
-                "match the surrounding code",
-            )]),
+            &proposal(vec![edit(EditAction::Create, EntryKind::Prompt, "style", "match the surrounding code")]),
             Lifetime::Durable,
             None,
             None,
         );
         store.render_notes(dir.path()).unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            content.starts_with("# My rules\n\nAlways run fmt.\n"),
-            "{content}"
-        );
+        assert!(content.starts_with("# My rules\n\nAlways run fmt.\n"), "{content}");
         assert!(content.contains("match the surrounding code"));
         assert_eq!(content.matches(NOTES_START).count(), 1);
     }
@@ -1908,12 +1563,7 @@ mod tests {
         let harness = dir.path().join("harness");
         let first = HarnessStore::load(harness.clone(), dir.path());
         let created = first.apply(
-            &proposal(vec![edit(
-                EditAction::Create,
-                EntryKind::Memory,
-                "regret",
-                "a hasty lesson",
-            )]),
+            &proposal(vec![edit(EditAction::Create, EntryKind::Memory, "regret", "a hasty lesson")]),
             Lifetime::Durable,
             None,
             None,
@@ -1929,9 +1579,7 @@ mod tests {
     fn built_in_delegation_roles_are_seeded_as_editable_entries() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
-        store
-            .migrate(&dir.path().join("nothing.json"), dir.path())
-            .unwrap();
+        store.migrate(&dir.path().join("nothing.json"), dir.path()).unwrap();
 
         let roles = store.snapshot_of(EntryKind::Subagent);
         let ids: Vec<&str> = roles.iter().map(|entry| entry.id.as_str()).collect();
@@ -1942,34 +1590,19 @@ mod tests {
         let scout = roles.iter().find(|entry| entry.id == "scout").unwrap();
         assert_eq!(scout.metadata["read_only"], serde_json::json!(true));
         assert_eq!(
-            roles
-                .iter()
-                .find(|entry| entry.id == "drone")
-                .unwrap()
-                .metadata["read_only"],
+            roles.iter().find(|entry| entry.id == "drone").unwrap().metadata["read_only"],
             serde_json::json!(false)
         );
 
         // Seeding is idempotent and does not fight an edit.
         store.apply(
-            &proposal(vec![edit(
-                EditAction::Update,
-                EntryKind::Subagent,
-                "scout",
-                "A revised scout brief.",
-            )]),
+            &proposal(vec![edit(EditAction::Update, EntryKind::Subagent, "scout", "A revised scout brief.")]),
             Lifetime::Durable,
             None,
             None,
         );
-        store
-            .migrate(&dir.path().join("nothing.json"), dir.path())
-            .unwrap();
-        let scout = store
-            .snapshot_of(EntryKind::Subagent)
-            .into_iter()
-            .find(|entry| entry.id == "scout")
-            .unwrap();
+        store.migrate(&dir.path().join("nothing.json"), dir.path()).unwrap();
+        let scout = store.snapshot_of(EntryKind::Subagent).into_iter().find(|entry| entry.id == "scout").unwrap();
         assert_eq!(scout.content, "A revised scout brief.");
     }
 
@@ -1979,12 +1612,7 @@ mod tests {
         let harness = dir.path().join("harness");
         let first = HarnessStore::load(harness.clone(), dir.path());
         first.apply(
-            &proposal(vec![edit(
-                EditAction::Create,
-                EntryKind::Memory,
-                "in_progress",
-                "mid-task state",
-            )]),
+            &proposal(vec![edit(EditAction::Create, EntryKind::Memory, "in_progress", "mid-task state")]),
             Lifetime::Session,
             None,
             None,
@@ -2000,10 +1628,7 @@ mod tests {
         assert_eq!(resumed.snapshot()[0].lifetime, Lifetime::Session);
 
         let unrelated = HarnessStore::load(harness, dir.path());
-        assert!(
-            unrelated.snapshot().is_empty(),
-            "session state must not leak into another session"
-        );
+        assert!(unrelated.snapshot().is_empty(), "session state must not leak into another session");
     }
 
     #[test]
@@ -2046,12 +1671,7 @@ mod tests {
     fn an_inert_store_persists_nothing_but_still_answers() {
         let store = HarnessStore::default();
         // Subagents get this: recording must not panic or write anywhere.
-        let reply = store
-            .execute(
-                "memory_record",
-                &json!({"title": "t", "body": "b"}).to_string(),
-            )
-            .unwrap();
+        let reply = store.execute("memory_record", &json!({"title": "t", "body": "b"}).to_string()).unwrap();
         assert!(reply.contains("recorded"), "{reply}");
         assert!(store.history().is_empty());
         assert_eq!(store.snapshot().len(), 1);

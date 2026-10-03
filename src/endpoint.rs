@@ -31,7 +31,6 @@ use crate::config::ProviderProtocol;
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScriptedEndpoint {
     /// Display name; falls back to the file stem.
-    #[serde(default)]
     pub name: Option<String>,
     /// The full request URL, used verbatim — this replaces the base-url +
     /// protocol-path construction entirely.
@@ -41,15 +40,12 @@ pub struct ScriptedEndpoint {
     pub protocol: ProviderProtocol,
     /// Optional model this endpoint serves, filled in when the profile leaves
     /// its model blank.
-    #[serde(default)]
     pub model: Option<String>,
     /// Optional models-list URL for `abacus models` and limit detection. When
     /// absent, detection is simply skipped for this endpoint.
-    #[serde(default)]
     pub models_url: Option<String>,
     /// How to authenticate. Absent means "use the profile's ordinary API key"
     /// (or none).
-    #[serde(default)]
     pub auth: Option<Auth>,
     /// Extra static headers sent on every request. Values may contain
     /// `{uuid}`/`{session}`, replaced with a per-session random hex UUID — for
@@ -59,7 +55,6 @@ pub struct ScriptedEndpoint {
     /// Text prepended as the first system block (Anthropic) or to the system
     /// message (OpenAI). This is how the Anthropic billing-attribution line is
     /// injected: it must be its own leading system block.
-    #[serde(default)]
     pub system_prefix: Option<String>,
     /// Body fields deep-merged onto every request after Abacus builds it —
     /// scripted values win, so this is how a required `store: false` or
@@ -83,20 +78,15 @@ pub struct Auth {
     #[serde(default = "default_auth_format")]
     pub format: String,
     /// A literal token. Discouraged — prefer a source that is not in the file.
-    #[serde(default)]
     pub token: Option<String>,
     /// Environment variable holding the token.
-    #[serde(default)]
     pub env: Option<String>,
     /// A JSON file to read the token from (e.g. an OAuth `auth.json`).
-    #[serde(default)]
     pub file: Option<PathBuf>,
     /// Dotted path (`tokens.access_token`) or JSON Pointer (`/tokens/access_token`)
     /// into `file`. When absent, the whole file is used, trimmed.
-    #[serde(default)]
     pub file_field: Option<String>,
     /// A command whose stdout is the token — for a source that must refresh.
-    #[serde(default)]
     pub command: Option<Vec<String>>,
 }
 
@@ -112,30 +102,20 @@ impl ScriptedEndpoint {
     /// name maps to `<endpoints_dir>/<name>.yaml`; a value containing a path
     /// separator or ending in `.yaml`/`.yml` is treated as an explicit path.
     pub fn resolve(reference: &str, endpoints_dir: &Path) -> Result<Self> {
-        let candidate = if reference.contains('/')
-            || reference.ends_with(".yaml")
-            || reference.ends_with(".yml")
-        {
+        let candidate = if reference.contains('/') || reference.ends_with(".yaml") || reference.ends_with(".yml") {
             expand_home(reference)
         } else {
             endpoints_dir.join(format!("{reference}.yaml"))
         };
-        let content = std::fs::read_to_string(&candidate).with_context(|| {
-            format!(
-                "could not read scripted endpoint `{reference}` at {}",
-                candidate.display()
-            )
-        })?;
+        let content = std::fs::read_to_string(&candidate)
+            .with_context(|| format!("could not read scripted endpoint `{reference}` at {}", candidate.display()))?;
         let mut endpoint: ScriptedEndpoint = serde_yaml::from_str(&content)
             .with_context(|| format!("invalid scripted endpoint {}", candidate.display()))?;
         if endpoint.url.trim().is_empty() {
             bail!("scripted endpoint {} has no `url`", candidate.display());
         }
         if endpoint.name.is_none() {
-            endpoint.name = candidate
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .map(str::to_owned);
+            endpoint.name = candidate.file_stem().and_then(|stem| stem.to_str()).map(str::to_owned);
         }
         Ok(endpoint)
     }
@@ -148,14 +128,7 @@ impl ScriptedEndpoint {
     pub fn resolved_headers(&self, session: &str) -> Vec<(String, String)> {
         self.headers
             .iter()
-            .map(|(name, value)| {
-                (
-                    name.clone(),
-                    value
-                        .replace("{uuid}", session)
-                        .replace("{session}", session),
-                )
-            })
+            .map(|(name, value)| (name.clone(), value.replace("{uuid}", session).replace("{session}", session)))
             .collect()
     }
 
@@ -164,9 +137,7 @@ impl ScriptedEndpoint {
     /// default header of their own skip it when this is true, leaving the
     /// file authoritative.
     pub fn sets_header(&self, name: &str) -> bool {
-        self.headers
-            .keys()
-            .any(|header| header.eq_ignore_ascii_case(name))
+        self.headers.keys().any(|header| header.eq_ignore_ascii_case(name))
     }
 
     /// The request URL — always the verbatim `url`, the `protocol` argument is
@@ -184,21 +155,13 @@ impl ScriptedEndpoint {
         let token = if let Some(literal) = &auth.token {
             literal.clone()
         } else if let Some(name) = &auth.env {
-            std::env::var(name).with_context(|| {
-                format!("auth env `{name}` is not set for {}", self.display_name())
-            })?
+            std::env::var(name).with_context(|| format!("auth env `{name}` is not set for {}", self.display_name()))?
         } else if let Some(file) = &auth.file {
-            token_from_file(
-                &expand_home(&file.to_string_lossy()),
-                auth.file_field.as_deref(),
-            )?
+            token_from_file(&expand_home(&file.to_string_lossy()), auth.file_field.as_deref())?
         } else if let Some(command) = &auth.command {
             token_from_command(command)?
         } else {
-            bail!(
-                "scripted endpoint {} has `auth` but no token source (token/env/file/command)",
-                self.display_name()
-            )
+            bail!("scripted endpoint {} has `auth` but no token source (token/env/file/command)", self.display_name())
         };
         let token = token.trim();
         if token.is_empty() {
@@ -211,10 +174,7 @@ impl ScriptedEndpoint {
     pub fn auth_header(&self) -> Result<Option<(String, String)>> {
         match self.resolve_token()? {
             Some(value) => Ok(Some((
-                self.auth
-                    .as_ref()
-                    .map(|auth| auth.header.clone())
-                    .unwrap_or_else(default_auth_header),
+                self.auth.as_ref().map(|auth| auth.header.clone()).unwrap_or_else(default_auth_header),
                 value,
             ))),
             None => Ok(None),
@@ -249,13 +209,13 @@ fn merge_value(base: &mut Value, overlay: &Value) {
 }
 
 fn token_from_file(path: &Path, field: Option<&str>) -> Result<String> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("could not read auth file {}", path.display()))?;
+    let content =
+        std::fs::read_to_string(path).with_context(|| format!("could not read auth file {}", path.display()))?;
     let Some(field) = field else {
         return Ok(content.trim().to_owned());
     };
-    let value: Value = serde_json::from_str(&content)
-        .with_context(|| format!("auth file {} is not JSON", path.display()))?;
+    let value: Value =
+        serde_json::from_str(&content).with_context(|| format!("auth file {} is not JSON", path.display()))?;
     let found = if let Some(pointer) = field.strip_prefix('/') {
         value.pointer(&format!("/{pointer}"))
     } else {
@@ -279,10 +239,7 @@ fn token_from_command(command: &[String]) -> Result<String> {
         .output()
         .with_context(|| format!("could not run auth command `{program}`"))?;
     if !output.status.success() {
-        bail!(
-            "auth command `{program}` failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        bail!("auth command `{program}` failed: {}", String::from_utf8_lossy(&output.stderr).trim());
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
@@ -319,11 +276,7 @@ mod tests {
             }
             let endpoint = ScriptedEndpoint::resolve(path.to_str().unwrap(), &examples)
                 .unwrap_or_else(|error| panic!("{} does not parse: {error:#}", path.display()));
-            assert!(
-                endpoint.url.starts_with("https://"),
-                "{} must call a https url",
-                path.display()
-            );
+            assert!(endpoint.url.starts_with("https://"), "{} must call a https url", path.display());
             seen += 1;
         }
         assert!(seen >= 4, "expected the shipped examples, found {seen}");
@@ -334,11 +287,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // A JSON token file in the OAuth shape from the reference doc.
         let auth_file = dir.path().join("auth.json");
-        std::fs::write(
-            &auth_file,
-            json!({"tokens": {"access_token": "sk-oauth-123"}}).to_string(),
-        )
-        .unwrap();
+        std::fs::write(&auth_file, json!({"tokens": {"access_token": "sk-oauth-123"}}).to_string()).unwrap();
         write(
             dir.path(),
             "codex",
@@ -354,10 +303,7 @@ mod tests {
 
         let endpoint = ScriptedEndpoint::resolve("codex", dir.path()).unwrap();
         assert_eq!(endpoint.protocol, ProviderProtocol::Responses);
-        assert_eq!(
-            endpoint.request_url(),
-            "https://chatgpt.com/backend-api/codex/responses"
-        );
+        assert_eq!(endpoint.request_url(), "https://chatgpt.com/backend-api/codex/responses");
         let (header, value) = endpoint.auth_header().unwrap().unwrap();
         assert_eq!(header, "Authorization");
         assert_eq!(value, "Bearer sk-oauth-123");
@@ -373,15 +319,8 @@ mod tests {
         endpoint.apply_to_body(&mut body);
         assert_eq!(body["store"], json!(false), "override wins");
         assert_eq!(body["reasoning"]["effort"], json!("low"), "deep merge");
-        assert_eq!(
-            body["reasoning"]["summary"],
-            json!("auto"),
-            "unmentioned nested keys survive"
-        );
-        assert!(
-            body.get("parallel_tool_calls").is_none(),
-            "removed key gone"
-        );
+        assert_eq!(body["reasoning"]["summary"], json!("auto"), "unmentioned nested keys survive");
+        assert!(body.get("parallel_tool_calls").is_none(), "removed key gone");
         assert_eq!(body["stream"], json!(true), "untouched field stays");
     }
 
@@ -406,11 +345,7 @@ mod tests {
     #[test]
     fn no_auth_block_means_no_auth_header() {
         let dir = tempfile::tempdir().unwrap();
-        write(
-            dir.path(),
-            "open",
-            "url: https://example.test/v1/chat/completions\n",
-        );
+        write(dir.path(), "open", "url: https://example.test/v1/chat/completions\n");
         let endpoint = ScriptedEndpoint::resolve("open", dir.path()).unwrap();
         assert!(endpoint.auth_header().unwrap().is_none());
     }
@@ -443,25 +378,13 @@ mod tests {
         let endpoint = ScriptedEndpoint::resolve(path.to_str().unwrap(), &examples)
             .unwrap_or_else(|error| panic!("grok-oauth does not parse: {error:#}"));
         assert_eq!(endpoint.protocol, ProviderProtocol::ChatCompletions);
-        assert_eq!(
-            endpoint.request_url(),
-            "https://cli-chat-proxy.grok.com/v1/chat/completions"
-        );
+        assert_eq!(endpoint.request_url(), "https://cli-chat-proxy.grok.com/v1/chat/completions");
         let auth = endpoint.auth.as_ref().expect("grok-oauth has auth");
-        assert!(
-            auth.command.is_some(),
-            "token comes from a command, not a literal"
-        );
+        assert!(auth.command.is_some(), "token comes from a command, not a literal");
         assert!(auth.token.is_none(), "no inline token in the shipped file");
         assert_eq!(auth.header, "Authorization");
         assert_eq!(auth.format, "Bearer {token}");
-        let version = endpoint
-            .headers
-            .get("X-Grok-Client-Version")
-            .expect("proxy requires the client-version header");
-        assert!(
-            !version.is_empty() && !version.contains("{token}"),
-            "version header is static: {version}"
-        );
+        let version = endpoint.headers.get("X-Grok-Client-Version").expect("proxy requires the client-version header");
+        assert!(!version.is_empty() && !version.contains("{token}"), "version header is static: {version}");
     }
 }

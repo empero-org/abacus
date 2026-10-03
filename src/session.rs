@@ -14,6 +14,79 @@ use crate::task::Task;
 
 const SESSION_VERSION: u32 = 3;
 
+/// What a conversation carries between turns: the state the model reads and
+/// writes as it works. Restored from a saved session, handed to every turn,
+/// and written back to the session when the turn ends. Every front end — the
+/// TUI, a headless run, the app server — holds one of these.
+#[derive(Clone, Default)]
+pub struct SessionState {
+    pub goal: crate::goal::GoalState,
+    pub tasks: crate::task::TaskList,
+    pub compaction: CompactionState,
+    /// What the session is trying to achieve, and drift-check bookkeeping.
+    pub tether: crate::tether::TetherState,
+    pub harness: crate::harness::HarnessStore,
+    /// Large tool outputs bound as inspectable variables.
+    pub handles: crate::handles::HandleStore,
+    /// Mid-turn arrivals: user steering and finished background subagents.
+    pub injections: crate::agent::InjectionQueue,
+}
+
+impl SessionState {
+    /// The state `session` left off with, or a fresh one.
+    ///
+    /// `key` names the session to the harness, which counts *distinct
+    /// sessions* when promoting a lesson to durable — so a run with no saved
+    /// session yet still needs a stable key, or it contributes no evidence.
+    pub fn open(config: &crate::config::Config, session: Option<&Session>, key: String) -> Self {
+        let harness = crate::harness::HarnessStore::load_migrated(
+            config.paths.harness_dir.clone(),
+            &config.workspace,
+            &config.paths.memories_file,
+        )
+        .with_session(key);
+        if let Some(state) = session.and_then(|session| session.harness.clone()) {
+            harness.restore_session(state);
+        }
+        Self {
+            goal: crate::goal::GoalState::new(session.and_then(|session| session.goal.clone())),
+            tasks: crate::task::TaskList::new(session.map(|session| session.tasks.clone()).unwrap_or_default()),
+            compaction: session.and_then(|session| session.compaction.clone()).unwrap_or_default(),
+            tether: crate::tether::TetherState::new(session.and_then(|session| session.intent.clone())),
+            harness,
+            handles: Default::default(),
+            injections: Default::default(),
+        }
+    }
+
+    /// Write this state into `session`, ready to be saved.
+    pub fn save(&self, session: &mut Session) {
+        session.intent = self.tether.intent();
+        session.harness = Some(self.harness.session_snapshot());
+        session.goal = self.goal.snapshot();
+        session.tasks = self.tasks.snapshot();
+        session.compaction = Some(self.compaction.clone());
+    }
+
+    /// The options for a turn over this state, shaped by `config`.
+    pub fn turn(
+        &self,
+        config: &crate::config::Config,
+        services: std::sync::Arc<crate::services::AgentServices>,
+    ) -> crate::agent::TurnOptions {
+        crate::agent::TurnOptions {
+            goal: self.goal.clone(),
+            tasks: self.tasks.clone(),
+            compaction: self.compaction.clone(),
+            tether: self.tether.clone(),
+            harness: self.harness.clone(),
+            handles: self.handles.clone(),
+            injections: self.injections.clone(),
+            ..crate::agent::TurnOptions::for_config(config, services)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub version: u32,
@@ -25,22 +98,17 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub messages: Vec<Value>,
-    #[serde(default)]
     pub goal: Option<Goal>,
-    #[serde(default)]
     pub ralph_loop: Option<RalphLoop>,
     #[serde(default)]
     pub tasks: Vec<Task>,
-    #[serde(default)]
     pub compaction: Option<CompactionState>,
     /// Tether snapshot: what this session is trying to achieve. Captured after
     /// the first answered prompt, refreshed before compaction.
-    #[serde(default)]
     pub intent: Option<String>,
     /// Session-lifetime harness entries. Durable ones live in `~/.abacus`;
     /// these are the ones that have not yet earned a place there, so they ride
     /// the session and are gone when it is.
-    #[serde(default)]
     pub harness: Option<crate::harness::HarnessState>,
     /// Approximate provider-reported token total accumulated across resumes.
     #[serde(default)]
@@ -78,11 +146,10 @@ impl Session {
         self.messages = messages;
         self.updated_at = Utc::now();
         if self.title == "New session"
-            && let Some(prompt) = self.messages.iter().find_map(|message| {
-                (message["role"] == "user")
-                    .then(|| message["content"].as_str())
-                    .flatten()
-            })
+            && let Some(prompt) = self
+                .messages
+                .iter()
+                .find_map(|message| (message["role"] == "user").then(|| message["content"].as_str()).flatten())
         {
             self.title = title_from_prompt(prompt);
         }
@@ -138,20 +205,13 @@ pub struct SessionStore {
 impl SessionStore {
     pub fn new(paths: &AbacusPaths, workspace: PathBuf) -> Self {
         let directory = paths.sessions_dir.join(workspace_key(&workspace));
-        Self {
-            directory,
-            workspace,
-        }
+        Self { directory, workspace }
     }
 
     pub fn create(&self, profile: String, model: String, messages: Vec<Value>) -> Result<Session> {
         let session = Session::new(self.workspace.clone(), profile, model, messages);
         self.save(&session)?;
         Ok(session)
-    }
-
-    pub fn for_session(paths: &AbacusPaths, workspace: PathBuf) -> Self {
-        Self::new(paths, workspace)
     }
 
     pub fn save(&self, session: &Session) -> Result<()> {
@@ -162,10 +222,8 @@ impl SessionStore {
 
     pub fn load(&self, id_or_prefix: &str) -> Result<Session> {
         let summaries = self.list()?;
-        let matches = summaries
-            .iter()
-            .filter(|session| session.id.to_string().starts_with(id_or_prefix))
-            .collect::<Vec<_>>();
+        let matches =
+            summaries.iter().filter(|session| session.id.to_string().starts_with(id_or_prefix)).collect::<Vec<_>>();
         match matches.as_slice() {
             [] => bail!("no session matches `{id_or_prefix}`"),
             [session] => self.load_exact(session.id),
@@ -233,9 +291,6 @@ impl SessionStore {
     /// Older session files predate persisted token totals, so their transcript
     /// size provides a best-effort estimate instead of leaving the chart empty.
     pub fn usage(&self) -> Result<Vec<SessionUsage>> {
-        if !self.directory.exists() {
-            return Ok(Vec::new());
-        }
         let mut usage = self
             .headers()?
             .into_iter()
@@ -244,11 +299,7 @@ impl SessionStore {
                 // Legacy sessions predate persisted totals. The file's size
                 // stands in for the transcript's size, which is what the old
                 // estimate measured anyway — without re-encoding it to find out.
-                let tokens_used = if tokens_estimated {
-                    size / 4
-                } else {
-                    header.tokens_used
-                };
+                let tokens_used = if tokens_estimated { size / 4 } else { header.tokens_used };
                 SessionUsage {
                     id: header.id,
                     model: header.model,
@@ -277,10 +328,8 @@ impl SessionStore {
 
     fn load_exact(&self, id: Uuid) -> Result<Session> {
         let path = self.path(id);
-        let content = fs::read(&path)
-            .with_context(|| format!("could not read session {}", path.display()))?;
-        let mut session: Session =
-            serde_json::from_slice(&content).context("invalid session file")?;
+        let content = fs::read(&path).with_context(|| format!("could not read session {}", path.display()))?;
+        let mut session: Session = serde_json::from_slice(&content).context("invalid session file")?;
         if session.version > SESSION_VERSION {
             bail!("session requires a newer version of Abacus");
         }
@@ -291,25 +340,14 @@ impl SessionStore {
         Ok(session)
     }
 
-    pub fn path_for(&self, id: Uuid) -> PathBuf {
-        self.path(id)
-    }
-
-    fn path(&self, id: Uuid) -> PathBuf {
+    pub fn path(&self, id: Uuid) -> PathBuf {
         self.directory.join(format!("{id}.json"))
     }
 }
 
 fn title_from_prompt(prompt: &str) -> String {
-    let one_line = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
-    let title = one_line.chars().take(72).collect::<String>();
-    if title.is_empty() {
-        "New session".to_owned()
-    } else if one_line.chars().count() > 72 {
-        format!("{title}…")
-    } else {
-        title
-    }
+    let title = crate::text::clip(&crate::text::squeeze(prompt), 72, "…");
+    if title.is_empty() { "New session".to_owned() } else { title }
 }
 
 /// Fix message-history corruption left behind by interrupted or failed turns,
@@ -454,20 +492,13 @@ mod tests {
         fs::create_dir(&workspace).unwrap();
         let paths = AbacusPaths::under(dir.path().join("home"));
         let store = SessionStore::new(&paths, workspace.canonicalize().unwrap());
-        let mut session = store
-            .create(
-                "local".into(),
-                "model".into(),
-                vec![json!({"role":"system","content":"x"})],
-            )
-            .unwrap();
+        let mut session =
+            store.create("local".into(), "model".into(), vec![json!({"role":"system","content":"x"})]).unwrap();
         session.update_messages(vec![
             json!({"role":"system","content":"x"}),
             json!({"role":"user","content":"Fix the parser without changing its API"}),
         ]);
-        session.ralph_loop = Some(
-            crate::ralph::RalphLoop::new("Keep fixing".into(), "DONE".into(), Some(5)).unwrap(),
-        );
+        session.ralph_loop = Some(crate::ralph::RalphLoop::new("Keep fixing".into(), "DONE".into(), Some(5)).unwrap());
         session.tokens_used = 12_345;
         session.active_secs = 3_661;
         store.save(&session).unwrap();
@@ -535,12 +566,7 @@ mod tests {
         // The valid-but-unanswered call gained a synthetic result right after it.
         assert_eq!(messages[1]["role"], "tool");
         assert_eq!(messages[1]["tool_call_id"], "unanswered");
-        assert!(
-            messages[1]["content"]
-                .as_str()
-                .unwrap()
-                .contains("interrupted")
-        );
+        assert!(messages[1]["content"].as_str().unwrap().contains("interrupted"));
         // The ghost result is gone.
         assert!(!messages.iter().any(|m| m["tool_call_id"] == "ghost"));
     }

@@ -1,3 +1,4 @@
+use crate::schema::{boolean, integer, req, tool};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result, bail};
@@ -22,11 +23,7 @@ impl TaskList {
     }
 
     pub fn snapshot(&self) -> Vec<Task> {
-        self.0
-            .read()
-            .ok()
-            .map(|tasks| tasks.clone())
-            .unwrap_or_default()
+        self.0.read().ok().map(|tasks| tasks.clone()).unwrap_or_default()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -34,10 +31,7 @@ impl TaskList {
     }
 
     fn create(&self, texts: Vec<String>) -> Result<Vec<Task>> {
-        let mut state = self
-            .0
-            .write()
-            .map_err(|_| anyhow::anyhow!("task lock poisoned"))?;
+        let mut state = self.0.write().map_err(|_| anyhow::anyhow!("task lock poisoned"))?;
         if state.len() + texts.len() > MAX_TASKS {
             bail!("task list would exceed the {MAX_TASKS} entry limit");
         }
@@ -61,13 +55,8 @@ impl TaskList {
     }
 
     fn update(&self, index: usize, done: bool) -> Result<Task> {
-        let mut state = self
-            .0
-            .write()
-            .map_err(|_| anyhow::anyhow!("task lock poisoned"))?;
-        let position = index
-            .checked_sub(1)
-            .context("task index is 1-based and must be at least 1")?;
+        let mut state = self.0.write().map_err(|_| anyhow::anyhow!("task lock poisoned"))?;
+        let position = index.checked_sub(1).context("task index is 1-based and must be at least 1")?;
         let task = state.get_mut(position).context("no task at that index")?;
         task.done = done;
         Ok(task.clone())
@@ -78,19 +67,7 @@ impl TaskList {
         if tasks.is_empty() {
             return String::new();
         }
-        let rendered = tasks
-            .iter()
-            .enumerate()
-            .map(|(index, task)| {
-                format!(
-                    "{}. [{}] {}",
-                    index + 1,
-                    if task.done { 'x' } else { ' ' },
-                    task.text
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let rendered = render_tasks(&tasks);
         let pending_count = tasks.iter().filter(|task| !task.done).count();
         format!(
             "<task_list>\n{rendered}\n</task_list>\n\
@@ -106,40 +83,23 @@ impl TaskList {
 
     pub fn tool_specs() -> Vec<Value> {
         vec![
-            function(
+            tool(
                 "task_create",
                 "Add one or more tasks to the session task list for tracking multi-step work the agent will complete itself. NOT for asking the user questions — respond in plain text for that. Each entry is a concrete action item with a verifiable outcome.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "tasks": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Action items the agent will complete. Each must describe concrete work with a verifiable outcome, not a question for the user.",
-                            "minItems": 1,
-                            "maxItems": 50
-                        }
-                    },
-                    "required": ["tasks"]
-                }),
+                [req(
+                    "tasks",
+                    json!({"type": "array", "items": {"type": "string"}, "description": "Action items the agent will complete. Each must describe concrete work with a verifiable outcome, not a question for the user.", "minItems": 1, "maxItems": 50}),
+                )],
             ),
-            function(
+            tool(
                 "task_update",
                 "Mark a task complete or pending by its 1-based index in the task list. Mark a task done only after its outcome is verified (test passed, file written, build green, etc.).",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "index": {"type": "integer", "description": "1-based position from task_list"},
-                        "done": {"type": "boolean", "description": "true to mark complete after verifying the outcome, false to reopen"}
-                    },
-                    "required": ["index", "done"]
-                }),
+                [
+                    req("index", integer("1-based position from task_list")),
+                    req("done", boolean("true to mark complete after verifying the outcome, false to reopen")),
+                ],
             ),
-            function(
-                "task_list",
-                "Read the current session task list with completion state.",
-                json!({"type": "object", "properties": {}}),
-            ),
+            tool("task_list", "Read the current session task list with completion state.", []),
         ]
     }
 
@@ -150,7 +110,7 @@ impl TaskList {
             "task_update" => self.update_from_args(arguments),
             _ => return None,
         };
-        Some(result.unwrap_or_else(|error| format!("Error: {error:#}")))
+        Some(crate::tools::reply(result))
     }
 
     fn list_output(&self) -> Result<String> {
@@ -168,11 +128,7 @@ impl TaskList {
         }
         let args: Args = serde_json::from_str(arguments)?;
         let added = self.create(args.tasks)?;
-        Ok(format!(
-            "Created {} task(s).\n{}",
-            added.len(),
-            render_tasks(&self.snapshot())
-        ))
+        Ok(format!("Created {} task(s).\n{}", added.len(), render_tasks(&self.snapshot())))
     }
 
     fn update_from_args(&self, arguments: &str) -> Result<String> {
@@ -183,11 +139,7 @@ impl TaskList {
         }
         let args: Args = serde_json::from_str(arguments)?;
         let task = self.update(args.index, args.done)?;
-        Ok(format!(
-            "Task {} marked {}.",
-            args.index,
-            if task.done { "complete" } else { "pending" }
-        ))
+        Ok(format!("Task {} marked {}.", args.index, if task.done { "complete" } else { "pending" }))
     }
 }
 
@@ -195,23 +147,9 @@ fn render_tasks(tasks: &[Task]) -> String {
     tasks
         .iter()
         .enumerate()
-        .map(|(index, task)| {
-            format!(
-                "{}. [{}] {}",
-                index + 1,
-                if task.done { 'x' } else { ' ' },
-                task.text
-            )
-        })
+        .map(|(index, task)| format!("{}. [{}] {}", index + 1, if task.done { 'x' } else { ' ' }, task.text))
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn function(name: &str, description: &str, parameters: Value) -> Value {
-    json!({
-        "type": "function",
-        "function": {"name": name, "description": description, "parameters": parameters}
-    })
 }
 
 #[cfg(test)]
@@ -221,8 +159,7 @@ mod tests {
     #[test]
     fn task_lifecycle_create_update_and_render() {
         let list = TaskList::default();
-        list.create_from_args(r#"{"tasks":["write tests","run lint"]}"#)
-            .unwrap();
+        list.create_from_args(r#"{"tasks":["write tests","run lint"]}"#).unwrap();
         assert!(list.prompt_context().contains("1. [ ] write tests"));
         list.update_from_args(r#"{"index":1,"done":true}"#).unwrap();
         assert!(list.prompt_context().contains("1. [x] write tests"));

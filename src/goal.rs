@@ -1,3 +1,4 @@
+use crate::schema::{opt, req, tool};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result, bail};
@@ -23,7 +24,6 @@ pub struct Goal {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub iterations: u32,
-    #[serde(default)]
     pub note: Option<String>,
 }
 
@@ -56,10 +56,7 @@ impl GoalState {
     }
 
     pub fn set(&self, goal: Option<Goal>) -> Result<()> {
-        *self
-            .0
-            .write()
-            .map_err(|_| anyhow::anyhow!("goal lock poisoned"))? = goal;
+        *self.0.write().map_err(|_| anyhow::anyhow!("goal lock poisoned"))? = goal;
         Ok(())
     }
 
@@ -69,16 +66,21 @@ impl GoalState {
         Ok(goal)
     }
 
+    /// Change the goal in place, and stamp it when the change goes through.
+    fn change<T>(&self, change: impl FnOnce(&mut Goal) -> Result<T>) -> Result<T> {
+        let mut state = self.0.write().map_err(|_| anyhow::anyhow!("goal lock poisoned"))?;
+        let goal = state.as_mut().context("no goal is set")?;
+        let outcome = change(goal)?;
+        goal.updated_at = Utc::now();
+        Ok(outcome)
+    }
+
     pub fn edit(&self, objective: &str) -> Result<Goal> {
         let objective = validate_objective(objective)?;
-        let mut state = self
-            .0
-            .write()
-            .map_err(|_| anyhow::anyhow!("goal lock poisoned"))?;
-        let goal = state.as_mut().context("no goal is set")?;
-        goal.objective = objective;
-        goal.updated_at = Utc::now();
-        Ok(goal.clone())
+        self.change(|goal| {
+            goal.objective = objective;
+            Ok(goal.clone())
+        })
     }
 
     pub fn pause(&self) -> Result<Goal> {
@@ -90,36 +92,27 @@ impl GoalState {
     }
 
     fn transition(&self, from: GoalStatus, to: GoalStatus) -> Result<Goal> {
-        let mut state = self
-            .0
-            .write()
-            .map_err(|_| anyhow::anyhow!("goal lock poisoned"))?;
-        let goal = state.as_mut().context("no goal is set")?;
-        if goal.status != from {
-            bail!("goal is {:?}, not {:?}", goal.status, from);
-        }
-        goal.status = to;
-        goal.updated_at = Utc::now();
-        Ok(goal.clone())
+        self.change(|goal| {
+            if goal.status != from {
+                bail!("goal is {:?}, not {:?}", goal.status, from);
+            }
+            goal.status = to;
+            Ok(goal.clone())
+        })
     }
 
     pub fn is_active(&self) -> bool {
-        self.snapshot()
-            .is_some_and(|goal| goal.status == GoalStatus::Active)
+        self.snapshot().is_some_and(|goal| goal.status == GoalStatus::Active)
     }
 
     pub fn increment_iteration(&self) -> Result<u32> {
-        let mut state = self
-            .0
-            .write()
-            .map_err(|_| anyhow::anyhow!("goal lock poisoned"))?;
-        let goal = state.as_mut().context("no active goal")?;
-        if goal.status != GoalStatus::Active {
-            bail!("goal is not active");
-        }
-        goal.iterations = goal.iterations.saturating_add(1);
-        goal.updated_at = Utc::now();
-        Ok(goal.iterations)
+        self.change(|goal| {
+            if goal.status != GoalStatus::Active {
+                bail!("goal is not active");
+            }
+            goal.iterations = goal.iterations.saturating_add(1);
+            Ok(goal.iterations)
+        })
     }
 
     pub fn prompt_context(&self) -> String {
@@ -139,22 +132,14 @@ impl GoalState {
 
     pub fn tool_specs() -> Vec<Value> {
         vec![
-            function(
-                "goal_status",
-                "Read the active persistent goal and its progress state.",
-                json!({"type":"object","properties":{}}),
-            ),
-            function(
+            tool("goal_status", "Read the active persistent goal and its progress state.", []),
+            tool(
                 "goal_update",
                 "Update the active persistent goal. Mark complete only after verifying the objective.",
-                json!({
-                    "type":"object",
-                    "properties":{
-                        "status":{"type":"string","enum":["active","paused","complete","cancelled"]},
-                        "note":{"type":"string"}
-                    },
-                    "required":["status"]
-                }),
+                [
+                    req("status", json!({"type": "string", "enum": ["active", "paused", "complete", "cancelled"]})),
+                    opt("note", json!({"type": "string"})),
+                ],
             ),
         ]
     }
@@ -165,7 +150,7 @@ impl GoalState {
             "goal_update" => self.update(arguments),
             _ => return None,
         };
-        Some(result.unwrap_or_else(|error| format!("Error: {error:#}")))
+        Some(crate::tools::reply(result))
     }
 
     fn status_output(&self) -> Result<String> {
@@ -178,27 +163,15 @@ impl GoalState {
     fn update(&self, arguments: &str) -> Result<String> {
         #[derive(Deserialize)]
         struct Args {
-            status: String,
-            #[serde(default)]
+            status: GoalStatus,
             note: Option<String>,
         }
-        let args: Args = serde_json::from_str(arguments)?;
-        let status = match args.status.as_str() {
-            "active" => GoalStatus::Active,
-            "paused" => GoalStatus::Paused,
-            "complete" => GoalStatus::Complete,
-            "cancelled" => GoalStatus::Cancelled,
-            _ => bail!("invalid goal status"),
-        };
-        let mut state = self
-            .0
-            .write()
-            .map_err(|_| anyhow::anyhow!("goal lock poisoned"))?;
-        let goal = state.as_mut().context("no goal is active")?;
-        goal.status = status;
-        goal.note = args.note.map(|note| note.chars().take(4_000).collect());
-        goal.updated_at = Utc::now();
-        Ok(format!("Goal is now {:?}.", goal.status))
+        let args: Args = serde_json::from_str(arguments).context("invalid goal status")?;
+        self.change(|goal| {
+            goal.status = args.status;
+            goal.note = args.note.map(|note| note.chars().take(4_000).collect());
+            Ok(format!("Goal is now {:?}.", goal.status))
+        })
     }
 }
 
@@ -213,13 +186,6 @@ fn validate_objective(objective: &str) -> Result<String> {
     Ok(objective.to_owned())
 }
 
-fn function(name: &str, description: &str, parameters: Value) -> Value {
-    json!({
-        "type":"function",
-        "function":{"name":name,"description":description,"parameters":parameters}
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,12 +195,7 @@ mod tests {
         let state = GoalState::default();
         state.create("Ship the parser").unwrap();
         state.increment_iteration().unwrap();
-        let output = state
-            .execute(
-                "goal_update",
-                r#"{"status":"complete","note":"tests passed"}"#,
-            )
-            .unwrap();
+        let output = state.execute("goal_update", r#"{"status":"complete","note":"tests passed"}"#).unwrap();
         assert!(output.contains("Complete"));
         let goal = state.snapshot().unwrap();
         assert_eq!(goal.iterations, 1);
@@ -246,10 +207,7 @@ mod tests {
         let state = GoalState::default();
         state.create("Ship the parser").unwrap();
         assert_eq!(state.pause().unwrap().status, GoalStatus::Paused);
-        assert_eq!(
-            state.edit("Ship the parser with tests").unwrap().objective,
-            "Ship the parser with tests"
-        );
+        assert_eq!(state.edit("Ship the parser with tests").unwrap().objective, "Ship the parser with tests");
         assert_eq!(state.resume().unwrap().status, GoalStatus::Active);
         assert!(state.edit(&"x".repeat(4_001)).is_err());
     }

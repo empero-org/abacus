@@ -57,14 +57,8 @@ pub struct ModeCoach {
 
 impl ModeCoach {
     pub fn load(file: PathBuf) -> Self {
-        let stats = std::fs::read_to_string(&file)
-            .ok()
-            .and_then(|content| serde_json::from_str::<ModeStats>(&content).ok())
-            .unwrap_or_default();
-        Self {
-            stats: Arc::new(RwLock::new(stats)),
-            file: Some(file),
-        }
+        let stats: ModeStats = crate::config::read_json(&file);
+        Self { stats: Arc::new(RwLock::new(stats)), file: Some(file) }
     }
 
     pub fn stats(&self) -> ModeStats {
@@ -72,10 +66,8 @@ impl ModeCoach {
     }
 
     fn save(&self, stats: &ModeStats) {
-        if let Some(file) = &self.file
-            && let Ok(serialized) = serde_json::to_vec_pretty(stats)
-        {
-            let _ = crate::config::atomic_write(file, &serialized, false);
+        if let Some(file) = &self.file {
+            crate::config::write_json(file, stats);
         }
     }
 
@@ -140,10 +132,7 @@ mod tests {
             assert!(MODE_GUIDE.contains(gated), "guide should mention {gated}");
         }
         for allowed in ["grepping", "linters", "tests"] {
-            assert!(
-                MODE_GUIDE.contains(allowed),
-                "guide should permit {allowed}"
-            );
+            assert!(MODE_GUIDE.contains(allowed), "guide should permit {allowed}");
         }
         assert!(MODE_GUIDE.contains("SCOUT AND PLAN"));
         assert!(MODE_GUIDE.contains("BUILD AND FOLLOW"));
@@ -178,10 +167,7 @@ mod tests {
         for _ in 0..3 {
             coach.record_switch();
         }
-        assert!(
-            coach.reminder().is_empty(),
-            "a model that learns should stop being reminded"
-        );
+        assert!(coach.reminder().is_empty(), "a model that learns should stop being reminded");
     }
 
     #[test]

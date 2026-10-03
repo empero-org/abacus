@@ -49,10 +49,7 @@ struct JobFile {
 
 impl Default for JobFile {
     fn default() -> Self {
-        Self {
-            version: STORE_VERSION,
-            jobs: Vec::new(),
-        }
+        Self { version: STORE_VERSION, jobs: Vec::new() }
     }
 }
 
@@ -90,9 +87,10 @@ impl CronStore {
         Ok(())
     }
 
-    fn lock(&self) -> Result<FileLock> {
+    fn lock(&self) -> Result<PidLock> {
         self.ensure()?;
-        FileLock::acquire(&self.lock_file, Duration::from_secs(10))
+        let patience = Duration::from_secs(10);
+        PidLock::acquire(&self.lock_file, patience, "timed out waiting for cron store lock")
     }
 
     fn load_unlocked(&self) -> Result<JobFile> {
@@ -102,10 +100,7 @@ impl CronStore {
         let content = fs::read(&self.jobs_file)?;
         let jobs: JobFile = serde_json::from_slice(&content).context("invalid cron job store")?;
         if jobs.version > STORE_VERSION {
-            bail!(
-                "cron store version {} is newer than supported",
-                jobs.version
-            );
+            bail!("cron store version {} is newer than supported", jobs.version);
         }
         Ok(jobs)
     }
@@ -121,39 +116,30 @@ impl CronStore {
     }
 
     fn add(&self, request: NewCronJob) -> Result<CronJob> {
-        let NewCronJob {
-            name,
-            expression,
-            prompt,
-            workspace,
-            profile,
-            always_approve,
-            timeout_minutes,
-        } = request;
-        if name.trim().is_empty() || name.len() > 100 {
+        if request.name.trim().is_empty() || request.name.len() > 100 {
             bail!("job name must contain 1 to 100 characters");
         }
-        if prompt.trim().is_empty() || prompt.len() > 100_000 {
+        if request.prompt.trim().is_empty() || request.prompt.len() > 100_000 {
             bail!("job prompt must contain 1 to 100000 characters");
         }
-        let workspace = workspace
+        let workspace = request
+            .workspace
             .canonicalize()
-            .with_context(|| format!("invalid workspace: {}", workspace.display()))?;
-        let schedule = normalize_schedule(&expression)?;
+            .with_context(|| format!("invalid workspace: {}", request.workspace.display()))?;
+        let schedule = normalize_schedule(&request.expression)?;
         let now = Utc::now();
-        let next_run = next_after(&schedule, now)?;
         let job = CronJob {
             id: Uuid::new_v4(),
-            name,
+            name: request.name,
+            next_run: next_after(&schedule, now)?,
             schedule,
-            prompt,
+            prompt: request.prompt,
             workspace,
-            profile,
-            always_approve,
-            timeout_seconds: timeout_minutes.clamp(1, 24 * 60) * 60,
+            profile: request.profile,
+            always_approve: request.always_approve,
+            timeout_seconds: request.timeout_minutes.clamp(1, 24 * 60) * 60,
             enabled: true,
             created_at: now,
-            next_run,
             last_started_at: None,
             last_completed_at: None,
             last_status: None,
@@ -214,11 +200,7 @@ impl CronStore {
     fn mark_started(&self, id: Uuid, now: DateTime<Utc>) -> Result<()> {
         let _lock = self.lock()?;
         let mut file = self.load_unlocked()?;
-        let job = file
-            .jobs
-            .iter_mut()
-            .find(|job| job.id == id)
-            .context("job disappeared before execution")?;
+        let job = file.jobs.iter_mut().find(|job| job.id == id).context("job disappeared before execution")?;
         job.last_started_at = Some(now);
         job.last_status = Some("running".into());
         self.save_unlocked(&file)
@@ -228,11 +210,7 @@ impl CronStore {
         self.append_log(id, log)?;
         let _lock = self.lock()?;
         let mut file = self.load_unlocked()?;
-        let job = file
-            .jobs
-            .iter_mut()
-            .find(|job| job.id == id)
-            .context("job disappeared while running")?;
+        let job = file.jobs.iter_mut().find(|job| job.id == id).context("job disappeared while running")?;
         job.last_completed_at = Some(Utc::now());
         job.last_status = Some(status);
         self.save_unlocked(&file)
@@ -274,11 +252,7 @@ impl CronStore {
     }
 }
 
-pub async fn handle(
-    action: CronCommand,
-    paths: &AbacusPaths,
-    default_workspace: PathBuf,
-) -> Result<()> {
+pub async fn handle(action: CronCommand, paths: &AbacusPaths, default_workspace: PathBuf) -> Result<()> {
     let store = CronStore::new(paths);
     match action {
         CronCommand::List => {
@@ -291,23 +265,13 @@ pub async fn handle(
                     "{}\t{}\t{}\t{}\t{}",
                     &job.id.to_string()[..8],
                     if job.enabled { "enabled" } else { "disabled" },
-                    job.next_run
-                        .with_timezone(&Local)
-                        .format("%Y-%m-%d %H:%M:%S %Z"),
+                    job.next_run.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S %Z"),
                     job.schedule,
                     job.name
                 );
             }
         }
-        CronCommand::Add {
-            name,
-            schedule,
-            prompt,
-            workspace,
-            profile,
-            always_approve,
-            timeout_minutes,
-        } => {
+        CronCommand::Add { name, schedule, prompt, workspace, profile, always_approve, timeout_minutes } => {
             let job = store.add(NewCronJob {
                 name,
                 expression: schedule,
@@ -332,9 +296,7 @@ pub async fn handle(
                 bail!("scheduled job failed");
             }
         }
-        CronCommand::Daemon { once, poll_seconds } => {
-            run_daemon(&store, once, poll_seconds).await?
-        }
+        CronCommand::Daemon { once, poll_seconds } => run_daemon(&store, once, poll_seconds).await?,
         CronCommand::Install => install_service(paths)?,
         CronCommand::Uninstall => uninstall_service(paths)?,
     }
@@ -342,7 +304,9 @@ pub async fn handle(
 }
 
 async fn run_daemon(store: &CronStore, once: bool, poll_seconds: u64) -> Result<()> {
-    let _guard = DaemonGuard::acquire(&store.directory.join("daemon.lock"))?;
+    store.ensure()?;
+    let running = "the Abacus cron daemon is already running";
+    let _guard = PidLock::acquire(&store.directory.join("daemon.lock"), Duration::ZERO, running)?;
     loop {
         let jobs = store.claim_due(Utc::now())?;
         stream::iter(jobs)
@@ -371,13 +335,7 @@ async fn run_job(job: &CronJob, store: &CronStore) -> Result<bool> {
     let mut command = Command::new(executable);
     command
         .arg(&job.workspace)
-        .args([
-            "--prompt",
-            &job.prompt,
-            "--output-format",
-            "json",
-            "--no-session",
-        ])
+        .args(["--prompt", &job.prompt, "--output-format", "json", "--no-session"])
         .env("ABACUS_CRON_JOB_ID", job.id.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -389,42 +347,32 @@ async fn run_job(job: &CronJob, store: &CronStore) -> Result<bool> {
     if job.always_approve {
         command.arg("--always-approve");
     }
-    let output = match tokio::time::timeout(
-        Duration::from_secs(job.timeout_seconds.clamp(60, 24 * 60 * 60)),
-        command.output(),
-    )
-    .await
-    {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => {
-            let detail = format!("could not start scheduled Abacus run: {error}");
-            store.finish(job.id, "failed".into(), &detail)?;
-            return Err(error).context("could not start scheduled Abacus run");
-        }
-        Err(_) => {
-            let detail = format!("job timed out after {} seconds", job.timeout_seconds);
-            store.finish(job.id, "timed-out".into(), &detail)?;
-            bail!(detail);
-        }
-    };
+    let output =
+        match tokio::time::timeout(Duration::from_secs(job.timeout_seconds.clamp(60, 24 * 60 * 60)), command.output())
+            .await
+        {
+            Ok(Ok(output)) => output,
+            Ok(Err(error)) => {
+                let detail = format!("could not start scheduled Abacus run: {error}");
+                store.finish(job.id, "failed".into(), &detail)?;
+                return Err(error).context("could not start scheduled Abacus run");
+            }
+            Err(_) => {
+                let detail = format!("job timed out after {} seconds", job.timeout_seconds);
+                store.finish(job.id, "timed-out".into(), &detail)?;
+                bail!(detail);
+            }
+        };
     let stdout = bounded_text(&output.stdout);
     let stderr = bounded_text(&output.stderr);
-    let status = if output.status.success() {
-        "ok"
-    } else {
-        "failed"
-    };
+    let status = if output.status.success() { "ok" } else { "failed" };
     let log = format!(
         "=== {} | {} | {} ===\n{}{}{}",
         started,
         job.name,
         status,
         stdout,
-        if !stdout.is_empty() && !stderr.is_empty() {
-            "\n"
-        } else {
-            ""
-        },
+        if !stdout.is_empty() && !stderr.is_empty() { "\n" } else { "" },
         stderr
     );
     store.finish(job.id, status.into(), &log)?;
@@ -443,11 +391,7 @@ fn bounded_text(bytes: &[u8]) -> String {
         start += 1;
     }
     let text = String::from_utf8_lossy(&bytes[start..]);
-    if start > 0 {
-        format!("… output truncated …\n{text}")
-    } else {
-        text.into_owned()
-    }
+    if start > 0 { format!("… output truncated …\n{text}") } else { text.into_owned() }
 }
 
 fn default_timeout_seconds() -> u64 {
@@ -488,77 +432,34 @@ fn resolve_job(jobs: &[CronJob], prefix: &str) -> Result<usize> {
     }
 }
 
-struct FileLock {
+/// A lock file holding its owner's PID, so a lock left behind by a dead process is
+/// taken over instead of waited on.
+struct PidLock {
     path: PathBuf,
 }
 
-impl FileLock {
-    fn acquire(path: &Path, timeout: Duration) -> Result<Self> {
-        let deadline = std::time::Instant::now() + timeout;
+impl PidLock {
+    /// Waits up to `patience` for a live owner to let go, then fails with `busy`.
+    fn acquire(path: &Path, patience: Duration, busy: &str) -> Result<Self> {
+        let deadline = std::time::Instant::now() + patience;
         loop {
             match OpenOptions::new().write(true).create_new(true).open(path) {
                 Ok(mut file) => {
                     writeln!(file, "{}", std::process::id())?;
-                    return Ok(Self {
-                        path: path.to_owned(),
-                    });
+                    return Ok(Self { path: path.to_owned() });
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if !lock_owner_alive(path) {
-                        let _ = fs::remove_file(path);
-                        continue;
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        bail!("timed out waiting for cron store lock");
-                    }
-                    std::thread::sleep(Duration::from_millis(25));
+                Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
+                    return Err(error.into());
                 }
-                Err(error) => return Err(error.into()),
+                Err(_) if !lock_owner_alive(path) && fs::remove_file(path).is_ok() => {}
+                Err(_) if std::time::Instant::now() >= deadline => bail!("{busy}"),
+                Err(_) => std::thread::sleep(Duration::from_millis(25)),
             }
         }
     }
 }
 
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-struct DaemonGuard {
-    path: PathBuf,
-}
-
-impl DaemonGuard {
-    fn acquire(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        for _ in 0..2 {
-            match OpenOptions::new().write(true).create_new(true).open(path) {
-                Ok(mut file) => {
-                    writeln!(file, "{}", std::process::id())?;
-                    return Ok(Self {
-                        path: path.to_owned(),
-                    });
-                }
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::AlreadyExists
-                        && !lock_owner_alive(path) =>
-                {
-                    let _ = fs::remove_file(path);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    bail!("the Abacus cron daemon is already running")
-                }
-                Err(error) => return Err(error.into()),
-            }
-        }
-        bail!("could not acquire the cron daemon lock")
-    }
-}
-
-impl Drop for DaemonGuard {
+impl Drop for PidLock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
@@ -598,9 +499,7 @@ fn process_alive(_pid: u32) -> bool {
 
 #[cfg(target_os = "macos")]
 fn install_service(paths: &AbacusPaths) -> Result<()> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .context("HOME is unavailable")?;
+    let home = std::env::var_os("HOME").map(PathBuf::from).context("HOME is unavailable")?;
     let directory = home.join("Library/LaunchAgents");
     fs::create_dir_all(&directory)?;
     let path = directory.join("com.abacus.agent.plist");
@@ -619,15 +518,10 @@ fn install_service(paths: &AbacusPaths) -> Result<()> {
     );
     atomic_write(&path, content.as_bytes(), false)?;
     let domain = format!("gui/{}", unsafe { libc_getuid() });
-    let _ = std::process::Command::new("launchctl")
-        .args(["bootout", &domain, path.to_str().unwrap_or_default()])
-        .status();
+    let _ =
+        std::process::Command::new("launchctl").args(["bootout", &domain, path.to_str().unwrap_or_default()]).status();
     let status = std::process::Command::new("launchctl")
-        .args([
-            "bootstrap",
-            &domain,
-            path.to_str().context("service path is not UTF-8")?,
-        ])
+        .args(["bootstrap", &domain, path.to_str().context("service path is not UTF-8")?])
         .status()?;
     if !status.success() {
         bail!("launchctl bootstrap failed");
@@ -638,14 +532,11 @@ fn install_service(paths: &AbacusPaths) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn uninstall_service(_paths: &AbacusPaths) -> Result<()> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .context("HOME is unavailable")?;
+    let home = std::env::var_os("HOME").map(PathBuf::from).context("HOME is unavailable")?;
     let path = home.join("Library/LaunchAgents/com.abacus.agent.plist");
     let domain = format!("gui/{}", unsafe { libc_getuid() });
-    let _ = std::process::Command::new("launchctl")
-        .args(["bootout", &domain, path.to_str().unwrap_or_default()])
-        .status();
+    let _ =
+        std::process::Command::new("launchctl").args(["bootout", &domain, path.to_str().unwrap_or_default()]).status();
     if path.exists() {
         fs::remove_file(&path)?;
     }
@@ -663,9 +554,7 @@ unsafe fn libc_getuid() -> u32 {
 
 #[cfg(target_os = "linux")]
 fn install_service(paths: &AbacusPaths) -> Result<()> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .context("HOME is unavailable")?;
+    let home = std::env::var_os("HOME").map(PathBuf::from).context("HOME is unavailable")?;
     let directory = home.join(".config/systemd/user");
     fs::create_dir_all(&directory)?;
     let path = directory.join("abacus-agent.service");
@@ -676,23 +565,17 @@ fn install_service(paths: &AbacusPaths) -> Result<()> {
     );
     atomic_write(&path, content.as_bytes(), false)?;
     run_service_command("systemctl", &["--user", "daemon-reload"])?;
-    run_service_command(
-        "systemctl",
-        &["--user", "enable", "--now", "abacus-agent.service"],
-    )?;
+    run_service_command("systemctl", &["--user", "enable", "--now", "abacus-agent.service"])?;
     println!("Installed and started {}", path.display());
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
 fn uninstall_service(_paths: &AbacusPaths) -> Result<()> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .context("HOME is unavailable")?;
+    let home = std::env::var_os("HOME").map(PathBuf::from).context("HOME is unavailable")?;
     let path = home.join(".config/systemd/user/abacus-agent.service");
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "disable", "--now", "abacus-agent.service"])
-        .status();
+    let _ =
+        std::process::Command::new("systemctl").args(["--user", "disable", "--now", "abacus-agent.service"]).status();
     if path.exists() {
         fs::remove_file(&path)?;
     }
@@ -706,16 +589,7 @@ fn install_service(paths: &AbacusPaths) -> Result<()> {
     let executable = std::env::current_exe()?;
     let command = format!("\\\"{}\\\" cron daemon", executable.display());
     let status = std::process::Command::new("schtasks")
-        .args([
-            "/Create",
-            "/F",
-            "/SC",
-            "ONLOGON",
-            "/TN",
-            "Abacus Agent",
-            "/TR",
-            &command,
-        ])
+        .args(["/Create", "/F", "/SC", "ONLOGON", "/TN", "Abacus Agent", "/TR", &command])
         .env("ABACUS_HOME", &paths.root)
         .status()?;
     if !status.success() {
@@ -727,9 +601,7 @@ fn install_service(paths: &AbacusPaths) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 fn uninstall_service(_paths: &AbacusPaths) -> Result<()> {
-    let status = std::process::Command::new("schtasks")
-        .args(["/Delete", "/F", "/TN", "Abacus Agent"])
-        .status()?;
+    let status = std::process::Command::new("schtasks").args(["/Delete", "/F", "/TN", "Abacus Agent"]).status()?;
     if !status.success() {
         bail!("schtasks failed");
     }
@@ -758,11 +630,7 @@ fn run_service_command(program: &str, args: &[&str]) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn xml_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+    value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
 #[cfg(target_os = "linux")]
@@ -795,16 +663,8 @@ mod tests {
             .unwrap();
         assert_eq!(job.schedule, "0 0 9 * * *");
         assert_eq!(store.list().unwrap().len(), 1);
-        assert!(
-            !store
-                .set_enabled(&job.id.to_string(), false)
-                .unwrap()
-                .enabled
-        );
-        assert_eq!(
-            store.remove(&job.id.to_string()[..8]).unwrap().name,
-            "daily"
-        );
+        assert!(!store.set_enabled(&job.id.to_string(), false).unwrap().enabled);
+        assert_eq!(store.remove(&job.id.to_string()[..8]).unwrap().name, "daily");
     }
 
     #[test]

@@ -26,11 +26,7 @@ pub fn expand_file_references(workspace: &Path, prompt: &str) -> Result<String> 
             continue;
         }
         let relative = Path::new(raw);
-        if relative.is_absolute()
-            || relative
-                .components()
-                .any(|part| matches!(part, Component::ParentDir))
-        {
+        if relative.is_absolute() || relative.components().any(|part| matches!(part, Component::ParentDir)) {
             continue;
         }
         let Ok(path) = workspace.join(relative).canonicalize() else {
@@ -39,11 +35,7 @@ pub fn expand_file_references(workspace: &Path, prompt: &str) -> Result<String> 
         if !path.starts_with(&workspace) || !path.is_file() {
             continue;
         }
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_ascii_lowercase();
         if (name == ".env" || name.starts_with(".env.")) && name != ".env.example" {
             continue;
         }
@@ -65,9 +57,7 @@ pub fn expand_file_references(workspace: &Path, prompt: &str) -> Result<String> 
     }
     let mut expanded = prompt.to_owned();
     for (path, content) in attachments {
-        expanded.push_str(&format!(
-            "\n\n<attached_file path=\"{path}\">\n{content}\n</attached_file>"
-        ));
+        expanded.push_str(&format!("\n\n<attached_file path=\"{path}\">\n{content}\n</attached_file>"));
     }
     Ok(expanded)
 }
@@ -97,16 +87,9 @@ pub fn user_content(workspace: &Path, attachments: &Path, prompt: &str) -> Value
         };
         let end = start + length + 1;
         let name = &text[start + "[image:".len()..end - 1];
-        let clean = Path::new(name)
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default();
+        let clean = Path::new(name).file_name().and_then(|value| value.to_str()).unwrap_or_default();
         let path = attachments.join(clean);
-        let bytes = if !clean.is_empty() && clean == name {
-            std::fs::read(&path).ok()
-        } else {
-            None
-        };
+        let bytes = if !clean.is_empty() && clean == name { std::fs::read(&path).ok() } else { None };
         match bytes {
             Some(bytes) if total + bytes.len() as u64 <= MAX_IMAGE_BYTES => {
                 total += bytes.len() as u64;
@@ -127,20 +110,13 @@ pub fn user_content(workspace: &Path, attachments: &Path, prompt: &str) -> Value
                 continue;
             };
             let raw = raw.trim_matches(|ch: char| matches!(ch, ',' | ';' | ')' | ']' | '}'));
-            let extension = Path::new(raw)
-                .extension()
-                .and_then(|value| value.to_str())
-                .unwrap_or_default()
-                .to_ascii_lowercase();
+            let extension =
+                Path::new(raw).extension().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
             if !IMAGE_EXTENSIONS.contains(&extension.as_str()) {
                 continue;
             }
             let relative = Path::new(raw);
-            if relative.is_absolute()
-                || relative
-                    .components()
-                    .any(|part| matches!(part, Component::ParentDir))
-            {
+            if relative.is_absolute() || relative.components().any(|part| matches!(part, Component::ParentDir)) {
                 continue;
             }
             let Ok(path) = workspace.join(relative).canonicalize() else {
@@ -181,10 +157,7 @@ fn data_url_for(extension: &str, bytes: &[u8]) -> String {
         "webp" => "image/webp",
         _ => "image/png",
     };
-    format!(
-        "data:{mime};base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    )
+    format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
 #[cfg(test)]
@@ -204,11 +177,10 @@ mod tests {
 
     // A 1x1 transparent PNG, the smallest well-formed image to attach.
     const TINY_PNG: &[u8] = &[
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
-        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
-        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x62, 0x00,
-        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
-        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00,
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00,
+        0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D,
+        0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
 
     #[test]
@@ -223,11 +195,7 @@ mod tests {
         let workspace = tempdir().unwrap();
         let attachments = tempdir().unwrap();
         std::fs::write(attachments.path().join("img-ab12.png"), TINY_PNG).unwrap();
-        let content = user_content(
-            workspace.path(),
-            attachments.path(),
-            "what is in [image:img-ab12.png] here?",
-        );
+        let content = user_content(workspace.path(), attachments.path(), "what is in [image:img-ab12.png] here?");
         let parts = content.as_array().expect("content array");
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0]["text"], "what is in [image #1] here?");
@@ -244,11 +212,7 @@ mod tests {
         let content = user_content(
             workspace.path(),
             attachments.path(),
-            &format!(
-                "[image:../{}] and [image:{}]",
-                secret.file_name().unwrap().to_str().unwrap(),
-                secret.display()
-            ),
+            &format!("[image:../{}] and [image:{}]", secret.file_name().unwrap().to_str().unwrap(), secret.display()),
         );
         assert!(content.is_string(), "traversal must not attach: {content}");
     }
@@ -260,12 +224,7 @@ mod tests {
         let content = user_content(workspace.path(), workspace.path(), "look at @shot.png");
         let parts = content.as_array().expect("content array");
         assert_eq!(parts.len(), 2);
-        assert!(
-            parts[1]["image_url"]["url"]
-                .as_str()
-                .unwrap()
-                .starts_with("data:image/png"),
-        );
+        assert!(parts[1]["image_url"]["url"].as_str().unwrap().starts_with("data:image/png"),);
         // The @token stays in the text so the model can see the reference.
         assert_eq!(parts[0]["text"], "look at @shot.png");
     }

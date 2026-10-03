@@ -22,14 +22,8 @@ fn parse_token_arg(input: &str) -> Result<usize, String> {
 
 /// clap value parser for the tool-call text format.
 fn parse_agent_mode(input: &str) -> Result<crate::agent::AgentMode, String> {
-    match input.trim().to_ascii_lowercase().as_str() {
-        "auto" => Ok(crate::agent::AgentMode::Auto),
-        "plan" => Ok(crate::agent::AgentMode::Plan),
-        "build" => Ok(crate::agent::AgentMode::Build),
-        other => Err(format!(
-            "unknown mode `{other}` (expected auto, plan, or build)"
-        )),
-    }
+    crate::agent::AgentMode::parse(input)
+        .ok_or_else(|| format!("unknown mode `{}` (expected auto, plan, or build)", input.trim()))
 }
 
 fn parse_tool_format(input: &str) -> Result<ToolFormat, String> {
@@ -41,11 +35,7 @@ fn parse_tool_format(input: &str) -> Result<ToolFormat, String> {
 }
 
 #[derive(Debug, Clone, Parser)]
-#[command(
-    name = "abacus",
-    version,
-    about = "A fast, focused terminal coding agent"
-)]
+#[command(name = "abacus", version, about = "A fast, focused terminal coding agent")]
 pub struct Cli {
     /// Project directory (defaults to the current directory)
     #[arg(value_name = "PATH")]
@@ -410,24 +400,46 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn resolve(
-        cli: &Cli,
-        settings: &Settings,
-        credentials: &Credentials,
-        paths: AbacusPaths,
-    ) -> Result<Self> {
+    /// A configuration pointed at one endpoint, with every option at its
+    /// default. What an embedder or a test starts from.
+    pub fn for_endpoint(workspace: PathBuf, base_url: String, model: String, paths: AbacusPaths) -> Self {
+        Self {
+            workspace,
+            profile: "default".to_owned(),
+            model,
+            base_url,
+            protocol: ProviderProtocol::default(),
+            api_key: None,
+            max_steps: 32,
+            tool_output_limit: 30_000,
+            yes: false,
+            no_session: false,
+            model_limits: ModelLimits::default(),
+            tool_format: ToolFormat::default(),
+            mode: None,
+            trace_enabled: false,
+            routing: Routing::default(),
+            web_search: Default::default(),
+            endpoint: None,
+            aux_model: None,
+            subagent_model: None,
+            compaction_model: None,
+            reasoning_effort: None,
+            token_compression: false,
+            one_stream: false,
+            prompt_cache: true,
+            paths,
+        }
+    }
+
+    pub fn resolve(cli: &Cli, settings: &Settings, credentials: &Credentials, paths: AbacusPaths) -> Result<Self> {
         let workspace = resolve_workspace(cli.path.as_deref())?;
-        let profile_name = cli
-            .profile
-            .clone()
-            .unwrap_or_else(|| settings.default_profile.clone());
+        let profile_name = cli.profile.clone().unwrap_or_else(|| settings.default_profile.clone());
         let profile = settings.profiles.get(&profile_name);
 
         let scripted_model = profile
             .and_then(|profile| profile.endpoint.as_deref())
-            .and_then(|reference| {
-                crate::endpoint::ScriptedEndpoint::resolve(reference, &paths.endpoints_dir).ok()
-            })
+            .and_then(|reference| crate::endpoint::ScriptedEndpoint::resolve(reference, &paths.endpoints_dir).ok())
             .and_then(|endpoint| endpoint.model.clone());
         let model = cli
             .model
@@ -442,9 +454,7 @@ impl Config {
         // workspace, since it can run a token command and carry a bearer.
         let endpoint = profile
             .and_then(|profile| profile.endpoint.as_deref())
-            .map(|reference| {
-                crate::endpoint::ScriptedEndpoint::resolve(reference, &paths.endpoints_dir)
-            })
+            .map(|reference| crate::endpoint::ScriptedEndpoint::resolve(reference, &paths.endpoints_dir))
             .transpose()?;
 
         let base_url = cli
@@ -480,34 +490,20 @@ impl Config {
         let (profile_context, profile_output) = settings.profile_limits(&profile_name);
         let context_override = cli.context_window.or(profile_context);
         let output_override = cli.max_output_tokens.or(profile_output);
-        let model_limits =
-            ModelLimits::resolve_from_name(&model, context_override, output_override);
+        let model_limits = ModelLimits::resolve_from_name(&model, context_override, output_override);
         let tool_format = cli
             .tool_format
-            .or_else(|| {
-                settings
-                    .agent
-                    .tool_format
-                    .as_deref()
-                    .and_then(ToolFormat::parse)
-            })
+            .or_else(|| settings.agent.tool_format.as_deref().and_then(ToolFormat::parse))
             .unwrap_or_default();
 
         Ok(Self {
             workspace,
-            profile: if profile.is_some() {
-                profile_name
-            } else {
-                "cli".to_owned()
-            },
+            profile: if profile.is_some() { profile_name } else { "cli".to_owned() },
             model,
             base_url: base_url.trim_end_matches('/').to_owned(),
             protocol,
             api_key,
-            max_steps: cli
-                .max_steps
-                .unwrap_or(settings.agent.max_steps)
-                .clamp(1, 128),
+            max_steps: cli.max_steps.unwrap_or(settings.agent.max_steps).clamp(1, 128),
             tool_output_limit: settings.agent.tool_output_limit.clamp(2_000, 200_000),
             yes: cli.yes || settings.ui.permission_mode == PermissionMode::AlwaysApprove,
             no_session: cli.no_session,
@@ -516,27 +512,19 @@ impl Config {
             mode: cli.mode,
             trace_enabled: settings.trace.enabled,
             routing: Routing {
-                order: profile
-                    .map(|profile| profile.providers.clone())
-                    .unwrap_or_default(),
+                order: profile.map(|profile| profile.providers.clone()).unwrap_or_default(),
                 allow_fallbacks: profile.is_none_or(|profile| profile.allow_fallbacks),
             },
             web_search: settings.search.resolve(),
             endpoint,
-            aux_model: profile
-                .and_then(|profile| profile.aux_model.clone())
-                .filter(|model| !model.trim().is_empty()),
+            aux_model: profile.and_then(|profile| profile.aux_model.clone()).filter(|model| !model.trim().is_empty()),
             // Only an *explicit* role assignment travels here. An unassigned
             // role stays `None` so the turn falls back to the main model,
             // which is what the fallback chain resolves to anyway — resolving
             // it here instead would pin the main model at startup and stop
             // `/model` from moving these along with it.
-            subagent_model: profile
-                .and_then(|profile| profile.role_model("subagent"))
-                .map(str::to_owned),
-            compaction_model: profile
-                .and_then(|profile| profile.role_model("compaction"))
-                .map(str::to_owned),
+            subagent_model: profile.and_then(|profile| profile.role_model("subagent")).map(str::to_owned),
+            compaction_model: profile.and_then(|profile| profile.role_model("compaction")).map(str::to_owned),
             reasoning_effort: profile.and_then(|profile| profile.reasoning_effort),
             token_compression: settings.agent.token_compression,
             one_stream: settings.agent.one_stream,
@@ -566,10 +554,7 @@ impl Config {
     }
 
     pub fn workspace_name(&self) -> &str {
-        self.workspace
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("workspace")
+        self.workspace.file_name().and_then(|name| name.to_str()).unwrap_or("workspace")
     }
 }
 
@@ -660,10 +645,8 @@ impl ProjectExtensions {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let content = fs::read_to_string(&path)
-            .with_context(|| format!("could not read {}", path.display()))?;
-        toml::from_str(&content)
-            .with_context(|| format!("invalid project extension config: {}", path.display()))
+        let content = fs::read_to_string(&path).with_context(|| format!("could not read {}", path.display()))?;
+        toml::from_str(&content).with_context(|| format!("invalid project extension config: {}", path.display()))
     }
 }
 
@@ -674,13 +657,10 @@ impl Settings {
         }
         let content = fs::read_to_string(&paths.config_file)
             .with_context(|| format!("could not read {}", paths.config_file.display()))?;
-        let mut settings: Self = toml::from_str(&content)
-            .with_context(|| format!("invalid config: {}", paths.config_file.display()))?;
+        let mut settings: Self =
+            toml::from_str(&content).with_context(|| format!("invalid config: {}", paths.config_file.display()))?;
         if settings.version > SETTINGS_VERSION {
-            bail!(
-                "config version {} is newer than this Abacus supports ({SETTINGS_VERSION})",
-                settings.version
-            );
+            bail!("config version {} is newer than this Abacus supports ({SETTINGS_VERSION})", settings.version);
         }
         settings.version = SETTINGS_VERSION;
         Ok(settings)
@@ -701,12 +681,8 @@ impl Settings {
     pub fn profile_limits(&self, profile_name: &str) -> (Option<usize>, Option<usize>) {
         let profile = self.profiles.get(profile_name);
         (
-            profile
-                .and_then(|profile| profile.context_window)
-                .or(self.agent.context_window),
-            profile
-                .and_then(|profile| profile.max_output_tokens)
-                .or(self.agent.max_output_tokens),
+            profile.and_then(|profile| profile.context_window).or(self.agent.context_window),
+            profile.and_then(|profile| profile.max_output_tokens).or(self.agent.max_output_tokens),
         )
     }
 }
@@ -779,10 +755,8 @@ pub struct ProviderProfile {
     pub roles: BTreeMap<String, String>,
 }
 
-impl ProviderProfile {
-    /// A profile with nothing filled in, for `..ProviderProfile::empty()` at
-    /// the several call sites that only care about a few fields.
-    pub fn empty() -> Self {
+impl Default for ProviderProfile {
+    fn default() -> Self {
         Self {
             name: String::new(),
             base_url: String::new(),
@@ -796,7 +770,7 @@ impl ProviderProfile {
             allow_fallbacks: true,
             context_window: None,
             max_output_tokens: None,
-            roles: BTreeMap::new(),
+            roles: Default::default(),
         }
     }
 }
@@ -1081,10 +1055,7 @@ pub struct ActivitySettings {
 
 impl Default for ActivitySettings {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            endpoint: crate::activity::DEFAULT_ACTIVITY_ENDPOINT.to_owned(),
-        }
+        Self { enabled: true, endpoint: crate::activity::DEFAULT_ACTIVITY_ENDPOINT.to_owned() }
     }
 }
 
@@ -1107,7 +1078,6 @@ impl Default for AgentSettings {
 #[serde(default)]
 pub struct Credentials {
     pub keys: BTreeMap<String, String>,
-    #[serde(default)]
     pub sync: Option<SyncCredentials>,
 }
 
@@ -1192,8 +1162,7 @@ impl AbacusPaths {
     }
 
     pub fn ensure(&self) -> Result<()> {
-        fs::create_dir_all(&self.sessions_dir)
-            .with_context(|| format!("could not create {}", self.root.display()))?;
+        fs::create_dir_all(&self.sessions_dir).with_context(|| format!("could not create {}", self.root.display()))?;
         Ok(())
     }
 }
@@ -1204,17 +1173,26 @@ fn resolve_workspace(path: Option<&Path>) -> Result<PathBuf> {
         None => std::env::current_dir().context("could not determine current directory")?,
     };
     if !path.is_dir() {
-        bail!(
-            "workspace does not exist or is not a directory: {}",
-            path.display()
-        );
+        bail!("workspace does not exist or is not a directory: {}", path.display());
     }
-    path.canonicalize()
-        .with_context(|| format!("could not resolve workspace: {}", path.display()))
+    path.canonicalize().with_context(|| format!("could not resolve workspace: {}", path.display()))
 }
 
 pub fn workspace_from_cli(cli: &Cli) -> Result<PathBuf> {
     resolve_workspace(cli.path.as_deref())
+}
+
+/// Reads a JSON state file, starting from the default when it is missing or
+/// unreadable: these files hold learned history, never anything a run depends on.
+pub fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
+    fs::read_to_string(path).ok().and_then(|content| serde_json::from_str(&content).ok()).unwrap_or_default()
+}
+
+/// Writes a JSON state file, best effort, for the same reason.
+pub fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) {
+    if let Ok(content) = serde_json::to_vec_pretty(value) {
+        let _ = atomic_write(path, &content, false);
+    }
 }
 
 pub fn atomic_write(path: &Path, content: &[u8], private: bool) -> Result<()> {
@@ -1222,13 +1200,11 @@ pub fn atomic_write(path: &Path, content: &[u8], private: bool) -> Result<()> {
     fs::create_dir_all(parent)?;
     let temp = parent.join(format!(
         ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("abacus"),
+        path.file_name().and_then(|name| name.to_str()).unwrap_or("abacus"),
         std::process::id()
     ));
-    let mut file = File::create(&temp)
-        .with_context(|| format!("could not create temporary file in {}", parent.display()))?;
+    let mut file =
+        File::create(&temp).with_context(|| format!("could not create temporary file in {}", parent.display()))?;
 
     #[cfg(unix)]
     if private {
@@ -1267,14 +1243,8 @@ mod tests {
         // The two Anthropic-only rungs above `high`. `max` is now its own
         // level, not an alias for `high` — it means unconstrained spend.
         assert_eq!(ReasoningEffort::parse("max"), Some(ReasoningEffort::Max));
-        assert_eq!(
-            ReasoningEffort::parse("xhigh"),
-            Some(ReasoningEffort::XHigh)
-        );
-        assert_eq!(
-            ReasoningEffort::parse("x-high"),
-            Some(ReasoningEffort::XHigh)
-        );
+        assert_eq!(ReasoningEffort::parse("xhigh"), Some(ReasoningEffort::XHigh));
+        assert_eq!(ReasoningEffort::parse("x-high"), Some(ReasoningEffort::XHigh));
 
         // Anthropic takes a budget, and minimal means "do not enable thinking".
         assert_eq!(ReasoningEffort::Minimal.thinking_budget(), None);
@@ -1306,15 +1276,9 @@ mod tests {
     fn routing_becomes_a_provider_object_only_when_pinned() {
         let none = Routing::default();
         assert!(!none.is_pinned());
-        assert!(
-            none.body().is_none(),
-            "an unpinned request carries no field"
-        );
+        assert!(none.body().is_none(), "an unpinned request carries no field");
 
-        let pinned = Routing {
-            order: vec!["Together".into(), "Anthropic".into()],
-            allow_fallbacks: false,
-        };
+        let pinned = Routing { order: vec!["Together".into(), "Anthropic".into()], allow_fallbacks: false };
         let body = pinned.body().expect("a provider object");
         assert_eq!(body["order"][0], "Together");
         assert_eq!(body["order"][1], "Anthropic");
@@ -1323,14 +1287,8 @@ mod tests {
 
     #[test]
     fn an_order_can_be_written_with_commas_or_spaces() {
-        assert_eq!(
-            Routing::parse_order("Together, Anthropic"),
-            vec!["Together", "Anthropic"]
-        );
-        assert_eq!(
-            Routing::parse_order("  DeepInfra   Novita  "),
-            vec!["DeepInfra", "Novita"]
-        );
+        assert_eq!(Routing::parse_order("Together, Anthropic"), vec!["Together", "Anthropic"]);
+        assert_eq!(Routing::parse_order("  DeepInfra   Novita  "), vec!["DeepInfra", "Novita"]);
         assert_eq!(Routing::parse_order("Z.AI"), vec!["Z.AI"]);
         assert!(Routing::parse_order("  ,, ").is_empty());
     }
@@ -1348,24 +1306,11 @@ mod tests {
                 name: "Local".into(),
                 base_url: "http://localhost:11434/v1".into(),
                 model: "codestral".into(),
-                protocol: ProviderProtocol::ChatCompletions,
-                api_key_env: None,
-                aux_model: None,
-                reasoning_effort: None,
-                endpoint: None,
-                providers: Vec::new(),
-                allow_fallbacks: true,
-                context_window: None,
-                max_output_tokens: None,
-                roles: Default::default(),
+                ..Default::default()
             },
         );
         settings.profiles.get_mut("local").unwrap().context_window = Some(1_000_000);
-        settings
-            .profiles
-            .get_mut("local")
-            .unwrap()
-            .max_output_tokens = Some(64_000);
+        settings.profiles.get_mut("local").unwrap().max_output_tokens = Some(64_000);
         settings.default_profile = "local".into();
         settings.agent.token_compression = true;
         settings.agent.one_stream = true;
@@ -1393,15 +1338,9 @@ mod tests {
                 base_url: "https://api.anthropic.com".into(),
                 model: "claude".into(),
                 protocol: ProviderProtocol::Anthropic,
-                api_key_env: None,
-                aux_model: None,
-                reasoning_effort: None,
-                endpoint: None,
-                providers: Vec::new(),
-                allow_fallbacks: true,
                 context_window: Some(1_000_000),
                 max_output_tokens: Some(64_000),
-                roles: Default::default(),
+                ..Default::default()
             },
         );
         settings.profiles.insert(
@@ -1410,26 +1349,11 @@ mod tests {
                 name: "Local".into(),
                 base_url: "http://localhost:11434/v1".into(),
                 model: "codestral".into(),
-                protocol: ProviderProtocol::ChatCompletions,
-                api_key_env: None,
-                aux_model: None,
-                reasoning_effort: None,
-                endpoint: None,
-                providers: Vec::new(),
-                allow_fallbacks: true,
-                context_window: None,
-                max_output_tokens: None,
-                roles: Default::default(),
+                ..Default::default()
             },
         );
-        assert_eq!(
-            settings.profile_limits("claude"),
-            (Some(1_000_000), Some(64_000))
-        );
-        assert_eq!(
-            settings.profile_limits("local"),
-            (Some(128_000), Some(8_000))
-        );
+        assert_eq!(settings.profile_limits("claude"), (Some(1_000_000), Some(64_000)));
+        assert_eq!(settings.profile_limits("local"), (Some(128_000), Some(8_000)));
     }
 
     #[test]
@@ -1447,10 +1371,7 @@ mod tests {
         let workspace = dir.path().join("workspace");
         fs::create_dir(&workspace).unwrap();
         let paths = AbacusPaths::under(dir.path().join("home"));
-        let mut settings = Settings {
-            default_profile: "claude".into(),
-            ..Settings::default()
-        };
+        let mut settings = Settings { default_profile: "claude".into(), ..Settings::default() };
         settings.agent.context_window = Some(128_000);
         settings.agent.max_output_tokens = Some(8_000);
         settings.profiles.insert(
@@ -1460,15 +1381,9 @@ mod tests {
                 base_url: "https://api.anthropic.com".into(),
                 model: "claude".into(),
                 protocol: ProviderProtocol::Anthropic,
-                api_key_env: None,
-                aux_model: None,
-                reasoning_effort: None,
-                endpoint: None,
-                providers: Vec::new(),
-                allow_fallbacks: true,
                 context_window: Some(1_000_000),
                 max_output_tokens: Some(64_000),
-                roles: Default::default(),
+                ..Default::default()
             },
         );
         settings.profiles.insert(
@@ -1477,16 +1392,7 @@ mod tests {
                 name: "Local".into(),
                 base_url: "http://localhost:11434/v1".into(),
                 model: "codestral".into(),
-                protocol: ProviderProtocol::ChatCompletions,
-                api_key_env: None,
-                aux_model: None,
-                reasoning_effort: None,
-                endpoint: None,
-                providers: Vec::new(),
-                allow_fallbacks: true,
-                context_window: None,
-                max_output_tokens: None,
-                roles: Default::default(),
+                ..Default::default()
             },
         );
         let credentials = Credentials::default();
@@ -1499,10 +1405,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(from_profile.model_limits.context_window, 1_000_000);
-        assert_eq!(
-            from_profile.model_limits.configured_output_tokens,
-            Some(64_000)
-        );
+        assert_eq!(from_profile.model_limits.configured_output_tokens, Some(64_000));
 
         let from_agent = Config::resolve(
             &Cli::parse_from(["abacus", "--profile", "local", workspace.to_str().unwrap()]),
@@ -1512,10 +1415,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(from_agent.model_limits.context_window, 128_000);
-        assert_eq!(
-            from_agent.model_limits.configured_output_tokens,
-            Some(8_000)
-        );
+        assert_eq!(from_agent.model_limits.configured_output_tokens, Some(8_000));
 
         let from_cli = Config::resolve(
             &Cli::parse_from([
@@ -1543,19 +1443,11 @@ mod tests {
         credentials.keys.insert("default".into(), "secret".into());
         credentials.save(&paths).unwrap();
         assert!(!paths.config_file.exists());
-        assert!(
-            fs::read_to_string(&paths.credentials_file)
-                .unwrap()
-                .contains("secret")
-        );
+        assert!(fs::read_to_string(&paths.credentials_file).unwrap().contains("secret"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&paths.credentials_file)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777;
+            let mode = fs::metadata(&paths.credentials_file).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
     }

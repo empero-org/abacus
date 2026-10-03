@@ -19,7 +19,7 @@ pub const DEFAULT_ACTIVITY_ENDPOINT: &str = "https://abacus.empero.org/v1/activi
 
 /// How often an open session pings the API. Must stay well under the server's
 /// active-session window so a live session is never mistaken for a stale one.
-pub const HEARTBEAT_INTERVAL_SECS: u64 = 45;
+const HEARTBEAT_INTERVAL_SECS: u64 = 45;
 
 #[derive(Clone)]
 pub struct ActivityReporter {
@@ -51,9 +51,7 @@ impl ActivityReporter {
             client,
             base: endpoint.trim_end_matches('/').to_owned(),
             install_id: install_id(paths),
-            ingest_token: std::env::var("ABACUS_INGEST_TOKEN")
-                .ok()
-                .filter(|token| !token.trim().is_empty()),
+            ingest_token: std::env::var("ABACUS_INGEST_TOKEN").ok().filter(|token| !token.trim().is_empty()),
         })
     }
 
@@ -87,6 +85,25 @@ impl ActivityReporter {
         .await;
     }
 
+    /// Keep an open session visible, with its live token count, until the
+    /// returned task is aborted. A session that is killed stops pinging and so
+    /// drops off "active" instead of lingering.
+    pub fn heartbeat(
+        &self,
+        session_id: String,
+        tokens: std::sync::Arc<crate::provider::TokenLedger>,
+    ) -> tokio::task::JoinHandle<()> {
+        let reporter = self.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+            ticker.tick().await; // the first tick fires immediately; skip it
+            loop {
+                ticker.tick().await;
+                reporter.report_heartbeat(&session_id, tokens.total()).await;
+            }
+        })
+    }
+
     pub async fn report_end(&self, session_id: &str, tokens: u64, duration_secs: u64) {
         self.post(
             "end",
@@ -101,10 +118,7 @@ impl ActivityReporter {
     }
 
     async fn post(&self, path: &str, body: Value) {
-        let mut request = self
-            .client
-            .post(format!("{}/{path}", self.base))
-            .json(&body);
+        let mut request = self.client.post(format!("{}/{path}", self.base)).json(&body);
         if let Some(token) = &self.ingest_token {
             request = request.header("x-abacus-token", token);
         }

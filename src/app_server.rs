@@ -40,17 +40,11 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    agent::{
-        AgentEvent, AgentMode, ApprovalDecision, DoneReason, InjectionQueue, TurnOptions,
-        UserAnswer, compression_budget, initial_messages, run_turn,
-    },
-    compaction::CompactionState,
-    config::{Config, Credentials, Settings},
-    goal::GoalState,
+    agent::{AgentEvent, AgentMode, ApprovalDecision, DoneReason, TurnOptions, UserAnswer, initial_messages, run_turn},
+    config::{Config, Settings},
     provider::Provider,
     services::AgentServices,
-    session::{Session, SessionStore},
-    task::TaskList,
+    session::{Session, SessionState, SessionStore},
 };
 
 /// Bumped when a frame's shape changes in a way a front end must notice.
@@ -67,15 +61,8 @@ const SERVER_ERROR: i32 = -32000;
 const COMMAND_TOOLS: &[&str] = &["run_command"];
 /// Tools that change files. Split out because a front end shows a diff for
 /// these and a log for everything else.
-const FILE_CHANGE_TOOLS: &[&str] = &[
-    "edit_file",
-    "write_file",
-    "apply_patch",
-    "delete_file",
-    "move_file",
-    "append_file",
-    "create_directory",
-];
+const FILE_CHANGE_TOOLS: &[&str] =
+    &["edit_file", "write_file", "apply_patch", "delete_file", "move_file", "append_file", "create_directory"];
 
 fn item_type(tool: &str) -> &'static str {
     if COMMAND_TOOLS.contains(&tool) {
@@ -90,10 +77,19 @@ fn item_type(tool: &str) -> &'static str {
 /// A frame arriving from the front end.
 #[derive(Debug)]
 enum Incoming {
-    Request { id: Value, method: String, params: Value },
+    Request {
+        id: Value,
+        method: String,
+        params: Value,
+    },
     /// The client answering a request *we* sent — an approval or a question.
-    Response { id: Value, result: Value },
-    Notification { method: String },
+    Response {
+        id: Value,
+        result: Value,
+    },
+    Notification {
+        method: String,
+    },
 }
 
 /// Everything one served thread needs. Rebuilt whenever the front end starts
@@ -105,13 +101,7 @@ struct ThreadState {
     /// is never persisted — opening the app should not litter the store.
     persisted: bool,
     messages: Vec<Value>,
-    goal: GoalState,
-    tasks: TaskList,
-    compaction: CompactionState,
-    tether: crate::tether::TetherState,
-    harness: crate::harness::HarnessStore,
-    handles: crate::handles::HandleStore,
-    injections: InjectionQueue,
+    state: SessionState,
     trace: Option<crate::sft::TraceWriter>,
 }
 
@@ -126,34 +116,12 @@ impl ThreadState {
                 initial_messages(&config.workspace),
             )
         });
-        let harness = crate::harness::HarnessStore::load_migrated(
-            config.paths.harness_dir.clone(),
-            &config.workspace,
-            &config.paths.memories_file,
-        )
-        .with_session(session.id.to_string());
-        if let Some(state) = session.harness.clone() {
-            harness.restore_session(state);
-        }
+        let state = SessionState::open(config, Some(&session), session.id.to_string());
         let trace = config
             .trace_enabled
-            .then(|| {
-                crate::sft::TraceWriter::open(&config.paths.traces_dir, &session.id.to_string()).ok()
-            })
+            .then(|| crate::sft::TraceWriter::open(&config.paths.traces_dir, &session.id.to_string()).ok())
             .flatten();
-        Self {
-            messages: session.messages.clone(),
-            goal: GoalState::new(session.goal.clone()),
-            tasks: TaskList::new(session.tasks.clone()),
-            compaction: session.compaction.clone().unwrap_or_default(),
-            tether: crate::tether::TetherState::new(session.intent.clone()),
-            harness,
-            handles: crate::handles::HandleStore::default(),
-            injections: InjectionQueue::default(),
-            trace,
-            persisted,
-            session,
-        }
+        Self { messages: session.messages.clone(), state, trace, persisted, session }
     }
 
     fn id(&self) -> String {
@@ -169,11 +137,19 @@ struct OpenItem {
     summary: String,
 }
 
+impl OpenItem {
+    /// The item as a client sees a tool call at `status`.
+    fn tool(&self, name: &str, status: &str) -> Value {
+        json!({
+            "id": self.id, "type": self.kind, "name": name,
+            "command": self.summary, "status": status,
+        })
+    }
+}
+
 struct App {
     config: Config,
     settings: Settings,
-    #[allow(dead_code)]
-    credentials: Credentials,
     services: Arc<AgentServices>,
     store: Option<SessionStore>,
     thread: ThreadState,
@@ -198,14 +174,12 @@ struct App {
 pub async fn run(
     config: Config,
     settings: Settings,
-    credentials: Credentials,
     session: Option<Session>,
     store: Option<SessionStore>,
     services: Arc<AgentServices>,
 ) -> Result<()> {
-    let tokens = Arc::new(crate::provider::TokenLedger::new(
-        session.as_ref().map(|value| value.tokens_used).unwrap_or(0),
-    ));
+    let tokens =
+        Arc::new(crate::provider::TokenLedger::new(session.as_ref().map(|value| value.tokens_used).unwrap_or(0)));
     let provider = Provider::with_tokens(&config, tokens.clone())?;
     let allow = Arc::new(AtomicBool::new(config.yes));
     let mode = config.mode.unwrap_or(AgentMode::Auto);
@@ -213,7 +187,6 @@ pub async fn run(
         thread: ThreadState::new(&config, session),
         config,
         settings,
-        credentials,
         services,
         store,
         provider,
@@ -304,17 +277,10 @@ fn parse(line: &str) -> Result<Incoming> {
             result: value.get("result").cloned().unwrap_or(Value::Null),
         });
     }
-    let method = value["method"]
-        .as_str()
-        .ok_or_else(|| anyhow!("frame has no method"))?
-        .to_owned();
+    let method = value["method"].as_str().ok_or_else(|| anyhow!("frame has no method"))?.to_owned();
     let params = value.get("params").cloned().unwrap_or(Value::Null);
     match value.get("id") {
-        Some(id) if !id.is_null() => Ok(Incoming::Request {
-            id: id.clone(),
-            method,
-            params,
-        }),
+        Some(id) if !id.is_null() => Ok(Incoming::Request { id: id.clone(), method, params }),
         _ => Ok(Incoming::Notification { method }),
     }
 }
@@ -401,9 +367,7 @@ impl App {
             }
             "thread/resume" | "thread/read" => {
                 self.require_idle()?;
-                let id = params["threadId"]
-                    .as_str()
-                    .ok_or_else(|| anyhow!("threadId required"))?;
+                let id = params["threadId"].as_str().ok_or_else(|| anyhow!("threadId required"))?;
                 let store = self.store.as_ref().ok_or_else(|| anyhow!("sessions off"))?;
                 let session = store.load(id)?;
                 self.tokens.store_total(session.tokens_used);
@@ -415,10 +379,7 @@ impl App {
                 let store = self.store.as_ref().ok_or_else(|| anyhow!("sessions off"))?;
                 store.rename(&mut self.thread.session, name)?;
                 self.thread.persisted = true;
-                notify(
-                    "thread/name/updated",
-                    json!({"threadId": self.thread_id(), "name": self.thread.session.title}),
-                );
+                notify("thread/name/updated", json!({"threadId": self.thread_id(), "name": self.thread.session.title}));
                 Ok(json!({"name": self.thread.session.title}))
             }
 
@@ -430,16 +391,13 @@ impl App {
                 // at the next tool boundary instead of after everything it has
                 // already planned. `turn/steer` is the explicit spelling of it.
                 if self.turn_id.is_some() {
-                    self.thread
-                        .injections
-                        .push(crate::agent::Injection::UserMessage(text));
+                    self.thread.state.injections.push(crate::agent::Injection::UserMessage(text));
                     return Ok(json!({"steered": true, "turnId": self.turn_id()}));
                 }
                 if method == "turn/steer" {
                     return Err(anyhow!("no turn is running to steer"));
                 }
-                let text = crate::context::expand_file_references(&self.config.workspace, &text)
-                    .unwrap_or(text);
+                let text = crate::context::expand_file_references(&self.config.workspace, &text).unwrap_or(text);
                 self.start_turn(text, events);
                 Ok(json!({"turnId": self.turn_id(), "threadId": self.thread_id()}))
             }
@@ -450,15 +408,10 @@ impl App {
 
             // ---- models and config -----------------------------------------
             "model/list" => {
-                let models = crate::setup::discover_models(
-                    &self.config.base_url,
-                    self.config.api_key.as_deref(),
-                )
-                .await?;
-                let models: Vec<Value> = models
-                    .into_iter()
-                    .map(|id| json!({"id": id, "selected": id == self.config.model}))
-                    .collect();
+                let models =
+                    crate::setup::discover_models(&self.config.base_url, self.config.api_key.as_deref()).await?;
+                let models: Vec<Value> =
+                    models.into_iter().map(|id| json!({"id": id, "selected": id == self.config.model})).collect();
                 Ok(json!({"models": models}))
             }
             "config/read" => Ok(json!({
@@ -584,9 +537,8 @@ impl App {
                     Value::Null => None,
                     Value::String(ref text) if text.is_empty() || text == "auto" => None,
                     Value::String(ref text) => Some(
-                        crate::config::ReasoningEffort::parse(text).ok_or_else(|| {
-                            anyhow!("effort must be minimal, low, medium, high, xhigh, max, or auto")
-                        })?,
+                        crate::config::ReasoningEffort::parse(text)
+                            .ok_or_else(|| anyhow!("effort must be minimal, low, medium, high, xhigh, max, or auto"))?,
                     ),
                     _ => return Err(anyhow!("effort must be a string or null")),
                 };
@@ -594,15 +546,10 @@ impl App {
                 self.update_profile(|profile| profile.reasoning_effort = effort)?;
             }
             "mode" => {
-                self.mode = match value.as_str().unwrap_or("auto") {
-                    "build" => AgentMode::Build,
-                    "plan" => AgentMode::Plan,
-                    _ => AgentMode::Auto,
-                };
+                let named = value.as_str().and_then(AgentMode::parse);
+                self.mode = named.unwrap_or(AgentMode::Auto);
             }
-            "autoApprove" => self
-                .allow
-                .store(value.as_bool().unwrap_or(false), Ordering::Relaxed),
+            "autoApprove" => self.allow.store(value.as_bool().unwrap_or(false), Ordering::Relaxed),
             other => return Err(anyhow!("`{other}` is not a writable key")),
         }
         Ok(json!({
@@ -615,10 +562,7 @@ impl App {
 
     /// Edit the active profile and write the settings file, so a change made
     /// here is the same change `/config` would have made.
-    fn update_profile(
-        &mut self,
-        edit: impl FnOnce(&mut crate::config::ProviderProfile),
-    ) -> Result<()> {
+    fn update_profile(&mut self, edit: impl FnOnce(&mut crate::config::ProviderProfile)) -> Result<()> {
         let Some(profile) = self.settings.profiles.get_mut(&self.config.profile) else {
             // No stored profile (an env-only or one-off configuration): the
             // change still applies to this session, there is just nowhere to
@@ -657,157 +601,83 @@ impl App {
     }
 
     async fn git(&self, args: &[&str]) -> Result<String> {
-        let output = tokio::process::Command::new("git")
-            .args(args)
-            .current_dir(&self.config.workspace)
-            .output()
-            .await?;
+        let output =
+            tokio::process::Command::new("git").args(args).current_dir(&self.config.workspace).output().await?;
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
     fn start_turn(&mut self, text: String, events: &mpsc::UnboundedSender<AgentEvent>) {
-        self.thread
-            .messages
-            .push(json!({"role": "user", "content": text.clone()}));
+        self.thread.messages.push(json!({"role": "user", "content": text.clone()}));
         let turn = self.next("turn");
         self.turn_id = Some(turn.clone());
         self.cancel = Arc::new(AtomicBool::new(false));
 
         let item_id = self.next("item");
-        notify(
-            "turn/started",
-            json!({"threadId": self.thread_id(), "turnId": turn}),
-        );
+        notify("turn/started", json!({"threadId": self.thread_id(), "turnId": turn}));
         // The user's own message is an item too, so a client that replays
         // `item/*` alone reconstructs the whole transcript.
-        notify(
-            "item/completed",
-            json!({
-                "threadId": self.thread_id(),
-                "turnId": turn,
-                "completedAtMs": now_ms(),
-                "item": {"id": item_id, "type": "userMessage", "text": text},
-            }),
-        );
+        self.item("completed", json!({"id": item_id, "type": "userMessage", "text": text}));
 
         let options = TurnOptions {
-            workspace: self.config.workspace.clone(),
-            max_steps: self.config.max_steps,
-            tool_output_limit: self.config.tool_output_limit,
             mode: self.mode,
             allow_mutations: self.allow.clone(),
-            services: self.services.clone(),
             session_id: Some(self.thread_id()),
-            goal: self.thread.goal.clone(),
-            tasks: self.thread.tasks.clone(),
-            compaction: self.thread.compaction.clone(),
-            compaction_budget: compression_budget(
-                self.config.model_limits.compaction_budget(),
-                self.config.token_compression,
-            ),
-            token_compression: self.config.token_compression,
-            allow_subagents: true,
-            web_search: self.config.web_search.clone(),
-            papercuts: crate::papercuts::PapercutStore::load(
-                self.config.paths.papercuts_file.clone(),
-                &self.config.workspace,
-            ),
-            handles: self.thread.handles.clone(),
-            harness: self.thread.harness.clone(),
-            tether: self.thread.tether.clone(),
-            hive: crate::hive::HiveHandle::load(self.config.paths.hive_file.clone()),
-            aux_model: self.config.aux_model.clone(),
-            subagent_model: self.config.subagent_model.clone(),
-            compaction_model: self.config.compaction_model.clone(),
-            injections: self.thread.injections.clone(),
-            modes: crate::modes::ModeCoach::load(self.config.paths.modes_file.clone()),
-            safety: crate::safety::SafetyCache::default(),
-            safety_uses_main: false,
             trace: self.thread.trace.clone(),
             cancel: self.cancel.clone(),
+            ..self.thread.state.turn(&self.config, self.services.clone()).with_workspace_stores(&self.config)
         };
-        tokio::spawn(run_turn(
-            self.provider.clone(),
-            self.thread.messages.clone(),
-            options,
-            events.clone(),
-        ));
+        tokio::spawn(run_turn(self.provider.clone(), self.thread.messages.clone(), options, events.clone()));
     }
 
-    /// Open a streaming item of `kind`, or return the one already open.
-    fn streaming_item(&mut self, kind: &'static str) -> String {
-        if let Some(open) = self.open_items.get(kind) {
-            return open.id.clone();
-        }
-        let id = self.next("item");
+    /// Announce an item of the running turn opening (`started`) or closing
+    /// (`completed`).
+    fn item(&self, phase: &str, item: Value) {
+        let stamp = if phase == "started" { "startedAtMs" } else { "completedAtMs" };
         notify(
-            "item/started",
+            &format!("item/{phase}"),
             json!({
                 "threadId": self.thread_id(),
                 "turnId": self.turn_id(),
-                "startedAtMs": now_ms(),
-                "item": {"id": id, "type": kind, "text": ""},
+                stamp: now_ms(),
+                "item": item,
             }),
         );
-        self.open_items.insert(
-            kind.to_owned(),
-            OpenItem {
-                id: id.clone(),
-                kind,
-                summary: String::new(),
-            },
-        );
-        id
     }
 
-    /// Close a streaming item, if one of that kind is open. Called before a
-    /// tool call and at end of turn so `item/completed` always arrives.
-    fn close_streaming(&mut self, kind: &str, text: &str) {
-        if let Some(open) = self.open_items.remove(kind) {
-            notify(
-                "item/completed",
-                json!({
-                    "threadId": self.thread_id(),
-                    "turnId": self.turn_id(),
-                    "completedAtMs": now_ms(),
-                    "item": {"id": open.id, "type": open.kind, "text": text},
-                }),
-            );
+    /// Append streamed text to the open item of `kind`, opening one if needed.
+    fn stream(&mut self, kind: &'static str, method: &str, text: String) {
+        if !self.open_items.contains_key(kind) {
+            let id = self.next("item");
+            self.item("started", json!({"id": id, "type": kind, "text": ""}));
+            self.open_items.insert(kind.to_owned(), OpenItem { id, kind, summary: String::new() });
         }
+        let open = self.open_items.get_mut(kind).expect("opened above");
+        open.summary.push_str(&text);
+        let id = open.id.clone();
+        notify(
+            method,
+            json!({
+                "threadId": self.thread_id(),
+                "turnId": self.turn_id(),
+                "itemId": id,
+                "delta": text,
+            }),
+        );
+    }
+
+    /// Open the item for a tool call and announce it at `status`.
+    fn open_tool(&mut self, name: &str, summary: &str, status: &str) -> String {
+        let open = OpenItem { id: self.next("item"), kind: item_type(name), summary: summary.to_owned() };
+        self.item("started", open.tool(name, status));
+        let id = open.id.clone();
+        self.open_items.insert(name.to_owned(), open);
+        id
     }
 
     fn handle_event(&mut self, event: AgentEvent) {
         match event {
-            AgentEvent::Delta(text) => {
-                let id = self.streaming_item("agentMessage");
-                if let Some(open) = self.open_items.get_mut("agentMessage") {
-                    open.summary.push_str(&text);
-                }
-                notify(
-                    "item/agentMessage/delta",
-                    json!({
-                        "threadId": self.thread_id(),
-                        "turnId": self.turn_id(),
-                        "itemId": id,
-                        "delta": text,
-                    }),
-                );
-            }
-            AgentEvent::Reasoning(text) => {
-                let id = self.streaming_item("reasoning");
-                if let Some(open) = self.open_items.get_mut("reasoning") {
-                    open.summary.push_str(&text);
-                }
-                notify(
-                    "item/reasoning/textDelta",
-                    json!({
-                        "threadId": self.thread_id(),
-                        "turnId": self.turn_id(),
-                        "itemId": id,
-                        "delta": text,
-                    }),
-                );
-            }
+            AgentEvent::Delta(text) => self.stream("agentMessage", "item/agentMessage/delta", text),
+            AgentEvent::Reasoning(text) => self.stream("reasoning", "item/reasoning/textDelta", text),
             AgentEvent::ToolStarted { name, summary } => {
                 // A tool call ends whatever text was streaming: the model has
                 // stopped talking and started doing.
@@ -815,50 +685,17 @@ impl App {
                 // An approval for this tool already opened the item, so that
                 // the prompt could name the call it was about. Reuse it rather
                 // than announcing the same call twice.
-                if let Some(open) = self.open_items.get_mut(&name) {
-                    open.summary = summary;
-                    return;
+                match self.open_items.get_mut(&name) {
+                    Some(open) => open.summary = summary,
+                    None => drop(self.open_tool(&name, &summary, "inProgress")),
                 }
-                let id = self.next("item");
-                let kind = item_type(&name);
-                notify(
-                    "item/started",
-                    json!({
-                        "threadId": self.thread_id(),
-                        "turnId": self.turn_id(),
-                        "startedAtMs": now_ms(),
-                        "item": {
-                            "id": id, "type": kind, "name": name,
-                            "command": summary, "status": "inProgress",
-                        },
-                    }),
-                );
-                self.open_items.insert(
-                    name,
-                    OpenItem {
-                        id,
-                        kind,
-                        summary,
-                    },
-                );
             }
             AgentEvent::ToolFinished { name, output } => {
-                let Some(open) = self.open_items.remove(&name) else {
-                    return;
-                };
-                notify(
-                    "item/completed",
-                    json!({
-                        "threadId": self.thread_id(),
-                        "turnId": self.turn_id(),
-                        "completedAtMs": now_ms(),
-                        "item": {
-                            "id": open.id, "type": open.kind, "name": name,
-                            "command": open.summary, "status": "completed",
-                            "output": output,
-                        },
-                    }),
-                );
+                if let Some(open) = self.open_items.remove(&name) {
+                    let mut item = open.tool(&name, "completed");
+                    item["output"] = json!(output);
+                    self.item("completed", item);
+                }
             }
             AgentEvent::ModeChanged { mode, reason } => notify(
                 "thread/mode/updated",
@@ -869,10 +706,9 @@ impl App {
                 }),
             ),
             AgentEvent::Notice(text) => notify("warning", json!({"message": text})),
-            AgentEvent::TraceFailed { error } => notify(
-                "warning",
-                json!({"message": format!("training trace off — {error}")}),
-            ),
+            AgentEvent::TraceFailed { error } => {
+                notify("warning", json!({"message": format!("training trace off — {error}")}))
+            }
             AgentEvent::Approval(request) => {
                 let id = self.next("srv");
                 // The approval lands *before* the call starts, so open the item
@@ -881,31 +717,7 @@ impl App {
                 // transcript, and a rejected call still leaves a visible item.
                 let item_id = match self.open_items.get(&request.tool) {
                     Some(open) => open.id.clone(),
-                    None => {
-                        let item_id = self.next("item");
-                        let kind = item_type(&request.tool);
-                        notify(
-                            "item/started",
-                            json!({
-                                "threadId": self.thread_id(),
-                                "turnId": self.turn_id(),
-                                "startedAtMs": now_ms(),
-                                "item": {
-                                    "id": item_id, "type": kind, "name": request.tool,
-                                    "command": request.summary, "status": "awaitingApproval",
-                                },
-                            }),
-                        );
-                        self.open_items.insert(
-                            request.tool.clone(),
-                            OpenItem {
-                                id: item_id.clone(),
-                                kind,
-                                summary: request.summary.clone(),
-                            },
-                        );
-                        item_id
-                    }
+                    None => self.open_tool(&request.tool, &request.summary, "awaitingApproval"),
                 };
                 emit(json!({
                     "jsonrpc": "2.0",
@@ -967,12 +779,9 @@ impl App {
     /// deltas renders.
     fn flush_streaming(&mut self) {
         for kind in ["agentMessage", "reasoning"] {
-            let text = self
-                .open_items
-                .get(kind)
-                .map(|open| open.summary.clone())
-                .unwrap_or_default();
-            self.close_streaming(kind, &text);
+            if let Some(open) = self.open_items.remove(kind) {
+                self.item("completed", json!({"id": open.id, "type": open.kind, "text": open.summary}));
+            }
         }
     }
 
@@ -981,18 +790,7 @@ impl App {
         // Any tool still open lost its result to an interrupt; say so rather
         // than leaving a spinner running in the client forever.
         for (name, open) in std::mem::take(&mut self.open_items) {
-            notify(
-                "item/completed",
-                json!({
-                    "threadId": self.thread_id(),
-                    "turnId": self.turn_id(),
-                    "completedAtMs": now_ms(),
-                    "item": {
-                        "id": open.id, "type": open.kind, "name": name,
-                        "command": open.summary, "status": "aborted",
-                    },
-                }),
-            );
+            self.item("completed", open.tool(&name, "aborted"));
         }
         let turn = self.turn_id.take().unwrap_or_default();
         self.persist();
@@ -1041,17 +839,11 @@ impl App {
             else {
                 return;
             };
-            let files: Vec<Value> = String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .filter_map(parse_numstat)
-                .collect();
+            let files: Vec<Value> = String::from_utf8_lossy(&output.stdout).lines().filter_map(parse_numstat).collect();
             if files.is_empty() {
                 return;
             }
-            notify(
-                "turn/diff/updated",
-                json!({"threadId": thread, "turnId": turn, "files": files}),
-            );
+            notify("turn/diff/updated", json!({"threadId": thread, "turnId": turn, "files": files}));
         });
     }
 
@@ -1077,12 +869,7 @@ impl App {
         if let Some(responder) = self.pending_questions.remove(id) {
             let selected = result["selected"]
                 .as_array()
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(|value| value.as_str().map(str::to_owned))
-                        .collect()
-                })
+                .map(|values| values.iter().filter_map(|value| value.as_str().map(str::to_owned)).collect())
                 .unwrap_or_default();
             let _ = responder.send(UserAnswer {
                 selected_labels: selected,
@@ -1100,11 +887,7 @@ impl App {
         };
         let session = &mut self.thread.session;
         session.update_messages(self.thread.messages.clone());
-        session.intent = self.thread.tether.intent();
-        session.harness = Some(self.thread.harness.session_snapshot());
-        session.goal = self.thread.goal.snapshot();
-        session.tasks = self.thread.tasks.snapshot();
-        session.compaction = Some(self.thread.compaction.clone());
+        self.thread.state.save(session);
         session.tokens_used = self.tokens.total();
         session.model = self.config.model.clone();
         if let Err(error) = store.save(session) {
@@ -1169,22 +952,14 @@ fn turn_input(params: &Value) -> Result<String> {
         return non_empty(text);
     }
     if let Some(items) = params["input"].as_array() {
-        let text = items
-            .iter()
-            .filter_map(|item| item["text"].as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text = items.iter().filter_map(|item| item["text"].as_str()).collect::<Vec<_>>().join("\n");
         return non_empty(&text);
     }
     Err(anyhow!("turn input required"))
 }
 
 fn non_empty(text: &str) -> Result<String> {
-    if text.trim().is_empty() {
-        Err(anyhow!("turn input is empty"))
-    } else {
-        Ok(text.to_owned())
-    }
+    if text.trim().is_empty() { Err(anyhow!("turn input is empty")) } else { Ok(text.to_owned()) }
 }
 
 /// The token ledger as a client sees it. `cacheRate` is omitted rather than
@@ -1246,8 +1021,7 @@ mod tests {
         let notification = parse(r#"{"jsonrpc":"2.0","method":"shutdown"}"#).unwrap();
         assert!(matches!(notification, Incoming::Notification { .. }));
         // A reply to a server-initiated request carries a result, not a method.
-        let response = parse(r#"{"jsonrpc":"2.0","id":"srv_1","result":{"decision":"accept"}}"#)
-            .unwrap();
+        let response = parse(r#"{"jsonrpc":"2.0","id":"srv_1","result":{"decision":"accept"}}"#).unwrap();
         match response {
             Incoming::Response { id, result } => {
                 assert_eq!(id, json!("srv_1"));
@@ -1260,10 +1034,7 @@ mod tests {
     #[test]
     fn turn_input_accepts_both_shapes() {
         assert_eq!(turn_input(&json!({"text": "hello"})).unwrap(), "hello");
-        assert_eq!(
-            turn_input(&json!({"input": [{"type": "text", "text": "hello"}]})).unwrap(),
-            "hello"
-        );
+        assert_eq!(turn_input(&json!({"input": [{"type": "text", "text": "hello"}]})).unwrap(), "hello");
         assert!(turn_input(&json!({"text": "  "})).is_err());
         assert!(turn_input(&json!({})).is_err());
     }
@@ -1276,10 +1047,7 @@ mod tests {
             json!({"role": "assistant", "content": "on it"}),
             json!({"role": "tool", "name": "run_command", "content": "ok"}),
         ]);
-        let types: Vec<&str> = items
-            .iter()
-            .map(|item| item["type"].as_str().unwrap())
-            .collect();
+        let types: Vec<&str> = items.iter().map(|item| item["type"].as_str().unwrap()).collect();
         assert_eq!(types, ["userMessage", "agentMessage", "commandExecution"]);
     }
 

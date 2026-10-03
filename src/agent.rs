@@ -1,3 +1,4 @@
+use crate::schema::{req, string, tool};
 use std::{
     collections::HashMap,
     fs,
@@ -41,6 +42,16 @@ pub enum AgentMode {
 }
 
 impl AgentMode {
+    /// The mode `name` spells, in any case.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "plan" => Some(Self::Plan),
+            "build" => Some(Self::Build),
+            _ => None,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Auto => "AUTO",
@@ -159,10 +170,7 @@ impl InjectionQueue {
 
     /// Take everything pending, leaving the queue empty.
     pub fn drain(&self) -> Vec<Injection> {
-        self.0
-            .lock()
-            .map(|mut queue| std::mem::take(&mut *queue))
-            .unwrap_or_default()
+        self.0.lock().map(|mut queue| std::mem::take(&mut *queue)).unwrap_or_default()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -241,6 +249,71 @@ pub struct TurnOptions {
     pub cancel: Arc<AtomicBool>,
 }
 
+impl TurnOptions {
+    /// A turn that carries nothing over: inert stores, BUILD mode, mutations
+    /// allowed, no delegation. What a subagent or a test starts from.
+    pub fn bare(workspace: std::path::PathBuf, services: Arc<AgentServices>) -> Self {
+        Self {
+            workspace,
+            max_steps: 32,
+            tool_output_limit: 30_000,
+            mode: AgentMode::Build,
+            allow_mutations: Arc::new(AtomicBool::new(true)),
+            services,
+            session_id: None,
+            goal: GoalState::default(),
+            tasks: TaskList::default(),
+            compaction: CompactionState::default(),
+            compaction_budget: CompactionBudget::default(),
+            token_compression: false,
+            allow_subagents: false,
+            web_search: Default::default(),
+            papercuts: Default::default(),
+            handles: Default::default(),
+            harness: Default::default(),
+            tether: Default::default(),
+            hive: Default::default(),
+            aux_model: None,
+            subagent_model: None,
+            compaction_model: None,
+            injections: Default::default(),
+            modes: Default::default(),
+            safety: Default::default(),
+            safety_uses_main: false,
+            trace: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// A turn shaped by `config`: its limits, models, mode, and permissions.
+    /// Session state and stores are the caller's to fill in.
+    pub fn for_config(config: &crate::config::Config, services: Arc<AgentServices>) -> Self {
+        Self {
+            max_steps: config.max_steps,
+            tool_output_limit: config.tool_output_limit,
+            mode: config.mode.unwrap_or(AgentMode::Auto),
+            allow_mutations: Arc::new(AtomicBool::new(config.yes)),
+            compaction_budget: compression_budget(config.model_limits.compaction_budget(), config.token_compression),
+            token_compression: config.token_compression,
+            allow_subagents: true,
+            web_search: config.web_search.clone(),
+            aux_model: config.aux_model.clone(),
+            subagent_model: config.subagent_model.clone(),
+            compaction_model: config.compaction_model.clone(),
+            ..Self::bare(config.workspace.clone(), services)
+        }
+    }
+
+    /// Load what the workspace has learned across sessions: recorded lessons,
+    /// the delegation record, and mode discipline.
+    pub fn with_workspace_stores(mut self, config: &crate::config::Config) -> Self {
+        self.papercuts = crate::papercuts::PapercutStore::load(config.paths.papercuts_file.clone(), &config.workspace);
+        self.hive = crate::hive::HiveHandle::load(config.paths.hive_file.clone());
+        self.modes = crate::modes::ModeCoach::load(config.paths.modes_file.clone());
+        self
+    }
+}
+
 pub fn run_turn(
     provider: Provider,
     messages: Vec<Value>,
@@ -261,24 +334,17 @@ async fn run_turn_inner(
     // main model does not pay for them. Compaction deliberately stays on the
     // main model — the rolling summary is load-bearing for the whole session.
     // Falls back to the main provider when no aux model is set.
-    let for_role = |assigned: Option<&str>| match assigned {
-        Some(model) if !model.trim().is_empty() && model != provider.model() => {
-            provider.with_model(model)
-        }
-        _ => provider.clone(),
-    };
-    let aux = for_role(options.aux_model.as_deref());
-    let summariser = for_role(options.compaction_model.as_deref());
-    let delegate = for_role(options.subagent_model.as_deref());
+    let aux = provider.for_role(options.aux_model.as_deref());
+    let summariser = provider.for_role(options.compaction_model.as_deref());
+    let delegate = provider.for_role(options.subagent_model.as_deref());
 
     // Paths outside the workspace that the safety layer has cleared for
     // reading. The executor consults it; the loop below fills it in.
     let outside_reads = crate::tools::OutsideReads::default();
-    let tools =
-        ToolExecutor::with_output_limit(options.workspace.clone(), options.tool_output_limit)
-            // The auxiliary model reads fetched pages for the tools.
-            .with_web(options.web_search.clone().with_extractor(aux.clone()))
-            .with_outside_reads(outside_reads.clone());
+    let tools = ToolExecutor::with_output_limit(options.workspace.clone(), options.tool_output_limit)
+        // The auxiliary model reads fetched pages for the tools.
+        .with_web(options.web_search.clone().with_extractor(aux.clone()))
+        .with_outside_reads(outside_reads.clone());
     let mut specs = options.services.tool_specs();
     specs.extend(GoalState::tool_specs());
     specs.extend(TaskList::tool_specs());
@@ -295,17 +361,7 @@ async fn run_turn_inner(
     if options.mode == AgentMode::Auto {
         specs.push(mode_tool_spec());
     }
-    let subagents = SubagentRuntime::new(
-        options.workspace.clone(),
-        delegate,
-        options.services.clone(),
-        options.max_steps,
-        options.tool_output_limit,
-        options.web_search.clone(),
-        options.hive.clone(),
-        options.harness.clone(),
-        options.injections.clone(),
-    );
+    let subagents = SubagentRuntime::for_turn(delegate, &options);
     let mut repeated_calls: HashMap<String, usize> = HashMap::new();
     // Consecutive failed tool results this turn — two in a row triggers a
     // forced papercut recall on the theory the model is stuck on a known snag.
@@ -321,26 +377,17 @@ async fn run_turn_inner(
     // Which model judges: the auxiliary one by default, the main one when the
     // profile asks for it — the decision gates what the agent may do, so it is
     // worth being able to put the better model on it.
-    let safety_model = if options.safety_uses_main {
-        provider.clone()
-    } else {
-        aux.clone()
-    };
+    let safety_model = if options.safety_uses_main { provider.clone() } else { aux.clone() };
     let mut active_mode = options.mode;
     // Capture once per session. Later turns reuse the snapshot; only imminent
     // rolling compaction refreshes it before verbatim evidence is erased.
-    let mut intent_capture: Option<tokio::task::JoinHandle<Option<String>>> =
-        (options.session_id.is_some() && options.tether.intent().is_none()).then(|| {
-            let (aux, snapshot, previous, cancel) = (
-                aux.clone(),
-                messages.clone(),
-                options.tether.intent(),
-                options.cancel.clone(),
-            );
-            tokio::spawn(async move {
-                crate::tether::capture_intent(&aux, &snapshot, previous.as_deref(), &cancel).await
-            })
-        });
+    let mut intent_capture: Option<tokio::task::JoinHandle<Option<String>>> = (options.session_id.is_some()
+        && options.tether.intent().is_none())
+    .then(|| {
+        let (aux, snapshot, previous, cancel) =
+            (aux.clone(), messages.clone(), options.tether.intent(), options.cancel.clone());
+        tokio::spawn(async move { crate::tether::capture_intent(&aux, &snapshot, previous.as_deref(), &cancel).await })
+    });
     // Best-effort: count this turn against the active goal's progress metric.
     let _ = options.goal.increment_iteration();
 
@@ -362,21 +409,9 @@ async fn run_turn_inner(
         // Rolling-summary compaction erases verbatim history, so the
         // reflection pass runs first, unconditionally — a memory written from
         // the summary alone would be a memory of a summary.
-        if !rethought
-            && crate::compaction::needs_summary(
-                &messages,
-                &options.compaction,
-                &options.compaction_budget,
-            )
-        {
+        if !rethought && crate::compaction::needs_summary(&messages, &options.compaction, &options.compaction_budget) {
             rethought = true;
-            run_refine(
-                &reflector(&aux, &provider, &specs),
-                &messages,
-                &options,
-                &events,
-            )
-            .await;
+            run_refine(&reflector(&aux, &provider, &specs), &messages, &options, &events).await;
             // Refresh the tether snapshot while the evidence is still
             // verbatim — this is the one point mid-turn where history is about
             // to be replaced by a summary. The snapshot is owned, so it can
@@ -391,8 +426,7 @@ async fn run_turn_inner(
                 );
                 tokio::spawn(async move {
                     if let Some(intent) =
-                        crate::tether::capture_intent(&aux, &snapshot, previous.as_deref(), &cancel)
-                            .await
+                        crate::tether::capture_intent(&aux, &snapshot, previous.as_deref(), &cancel).await
                     {
                         tether.set_intent(intent);
                     }
@@ -429,32 +463,23 @@ async fn run_turn_inner(
         // re-hit the provider; compaction and delta-forwarding happen once.
         const EMPTY_COMPLETION_RETRY_LIMIT: usize = 2;
         let mut empty_retries: usize = 0;
-        let mut provider_messages = build_provider_messages(&messages, &options, active_mode);
+        sync_session_context(&mut messages, &options, active_mode);
+        let mut provider_messages = messages.clone();
         let completion = loop {
-            let completion = match provider
-                .complete(
-                    &provider_messages,
-                    &specs,
-                    delta_tx.clone(),
-                    &options.cancel,
-                )
-                .await
-            {
-                Ok(completion) => completion,
-                Err(error) => {
-                    // The forwarder only exits once every sender is gone;
-                    // without this drop the await below deadlocks and the
-                    // turn hangs on "connecting" instead of reporting.
-                    drop(delta_tx);
-                    let _ = forward.await;
-                    abort_capture(intent_capture.take());
-                    let _ = events.send(AgentEvent::Failed {
-                        error: format!("{error:#}"),
-                        messages,
-                    });
-                    return;
-                }
-            };
+            let completion =
+                match provider.complete(&provider_messages, &specs, delta_tx.clone(), &options.cancel).await {
+                    Ok(completion) => completion,
+                    Err(error) => {
+                        // The forwarder only exits once every sender is gone;
+                        // without this drop the await below deadlocks and the
+                        // turn hangs on "connecting" instead of reporting.
+                        drop(delta_tx);
+                        let _ = forward.await;
+                        abort_capture(intent_capture.take());
+                        let _ = events.send(AgentEvent::Failed { error: format!("{error:#}"), messages });
+                        return;
+                    }
+                };
             // A cancelled completion is empty by nature — it must not be
             // mistaken for the provider having nothing to say and retried.
             if completion.cancelled {
@@ -468,18 +493,15 @@ async fn run_turn_inner(
                     drop(delta_tx);
                     let _ = forward.await;
                     abort_capture(intent_capture.take());
-                    let _ = events.send(AgentEvent::Done {
-                        messages,
-                        reason: DoneReason::Complete,
-                    });
+                    let _ = events.send(AgentEvent::Done { messages, reason: DoneReason::Complete });
                     return;
                 }
                 // Brief backoff before retrying so the provider has a moment
                 // to recover from a transient stream hiccup, then rebuild the
                 // message list in case compaction or context state changed.
-                tokio::time::sleep(std::time::Duration::from_millis(500 * empty_retries as u64))
-                    .await;
-                provider_messages = build_provider_messages(&messages, &options, active_mode);
+                tokio::time::sleep(std::time::Duration::from_millis(500 * empty_retries as u64)).await;
+                sync_session_context(&mut messages, &options, active_mode);
+                provider_messages = messages.clone();
                 continue;
             }
             break completion;
@@ -505,9 +527,7 @@ async fn run_turn_inner(
                 cancelled: completion.cancelled,
             })
         {
-            let _ = events.send(AgentEvent::TraceFailed {
-                error: format!("{error:#}"),
-            });
+            let _ = events.send(AgentEvent::TraceFailed { error: format!("{error:#}") });
         }
 
         if completion.truncated {
@@ -520,11 +540,7 @@ async fn run_turn_inner(
         // Skip an assistant turn that produced nothing at all, which is what a
         // cancel before the first token looks like.
         if !completion.content.is_empty() || !completion.tool_calls.is_empty() {
-            messages.push(assistant_message(
-                &completion.content,
-                &completion.reasoning,
-                &completion.tool_calls,
-            ));
+            messages.push(assistant_message(&completion.content, &completion.reasoning, &completion.tool_calls));
         }
         // Tether drift check every ~35 model steps: a quick call judges the
         // recent activity against the session intent, and an off-track verdict
@@ -548,9 +564,7 @@ async fn run_turn_inner(
                 events.clone(),
             );
             tokio::spawn(async move {
-                if let Some(correction) =
-                    crate::tether::check_drift(&aux, &intent, &plan, &snapshot, &cancel).await
-                {
+                if let Some(correction) = crate::tether::check_drift(&aux, &intent, &plan, &snapshot, &cancel).await {
                     tether.set_correction(correction.clone());
                     let _ = notices.send(AgentEvent::Notice(format!("tether — {correction}")));
                 }
@@ -560,10 +574,7 @@ async fn run_turn_inner(
         // got through, so it is kept in history before the turn reports back.
         if completion.cancelled || options.cancel.load(Ordering::Relaxed) {
             abort_capture(intent_capture.take());
-            let _ = events.send(AgentEvent::Done {
-                messages,
-                reason: DoneReason::Interrupted,
-            });
+            let _ = events.send(AgentEvent::Done { messages, reason: DoneReason::Interrupted });
             return;
         }
         if completion.tool_calls.is_empty() {
@@ -577,17 +588,8 @@ async fn run_turn_inner(
             }
             // A turn with many actions earns a look back before it ends;
             // conversational turns end unexamined.
-            if !options.token_compression
-                && !rethought
-                && tool_calls_executed >= crate::refine::LONG_TURN_TOOL_CALLS
-            {
-                run_refine(
-                    &reflector(&aux, &provider, &specs),
-                    &messages,
-                    &options,
-                    &events,
-                )
-                .await;
+            if !options.token_compression && !rethought && tool_calls_executed >= crate::refine::LONG_TURN_TOOL_CALLS {
+                run_refine(&reflector(&aux, &provider, &specs), &messages, &options, &events).await;
             }
             // Collect the intent snapshot started when the turn began. It has
             // had the whole turn to finish, so this is a formality — the
@@ -598,10 +600,7 @@ async fn run_turn_inner(
                 options.tether.set_intent(intent.clone());
                 let _ = events.send(AgentEvent::Notice(format!("tethered — {intent}")));
             }
-            let _ = events.send(AgentEvent::Done {
-                messages,
-                reason: DoneReason::Complete,
-            });
+            let _ = events.send(AgentEvent::Done { messages, reason: DoneReason::Complete });
             return;
         }
 
@@ -614,195 +613,57 @@ async fn run_turn_inner(
                 interrupted = true;
                 break;
             }
-            if call.name == "mode_set" {
-                let output = match set_auto_mode(options.mode, &mut active_mode, &call.arguments) {
-                    Ok((mode, reason)) => {
+            // Two tools belong to the loop itself rather than to an executor.
+            // `ask_user` blocks the turn until the user answers, and neither
+            // counts under the repeat-call heuristic.
+            let settled = match call.name.as_str() {
+                "mode_set" => {
+                    Some(set_auto_mode(options.mode, &mut active_mode, &call.arguments).map(|(mode, reason)| {
                         // Choosing a mode unprompted is the habit worth
                         // reinforcing; it pays down earlier slips.
                         options.modes.record_switch();
-                        let _ = events.send(AgentEvent::ModeChanged {
-                            mode,
-                            reason: reason.clone(),
-                        });
-                        format!("Mode set to {}. Reason: {reason}", mode.label())
-                    }
-                    Err(error) => format!("Error: {error:#}"),
-                };
-                let _ = events.send(AgentEvent::ToolFinished {
-                    name: call.name.clone(),
-                    output: output.clone(),
-                });
-                messages.push(json!({
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "name": call.name,
-                    "content": output
-                }));
+                        let output = format!("Mode set to {}. Reason: {reason}", mode.label());
+                        let _ = events.send(AgentEvent::ModeChanged { mode, reason });
+                        output
+                    }))
+                }
+                "ask_user" => Some(request_user_question(&call, &events).await.map(|answer| answer.describe())),
+                _ => None,
+            };
+            if let Some(result) = settled {
+                finish_tool(&call, crate::tools::reply(result), &mut messages, &events);
                 continue;
             }
-            if call.name == "ask_user" {
-                // ask_user blocks the turn until the user answers — the agent
-                // cannot proceed without the choice. Don't count it under the
-                // repeat-call heuristic; the user's deliberate answers will
-                // legitimately produce different next-model-call shapes.
-                let output = match request_user_question(&call, &events).await {
-                    Ok(answer) => {
-                        let mut parts = Vec::new();
-                        if !answer.selected_labels.is_empty() {
-                            parts.push(format!("Selected: {}", answer.selected_labels.join(", ")));
-                        }
-                        if let Some(custom) = &answer.custom_text
-                            && !custom.is_empty()
-                        {
-                            parts.push(format!("Custom answer: {custom}"));
-                        }
-                        if parts.is_empty() {
-                            "User skipped the question.".to_owned()
-                        } else {
-                            parts.join("\n")
-                        }
-                    }
-                    Err(error) => format!("Error: {error:#}"),
-                };
-                let _ = events.send(AgentEvent::ToolFinished {
-                    name: call.name.clone(),
-                    output: output.clone(),
-                });
-                messages.push(json!({
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "name": call.name,
-                    "content": output
-                }));
-                continue;
-            }
+
             // The repeat-blocker exists to break mutation loops. Inspection is
             // exempt: re-reading a file after editing it uses identical
-            // arguments and is exactly the right thing to do, so counting it as
-            // a loop punished correct behaviour. Runaway reads are still bounded
-            // by `max_steps`.
-            let signature = format!("{}\0{}", call.name, call.arguments);
-            let repeated = repeated_calls.entry(signature).or_default();
+            // arguments and is exactly the right thing to do. Runaway reads
+            // are still bounded by `max_steps`.
+            let repeated = repeated_calls.entry(format!("{}\0{}", call.name, call.arguments));
+            let repeated = repeated.or_default();
             *repeated += 1;
             let loop_blocked = *repeated >= 3 && !is_read_only(&call);
             let requires_approval = tool_requires_approval(&call, &options.services);
-            let mut mode_blocked = mode_blocks(active_mode, &call, requires_approval);
-            // PLAN and AUTO block shell outright only when the command actually
-            // changes something. Inspecting — building, linting, running tests —
-            // is exactly what a planning mode needs, so an unclear command costs
-            // one small classification call rather than a flat refusal.
-            // Set when a command has been affirmatively judged to have no side
-            // effects. PLAN uses it to skip the approval prompt: the mode
-            // exists to investigate, and asking permission for each `ls` is the
-            // same obstacle in a politer form. It is deliberately not enough on
-            // its own — the mode still has to be PLAN.
-            let mut judged_inspection = false;
-            if mode_blocked && call.name == "run_command" {
-                let command = serde_json::from_str::<Value>(&call.arguments)
-                    .ok()
-                    .and_then(|args| args["command"].as_str().map(str::to_owned))
-                    .unwrap_or_default();
-                if !command.is_empty() {
-                    mode_blocked = match crate::safety::command_verdict(&command) {
-                        // Recognisably pure inspection, and recognisable
-                        // destruction, are both settled here — no model call,
-                        // no latency, and no chance of being talked round.
-                        crate::safety::Verdict::Allow => {
-                            judged_inspection = true;
-                            false
-                        }
-                        crate::safety::Verdict::Deny => true,
-                        crate::safety::Verdict::Unclear => {
-                            judged_inspection =
-                                crate::safety::command_is_safe(&safety_model, &safety, &command)
-                                    .await;
-                            !judged_inspection
-                        }
-                    };
-                }
-            }
-            // Reads that leave the workspace are cleared here, before the
-            // executor resolves them: credentials are refused outright, plain
-            // reference material passes, and the rest is judged once and
-            // remembered. Writes never take this path — they stay confined.
-            let mut path_refusal = None;
-            for raw in crate::safety::read_paths(&call.name, &call.arguments) {
-                let candidate = std::path::Path::new(&raw);
-                let joined = if candidate.is_absolute() {
-                    candidate.to_path_buf()
-                } else {
-                    options.workspace.join(candidate)
-                };
-                let Ok(canonical) = joined.canonicalize() else {
-                    continue; // A missing path fails later, with a better message.
-                };
-                // Environment files are judged wherever they live: templates
-                // pass, production never does, and a real `.env` is cleared
-                // once rather than banned — a config question is often exactly
-                // what the plan needs answered.
-                let env_verdict = crate::safety::env_file_verdict(&canonical);
-                let env_cleared = match env_verdict {
-                    crate::safety::Verdict::Allow => true,
-                    crate::safety::Verdict::Deny => false,
-                    crate::safety::Verdict::Unclear => {
-                        crate::safety::env_file_is_readable(&safety_model, &safety, &canonical)
-                            .await
-                    }
-                };
-                if !env_cleared {
-                    path_refusal = Some(format!(
-                        "Refused to read {}: it looks like a live environment file rather than a \
-                         template. Ask the user for the values the plan needs.",
-                        canonical.display()
-                    ));
-                    break;
-                }
-                // A cleared-but-not-obvious env file is recorded, since the
-                // executor re-checks it and cannot ask a model itself.
-                if env_verdict == crate::safety::Verdict::Unclear
-                    && let Ok(mut approved) = outside_reads.write()
-                {
-                    approved.insert(canonical.clone());
-                }
-                if canonical.starts_with(&options.workspace) {
-                    continue;
-                }
-                let cleared = match crate::safety::read_path_verdict(&canonical) {
-                    crate::safety::Verdict::Allow => true,
-                    crate::safety::Verdict::Deny => false,
-                    crate::safety::Verdict::Unclear => {
-                        crate::safety::path_is_readable(&safety_model, &safety, &canonical).await
-                    }
-                };
-                if cleared {
-                    if let Ok(mut approved) = outside_reads.write() {
-                        approved.insert(canonical);
-                    }
-                } else {
-                    path_refusal = Some(format!(
-                        "Refused to read {}: it is outside the workspace and looks like private \
-                         data rather than project material. Ask the user for it if the plan \
-                         needs it.",
-                        canonical.display()
-                    ));
-                    break;
-                }
-            }
+            let judge = Judge { model: &safety_model, cache: &safety, workspace: &options.workspace };
+            // PLAN and AUTO block a shell command only when it actually changes
+            // something. A command judged to have no side effects also skips
+            // the approval prompt in PLAN: the mode exists to investigate, and
+            // asking permission for each `ls` is the same obstacle in a politer
+            // form.
+            let changes_something = mode_blocks(active_mode, &call, requires_approval);
+            let judged_inspection = changes_something && judge.command_only_inspects(&call).await;
+            let mode_blocked = changes_something && !judged_inspection;
+            let path_refusal = judge.refuse_read(&call, &outside_reads).await;
 
             let approved = if loop_blocked || mode_blocked || path_refusal.is_some() {
                 false
             } else if active_mode == AgentMode::Plan && judged_inspection {
-                // Judged to change nothing, in the mode whose whole purpose is
-                // looking. Nothing to approve.
                 true
             } else if requires_approval && !options.allow_mutations.load(Ordering::Relaxed) {
                 let details = if call.name == "spawn_subagents" {
                     SubagentRuntime::approval_details(&call.arguments)
                 } else {
-                    options
-                        .services
-                        .approval_details(&call)
-                        .unwrap_or_else(|| tools.approval_details(&call))
+                    options.services.approval_details(&call).unwrap_or_else(|| tools.approval_details(&call))
                 };
                 request_approval(&call, details, &events, &options.allow_mutations).await
             } else {
@@ -812,118 +673,27 @@ async fn run_turn_inner(
             if mode_blocked {
                 options.modes.record_block();
             }
-            let output = if let Some(refusal) = path_refusal {
+            let mut output = if let Some(refusal) = path_refusal {
                 refusal
             } else if loop_blocked {
-                "Blocked: the same tool call was requested three times. Change the approach before retrying."
+                "Blocked: the same tool call was requested three times. Change the approach before retrying.".to_owned()
+            } else if mode_blocked && active_mode == AgentMode::Auto {
+                "Blocked by AUTO MODE: this would change something. Call mode_set with mode=build and a reason first."
                     .to_owned()
             } else if mode_blocked {
-                match active_mode {
-                    AgentMode::Auto => "Blocked by AUTO MODE: this would change something. Call mode_set with mode=build and a reason first.".to_owned(),
-                    AgentMode::Plan => "Blocked by PLAN MODE: this changes something. Commands that only inspect run without asking — reading, searching, building, testing, printing. Rewrite this as an inspection, or switch to BUILD mode to make the change.".to_owned(),
-                    AgentMode::Build => unreachable!(),
-                }
+                "Blocked by PLAN MODE: this changes something. Commands that only inspect run without asking — reading, searching, building, testing, printing. Rewrite this as an inspection, or switch to BUILD mode to make the change.".to_owned()
             } else if approved {
-                let _ = events.send(AgentEvent::ToolStarted {
-                    name: call.name.clone(),
-                    summary: call.summary(),
-                });
-                let payload = json!({
-                    "tool":call.name,
-                    "arguments":serde_json::from_str::<Value>(&call.arguments).unwrap_or(Value::Null)
-                });
-                match options
-                    .services
-                    .run_hooks("before_tool", options.session_id.as_deref(), &payload)
-                    .await
-                {
-                    Err(error) => format!("Error: {error:#}"),
-                    Ok(_) => {
-                        let mut output =
-                            if call.name == "spawn_subagents" && options.allow_subagents {
-                                subagents.execute(&call.arguments).await
-                            } else if call.name == "message_subagent" && options.allow_subagents {
-                                subagents.message(&call.arguments).await
-                            } else if let Some(output) =
-                                options.goal.execute(&call.name, &call.arguments)
-                            {
-                                output
-                            } else if let Some(output) =
-                                options.tasks.execute(&call.name, &call.arguments)
-                            {
-                                output
-                            } else if let Some(output) =
-                                options.papercuts.execute(&call.name, &call.arguments)
-                            {
-                                output
-                            } else if let Some(output) =
-                                options.harness.execute(&call.name, &call.arguments)
-                            {
-                                output
-                            } else if call.name == "handle_recurse" {
-                                // Dispatched apart from the other handle tools
-                                // because it makes model calls. The aux model
-                                // reads the chunks; the main model is the one
-                                // deciding what to ask.
-                                crate::handles::recurse(
-                                    &aux,
-                                    &options.handles,
-                                    &call.arguments,
-                                    &options.cancel,
-                                )
-                                .await
-                            } else if let Some(output) =
-                                options.handles.execute(&call.name, &call.arguments)
-                            {
-                                output
-                            } else if let Some(output) = options.services.execute(&call).await {
-                                output
-                            } else {
-                                tools.execute(&call).await
-                            };
-                        if call.name == "tool_search" {
-                            let query = serde_json::from_str::<Value>(&call.arguments)
-                                .ok()
-                                .and_then(|value| value["query"].as_str().map(str::to_owned))
-                                .unwrap_or_default();
-                            let extensions = options.services.search_catalog(&query);
-                            if !extensions.is_empty() {
-                                output.push('\n');
-                                output.push_str(&extensions);
-                            }
-                        }
-                        let after_payload = json!({
-                            "tool":call.name,
-                            "arguments":payload["arguments"],
-                            "output":output
-                        });
-                        match options
-                            .services
-                            .run_hooks("after_tool", options.session_id.as_deref(), &after_payload)
-                            .await
-                        {
-                            Ok(hook_outputs) if !hook_outputs.is_empty() => {
-                                output.push_str("\nHook output:\n");
-                                output.push_str(&hook_outputs.join("\n"));
-                            }
-                            Err(error) => {
-                                output.push_str(&format!("\nAfter-tool hook error: {error:#}"))
-                            }
-                            _ => {}
-                        }
-                        output
-                    }
-                }
+                let _ = events.send(AgentEvent::ToolStarted { name: call.name.clone(), summary: call.summary() });
+                run_tool(&call, &options, &tools, &subagents, &aux).await
             } else {
-                "User rejected this tool call. Do not retry it without changing the approach."
-                    .to_owned()
+                "User rejected this tool call. Do not retry it without changing the approach.".to_owned()
             };
+
             // Papercut recall. Every tool result is scanned against the
             // recorded tripwires; a failing streak or a blocked loop force-
             // recalls the strongest lessons even inside their cooldown. The
             // reminders are appended to the tool result itself — the one place
             // the model is guaranteed to be looking when the snag happens.
-            let mut output = output;
             if tool_result_failed(&output) || loop_blocked {
                 consecutive_failures += 1;
             } else {
@@ -946,51 +716,24 @@ async fn run_turn_inner(
                 }
             }
             if !reminders.is_empty() {
-                output.push_str("\n\nLessons from earlier snags that match this situation:");
-                for reminder in &reminders {
-                    output.push('\n');
-                    output.push_str(reminder);
-                }
+                output.push_str("\n\nLessons from earlier snags that match this situation:\n");
+                output.push_str(&reminders.join("\n"));
             }
-            // Bind an oversized result instead of spending the window on it.
-            // The model gets a description and the tools to interrogate it,
-            // The bet: reasoning about the shape of the data and then reading
-            // only the part that turns out to matter beats spending the whole
-            // window on all of it.
-            //
-            // Deliberately after the papercut scan above — tripwires match on
-            // the failure text, and a large output replaced by a summary first
-            // would stop recalling the lesson it should have triggered.
-            //
-            // Handle tools are exempt: binding a slice of $h1 to $h2 would give
-            // the model a handle to a handle and no way back to the content.
-            if output.chars().count() >= crate::handles::BIND_THRESHOLD_CHARS
-                && !call.name.starts_with("handle_")
-            {
-                let source = format!(
-                    "{}: {}",
-                    call.name,
-                    call.arguments.chars().take(120).collect::<String>()
-                );
+            // Bind an oversized result instead of spending the window on it:
+            // the model gets a description and the tools to interrogate it.
+            // Deliberately after the papercut scan — tripwires match on the
+            // failure text. Handle tools are exempt: binding a slice of $h1 to
+            // $h2 would give the model a handle to a handle and no way back.
+            if output.chars().count() >= crate::handles::BIND_THRESHOLD_CHARS && !call.name.starts_with("handle_") {
+                let arguments: String = call.arguments.chars().take(120).collect();
+                let source = format!("{}: {arguments}", call.name);
                 output = options.handles.bind(&source, output).summary();
             }
             tool_calls_executed += 1;
-            let _ = events.send(AgentEvent::ToolFinished {
-                name: call.name.clone(),
-                output: output.clone(),
-            });
-            messages.push(json!({
-                "role": "tool",
-                "tool_call_id": call.id,
-                "name": call.name,
-                "content": output
-            }));
+            finish_tool(&call, output, &mut messages, &events);
         }
         if interrupted {
-            let _ = events.send(AgentEvent::Done {
-                messages,
-                reason: DoneReason::Interrupted,
-            });
+            let _ = events.send(AgentEvent::Done { messages, reason: DoneReason::Interrupted });
             return;
         }
         // Everything that arrived while those tools ran lands here, before the
@@ -1009,18 +752,186 @@ async fn run_turn_inner(
     // A limit-length turn is by definition long, so it earns the reflection
     // pass on the way out.
     if !options.token_compression && !rethought {
-        run_refine(
-            &reflector(&aux, &provider, &specs),
-            &messages,
-            &options,
-            &events,
-        )
-        .await;
+        run_refine(&reflector(&aux, &provider, &specs), &messages, &options, &events).await;
     }
-    let _ = events.send(AgentEvent::Done {
-        messages,
-        reason: DoneReason::StepLimit,
-    });
+    let _ = events.send(AgentEvent::Done { messages, reason: DoneReason::StepLimit });
+}
+
+/// Record a tool's result: tell the UI, and put it in the conversation.
+fn finish_tool(call: &ToolCall, output: String, messages: &mut Vec<Value>, events: &mpsc::UnboundedSender<AgentEvent>) {
+    messages.push(json!({
+        "role": "tool",
+        "tool_call_id": call.id,
+        "name": call.name,
+        "content": output
+    }));
+    let _ = events.send(AgentEvent::ToolFinished { name: call.name.clone(), output });
+}
+
+/// One string argument of a tool call, if it has one by that name.
+fn argument(call: &ToolCall, name: &str) -> Option<String> {
+    let arguments = serde_json::from_str::<Value>(&call.arguments).ok()?;
+    arguments[name].as_str().map(str::to_owned)
+}
+
+/// Run an approved tool, between its `before_tool` and `after_tool` hooks.
+///
+/// Whoever owns the tool answers for it: delegation, then the session's own
+/// stores, then extensions, and the workspace executor last.
+async fn run_tool(
+    call: &ToolCall,
+    options: &TurnOptions,
+    tools: &ToolExecutor,
+    subagents: &SubagentRuntime,
+    aux: &Provider,
+) -> String {
+    let (name, arguments) = (call.name.as_str(), call.arguments.as_str());
+    let session = options.session_id.as_deref();
+    let parsed = serde_json::from_str::<Value>(arguments).unwrap_or(Value::Null);
+    let before = json!({"tool": name, "arguments": parsed});
+    if let Err(error) = options.services.run_hooks("before_tool", session, &before).await {
+        return format!("Error: {error:#}");
+    }
+    let reply = crate::tools::reply;
+    let mut output = if name == "spawn_subagents" && options.allow_subagents {
+        reply(subagents.execute(arguments).await)
+    } else if name == "message_subagent" && options.allow_subagents {
+        reply(subagents.message(arguments).await)
+    } else if name == "handle_recurse" {
+        // Apart from the other handle tools because it makes model calls: the
+        // aux model reads the chunks, the main model decides what to ask.
+        reply(crate::handles::recurse(aux, &options.handles, arguments, &options.cancel).await)
+    } else if let Some(output) = options
+        .goal
+        .execute(name, arguments)
+        .or_else(|| options.tasks.execute(name, arguments))
+        .or_else(|| options.papercuts.execute(name, arguments))
+        .or_else(|| options.harness.execute(name, arguments))
+        .or_else(|| options.handles.execute(name, arguments))
+    {
+        output
+    } else if let Some(output) = options.services.execute(call).await {
+        output
+    } else {
+        tools.execute(call).await
+    };
+    if name == "tool_search" {
+        let extensions = options.services.search_catalog(&argument(call, "query").unwrap_or_default());
+        if !extensions.is_empty() {
+            output.push('\n');
+            output.push_str(&extensions);
+        }
+    }
+    let after = json!({"tool": name, "arguments": before["arguments"], "output": output});
+    match options.services.run_hooks("after_tool", session, &after).await {
+        Ok(hook_outputs) if !hook_outputs.is_empty() => {
+            output.push_str("\nHook output:\n");
+            output.push_str(&hook_outputs.join("\n"));
+        }
+        Err(error) => output.push_str(&format!("\nAfter-tool hook error: {error:#}")),
+        _ => {}
+    }
+    output
+}
+
+/// The safety layer as one turn consults it: settled by rule where a rule is
+/// clear — no model call, no latency, no chance of being talked round — and by
+/// a small classification call, remembered for the session, where it is not.
+struct Judge<'a> {
+    model: &'a Provider,
+    cache: &'a crate::safety::SafetyCache,
+    workspace: &'a Path,
+}
+
+impl Judge<'_> {
+    /// Whether a shell command has been affirmatively judged to change nothing.
+    /// Inspecting — building, linting, running tests — is exactly what a
+    /// planning mode needs.
+    async fn command_only_inspects(&self, call: &ToolCall) -> bool {
+        use crate::safety::Verdict;
+        let Some(command) = argument(call, "command").filter(|command| !command.is_empty()) else {
+            return false;
+        };
+        if call.name != "run_command" {
+            return false;
+        }
+        match crate::safety::command_verdict(&command) {
+            Verdict::Allow => true,
+            Verdict::Deny => false,
+            Verdict::Unclear => crate::safety::command_is_safe(self.model, self.cache, &command).await,
+        }
+    }
+
+    /// Clear the paths a call wants to read, recording the ones that needed a
+    /// judgement so the executor — which cannot ask a model — lets them
+    /// through. Returns the refusal when one is not cleared.
+    ///
+    /// Credentials are refused outright, plain reference material passes, and
+    /// the rest is judged once. Environment files are judged wherever they
+    /// live: templates pass, production never does, and a real `.env` is
+    /// cleared once rather than banned. Writes never take this path.
+    async fn refuse_read(&self, call: &ToolCall, approved: &crate::tools::OutsideReads) -> Option<String> {
+        use crate::safety::{self, Verdict};
+        let approve = |path: std::path::PathBuf| {
+            if let Ok(mut approved) = approved.write() {
+                approved.insert(path);
+            }
+        };
+        for raw in safety::read_paths(&call.name, &call.arguments) {
+            // A missing path fails later, with a better message.
+            let Ok(path) = self.workspace.join(&raw).canonicalize() else {
+                continue;
+            };
+            let env = safety::env_file_verdict(&path);
+            let env_cleared = match env {
+                Verdict::Allow => true,
+                Verdict::Deny => false,
+                Verdict::Unclear => safety::env_file_is_readable(self.model, self.cache, &path).await,
+            };
+            if !env_cleared {
+                return Some(format!(
+                    "Refused to read {}: it looks like a live environment file rather than a \
+                     template. Ask the user for the values the plan needs.",
+                    path.display()
+                ));
+            }
+            if env == Verdict::Unclear {
+                approve(path.clone());
+            }
+            if path.starts_with(self.workspace) {
+                continue;
+            }
+            let cleared = match safety::read_path_verdict(&path) {
+                Verdict::Allow => true,
+                Verdict::Deny => false,
+                Verdict::Unclear => safety::path_is_readable(self.model, self.cache, &path).await,
+            };
+            if !cleared {
+                return Some(format!(
+                    "Refused to read {}: it is outside the workspace and looks like private \
+                     data rather than project material. Ask the user for it if the plan \
+                     needs it.",
+                    path.display()
+                ));
+            }
+            approve(path);
+        }
+        None
+    }
+}
+
+impl UserAnswer {
+    /// The answer as the model reads it.
+    fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.selected_labels.is_empty() {
+            parts.push(format!("Selected: {}", self.selected_labels.join(", ")));
+        }
+        if let Some(custom) = self.custom_text.as_deref().filter(|custom| !custom.is_empty()) {
+            parts.push(format!("Custom answer: {custom}"));
+        }
+        if parts.is_empty() { "User skipped the question.".to_owned() } else { parts.join("\n") }
+    }
 }
 
 pub fn compact_messages(messages: &[Value], max_chars: usize) -> Vec<Value> {
@@ -1078,11 +989,7 @@ pub fn compaction_trace(messages: &[Value]) -> String {
                 let name = call["function"]["name"].as_str().unwrap_or("tool");
                 let args = call["function"]["arguments"].as_str().unwrap_or("");
                 let preview = arg_preview(args, name);
-                parts.push(if preview.is_empty() {
-                    name.to_owned()
-                } else {
-                    format!("{name}({preview})")
-                });
+                parts.push(if preview.is_empty() { name.to_owned() } else { format!("{name}({preview})") });
             }
         }
         if parts.is_empty()
@@ -1090,7 +997,7 @@ pub fn compaction_trace(messages: &[Value]) -> String {
         {
             let snippet = content.trim();
             if !snippet.is_empty() {
-                parts.push(single_line_trim(snippet, 100));
+                parts.push(crate::text::clip(&crate::text::squeeze(snippet), 100, "…"));
             }
         }
         if parts.is_empty() {
@@ -1112,8 +1019,8 @@ fn arg_preview(args: &str, name: &str) -> String {
         return String::new();
     };
     let key = match name {
-        "read_file" | "read_files" | "edit_file" | "write_file" | "append_file" | "delete_file"
-        | "move_file" | "git_restore" | "git_checkout" => "path",
+        "read_file" | "read_files" | "edit_file" | "write_file" | "append_file" | "delete_file" | "move_file"
+        | "git_restore" | "git_checkout" => "path",
         "grep" => "query",
         "glob" => "pattern",
         "list_files" => "path",
@@ -1122,20 +1029,9 @@ fn arg_preview(args: &str, name: &str) -> String {
         _ => return String::new(),
     };
     if let Some(s) = value[key].as_str() {
-        single_line_trim(s, 60)
+        crate::text::clip(&crate::text::squeeze(s), 60, "…")
     } else {
         String::new()
-    }
-}
-
-fn single_line_trim(text: &str, limit: usize) -> String {
-    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let chars: Vec<char> = one_line.chars().collect();
-    if chars.len() <= limit {
-        one_line
-    } else {
-        let head: String = chars[..limit].iter().collect();
-        format!("{head}…")
     }
 }
 
@@ -1171,12 +1067,7 @@ async fn request_approval(
     allow_mutations: &Arc<AtomicBool>,
 ) -> bool {
     let (respond, receive) = oneshot::channel();
-    let request = ApprovalRequest {
-        tool: call.name.clone(),
-        summary: call.summary(),
-        details,
-        respond,
-    };
+    let request = ApprovalRequest { tool: call.name.clone(), summary: call.summary(), details, respond };
     if events.send(AgentEvent::Approval(request)).is_err() {
         return false;
     }
@@ -1215,8 +1106,7 @@ async fn request_user_question(
         #[serde(default)]
         multi_select: bool,
     }
-    let args: Args = serde_json::from_str(&call.arguments)
-        .with_context(|| "ask_user arguments are invalid JSON")?;
+    let args: Args = serde_json::from_str(&call.arguments).with_context(|| "ask_user arguments are invalid JSON")?;
 
     let (respond, receive) = oneshot::channel();
     let request = UserQuestionRequest {
@@ -1240,18 +1130,12 @@ async fn request_user_question(
         // UI is gone — pick the first option as a programmatic fallback so
         // the agent loop can still point somewhere.
         return Ok(UserAnswer {
-            selected_labels: args
-                .options
-                .first()
-                .map(|opt| vec![opt.label.clone()])
-                .unwrap_or_default(),
+            selected_labels: args.options.first().map(|opt| vec![opt.label.clone()]).unwrap_or_default(),
             custom_text: None,
         });
     }
 
-    receive
-        .await
-        .context("user question was cancelled before answer")
+    receive.await.context("user question was cancelled before answer")
 }
 
 /// Whether a tool mutates the workspace and therefore needs a yes.
@@ -1260,9 +1144,10 @@ async fn request_user_question(
 /// is the executor's own list, with MCP servers able to override per tool.
 fn tool_requires_approval(call: &ToolCall, services: &AgentServices) -> bool {
     match call.name.as_str() {
-        "goal_status" | "goal_update" | "task_list" | "task_create" | "task_update"
-        | "papercut_record" | "papercut_list" | "memory_record" | "memory_list"
-        | "memory_forget" | "message_subagent" | "ask_user" => false,
+        "goal_status" | "goal_update" | "task_list" | "task_create" | "task_update" | "papercut_record"
+        | "papercut_list" | "memory_record" | "memory_list" | "memory_forget" | "message_subagent" | "ask_user" => {
+            false
+        }
         "spawn_subagents" => true,
         _ => services.needs_approval(call),
     }
@@ -1332,56 +1217,22 @@ pub fn tool_reads_only(name: &str) -> bool {
 /// which is the quiet way to fail — the composer just shows its normal hint.
 pub async fn draft_reply(provider: &Provider, messages: &[Value]) -> Option<String> {
     const PROMPT: &str = "You predict the user's next message to a coding agent.          Given the assistant's last reply, write the single most likely follow-up the user          would send. Write it as the user, in the first person, under 12 words, as an          instruction or question. No quotes, no preamble, no alternatives. If no follow-up is          likely, reply with exactly NONE.";
-    let last = messages
-        .iter()
-        .rev()
-        .find(|message| message["role"] == "assistant" && message["content"].is_string())
-        .and_then(|message| message["content"].as_str())?;
+    let last = crate::text::last_reply(messages);
     if last.trim().is_empty() {
         return None;
     }
     // The tail carries the conclusion, which is what a follow-up responds to.
-    let tail: String = last
-        .chars()
-        .rev()
-        .take(1_200)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
+    let tail: String = last.chars().rev().take(1_200).collect::<String>().chars().rev().collect();
     let request = vec![
         json!({"role": "system", "content": PROMPT}),
         json!({"role": "user", "content": format!("Assistant's last reply:\n{tail}")}),
     ];
-    let (deltas, _sink) = mpsc::unbounded_channel();
-    let never = AtomicBool::new(false);
-    let completion = provider
-        .complete(&request, &[], deltas, &never)
-        .await
-        .ok()?;
-    let draft = completion
-        .content
-        .trim()
-        .trim_matches('"')
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
+    let reply = provider.answer(&request, &[], &AtomicBool::new(false)).await?;
+    let draft = reply.trim_matches('"').lines().next().unwrap_or_default().trim().to_owned();
     if draft.is_empty() || draft.eq_ignore_ascii_case("NONE") || draft.chars().count() > 160 {
         return None;
     }
     Some(draft)
-}
-
-/// An assistant message built from a completion, for the refine pass's own
-/// private conversation.
-pub fn assistant_reflection_message(completion: &crate::provider::Completion) -> Value {
-    assistant_message(
-        &completion.content,
-        &completion.reasoning,
-        &completion.tool_calls,
-    )
 }
 
 fn assistant_message(content: &str, reasoning: &str, calls: &[ToolCall]) -> Value {
@@ -1420,21 +1271,14 @@ fn assistant_message(content: &str, reasoning: &str, calls: &[ToolCall]) -> Valu
 }
 
 fn mode_tool_spec() -> Value {
-    json!({
-        "type": "function",
-        "function": {
-            "name": "mode_set",
-            "description": "Record the workflow mode for the current AUTO turn. Required before any file mutation, shell command, or subagent run. Pass mode=plan or mode=build with a brief reason; see the active AUTO-mode instruction for how to choose between them.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "mode": {"type": "string", "enum": ["plan", "build"]},
-                    "reason": {"type": "string", "description": "Brief reason this mode fits the user's request"}
-                },
-                "required": ["mode", "reason"]
-            }
-        }
-    })
+    tool(
+        "mode_set",
+        "Record the workflow mode for the current AUTO turn. Required before any file mutation, shell command, or subagent run. Pass mode=plan or mode=build with a brief reason; see the active AUTO-mode instruction for how to choose between them.",
+        [
+            req("mode", json!({"type": "string", "enum": ["plan", "build"]})),
+            req("reason", string("Brief reason this mode fits the user's request")),
+        ],
+    )
 }
 
 fn set_auto_mode(
@@ -1443,16 +1287,12 @@ fn set_auto_mode(
     arguments: &str,
 ) -> Result<(AgentMode, String), anyhow::Error> {
     if configured != AgentMode::Auto {
-        anyhow::bail!(
-            "mode is pinned to {}; AUTO is not active",
-            configured.label()
-        );
+        anyhow::bail!("mode is pinned to {}; AUTO is not active", configured.label());
     }
     let value: Value = serde_json::from_str(arguments)?;
-    let mode = match value["mode"].as_str() {
-        Some("plan") => AgentMode::Plan,
-        Some("build") => AgentMode::Build,
-        _ => anyhow::bail!("mode must be plan or build"),
+    let mode = value["mode"].as_str().and_then(AgentMode::parse);
+    let Some(mode) = mode.filter(|mode| *mode != AgentMode::Auto) else {
+        anyhow::bail!("mode must be plan or build");
     };
     let reason = value["reason"]
         .as_str()
@@ -1480,55 +1320,69 @@ fn mode_prompt(mode: AgentMode) -> &'static str {
     }
 }
 
-/// Build the message list sent to the provider from the trimmed conversation
-/// `messages`, then layering on extension/summary/goal/task/mode system messages
-/// on top. Extracted so the empty-completion retry loop can rebuild it without
-/// duplicating the layering logic.
-fn build_provider_messages(
-    messages: &[Value],
-    options: &TurnOptions,
-    active_mode: AgentMode,
-) -> Vec<Value> {
-    let mut provider_messages = messages.to_vec();
-    // Everything below is volatile: the rolling summary, harness memory, goal,
-    // task list, mode and tether correction all move as the session works. It
-    // goes in ONE block at the very end of the request, after the conversation.
-    //
-    // That position is the whole point. A provider-side prompt cache is a
-    // prefix cache: it can only reuse a request whose leading bytes are
-    // identical to a previous one. Layering this context into the leading
-    // system message — which is what this function used to do, via
-    // `merge_system_messages` — rewrote the first tokens of every request, so a
-    // long session re-paid full price for its entire history on every single
-    // turn. Appended last, the cacheable prefix is the static system prompt
-    // plus the append-only conversation, and only the small volatile tail is
-    // ever uncached.
-    let mut layers: Vec<String> = Vec::new();
-    let mut layer = |text: String| {
-        if !text.trim().is_empty() {
-            layers.push(text);
+/// The opening of a context block Abacus appended to the conversation. The
+/// layer name follows, so each layer can be found — and compared — on its own.
+pub(crate) const SESSION_CONTEXT_TAG: &str = "<session_context";
+
+/// Body written for a layer that has stopped applying, so the copy still in
+/// history is not read as current.
+const CLEARED_LAYER: &str = "(cleared — this no longer applies)";
+
+/// The session's context layers, in the order they are first introduced.
+fn context_layers(options: &TurnOptions, active_mode: AgentMode) -> Vec<(&'static str, String)> {
+    vec![
+        ("extensions", options.services.prompt_context()),
+        ("summary", options.compaction.prompt_context()),
+        ("memory", options.harness.prompt_context()),
+        ("correction", options.tether.correction_layer().unwrap_or_default()),
+        ("delegation", if options.allow_subagents { options.hive.guidance() } else { String::new() }),
+        ("goal", options.goal.prompt_context()),
+        ("tasks", options.tasks.prompt_context()),
+        ("mode", mode_prompt(active_mode).to_owned()),
+        ("mode_reminder", options.modes.reminder()),
+    ]
+}
+
+/// Bring the conversation's context up to date by *appending* what changed.
+///
+/// Every provider cache is a prefix cache, and they differ in how forgiving
+/// they are. Anthropic reads up to a marked breakpoint; vLLM and SGLang match
+/// any shared prefix. DeepSeek-style caches are strictest: they store units at
+/// request boundaries — the end of the input, the end of the output — and a
+/// later request hits only if it contains one of those units *whole*.
+///
+/// Context used to ride as one block rebuilt at the end of every request and
+/// dropped before the next. The history before it was stable, but no stored
+/// unit ever was: each ended in a block the next request no longer had. Such a
+/// cache missed until it noticed the common prefix on its own, several requests
+/// later — observed as a run of 0% hits on every step of a turn.
+///
+/// Appended to the history instead, and only when a layer's text actually
+/// changes, every request is exactly the previous request plus the model's
+/// reply plus whatever followed it. That is the one shape every cache hits
+/// immediately. Each layer is its own message, so a goal's iteration count
+/// ticking over re-sends the goal, not the harness memory beside it; a layer
+/// that goes away is marked cleared rather than silently left standing.
+fn sync_session_context(messages: &mut Vec<Value>, options: &TurnOptions, active_mode: AgentMode) {
+    for (name, text) in context_layers(options, active_mode) {
+        let open = format!("{SESSION_CONTEXT_TAG} layer=\"{name}\">\n");
+        let text = text.trim();
+        let body = if text.is_empty() { CLEARED_LAYER } else { text };
+        let content = format!("{open}{body}\n</session_context>");
+        let (seen, unchanged) = messages
+            .iter()
+            .rev()
+            .filter(|message| message["role"] == "system")
+            .filter_map(|message| message["content"].as_str())
+            .find(|existing| existing.starts_with(&open))
+            .map_or((false, false), |existing| (true, existing == content));
+        // Nothing to clear if the layer was never introduced; nothing to send
+        // if what the model last saw is still true.
+        if unchanged || (!seen && text.is_empty()) {
+            continue;
         }
-    };
-    layer(options.services.prompt_context());
-    layer(options.compaction.prompt_context());
-    layer(options.harness.prompt_context());
-    if let Some(correction) = options.tether.correction_layer() {
-        layer(correction);
+        messages.push(json!({"role": "system", "content": content}));
     }
-    if options.allow_subagents {
-        layer(options.hive.guidance());
-    }
-    layer(options.goal.prompt_context());
-    layer(options.tasks.prompt_context());
-    layer(mode_prompt(active_mode).to_owned());
-    layer(options.modes.reminder());
-    if !layers.is_empty() {
-        provider_messages.push(json!({"role":"system","content": layers.join("\n\n")}));
-    }
-    // Strict chat templates that demand a leading system message are handled in
-    // the provider, which is the layer that knows (and learns) what an endpoint
-    // accepts — and which pays for the rewrite in cache misses.
-    provider_messages
 }
 
 /// Fold every non-leading `system` message into a single leading one.
@@ -1547,11 +1401,7 @@ fn build_provider_messages(
 /// system content (multimodal parts; Abacus never builds one) is left in place
 /// rather than dropped.
 pub(crate) fn merge_system_messages(messages: Vec<Value>) -> Vec<Value> {
-    if !messages
-        .iter()
-        .skip(1)
-        .any(|message| message["role"] == "system" && message["content"].is_string())
-    {
+    if !messages.iter().skip(1).any(|message| message["role"] == "system" && message["content"].is_string()) {
         return messages;
     }
 
@@ -1586,8 +1436,6 @@ pub fn initial_messages(workspace: &Path) -> Vec<Value> {
     })]
 }
 
-/// Run the reflection pass and surface its outcome. Workspace notes are only
-/// writable when the turn itself was allowed to mutate.
 /// Drop a background intent snapshot whose turn ended without it.
 fn abort_capture(handle: Option<tokio::task::JoinHandle<Option<String>>>) {
     if let Some(handle) = handle {
@@ -1601,16 +1449,8 @@ fn abort_capture(handle: Option<tokio::task::JoinHandle<Option<String>>>) {
 /// default, since the `aux` role falls back to `default` — so the two
 /// refinement calls read the conversation's cached prefix instead of paying full
 /// price for a rendered copy of it.
-fn reflector<'a>(
-    aux: &'a Provider,
-    provider: &Provider,
-    specs: &'a [Value],
-) -> crate::refine::Reflector<'a> {
-    crate::refine::Reflector {
-        provider: aux,
-        in_context: aux.model() == provider.model(),
-        tools: specs,
-    }
+fn reflector<'a>(aux: &'a Provider, provider: &Provider, specs: &'a [Value]) -> crate::refine::Reflector<'a> {
+    crate::refine::Reflector { provider: aux, in_context: aux.model() == provider.model(), tools: specs }
 }
 
 /// The reflection pass: decide whether this turn taught anything, and if so
@@ -1628,15 +1468,13 @@ async fn run_refine(
     options: &TurnOptions,
     events: &mpsc::UnboundedSender<AgentEvent>,
 ) {
-    let instructions =
-        match crate::refine::should_refine(reflector, messages, &options.harness, &options.cancel)
-            .await
-        {
-            Some((true, instructions)) => instructions,
-            // A refusal and an unparseable gate reply both mean "do not spend
-            // the planning call".
-            _ => return,
-        };
+    let instructions = match crate::refine::should_refine(reflector, messages, &options.harness, &options.cancel).await
+    {
+        Some((true, instructions)) => instructions,
+        // A refusal and an unparseable gate reply both mean "do not spend
+        // the planning call".
+        _ => return,
+    };
     if let Some(outcome) = crate::refine::run(
         reflector,
         messages,
@@ -1663,11 +1501,7 @@ async fn run_refine(
 /// the UI what landed. Steering is labelled so the model treats it as the
 /// user's live instruction; a worker report is labelled as the delivery of
 /// something it started earlier.
-fn deliver_injections(
-    options: &TurnOptions,
-    messages: &mut Vec<Value>,
-    events: &mpsc::UnboundedSender<AgentEvent>,
-) {
+fn deliver_injections(options: &TurnOptions, messages: &mut Vec<Value>, events: &mpsc::UnboundedSender<AgentEvent>) {
     for injection in options.injections.drain() {
         let content = match &injection {
             Injection::UserMessage(text) => {
@@ -1684,9 +1518,8 @@ fn deliver_injections(
                 )
             }
             Injection::SubagentReport(report) => {
-                let _ = events.send(AgentEvent::Notice(
-                    "a background subagent finished; its report was delivered".to_owned(),
-                ));
+                let _ = events
+                    .send(AgentEvent::Notice("a background subagent finished; its report was delivered".to_owned()));
                 format!(
                     "[background subagent finished] {report}\n\nFold this into what you are \
                      doing; if it changes the plan, say so."
@@ -1725,16 +1558,7 @@ fn system_prompt(workspace: &Path) -> String {
 
     let instructions = workspace.join("AGENTS.md");
     if let Ok(content) = fs::read_to_string(instructions) {
-        const MAX: usize = 24_000;
-        let content = if content.len() > MAX {
-            let mut boundary = MAX;
-            while !content.is_char_boundary(boundary) {
-                boundary -= 1;
-            }
-            format!("{}\n… AGENTS.md truncated", &content[..boundary])
-        } else {
-            content
-        };
+        let content = crate::text::clip_bytes(&content, 24_000, "\n… AGENTS.md truncated");
         prompt.push_str("\n\nProject instructions from AGENTS.md:\n");
         prompt.push_str(&content);
     }
@@ -1759,17 +1583,10 @@ mod tests {
 
         // Exactly one system message, and it is first -- what strict Qwen3.5
         // templates require.
-        assert_eq!(
-            merged.len(),
-            3,
-            "3 system messages collapse to 1, + user + assistant"
-        );
+        assert_eq!(merged.len(), 3, "3 system messages collapse to 1, + user + assistant");
         assert_eq!(merged[0]["role"], "system");
         assert_eq!(merged[0]["content"], "base\n\ngoal\n\nmode");
-        assert!(
-            merged.iter().skip(1).all(|m| m["role"] != "system"),
-            "no system message may follow the first"
-        );
+        assert!(merged.iter().skip(1).all(|m| m["role"] != "system"), "no system message may follow the first");
         // Conversation order is untouched.
         assert_eq!(merged[1]["content"], "hey");
         assert_eq!(merged[2]["content"], "hi");
@@ -1783,19 +1600,13 @@ mod tests {
             json!({"role":"user","content":"hey"}),
         ]);
         assert_eq!(merged.len(), 2);
-        assert_eq!(
-            merged[0]["content"],
-            "base\n\n3 older messages were omitted"
-        );
+        assert_eq!(merged[0]["content"], "base\n\n3 older messages were omitted");
         assert_eq!(merged[1]["role"], "user");
     }
 
     #[test]
     fn leaves_an_already_valid_message_list_untouched() {
-        let messages = vec![
-            json!({"role":"system","content":"base"}),
-            json!({"role":"user","content":"hey"}),
-        ];
+        let messages = vec![json!({"role":"system","content":"base"}), json!({"role":"user","content":"hey"})];
         assert_eq!(merge_system_messages(messages.clone()), messages);
     }
 
@@ -1809,10 +1620,7 @@ mod tests {
 
         let drained = queue.drain();
         assert_eq!(drained.len(), 2);
-        assert!(
-            queue.is_empty(),
-            "draining takes the items — a second turn must not replay them"
-        );
+        assert!(queue.is_empty(), "draining takes the items — a second turn must not replay them");
         assert!(queue.drain().is_empty());
         assert!(matches!(drained[0], Injection::UserMessage(_)));
         assert!(matches!(drained[1], Injection::SubagentReport(_)));
@@ -1823,9 +1631,7 @@ mod tests {
         let (events, mut receiver) = mpsc::unbounded_channel();
         let queue = InjectionQueue::default();
         queue.push(Injection::UserMessage("stop and do X instead".into()));
-        queue.push(Injection::SubagentReport(
-            "worker alpha: done, 3 files".into(),
-        ));
+        queue.push(Injection::SubagentReport("worker alpha: done, 3 files".into()));
         let options = test_turn_options(queue);
         let mut messages = vec![json!({"role":"user","content":"original ask"})];
 
@@ -1837,10 +1643,7 @@ mod tests {
         assert_eq!(messages[1]["content"], "stop and do X instead");
         // A worker report is labelled as the delivery it is.
         let report = messages[2]["content"].as_str().unwrap();
-        assert!(
-            report.starts_with("[background subagent finished]"),
-            "{report}"
-        );
+        assert!(report.starts_with("[background subagent finished]"), "{report}");
         assert!(report.contains("worker alpha: done, 3 files"));
         // Both are surfaced to the user as notices.
         let mut notices = Vec::new();
@@ -1857,9 +1660,7 @@ mod tests {
     fn a_side_note_is_delivered_as_context_not_as_an_instruction() {
         let (events, mut receiver) = mpsc::unbounded_channel();
         let queue = InjectionQueue::default();
-        queue.push(Injection::SideNote(
-            "does this handle windows paths?".into(),
-        ));
+        queue.push(Injection::SideNote("does this handle windows paths?".into()));
         let options = test_turn_options(queue);
         let mut messages = vec![json!({"role":"user","content":"refactor the parser"})];
 
@@ -1871,10 +1672,7 @@ mod tests {
         // The framing is what separates a nudge from a new task.
         assert!(delivered.contains("not an instruction"), "{delivered}");
         assert!(delivered.contains("Do not change course"), "{delivered}");
-        assert!(
-            delivered.contains("finish the work already in progress"),
-            "{delivered}"
-        );
+        assert!(delivered.contains("finish the work already in progress"), "{delivered}");
         // And the user sees it was noted.
         let notice = std::iter::from_fn(|| receiver.try_recv().ok())
             .find_map(|event| match event {
@@ -1887,87 +1685,87 @@ mod tests {
 
     /// Minimal options for the injection tests — nothing here reaches a model.
     fn test_turn_options(injections: InjectionQueue) -> TurnOptions {
+        let here = std::path::PathBuf::from(".");
         TurnOptions {
-            workspace: std::path::PathBuf::from("."),
             max_steps: 1,
             tool_output_limit: 2_000,
-            mode: AgentMode::Build,
-            allow_mutations: Arc::new(AtomicBool::new(true)),
-            services: Arc::new(AgentServices::empty(std::path::PathBuf::from("."))),
-            session_id: None,
-            goal: GoalState::default(),
-            tasks: TaskList::default(),
-            compaction: CompactionState::default(),
-            compaction_budget: CompactionBudget::default(),
-            token_compression: false,
-            allow_subagents: false,
-            web_search: crate::web::WebConfig::default(),
-            papercuts: crate::papercuts::PapercutStore::default(),
-            harness: crate::harness::HarnessStore::default(),
-            handles: crate::handles::HandleStore::default(),
-            tether: crate::tether::TetherState::default(),
-            hive: crate::hive::HiveHandle::default(),
-            aux_model: None,
-            subagent_model: None,
-            compaction_model: None,
             injections,
-            modes: crate::modes::ModeCoach::default(),
-            safety: crate::safety::SafetyCache::default(),
-            safety_uses_main: false,
-            trace: None,
-            cancel: Arc::new(AtomicBool::new(false)),
+            ..TurnOptions::bare(here.clone(), Arc::new(AgentServices::empty(here)))
         }
     }
 
+    fn appended(history: &[Value], from: usize) -> Vec<String> {
+        history[from..]
+            .iter()
+            .map(|message| {
+                assert_eq!(message["role"], "system");
+                message["content"].as_str().unwrap().to_owned()
+            })
+            .collect()
+    }
+
     #[test]
-    fn volatile_context_is_appended_and_never_rewrites_the_prefix() {
+    fn session_context_is_appended_only_when_it_changes() {
         let options = test_turn_options(InjectionQueue::default());
-        let history = vec![
+        let mut history = vec![
             json!({"role": "system", "content": "base prompt"}),
             json!({"role": "user", "content": "fix the parser"}),
             json!({"role": "assistant", "content": "on it"}),
         ];
+        let opening = history.clone();
 
-        let first = build_provider_messages(&history, &options, AgentMode::Build);
-        // The conversation is passed through untouched, in order, with the
-        // volatile context as one block after it.
-        assert_eq!(&first[..3], &history[..]);
-        assert_eq!(first.len(), 4);
-        assert_eq!(first[3]["role"], "system");
-        let volatile = first[3]["content"].as_str().unwrap();
-        assert!(
-            volatile.contains("BUILD"),
-            "mode rides in the tail: {volatile}"
-        );
+        sync_session_context(&mut history, &options, AgentMode::Build);
+        assert_eq!(&history[..3], &opening[..], "history before it is untouched");
+        let first = appended(&history, 3);
+        assert!(first.iter().all(|block| block.starts_with(SESSION_CONTEXT_TAG)));
+        assert!(first.iter().any(|block| block.contains("layer=\"mode\"") && block.contains("BUILD")), "{first:?}");
 
-        // Change the volatile state the way a turn does, and the prefix — the
-        // system prompt and every conversation message — must be byte-identical.
-        // This is the whole prompt-cache story: a rewritten first message means
-        // the provider has nothing to reuse and the session re-pays for its own
-        // history every turn.
-        options
-            .goal
-            .set(Some(crate::goal::Goal::new("ship the parser fix").unwrap()))
-            .unwrap();
-        let second = build_provider_messages(&history, &options, AgentMode::Plan);
-        assert_eq!(
-            &second[..3],
-            &first[..3],
-            "the cacheable prefix must not move when context changes"
-        );
-        let volatile = second.last().unwrap()["content"].as_str().unwrap();
-        assert!(volatile.contains("ship the parser fix"));
-        assert!(volatile.contains("PLAN"));
+        // A step later with nothing changed, nothing is appended: the next
+        // request is exactly the last one plus what happened since, which is
+        // the only shape a boundary-unit cache can hit.
+        history.push(json!({"role": "assistant", "content": "step two"}));
+        let settled = history.clone();
+        sync_session_context(&mut history, &options, AgentMode::Build);
+        assert_eq!(history, settled);
+
+        // Goal and mode change: only those two layers are re-sent, after
+        // everything the provider has already seen.
+        options.goal.set(Some(crate::goal::Goal::new("ship the parser fix").unwrap())).unwrap();
+        sync_session_context(&mut history, &options, AgentMode::Plan);
+        assert_eq!(&history[..settled.len()], &settled[..], "never rewritten");
+        let changed = appended(&history, settled.len());
+        assert_eq!(changed.len(), 2, "{changed:?}");
+        assert!(changed.iter().any(|block| block.contains("layer=\"goal\"") && block.contains("ship the parser fix")));
+        assert!(changed.iter().any(|block| block.contains("layer=\"mode\"") && block.contains("PLAN")));
+    }
+
+    #[test]
+    fn a_layer_that_stops_applying_is_marked_cleared() {
+        let options = test_turn_options(InjectionQueue::default());
+        let mut history = vec![
+            json!({"role": "system", "content": "base prompt"}),
+            json!({"role": "user", "content": "fix the parser"}),
+        ];
+        options.goal.set(Some(crate::goal::Goal::new("ship the parser fix").unwrap())).unwrap();
+        sync_session_context(&mut history, &options, AgentMode::Build);
+        let before = history.len();
+
+        options.goal.set(None).unwrap();
+        sync_session_context(&mut history, &options, AgentMode::Build);
+        let cleared = appended(&history, before);
+        assert_eq!(cleared.len(), 1);
+        assert!(cleared[0].contains("layer=\"goal\"") && cleared[0].contains(CLEARED_LAYER));
+
+        // Cleared once is enough.
+        sync_session_context(&mut history, &options, AgentMode::Build);
+        assert_eq!(history.len(), before + 1);
     }
 
     #[test]
     fn token_compression_tightens_every_context_budget() {
-        let normal = CompactionBudget {
-            compact_at_chars: 100_000,
-            recent_budget_chars: 40_000,
-            summary_budget_chars: 12_000,
-        };
-        let unchanged = compression_budget(normal.clone(), false);
+        let normal =
+            CompactionBudget { compact_at_chars: 100_000, recent_budget_chars: 40_000, summary_budget_chars: 12_000 };
+        let unchanged = compression_budget(normal, false);
         assert_eq!(unchanged.compact_at_chars, normal.compact_at_chars);
         assert_eq!(unchanged.recent_budget_chars, normal.recent_budget_chars);
         assert_eq!(unchanged.summary_budget_chars, normal.summary_budget_chars);
@@ -1983,11 +1781,7 @@ mod tests {
         let value = assistant_message(
             "",
             "checking the readme first",
-            &[ToolCall {
-                id: "call_1".into(),
-                name: "read_file".into(),
-                arguments: r#"{"path":"README.md"}"#.into(),
-            }],
+            &[ToolCall { id: "call_1".into(), name: "read_file".into(), arguments: r#"{"path":"README.md"}"#.into() }],
         );
         assert!(value["content"].is_null());
         assert_eq!(value["tool_calls"][0]["function"]["name"], "read_file");
@@ -2009,11 +1803,7 @@ mod tests {
         ];
         let compacted = compact_messages(&messages, 120);
         assert_eq!(compacted[0]["content"], "rules");
-        assert!(
-            compacted
-                .iter()
-                .any(|message| message["content"] == "recent")
-        );
+        assert!(compacted.iter().any(|message| message["content"] == "recent"));
         assert!(compacted.len() < messages.len() + 1);
     }
 
@@ -2032,16 +1822,10 @@ mod tests {
         let compacted = compact_messages(&messages, 160);
         let note = compacted
             .iter()
-            .find(|m| {
-                m["role"] == "system"
-                    && m["content"].as_str().is_some_and(|c| c.contains("omitted"))
-            })
+            .find(|m| m["role"] == "system" && m["content"].as_str().is_some_and(|c| c.contains("omitted")))
             .expect("compaction note present");
         let content = note["content"].as_str().unwrap();
-        assert!(
-            content.contains("edit_file(src/main.rs)"),
-            "note was: {content}"
-        );
+        assert!(content.contains("edit_file(src/main.rs)"), "note was: {content}");
         assert!(content.contains("final") || compacted.iter().any(|m| m["content"] == "final"));
     }
 
@@ -2059,23 +1843,15 @@ mod tests {
         assert!(reason.starts_with("The user"));
 
         assert!(
-            set_auto_mode(
-                AgentMode::Plan,
-                &mut active,
-                r#"{"mode":"build","reason":"override"}"#,
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("pinned")
+            set_auto_mode(AgentMode::Plan, &mut active, r#"{"mode":"build","reason":"override"}"#,)
+                .unwrap_err()
+                .to_string()
+                .contains("pinned")
         );
     }
 
     fn call(name: &str) -> ToolCall {
-        ToolCall {
-            id: "1".into(),
-            name: name.into(),
-            arguments: "{}".into(),
-        }
+        ToolCall { id: "1".into(), name: name.into(), arguments: "{}".into() }
     }
 
     /// The rule this encodes: PLAN and AUTO stop the agent changing things,
@@ -2085,26 +1861,12 @@ mod tests {
     fn inspection_is_allowed_in_every_mode() {
         for mode in [AgentMode::Plan, AgentMode::Auto, AgentMode::Build] {
             for name in [
-                "read_file",
-                "read_files",
-                "list_files",
-                "glob",
-                "grep",
-                "git_status",
-                "git_diff",
-                "git_log",
-                "git_show",
-                "git_blame",
-                "tool_search",
-                "web_search",
-                "read_page",
+                "read_file", "read_files", "list_files", "glob", "grep", "git_status", "git_diff", "git_log",
+                "git_show", "git_blame", "tool_search", "web_search", "read_page",
             ] {
                 // Even if something marks an inspection tool as needing
                 // approval, the mode gate must not be what stops it.
-                assert!(
-                    !mode_blocks(mode, &call(name), true),
-                    "{name} should not be mode-blocked in {mode:?}"
-                );
+                assert!(!mode_blocks(mode, &call(name), true), "{name} should not be mode-blocked in {mode:?}");
             }
         }
     }
@@ -2112,34 +1874,17 @@ mod tests {
     #[test]
     fn mutations_are_blocked_outside_build() {
         for name in [
-            "edit_file",
-            "write_file",
-            "apply_patch",
-            "delete_file",
-            "move_file",
-            "append_file",
-            "create_directory",
-            "run_command",
-            "git_commit",
-            "git_restore",
-            "git_checkout",
-            "spawn_subagents",
+            "edit_file", "write_file", "apply_patch", "delete_file", "move_file", "append_file", "create_directory",
+            "run_command", "git_commit", "git_restore", "git_checkout", "spawn_subagents",
             // Skill authoring writes files, so a read-only session must not
             // reach it. Mode gating keys off the approval list, so omitting
             // these here would let PLAN write a skill.
-            "skill_create",
-            "skill_update",
+            "skill_create", "skill_update",
         ] {
             for mode in [AgentMode::Plan, AgentMode::Auto] {
-                assert!(
-                    mode_blocks(mode, &call(name), true),
-                    "{name} should be mode-blocked in {mode:?}"
-                );
+                assert!(mode_blocks(mode, &call(name), true), "{name} should be mode-blocked in {mode:?}");
             }
-            assert!(
-                !mode_blocks(AgentMode::Build, &call(name), true),
-                "{name} should run in BUILD"
-            );
+            assert!(!mode_blocks(AgentMode::Build, &call(name), true), "{name} should run in BUILD");
         }
     }
 
@@ -2147,12 +1892,7 @@ mod tests {
     /// $h1 to $h2 hands the model a handle to a handle with no way back.
     #[test]
     fn handle_tool_results_are_exempt_from_binding() {
-        for name in [
-            "handle_slice",
-            "handle_grep",
-            "handle_recurse",
-            "handle_info",
-        ] {
+        for name in ["handle_slice", "handle_grep", "handle_recurse", "handle_info"] {
             assert!(name.starts_with("handle_"));
         }
         // The read-only classification has to agree: inspecting a bound
@@ -2170,12 +1910,8 @@ mod tests {
         assert!(!tool_reads_only("skill_create"));
         assert!(!tool_reads_only("skill_update"));
         assert!(
-            crate::tools::ToolCall {
-                id: "1".into(),
-                name: "skill_create".into(),
-                arguments: "{}".into()
-            }
-            .needs_approval()
+            crate::tools::ToolCall { id: "1".into(), name: "skill_create".into(), arguments: "{}".into() }
+                .needs_approval()
         );
     }
 
@@ -2217,21 +1953,10 @@ mod tests {
     #[test]
     fn the_read_only_list_holds_no_mutating_tools() {
         for name in [
-            "edit_file",
-            "write_file",
-            "apply_patch",
-            "delete_file",
-            "move_file",
-            "append_file",
-            "run_command",
-            "git_commit",
-            "git_restore",
-            "git_checkout",
+            "edit_file", "write_file", "apply_patch", "delete_file", "move_file", "append_file", "run_command",
+            "git_commit", "git_restore", "git_checkout",
         ] {
-            assert!(
-                !is_read_only(&call(name)),
-                "{name} must not be treated as read-only"
-            );
+            assert!(!is_read_only(&call(name)), "{name} must not be treated as read-only");
         }
     }
 }
