@@ -1829,3 +1829,105 @@ async fn read_request(stream: &mut TcpStream) -> Vec<u8> {
     buffer.truncate(used);
     buffer
 }
+
+/// LocalAI renders a strict chat template (Qwen 3.x) and reports its
+/// "System message must be at the beginning" as an error chunk on a 200
+/// stream, not as a failed request. The rejection must still be learned: the
+/// retry carries one leading system message, and the session keeps doing so.
+#[tokio::test]
+async fn a_streamed_leading_system_rejection_is_learned_and_retried() {
+    let directory = tempdir().unwrap();
+    let workspace = directory.path().join("project");
+    std::fs::create_dir(&workspace).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (seen_tx, mut seen) = mpsc::unbounded_channel::<Vec<String>>();
+    let server = tokio::spawn(async move {
+        let rejection = concat!(
+            "data: {\"error\":{\"code\":\"server_error\",\"message\":\"rpc error: Jinja Exception: System message must be at the beginning.\",\"type\":\"server_error\"}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let answer = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello from Qwen.\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        for body in [rejection, answer] {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_request(&mut stream).await;
+            let request = String::from_utf8_lossy(&request);
+            let json_start = request.find("\r\n\r\n").map(|at| at + 4).unwrap_or(0);
+            let sent: serde_json::Value = serde_json::from_str(&request[json_start..]).unwrap();
+            let roles = sent["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|message| message["role"].as_str().unwrap().to_owned())
+                .collect();
+            seen_tx.send(roles).unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.shutdown().await.unwrap();
+        }
+    });
+
+    let config = Config {
+        workspace: workspace.clone(),
+        profile: "test".into(),
+        model: "qwen3".into(),
+        base_url: format!("http://{address}/v1"),
+        protocol: ProviderProtocol::ChatCompletions,
+        api_key: None,
+        max_steps: 4,
+        tool_output_limit: 30_000,
+        yes: true,
+        no_session: true,
+        model_limits: ModelLimits::default(),
+        tool_format: abacus_agent::tool_format::ToolFormat::default(),
+        mode: None,
+        trace_enabled: false,
+        routing: Default::default(),
+        web_search: abacus_agent::web::WebConfig::default(),
+        endpoint: None,
+        aux_model: None,
+        subagent_model: None,
+        compaction_model: None,
+        reasoning_effort: None,
+        token_compression: false,
+        one_stream: false,
+        prompt_cache: true,
+        paths: AbacusPaths::under(directory.path().join("home")),
+    };
+    let provider = Provider::new(&config).unwrap();
+    // The shape Abacus sends: the base prompt first, and the volatile context
+    // (summary, goal, mode) as a trailing system block.
+    let messages = vec![
+        json!({"role":"system","content":"You are Abacus."}),
+        json!({"role":"user","content":"Hi"}),
+        json!({"role":"system","content":"BUILD MODE is active."}),
+    ];
+    let (deltas, _sink) = mpsc::unbounded_channel();
+    let completion = provider
+        .complete(&messages, &[], deltas, &AtomicBool::new(false))
+        .await
+        .unwrap();
+    assert_eq!(completion.content, "Hello from Qwen.");
+    server.await.unwrap();
+
+    let first = seen.recv().await.unwrap();
+    assert_eq!(
+        first,
+        ["system", "user", "system"],
+        "the first request is sent as built"
+    );
+    let second = seen.recv().await.unwrap();
+    assert_eq!(
+        second,
+        ["system", "user"],
+        "the retry merges the system blocks at the front"
+    );
+}

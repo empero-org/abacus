@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Fixed: a Qwen 3.x model served by LocalAI failed every request with a Jinja
+  exception, "System message must be at the beginning". LocalAI reports the
+  strict template's rejection as an error chunk on a successful stream rather
+  than as a failed request, so it bypassed the retry that merges the system
+  blocks. The rejection is now learned from the stream as well, and the request
+  is sent again with one leading system message, as before. (#2)
+
 - **`abacus app-server`**, a persistent machine-facing mode for desktop and
   editor front ends: JSON-RPC 2.0 over stdin/stdout, one process per workspace
   and thread. A turn streams as a sequence of *items* — user message, agent
