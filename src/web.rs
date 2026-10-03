@@ -136,7 +136,7 @@ impl SearchSettings {
             // no key, and nothing leaves their own infrastructure.
             SearchBackend::Auto if instance.is_some() => (SearchBackend::Searxng, None),
             // A named variable is an explicit choice; honour it first.
-            SearchBackend::Auto => match named.and_then(&read).or_else(|| read("BRAVE_API_KEY")) {
+            SearchBackend::Auto => match named.and_then(read).or_else(|| read("BRAVE_API_KEY")) {
                 Some(key) => (SearchBackend::Brave, Some(key)),
                 // Explicitly asked for: a real JSON API beats scraping, but it
                 // is someone else's host, so it is never assumed.
@@ -150,7 +150,7 @@ impl SearchSettings {
             },
             chosen => {
                 let default_env = matches!(chosen, SearchBackend::Brave).then_some("BRAVE_API_KEY");
-                (chosen, named.or(default_env).and_then(&read))
+                (chosen, named.or(default_env).and_then(read))
             }
         };
         WebConfig { enabled: self.enabled, backend, api_key, instance_url: instance, extractor: None }
