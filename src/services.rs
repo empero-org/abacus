@@ -216,7 +216,7 @@ impl AgentServices {
         // with one name means whichever root wins discovery silently decides.
         if let Some(existing) =
             self.skills.read().expect("skill registry lock").root_of(&args.name).map(Path::to_path_buf)
-            && !existing.starts_with(&root)
+            && !inside(&existing, &root)
         {
             bail!(
                 "a skill named `{}` already exists at {} — pick another name, or use skill_update if it is yours",
@@ -252,9 +252,9 @@ impl AgentServices {
         // A plugin's skill, a `~/.agents` skill, or a configured root belongs to
         // whoever installed it. Editing it from here would be an edit the owner
         // never sees and the next reinstall would silently undo.
-        let root = if existing_root.starts_with(&project_root) {
+        let root = if inside(&existing_root, &project_root) {
             project_root
-        } else if existing_root.starts_with(&user_root) {
+        } else if inside(&existing_root, &user_root) {
             user_root
         } else {
             bail!(
@@ -338,6 +338,15 @@ impl AgentServices {
     }
 }
 
+/// Whether `path` lies under `root`, comparing the real paths: a discovered
+/// skill's root is canonical, and on macOS the temporary and home directories
+/// reach it through symlinks (`/var` is `/private/var`), so a textual prefix
+/// test wrongly disowned every skill Abacus had just written.
+fn inside(path: &Path, root: &Path) -> bool {
+    let real = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_owned());
+    path.starts_with(root) || real(path).starts_with(real(root))
+}
+
 fn resolve_paths(paths: &[PathBuf], base: &Path) -> Vec<PathBuf> {
     paths.iter().map(|path| if path.is_absolute() { path.clone() } else { base.join(path) }).collect()
 }
@@ -409,6 +418,29 @@ mod tests {
                 .unwrap()
                 .contains("release-audit")
         );
+    }
+
+    /// macOS hands out `/var/folders/…` for a temporary directory, which is
+    /// really `/private/var/…`; a skill's discovered root is the real path,
+    /// the workspace is the alias, and a textual prefix test said the skill
+    /// Abacus had just written belonged to someone else.
+    #[tokio::test]
+    async fn an_owned_skill_is_recognised_through_a_symlinked_workspace() {
+        let directory = tempdir().unwrap();
+        let real = directory.path().join("real");
+        std::fs::create_dir_all(real.join("workspace")).unwrap();
+        std::os::unix::fs::symlink(&real, directory.path().join("alias")).unwrap();
+        let workspace = directory.path().join("alias/workspace");
+        let paths = AbacusPaths::under(directory.path().join("home"));
+        std::fs::create_dir_all(&paths.root).unwrap();
+        let services = AgentServices::discover(&workspace, &paths, &Settings::default()).await.unwrap();
+        services
+            .execute(&call("skill_create", json!({"name":"mine","description":"d","instructions":"v1 body"})))
+            .await
+            .unwrap();
+        let updated =
+            services.execute(&call("skill_update", json!({"name":"mine","instructions":"v2 body"}))).await.unwrap();
+        assert!(updated.starts_with("Updated skill `mine`"), "{updated}");
     }
 
     #[tokio::test]

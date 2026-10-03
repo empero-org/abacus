@@ -48,11 +48,21 @@ impl App {
             "/memories" => self.memories_command(argument),
             "/refine" => self.start_refine(argument),
             "/harness" => self.harness_command(argument),
-            _ if command.starts_with('/') => self.fail(format!("Unknown command: {command}")),
+            // A `/name` that is a skill or a plugin command is not a slash
+            // command; the caller resolves it into a prompt.
+            _ if command.starts_with('/') && !self.has_extension(&command[1..]) => {
+                self.fail(format!("Unknown command: {command}"))
+            }
             _ => return false,
         }
         self.follow = true;
         true
+    }
+
+    /// Whether an installed skill or plugin answers to `/name`.
+    fn has_extension(&self, name: &str) -> bool {
+        self.services.skills.read().expect("skill registry lock").get(name).is_some()
+            || self.services.plugins.command(name).is_some()
     }
 
     /// Put the outcome of a settings change in the status bar: `done` when it

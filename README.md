@@ -2,1043 +2,397 @@
   <img src="assets/logo.jpg" alt="Abacus logo" width="300" />
 </p>
 
-# Abacus Agent
+# Abacus
 
-**The terminal coding agent that remembers being an agent.**
+Abacus is a coding agent that runs in your terminal and works in your
+repository. It reads code, edits files, runs commands and tests, and asks before
+it changes anything. It works with any OpenAI-compatible Chat Completions
+endpoint, the OpenAI Responses API or the Anthropic Messages API, including local
+models served by Ollama, llama.cpp or vLLM. It is for developers who want an
+agent in the terminal and want to choose the model. It is one Rust binary for
+macOS, Linux and Windows.
 
-Abacus is a high-performance, deliberately slimmed TUI coding agent built for the
-mission-critical lane. One fast Rust binary, a compact auditable toolset, and a
-recursive self-improvement loop that makes it better at your codebase with every
-single session. It is not a front-end for one vendor's model and not a
-kitchen-sink hub — it treats *which model* as a knob, not an identity, and it runs
-natively on macOS, Linux, and Windows.
+## Install
 
-Most coding agents are amnesiacs: brilliant in the moment, and forgetful the
-moment the session ends. Abacus is built on a different bet — **an agent should
-get better at your repository the longer it works there, and never need to be
-taught the same lesson twice.**
-
----
-
-## The recursive self-improvement loop
-
-This is Abacus's defining superpower: everything one session learns becomes the
-starting state of the next. Work in a repository for a week and the agent that
-starts on day eight is not the agent that started on day one — it is *your*
-agent, carrying a body of hard-won context no other tool on your machine can
-offer.
-
-Five mechanisms form the loop, supported by training traces and tiered context
-compaction that keep long runways from degrading:
-
-- **[Papercuts](#papercuts)** remember *failures*: what went wrong, the fix that
-  worked, and tripwires that re-inject the lesson the moment the same snag
-  reappears. The more often a lesson is needed, the more often it surfaces.
-- **[Memories and rethink](#memories-and-rethink)** remember *knowledge*:
-  architecture facts, decisions and their reasons, conventions — recorded and
-  curated by the model itself, injected at the start of every turn, and distilled
-  from heavy turns by a bounded reflection pass.
-- **[Tethering](#tethering)** is the *anchor*: a snapshot of the session's intent,
-  checked every ~35 model steps against a compact history (including the model's
-  own thinking), with off-track verdicts becoming targeted course corrections.
-- **[The hive](#the-hive-earned-delegation)** is *earned* delegation:
-  confidence is recorded from actual swarm outcomes, and the derived maturity
-  tier — probing, swarm, hive — decides how the model parallelizes work.
-- **[Training traces](#training-traces)** make Abacus *teachable*: every model
-  call is captured as the task it was actually given, ready to fine-tune a model
-  to drive agents — not just a log of what happened.
-
-The through-line is one sentence: **Abacus compounds.** Its mechanisms persist
-locally under `~/.abacus/` — `papercuts.json`, `memories.json`, `hive.json`,
-`modes.json`, and the session files — and inside the workspace only via a clearly delimited notes
-block in `AGENTS.md`. Nothing leaves your machine unless you send it.
-
-### Papercuts
-
-When Abacus works through a snag — an error whose fix was not obvious, a tool
-that failed repeatedly until the approach changed — it records the lesson as a
-**papercut**: a title, what went wrong, the fix that worked, optional references,
-and 1–6 **tripwires** — distinctive strings from the failure output that identify
-the same snag when it happens again.
-
-Recall is **trigger-driven and frequency-adaptive**. Every tool call's name,
-arguments, and output are scanned against every recorded tripwire. A match is an
-*encounter*: it strengthens the lesson and, subject to a cooldown that **shrinks
-as strength grows**, injects the reminder straight into the tool result — the one
-place the model is guaranteed to be looking:
-
-```text
-exit: 1
-error: DATABASE_URL must be set to compile this crate
-
-Lessons from earlier snags that match this situation:
-[papercut] sqlx tests need DATABASE_URL — fix: export DATABASE_URL first (see .env.example)
-```
-
-Two consecutive failed tool results — or a blocked call loop — force-recall the
-strongest lessons even inside their cooldown. Strength decays with a two-week
-half-life, so a papercut that stops being needed fades to a gentle reminder
-instead of permanent noise. Papercuts are workspace-scoped by default (the model
-can record `global` lessons), live in `~/.abacus/papercuts.json`, and are
-managed with `/papercuts` and `/papercuts delete <n>`. The model records them
-itself via `papercut_record` the moment it recovers from a non-obvious failure.
-
-### Memories and rethink
-
-Alongside failure lessons, Abacus keeps **memories**: durable knowledge —
-architecture facts, decisions and their reasons, conventions, roadmap changes,
-things figured out the hard way. The model records and curates them itself with
-`memory_record`, `memory_list`, and `memory_forget`; re-recording a title updates
-it, and stale memories are meant to be forgotten, not hoarded. Workspace
-memories (plus any `global`) are injected as a bounded context layer at the start
-of every turn, newest first — so each session starts where the last one ended.
-
-After a turn with many actions — and, unconditionally, right before rolling-summary
-compaction erases the verbatim evidence — a **rethink** pass looks back over what
-actually happened: snags worked through, decisions taken, papercut reminders that
-were right or wrong, goals accomplished. It runs with a restricted toolset
-(`memory_record`/`memory_forget`, `papercut_record`, `working_notes_update`) and
-records what a future session would genuinely need, *or nothing* — the reflection
-itself is discarded, only the records persist. A `rethink — …` notice marks it in
-the transcript. The pass stops as soon as it is done: when every record in the
-batch is accepted and the model already said what it recorded, the follow-up
-call that would only restate that summary is skipped — it still runs when a
-record fails, which is the case where seeing the result changes the answer.
-
-Working notes live in a clearly delimited, Abacus-managed `abacus:notes` block
-inside the workspace's `AGENTS.md`. Only that block is ever rewritten; your own
-content is preserved byte for byte, and notes are writable only when the turn
-itself was allowed to mutate — never under a PLAN pin.
-
-### Tethering
-
-Long sessions drift: a bug fix becomes a refactor becomes a rewrite. **Tethering**
-is the anchor. A quick model call snapshots the session's **intent** — what
-you're trying to achieve and under which constraints — shown as a `tethered — …`
-notice and persisted so resume keeps it. The snapshot runs *beside* your first
-turn rather than after it: the intent is yours and the prompt already states it,
-so the call overlaps the answer and the notice lands with it instead of holding
-the turn open for a couple of seconds.
-
-The snapshot refreshes on every turn, because every turn is a new prompt and
-that is exactly when intent can change. (It used to refresh only under
-compaction pressure, so on a big-context model it never refreshed at all — a
-snapshot taken from an opening "hi" stayed the yardstick for a whole session.)
-
-Every ~35 model steps, a drift check runs: the intent, the plan you have already
-agreed to (active goal and task list), and a compact history — user prompts,
-assistant text *and its recorded thinking*, and tool-call names, never tool
-outputs — and a strict-but-fair question: is the recent activity still serving
-the intent? Your prompts get a reserved share of that history so a long build
-phase cannot flush them out of the window and leave the check judging the
-session with no idea what was ever asked for; elisions are marked `…`. An `ON_TRACK` verdict costs one small call and changes
-nothing. An `OFF_TRACK` verdict arrives with a course correction written by the
-checking call itself, injected as a system layer into the next few requests and
-surfaced as a `tether — …` notice. The check runs detached for the same reason:
-a correction steers the requests *after* this one, so nothing waits on it.
-Thinking is deliberately included: drift shows up in the reasoning before it
-shows up in the actions. A verdict that doesn't
-follow the format is discarded — it gets no steering power.
-
-### The hive: earned delegation
-
-The model parallelizes work through `spawn_subagents`, and delegation confidence
-is **earned, in writing**. Every swarm's outcome updates a persistent record
-(`~/.abacus/hive.json` — runs, clean runs, workers, failures). From it a maturity
-tier is derived and its guidance injected into every turn:
-
-- **Probing** — delegate only low-risk separable sub-work, scouts first;
-- **Swarm** (a proven record) — prefer delegation for anything separable;
-- **Hive** (a dozen clean runs and a low failure rate) — clusters of parallel
-  swarms per surface, scouts ahead of drones, the model's own effort spent
-  validating outcomes and coordinating.
-
-Workers take role types that shape both prompt and privileges: a **scout**
-researches — reads, crawls, searches the web — and is *mechanically* read-only
-(PLAN mode with a mutation lock nothing in the worker can lift); a **drone**
-builds one concrete change with the narrowest verifying checks; a **worker** is
-the generic default. Up to eight run in detached git worktrees seeded with your
-tracked and untracked state, with no nested delegation and optional patch
-application gated on `git apply --check`. See [Goals, loops, and subagents](#goals-loops-and-subagents).
-
-### Training traces
-
-The same discipline that makes Abacus remember makes Abacus *teachable*. With
-tracing enabled (the default), each model call is appended as one JSON object to
-`~/.abacus/traces/<session-id>.jsonl`:
-
-```json
-{"version":2,"source":"live","session":"…","model":"…","step":1,"mode":"AUTO",
- "messages":[{"role":"system",…},{"role":"user",…}],
- "tools":["read_file","grep",…],
- "completion":{"reasoning":"…","tool_calls":[{"name":"read_file","arguments":"{…}"}]}}
-```
-
-Crucially, the request is captured *after* the system prompt, compaction summary,
-and goal/task/mode context are layered on — so a record is the task the model was
-actually given, which is what makes it usable for fine-tuning rather than a plain
-log. Reasoning is kept where the provider exposes it, tool arguments are stored
-raw, and there is one record per model call — eight tool calls, eight samples.
-
-`abacus pull` copies every non-empty trace into a target directory — idempotently,
-refreshing grown sources and leaving originals untouched because a live session
-may be appending to one. `abacus pull all` additionally rebuilds records from
-every saved session on the device (`"source":"session"`), with live captures
-(`"source":"live"`) always winning. Traces never leave the machine; deleting the
-directory is the whole cleanup, and you can turn the feature off under `/config`.
-
----
-
-## Why Abacus
-
-- **Built for every model.** Three native wire protocols — OpenAI-shaped
-  `chat-completions`, `responses`, and the Anthropic Messages API — with dedicated
-  streaming parsers for each. The agent turn is model-agnostic; the protocol is
-  just the transport. Bring OpenAI, xAI, OpenRouter, or a fully local
-  Ollama / llama.cpp / vLLM server.
-- **Open-weight models drive the same loop as closed ones.** When a model emits
-  tool calls as *assistant text* instead of native `tool_calls`, Abacus parses
-  them client-side and lifts them into the exact dispatch path native calls use.
-  It ships parsers for Hermes, Qwen/Qwen3, Llama 3, Mistral, GLM (4.5/4.7), Kimi
-  K2, DeepSeek, and an explicit generic-JSON mode. Native calls are always tried
-  first, so ordinary prose is never mistaken for a tool call.
-- **Deliberately slim, and auditable.** A compact, focused tool registry; every
-  mutation is approval-gated and shown first as a semantic, per-file diff.
-  Nothing touches your repo without a yes. Headless runs reject writes unless you
-  explicitly pass `--always-approve`.
-- **Edge-case-proof by construction.** Exfiltrating .env files, symlink escapes,
-  patch corruption, truncated history, rate-limit ceilings, drifting sessions —
-  the failure modes that quietly kill other agents are engineered out here. More
-  in [Edge-case proofing](#edge-case-proofing).
-- **Self-improving on every run.** Papercuts, memories, rethink, tethering, and
-  the hive — each session leaves the next one starting further ahead.
-- **One fast binary, from TUI to CI.** Persistent sessions, scheduled cron jobs,
-  and a scriptable headless mode, all from a single Rust executable.
-
-## Install and start
+You need Rust 1.88 or newer and git.
 
 ```sh
-cargo install --path .
-abacus setup
+git clone https://github.com/empero-org/abacus
+cd abacus
+cargo install --path .   # or: cargo build --release, then use target/release/abacus
+```
+
+## First run
+
+```sh
+abacus setup        # pick a provider, connect, choose a model
 cd your-project
-abacus
+abacus              # open the agent in this directory
+abacus doctor       # check the provider, credentials and environment
 ```
 
-A first launch without configuration runs a three-step onboarding: provider
-credentials, live model discovery, permissions, Vim bindings, welcome guidance,
-and the web-search backend. Setup ships presets for OpenAI, xAI, OpenRouter,
-Groq, DeepSeek, Mistral, Together, Fireworks, Cerebras, Ollama, and local
-llama.cpp/vLLM servers plus any custom OpenAI-compatible endpoint, and marks
-which API keys it already found in your environment. It writes:
+`abacus setup` has three steps. You choose a provider (OpenAI, xAI, OpenRouter,
+Groq, DeepSeek, Mistral, Together, Fireworks, Cerebras, Ollama, a local
+llama.cpp/vLLM server, or a custom URL), Abacus lists the models the endpoint
+serves so you can pick one, and you set defaults for approvals, Vim keys and web
+search. If the provider's key is already in your environment, setup uses it.
+Otherwise you can paste one and it is stored in `~/.abacus/credentials.toml`
+with owner-only permissions. Running `abacus` with no configuration starts setup
+automatically. `abacus setup --force` replaces the current default profile.
+`abacus models` lists the models the active profile can reach.
 
-```text
-~/.abacus/config.toml       provider profiles and preferences
-~/.abacus/credentials.toml  optional stored API keys (0600 on Unix)
-~/.abacus/sessions/         workspace-scoped sessions
-~/.abacus/skills/           user Agent Skills
-~/.abacus/plugins/          installed plugins
-~/.abacus/cron/             scheduled jobs and bounded logs
-~/.abacus/traces/           per-session JSONL training traces
-~/.abacus/endpoints/        scripted endpoint definitions (YAML)
-~/.abacus/attachments/      images pasted into the composer
-~/.abacus/papercuts.json    failure lessons with tripwires
-~/.abacus/memories.json     durable knowledge injected each turn
-~/.abacus/hive.json         delegation record behind the maturity tier
-~/.abacus/modes.json        mode-discipline counts
-```
+## Using the terminal UI
 
-Every file above is local and inert on its own: delete one and that mechanism
-resets. Nothing is uploaded.
+Type a prompt and press `Enter`. Type `@` to pick a file from the workspace and
+attach it to the prompt. `Ctrl+V` pastes text, or an image if the clipboard holds
+one. If the workspace has an `AGENTS.md`, Abacus reads it at startup and follows
+it.
 
-Environment variables take precedence over stored credentials — the common ones
-are `OPENAI_API_KEY`, `XAI_API_KEY`, and `OPENROUTER_API_KEY`. `ABACUS_HOME`
-relocates Abacus state.
+When the agent wants to change a file or run a command, it shows what it will do
+(a diff for file changes) and waits. Press `y` to allow it, `a` to allow it and every
+later change in this session, or `n` to reject it and then tell the agent in chat
+what to do instead. `v` switches between the semantic and raw diff.
 
----
+`Esc` or `Ctrl+C` stops a running turn. A message you type while a turn runs is
+handed to the model after its current tool call, so you can correct it without
+stopping it. `/btw <note>` passes a side note the same way, without making it an
+instruction.
 
-## Daily workflow
+### Modes
+
+Abacus has three workflow modes, shown in the status bar. `Shift+Tab` cycles
+them, or use `/mode auto|plan|build`.
+
+- **PLAN** is read-only. The agent can read, search and run inspection commands
+  such as builds, linters and tests, but anything that writes, deletes, installs
+  or touches git history is refused.
+- **BUILD** lets the agent make changes, each subject to your approval.
+- **AUTO** (the default) lets the model pick PLAN or BUILD per turn.
+
+`/plan` toggles the PLAN pin.
+
+### Keys
+
+| Key | Effect |
+| --- | --- |
+| `Enter` | Send |
+| `Ctrl+J`, `Shift+Enter` | New line |
+| `Shift+Tab` | Cycle AUTO / PLAN / BUILD |
+| `Ctrl+O` | Open the newest tool output, or hide an open dialog |
+| `F1` | Key reference |
+| `F2` | Release the mouse so you can select text with drag |
+| `F3` | Show or hide model reasoning |
+| `Ctrl+C` twice, `Ctrl+Q` | Quit |
+
+With Vim keys on (the default), `Esc` in an idle composer enters normal mode:
+`j`/`k` move between transcript blocks, `o` folds a tool result, `y` copies the
+selected block, `Y` copies the last reply, `i` returns to typing. Press `F1` or
+`?` for the full list.
+
+### Slash commands
+
+| Command | Effect |
+| --- | --- |
+| `/help` | Keys and commands |
+| `/config` | Settings panel: profile, model, API key, permissions, limits, search, theme |
+| `/config raw` | Edit the whole config file inside Abacus (`Ctrl+S` saves) |
+| `/model [id]`, `/models` | Show or switch the model; browse every model the endpoint serves |
+| `/profile [id]` | List or switch provider profiles |
+| `/mode`, `/plan` | Set the workflow mode |
+| `/effort <level>` | Reasoning effort: `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `auto` |
+| `/new`, `/fork` | Start a fresh session, or continue this one in a copy |
+| `/sessions`, `/resume <id>`, `/rename <title>` | Manage saved sessions |
+| `/goal`, `/loop`, `/swarm` | Long-running work (see below) |
+| `/compact` | Shrink the conversation context now |
+| `/repair` | Fix session history that a provider keeps rejecting |
+| `/memories`, `/papercuts` | Show or delete what Abacus has learned |
+| `/usage` | Local token usage and activity |
+| `/tools`, `/skills`, `/plugins`, `/mcps` | Show what the agent can use |
+| `/feedback` | Send feedback to the maintainers |
+| `/quit` | Exit |
+
+`/help` lists the rest, including `/theme`, `/thinking`, `/providers`,
+`/harness`, `/refine` and `/remote`.
+
+### Sessions
+
+Sessions are saved per workspace. `abacus --continue` reopens the latest one,
+`abacus --resume <id>` opens one by ID or unique prefix, and `abacus sessions`
+lists them.
+
+## Headless runs
+
+`-p` runs one prompt without the UI and prints the result. Headless runs reject
+every file change and command that needs approval unless you pass
+`--always-approve` (`-y`).
 
 ```sh
-abacus                         # new persistent TUI session
-abacus --continue              # continue latest workspace session
-abacus --resume a1b2c3d4       # resume by unique ID prefix
-abacus --mode plan -p '...'    # headless run pinned to read-only PLAN
-abacus sessions
+abacus -p "Explain this repository"
+abacus -p "Run the tests and fix failures" --always-approve
+abacus -p "List the TODOs" --output-format json
+abacus --mode plan -p "Review the error handling in src/"
 ```
 
-Reference files directly in a prompt — typing `@` opens a live, gitignore-aware
-file picker; `Tab` completes the highlighted path; the file is attached at
-submit. Images attach the same way: `Ctrl+V` with an image on the clipboard
-saves it and drops an editable `[image:…]` token into the composer (the OS
-clipboard is read natively on Wayland, X11, macOS, and Windows, with
-`wl-paste`/`xclip` fallbacks), and `@screenshot.png`/`.jpg`/`.gif`/`.webp`
-references workspace image files for vision-capable models.
+`--output-format` takes `plain` (default), `json` (one object at the end) or
+`streaming-json` (one event per line). `--no-session` skips saving the run.
 
-If the workspace root contains an `AGENTS.md`, Abacus reads it at startup and
-prepends it to the system prompt, so repository conventions steer every turn
-(content past 24,000 characters is truncated).
+`--loop` replays the same prompt until the model prints the completion promise
+or the iteration cap is reached:
 
-Abacus starts in **AUTO** mode: the model must explicitly choose read-only PLAN
-or mutating BUILD for each turn before it can change files or delegate. PLAN is
-not a shell lockout — commands that only inspect (builds, linters, tests) run,
-while anything that deletes, overwrites, moves, touches git history or a remote,
-installs software, or reaches the network is refused. Obvious cases are decided
-locally; the rest cost one short classification call; anything unclear is
-refused. Pin a mode with `/mode plan` or `/mode build`, return to auto with
-`/mode auto`, or cycle with `Shift+Tab`.
+```sh
+abacus -p "Implement the importer, run all tests, and print DONE when they pass" \
+  --loop --max-iterations 20 --completion-promise DONE --always-approve
+```
 
-Assistant responses render as terminal-native Markdown — headings, emphasis,
-links, quotes, task lists, fenced code — with tables laid out to the terminal
-width (per-column budgets, in-cell wrapping, alignment honoured) instead of
-overflowing. LaTeX math renders as Unicode: `$w_i = p_i / \sum_k p_k$` displays
-as *wᵢ = pᵢ / Σₖ pₖ*, display math becomes an indented block, and unknown
-commands pass through verbatim.
+Other per-run overrides: `--profile`, `--model`, `--base-url`, `--protocol`,
+`--api-key`, `--max-steps`, `--context-window 1m`, `--max-output-tokens 32k`, and
+`--tool-format` for models that write tool calls as text. Shell completions come
+from `abacus completions bash` (also `zsh`, `fish`, `elvish`, `powershell`).
 
-Before a mutation, Abacus opens a semantic review: per-file statistics, line
-numbers, colored additions/deletions, and a quiet `⋮` between hunks instead of
-raw `@@` headers. `y` allows once, `a` allows for the session, and `n` rejects
-so you can steer in chat — rejection is a course correction, not a dead end.
-`j/k` scroll, `h/l` pan, and `v` toggles semantic vs. raw diff.
+## Configuration
 
-## TUI commands and keys
+Settings live in `~/.abacus/config.toml`. `abacus setup` and `/config` write it
+for you; you can also edit it by hand. Each provider is a profile:
 
-The status bar reports two separate figures: `used` is the running total of
-tokens billed this session, and `ctx` is how full the model's window is *right
-now* — taken from the provider's own prompt count when it reports one, since a
-character estimate would ignore the system prompt and tool schemas sent with
-every request.
+```toml
+version = 2
+default_profile = "openrouter"
 
-| Command | Action |
-| --- | --- |
-| `/new` | Start a fresh persistent session |
-| `/fork` | Fork the conversation into a new session (also `Ctrl+Shift+Enter`) |
-| `/sessions` / `/resume <id>` | Pick or resume a saved session |
-| `/rename <title>` | Rename the active session |
-| `/model [id]` | Inspect or switch model |
-| `/models` | Browse every model an endpoint serves, and assign the roles they fill |
-| `/profile [id]` | List or switch provider profiles |
-| `/profile rename <id>` / `/profile delete [id]` / `/profile add` | Rename, delete, or add a profile |
-| `/providers [names\|clear\|strict\|fallback]` | Pin which upstream suppliers may serve the model |
-| `/usage` | Local activity heatmap, usage totals, model breakdown |
-| `/mode [auto\|plan\|build]` | Inspect or pin the workflow mode |
-| `/plan` | Toggle the read-only PLAN pin |
-| `/effort [minimal\|low\|medium\|high\|auto]` | How hard the model thinks; `auto` leaves it to the provider |
-| `/thinking [on\|off]` | Show or hide the model's reasoning (display only; still recorded) |
-| `/btw <note>` | Note a side question mid-turn without derailing the work in progress |
-| `/goal [objective]` | Show or create a persistent session goal |
-| `/goal pause\|resume\|edit <text>\|clear` | Manage the active goal |
-| `/loop "<prompt>" [options]` | Start a promise-driven Ralph loop |
-| `/cancel-loop` | Cancel the active Ralph loop |
-| `/swarm <objective>` | Delegate an objective to parallel subagents |
-| `/config` / `/config raw` | Change settings live: profiles, providers, API keys, limits |
-| `Auxiliary model` (in `/config`) | A cheaper model on the same endpoint for background calls; blank = same as the main model |
-| `Token Compression` (in `/config`) | Balanced high-savings mode: tighter context, fewer drift checks, and no drafts or routine rethink calls |
-| `One Stream` (in `/config`) | Serialize main and auxiliary upstream requests; explicitly spawned subagents remain parallel |
-| `/theme [auto\|dark\|light\|<name>]` | Switch the palette; `auto` detects the terminal, `<name>` loads a theme file |
-| `/theme export <name>` | Write the current palette to `~/.abacus/themes/<name>.json` to edit |
-| `/feedback` | Send product feedback |
-| `/compact` | Compact old conversation context |
-| `/papercuts` / `/papercuts delete <n>` | List or delete recorded failure lessons |
-| `/memories` / `/memories delete <n>` | List or delete durable memories |
-| `/repair` | Fix corrupted session history |
-| `/tools` / `/skills` / `/plugins` / `/mcps` | Inspect active capabilities |
-| `Update reminder` (in `/config`) | Daily check for a newer version tag; notice only, never downloads |
-| `/help` / `/quit` (`/q`, `/exit`) | Show help or exit |
+[profiles.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+model = "your-model-id"
+protocol = "chat-completions"        # chat-completions | responses | anthropic
+api_key_env = "OPENROUTER_API_KEY"
+# aux_model = "a-cheaper-model"      # background calls; omit to use `model`
+# context_window = 128000            # omit to detect from the provider
 
-While a turn runs, the status header shows what the model is actually doing: when
-the reasoning stream carries bold section headers, the latest one streams live —
-"Checking the parser" rather than a generic "thinking" — with a subtle shimmer
-(the `/config` animation toggle disables it). A message typed mid-turn is queued
-(flagged on the composer border) and sent the moment the turn ends, so an
-interrupted run can always be steered. `/btw <note>` is the softer form: the
-note reaches the model after its next tool call, framed as context rather than
-an instruction, so it informs how the work proceeds without redirecting it —
-useful for "does this handle Windows paths?" while a long refactor runs. A provider error is shown in the
-transcript with a hint when the history is the likely cause; `/repair` fixes
-exactly that — truncated tool calls are dropped (a note stays in the prose),
-unanswered calls get a synthetic "interrupted" result, and orphaned results are
-removed.
+[profiles.local]
+name = "Ollama"
+base_url = "http://localhost:11434/v1"
+model = "your-local-model"
+protocol = "chat-completions"
 
-Reasoning streamed apart from the answer (DeepSeek R1, Qwen thinking builds, GLM,
-OpenAI reasoning summaries) appears in its own dimmed block above the reply.
-`F3` (or `/thinking`) hides and shows all of it at once — including blocks
-already on screen — and it is recorded in training traces either way: the toggle
-governs display, not capture. Where a provider requires prior reasoning passed
-back for tool-call continuity (Kimi thinking builds) it is; where one rejects
-the field instead, it is stripped on first rejection and stays stripped for the
-session.
+[ui]
+permission_mode = "ask"              # or "always-approve"
+```
 
-### Recovering an interrupted reply
+Switch profiles with `/profile <id>` or `abacus --profile local`. For the
+`anthropic` protocol, set `base_url` to the host without a path (for example
+`https://api.anthropic.com`); Abacus appends `/v1/messages`.
 
-A reply is only written to the session once the turn ends, so a process that
-dies mid-stream used to take the whole answer with it — worst of all for the
-long ones. The stream is now mirrored where a crash can still reach it, and the
-same handlers that put the terminal back write it out. On the next start the
-text is handed straight back into the transcript, once, and the file is removed.
+The auxiliary model (`aux_model`, or **Auxiliary model** in `/config`) handles
+background calls such as command classification and drift checks. Set it to a
+cheaper model on the same endpoint to cut cost.
 
-### What PLAN mode allows
+### API keys
 
-PLAN is for investigating and writing a plan, so the boundary is *side
-effects*, not tools. Every shell command is judged in three tiers, and most
-never reach a model:
+Abacus looks for a key in this order: `--api-key` or `ABACUS_API_KEY`, the
+environment variable named by the profile's `api_key_env`, then
+`~/.abacus/credentials.toml`. Local endpoints need no key. `ABACUS_MODEL` and
+`ABACUS_BASE_URL` override the model and URL. `ABACUS_HOME` moves all Abacus
+state somewhere other than `~/.abacus`.
 
-- **Runs immediately** — recognisable inspection: `ls`, `cat`, `grep`, `rg`,
-  `find`, `git status`/`diff`/`log`, `cargo check`/`test`/`clippy`, `pytest`,
-  `npm test`, `sed -n`, pipelines of those, and `2>/dev/null` or `2>&1`.
-- **Blocked immediately** — recognisable destruction: `rm`, `mv`, `cp`, `chmod`,
-  `sudo`, `sed -i`, `find -delete`, `git push`/`reset`/`commit`, package
-  installs, and any redirect that writes a file. No appeal, no model call: a
-  classifier that is wrong about `rm -rf` is worse than one never asked.
-- **Judged** — everything else, including interpreters. `python -c 'print(1+1)'`
-  is judged on what the command does, not on what python can do.
+### Scripted endpoints
 
-Verdicts are cached for the session, and `Safety classifier` in `/config`
-chooses whether the auxiliary or the main model does the judging. In PLAN, a
-command judged to change nothing also skips the approval prompt — the mode
-exists to look around, and asking permission for each `ls` is the same
-obstacle in a politer form. BUILD is unaffected: it can mutate, so its prompt
-stays.
-
-Reading is judged the same way, and it is no longer confined to the workspace.
-Source and documentation are read wherever they live — a sibling checkout is
-the ordinary reason to look outside — `/usr`, `/etc/os-release` and the like
-pass as reference material, and credentials are refused outright: `~/.ssh`,
-`.aws/credentials`, `.netrc`, `*.pem`, private keys. Anything else, including
-files with no extension and formats that routinely hold tokens, is judged once
-and remembered. **Writing never leaves the workspace**, approved or not.
-
-Environment files follow the same shape. Committed templates —
-`.env.example`, `.env.sample`, `.env.template`, `.env.dist`, `.env.defaults` —
-are read without asking, since publishing placeholders is the point of them.
-`.env.production` and friends are refused outright. A real `.env` or
-`.env.local` is judged once rather than banned, because "what is this app
-configured with" is often the question a plan turns on. Writing to any of them
-is unchanged and still refused.
-
-The old rule banned every absolute path, in every mode. It did not stop the
-agent seeing those files — it had a shell — it taught it to reach them the
-expensive way, through an interpreter, which is the reward-hacking loop testers
-were watching burn tokens.
-
-This replaces a rule that blocked every shell command unless a model call
-rescued it — and that call was told to refuse whenever it was unsure, so
-interpreters were refused on capability alone. Models noticed, recorded
-papercuts saying PLAN was unusable, and routed around it.
+For a backend that needs custom auth, extra headers or a modified request body,
+write a YAML file in `~/.abacus/endpoints/` and point a profile at it with
+`endpoint = "<file name>"`. The file names the URL, protocol, model and where the
+token comes from (a literal, an environment variable, a JSON file or a command).
+The token is re-read on every request. Examples for xAI, Grok, ChatGPT/Codex and
+Anthropic OAuth are in [docs/endpoints](docs/endpoints). Abacus loads these files
+only from `~/.abacus/endpoints`, never from a workspace.
 
 ### Web search
 
-`[search] backend` defaults to `auto`, which takes the best option available:
-your own SearXNG instance, then a Brave key, then the keyless
-chain. Keyless search is genuinely limited compared with a keyed backend, and
-it is worth being blunt about why:
-
-| Backend | Key | Result |
-| --- | --- | --- |
-| `searxng` | none — your instance | Best option. Unlimited, private, reliable. Set `instance_url`; the instance must allow JSON (`search: formats: [html, json]`). |
-| `brave` | `BRAVE_API_KEY` | Full web search. The free tier ended in February 2026. |
-| `bing` | none | Public HTML, unofficial. The keyless default — best effort, and may rate-limit or bot-wall an agent. |
-
-With nothing configured, `auto` uses Bing's public page. That is a scraped
-HTML endpoint, not an official API: it can bot-wall or change layout without
-warning, and when it comes back empty the tool says so plainly and tells the
-model not to keep rephrasing, which is what used to burn whole turns.
-
-For search you can rely on, set `BRAVE_API_KEY` (free tier, no card) or point
-`instance_url` at your own SearXNG. There is also a shared public instance
-available as an explicit opt-in:
+The agent has `web_search` and `read_page` tools, configured under `[search]`:
 
 ```toml
 [search]
-use_shared_instance = true    # https://searxng.bluflare.de
+backend = "auto"                        # auto | searxng | brave | bing
+instance_url = "http://localhost:8888"  # your SearXNG instance
 ```
 
-It is off by default on purpose — turning it on sends every query to a host
-neither you nor Abacus controls, which is a decision worth making deliberately
-rather than discovering in a config file. A key or your own instance still
-wins over it.
+`auto` uses your SearXNG instance if `instance_url` is set, then Brave if
+`BRAVE_API_KEY` is set, then Bing's public results page. The Bing fallback needs
+no key but is unreliable; for dependable search, run SearXNG (enable the JSON
+format in its `settings.yml`) or set a Brave key. `use_shared_instance = true`
+adds a public SearXNG instance as a fallback; it is off by default because it
+sends your queries to a host you do not control. `enabled = false` removes the
+web tools.
 
-Both web tools take an `extract` argument — "the exact signature of
-`Client::builder`", "which crate handles unix signals" — and the auxiliary
-model answers that from the fetched page, so a lookup costs one fact rather
-than a whole document. `web_search` with `extract` reads the results page
-itself rather than scraping links out of it, which is the part that kept
-breaking: the markup shifts between fetches and the links are redirect
-wrappers. Fetched pages are quoted to the reader as data, with the instruction
-not to obey them stated where the page cannot reach — anything on the open web
-can contain text aimed at whatever model reads it.
+## Tools
 
-Self-hosting SearXNG is the fix that costs nothing but a container:
+The agent works through a fixed set of tools. `/tools` lists the active ones.
 
-```toml
-[search]
-backend = "auto"                       # or "searxng" to pin it
-instance_url = "http://localhost:8888"
-```
+- Reading: `list_files`, `glob`, `grep`, `read_file`, `read_files`, `tool_search`.
+- Editing: `edit_file`, `write_file`, `append_file`, `apply_patch`,
+  `create_directory`, `move_file`, `delete_file`.
+- Git: `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame`, plus
+  `git_commit`, `git_restore` and `git_checkout`. No git tool pushes.
+- Shell: `run_command` runs a command in the workspace with a timeout.
+- Web: `web_search` and `read_page`. `read_page` refuses private and loopback
+  addresses.
+- Planning: `task_create`, `task_update`, `task_list`, `goal_status`,
+  `goal_update`, `mode_set`, `ask_user`.
 
-**Ctrl+O** opens the newest tool block — the one running now, or the last to
-finish — and closes it again. It works mid-turn, which is the point: watching a
-long command's output should not mean waiting for it to end, or hunting for the
-row with the transcript cursor. When a dialog is open, Ctrl+O keeps its other
-meaning and steps the dialog aside instead.
+File changes, shell commands and subagents ask for approval unless you allowed
+them for the session or started with `--always-approve`. MCP tools appear as
+`mcp__<server>__<tool>`.
 
-### Selecting and copying
+## Skills, plugins and MCP
 
-The wheel works from the first frame: Abacus captures the mouse so a scroll
-moves the transcript and rows are clickable, with a click marking the block
-under the pointer just like `j`/`k` in normal mode. Capture is also what stops
-the terminal doing click-drag selection, so on terminals with a Shift-drag
-bypass (iTerm2, kitty, WezTerm, Alacritty, Ghostty) you can still select and
-copy text as anywhere else. Elsewhere **F2** hands the mouse back for
-drag-select, and F2 again takes it back — or skip the mouse entirely:
-**PgUp/PgDn** move a page at a time, **Alt+↑/↓** nudge a line, and **Ctrl+End**
-jumps back to live.
+Skills are folders with a `SKILL.md` file. Abacus finds them in
+`~/.abacus/skills/`, `~/.agents/skills/`, and `.abacus/skills/` or
+`.agents/skills/` inside the workspace. Only each skill's name and description
+are sent to the model up front; the body loads when needed. Type `/<skill-name>`
+in the TUI to run one yourself. `abacus skills` lists them and
+`abacus skills inspect <name>` prints one.
 
-You can also copy without the mouse at all. In normal mode `y` copies the
-selected block — the *full* tool output, not the truncated preview — and `Y`
-copies the last assistant reply. In the composer, `Ctrl+A` selects the draft and
-`Ctrl+C` copies it; with nothing selected `Ctrl+C` keeps its terminal meaning of
-interrupt.
+Plugins are directories with a `plugin.toml` that bundle skills, slash commands,
+hooks and MCP servers. Manage them with
+`abacus plugins list|install|inspect|enable|disable|remove`. Plugins and MCP
+servers defined inside a project stay disabled until you run `abacus trust` in
+that workspace (`abacus untrust` reverses it). The
+[plugin guide](docs/plugin_guide.md) covers the manifest, hooks and testing.
 
-The prompt starts in insert mode. `Enter` sends (or queues while a turn runs);
-`Ctrl+J` (or `Shift+Enter`) inserts a newline; `Ctrl+Shift+Enter` forks the
-session — the conversation moves into a new session, marked `(fork)` in
-`/sessions`, with your draft still in the box; `Up`/`Down` recall earlier
-prompts. Scroll with the mouse wheel, a trackpad, `PageUp`/`PageDown`, or
-`Alt`/`Shift`+`↑`/`↓` from the composer — a dense burst is read as a trackpad and
-moves a line at a time, while a discrete wheel notch moves three; scrolling from
-the tail shows a `↓ latest` marker and `G` (or `Ctrl+G` from any mode) returns to
-live output.
-
-During an approval or question dialog, `Ctrl+O` steps it aside so the transcript
-behind it can be read and scrolled — and brings it back; a new dialog always
-arrives visible. A reply that hits the output-token ceiling (`finish_reason:
-length`) gets a clear notice instead of trailing off mid-sentence.
-`run_command` reads `sleep` durations out of the command line and raises its
-timeout floor to cover them (capped at 10 minutes), so a deliberate
-wait-and-retry is not killed mid-sleep.
-
-Consecutive successful read-only calls — reads, greps, globs, git inspection —
-collapse into a single `explored` row with summed durations; unfolding shows
-every labelled result. Turns that ran tools for over a minute close with a
-labelled rule (`─ Worked for 2m 03s ───`), so long sessions scan in work blocks.
-Your own messages render as tinted cards.
-
-`Esc` (or `i`/`a`/`A`/`I`) enters normal mode, where the transcript gains a
-cursor: `j`/`k` step between blocks; `o`, `space`, or `Enter` folds and unfolds a
-tool result (a `▸` beside the duration marks more behind it). `Ctrl+u`/`Ctrl+d`
-scroll half a page, `Ctrl+y`/`Ctrl+e` one line, `gg`/`G` jump to the top or back
-to live, `Esc` drops the selection. Clicking works too: one click selects a row,
-a second click on the same row unfolds it.
-
-On an idle, empty composer, pressing `Esc` twice rewinds to your previous prompt:
-the prompt returns for editing and the turn it produced is discarded — a fork,
-not an undo — and repeating steps back one prompt at a time. `Ctrl+c` (or `Esc`)
-asks a running turn to stop (it finishes its current tool and keeps everything it
-did); pressing again forces an immediate stop. With no turn running, `Ctrl+c`
-clears the prompt, and twice in a row exits. `Ctrl+q` exits immediately. `F1` (or
-`?` in normal mode) opens the key reference.
-
-### Glyphs
-
-Three glyph sets, chosen in `/config` under **INTERFACE** or with
-`ABACUS_GLYPHS=auto|unicode|nerd|ascii`:
-
-- **`unicode`** — box drawing, braille, and block glyphs. The default.
-- **`nerd`** — icon glyphs from a patched [Nerd Font](https://www.nerdfonts.com).
-  **Never selected automatically**: nothing a terminal reports says whether its
-  font has these glyphs, and guessing wrong fills the screen with tofu. Turn it
-  on yourself once you know you have the font.
-- **`ascii`** — width-stable stand-ins for terminals whose fonts lack the rest,
-  including the panel outlines and the arrows in the hint strips.
-
-`auto` picks `ascii` on a `dumb` or `linux` `TERM` and `unicode` everywhere
-else. `ABACUS_ASCII=1` still forces `ascii`, and the environment overrides the
-setting either way.
-
-### Colour
-
-Colour depth is detected from `COLORTERM` and `TERM` and the palette quantized
-to match — truecolor, 256, or a role-mapped sixteen — with
-`ABACUS_COLOR=none|16|256|truecolor` to override. `NO_COLOR` is honoured: the
-interface drops to the terminal's own palette and leans on structure, bold, and
-reverse video instead.
-
-`/theme dark|light|auto` switches the built-in palettes. Beyond those, a theme
-is a JSON file in `~/.abacus/themes/`, and `/theme <name>` loads it:
-
-```json
-{
-  "name": "gruv",
-  "mode": "dark",
-  "vars": { "fg": "#ebdbb2", "orange": "#fe8019", "bg1": "#3c3836" },
-  "colors": { "primary": "orange", "text": "fg", "selection": "bg1", "border": "" }
-}
-```
-
-`vars` names the palette once; `colors` says where each colour goes. A role's
-value is a `vars` name, a `#rrggbb` (or `#rgb`) literal, an xterm-256 index, or
-`""` for the terminal's own colour. Every role is optional and falls back to the
-built-in palette for `mode`, so a file that sets nothing but `primary` is a
-complete theme. Custom colours are quantized to the terminal's depth like any
-other, and collapse to the role mapping at sixteen colours.
-
-The roles are `primary`, `secondary`, `success`, `warning`, `danger`, `muted`,
-`border`, `surface`, `text`, `inverse`, `code_bg`, `add_fg`, `add_bg`, `del_fg`,
-`del_bg`, `rail`, `selection`, `user_bg`, and `overlay` — but rather than
-transcribe that, run `/theme export <name>` to write the palette you are
-currently looking at out as a file with every role filled in, and edit it. A
-theme that fails to load reports why and falls back to the built-in one; it
-never leaves you without a readable screen.
-
----
-
-## Coding tools
-
-The core registry stays compact and is the single source of truth the agent
-dispatches through:
-
-- `tool_search`, `list_files`, `glob`, `grep`, `read_file`, and `read_files`
-  discover and inspect code (`read_files` reads up to 20 files in one call).
-- `edit_file` does exact atomic replacements; `write_file` and `append_file`
-  create or extend files; `apply_patch` applies precise multi-file unified diffs.
-- `create_directory`, `move_file`, and `delete_file` are approval-gated workspace
-  operations.
-- `git_status`, `git_diff`, `git_log`, `git_show`, and `git_blame` inspect
-  repository state and history read-only; `git_commit` stages and commits locally
-  (never pushes); `git_restore` reverts paths to HEAD; `git_checkout` creates or
-  switches branches. The mutating Git tools are approval-gated, as is
-  `run_command`, which executes a timed workspace command.
-- `web_search` queries the web and `read_page` fetches an `http(s)` URL. Both
-  take an `extract` argument saying what you want from the page, and answer
-  that with the auxiliary model instead of returning the whole document. Both are read-only; `read_page` refuses non-HTTP schemes and
-  private/loopback hosts. The backend defaults to `auto`, which picks the best
-  one you have configured — see [Web search](#web-search).
-- `skill_search`, `skill_load`, and `skill_read` load Agent Skills progressively.
-- `spawn_subagents` delegates independent work to parallel isolated git worktrees.
-- MCP tools surface as `mcp__<server>__<tool>`.
-- `goal_status`/`goal_update` report goal progress, `mode_set` makes AUTO
-  selection explicit and enforceable, and `task_create`/`task_update`/`task_list`
-  keep a persistent 1-based checklist that survives resume.
-
-## Skills and plugins
-
-Abacus discovers [Agent Skills](https://agentskills.io/) from several roots, with
-project-local definitions taking precedence over user- and agent-level ones
-(plugin-contributed roots and configured extra paths are also scanned):
-
-```text
-~/.agents/skills/<name>/SKILL.md
-~/.abacus/skills/<name>/SKILL.md
-<workspace>/.agents/skills/<name>/SKILL.md
-<workspace>/.abacus/skills/<name>/SKILL.md
-```
-
-Only each skill's name and description enter the initial model context; complete
-instructions load lazily on demand. Skills are also slash-invokable (`/name ...`).
-A minimal skill:
-
-```markdown
----
-name: release-check
-description: Verify a Rust release candidate and report blockers.
----
-
-Run formatting, lint, tests, and a locked release build. Never publish.
-```
-
-Manage roots with `abacus skills` and `abacus skills inspect <name>`.
-
-Plugins are declarative directories that can contribute skills, slash-command
-prompts, lifecycle/tool hooks, and MCP servers:
-
-```toml
-# plugin.toml
-manifest_version = 1
-name = "team-tools"
-version = "1.0.0"
-description = "Team coding workflows"
-skills = ["skills"]
-
-[[commands]]
-name = "review-api"
-description = "Review the API boundary"
-prompt = "Review the API boundary. Extra context: {{args}}"
-
-[[hooks]]
-event = "before_tool" # session_start, session_end, before_tool, after_tool
-command = "bin/audit-hook"
-timeout_seconds = 30
-```
-
-See the [plugin authoring guide](docs/plugin_guide.md) for the complete manifest
-reference, hook payloads, discovery rules, trust, and testing. Manage plugins
-with `abacus plugins install|inspect|disable|enable|remove`, and protect them
-when untrusted: installation rejects symlinks, path escapes, excessive nesting,
-and oversized files, and project plugins are ignored until `abacus trust` runs in
-that canonical workspace.
-
-## MCP
-
-Abacus implements MCP protocol `2025-11-25` over stdio and Streamable HTTP —
-session IDs, pagination, JSON/SSE responses, timeouts, namespaced tools, and
-structured results. MCP calls require approval unless `auto_approve = true` is
-explicitly configured.
+MCP servers are configured in `config.toml`:
 
 ```toml
 [mcp.local]
 transport = "stdio"
 command = "my-mcp-server"
 args = ["--stdio"]
-timeout_seconds = 60
-auto_approve = false
-
-[mcp.remote]
-transport = "http"
-url = "https://mcp.example.test/rpc"
-headers = { Authorization = "Bearer ${MCP_TOKEN}" }
 ```
 
-Trusted projects may define the same tables in `<workspace>/.abacus/config.toml`.
-`abacus mcp` prints connected tools; startup diagnostics report failures.
+For a remote server, use `transport = "http"` with `url` and optional `headers`.
+Each MCP call asks for approval unless the server has `auto_approve = true`.
+`abacus mcp` lists connected servers and their tools.
 
-## Scripted endpoints — every model, even the ones with no API
+## Goals, loops and subagents
 
-When a service speaks its own bespoke dialect — an OAuth bearer that refreshes,
-required extra headers, forced body fields, or keys to strip — a **scripted
-endpoint** turns any HTTP target into a normal profile. Drop a YAML file in
-`~/.abacus/endpoints/` describing the auth source (literal, env var, JSON file,
-or a refresh command), the extra headers, body overrides and removals, and a
-protocol. Examples ship in `docs/endpoints/` for the Anthropic OAuth and
-ChatGPT/Codex backends, for xAI's Grok over the public `api.x.ai` key — that
-one doubles as a commented tour of every auth source — and for a Grok
-*subscription* (`grok login`) spent through the grok CLI's own proxy.
+`/goal <objective>` sets a goal for the session and starts working on it. The
+goal stays above the composer and survives resume. `/goal pause`, `/goal resume`,
+`/goal edit <text>` and `/goal clear` manage it.
 
-```yaml
-name: Custom Backend
-url: https://api.example.test/v1/messages   # used verbatim
-protocol: anthropic                          # chat-completions | responses | anthropic
-model: some-model
-auth:
-  file: ~/.some-tool/auth.json               # or: env / command / token
-  file_field: tokens.access_token            # dotted path or /json/pointer
-  header: Authorization                      # defaults shown
-  format: "Bearer {token}"
-system_prefix: "required-first-system-block"  # e.g. an attribution header
-headers:
-  X-Session-Id: "{uuid}"                     # fresh per session
-body:                                        # deep-merged over the request
-  store: false
-  reasoning:
-    effort: low
-remove:                                      # fields this backend rejects
-  - parallel_tool_calls
-```
-
-The token is re-read on every request, so a credential that refreshes on disk is
-picked up without restarting. Once the file exists it shows up in
-`/config` → Profile → **Add a provider** beside the built-in presets, and
-selecting it creates a working profile.
-
-Such files are loaded **only** from user-owned state — never auto-discovered from
-a workspace — because a scripted endpoint can run a token command and send a
-bearer token to an arbitrary URL. Their YAML is parsed strictly: a typo is
-caught, not silently ignored.
-
-## Pinning upstream providers
-
-OpenRouter fronts many suppliers for the same model, and they are not
-interchangeable. Pin the ones you trust, in preference order:
+`/loop` sends the same prompt again after each turn until the model prints a
+completion word you choose:
 
 ```text
-/providers Together, Anthropic   # or whitespace-separated
-/providers strict                # only these may serve it — fail rather than reroute
-/providers fallback              # allow others when none can
-/providers clear                 # back to letting the endpoint choose
+/loop "Fix the failing tests and print DONE when the suite passes" --max-iterations 20 --completion-promise DONE
 ```
 
-The `provider` field is only sent to OpenRouter-compatible endpoints (matched on
-host), so a pin on a profile pointed elsewhere is inert rather than a request
-another server would reject. The same settings live in `/config` and in the
-profile as `providers = [...]` and `allow_fallbacks`.
+`/loop status`, `/loop pause`, `/loop resume` and `/cancel-loop` control it. Set
+`--max-iterations` so a loop that never converges stops. See
+[docs/how-to-use-loops.md](docs/how-to-use-loops.md).
 
-## Goals, loops, and subagents
+`/swarm <objective>` asks the agent to split the work and run it in parallel
+subagents. The agent can also do this on its own with `spawn_subagents`. After
+one approval, up to eight workers run in separate git worktrees seeded with your
+current changes, so their edits do not land in your checkout. Each worker returns
+a summary and a patch, and a patch is applied only if `git apply --check` passes.
+`Ctrl+P` shows each worker's progress.
 
-`/goal Fix the flaky import pipeline and keep tests green` sets a persistent
-definition of done and immediately uses that text as the starting prompt. The
-goal appears above the composer and survives resume; manage it with
-`/goal pause`, `/goal resume`, `/goal edit <text>`, or `/goal clear` (text capped
-at 4,000 characters).
+## What Abacus remembers
 
-A **Ralph loop** runs the *same prompt over and over* until the model declares it
-finished — ideal for "keep working until the tests pass" where a single turn
-isn't enough. Each iteration keeps the files and conversation the previous one
-produced, and the loop ends when the model prints your exact completion promise:
+Abacus remembers lessons between sessions in the same workspace.
 
-```text
-/loop "Implement the importer, run all tests, and output DONE only when green" \
-  --max-iterations 20 \
-  --completion-promise "DONE"
-```
+- **Memories** are facts, decisions and conventions the agent records about your
+  project. They are added to every new session. `/memories` lists them and
+  `/memories delete <n>` removes one.
+- **Papercuts** are fixes for errors the agent has hit before. When the same
+  error text shows up again, the fix is shown to the model next to the error.
+  `/papercuts` lists them and `/papercuts delete <n>` removes one.
 
-Cap with `--max-iterations` (strongly recommended) and set `--completion-promise`
-to the exact word that means done (default `COMPLETE`). Loop state survives
-resume, a failure pauses the loop, and `Ctrl+C` cancels it. See
-**[docs/how-to-use-loops.md](docs/how-to-use-loops.md)** for a full walkthrough.
+After long turns, Abacus reviews what happened and may record new memories,
+papercuts or short instructions for itself. `/refine` runs that review now. These
+records form the harness: `/harness` shows it, `/harness log` lists changes and
+`/harness revert <id>` undoes one. Durable instructions are also written into a
+marked `abacus:notes` block in the workspace's `AGENTS.md`; the rest of that file
+is left alone.
 
-For separable work, the model can request `spawn_subagents`. After one explicit
-approval, Abacus creates detached git worktrees for up to eight workers, seeds
-each with the parent's tracked and untracked state, runs them concurrently
-without nested delegation, and returns their summaries and patches — optionally
-applying only patches that pass `git apply --check`. Worker commits are temporary
-and never modify parent history; worktrees are removed afterward.
-
-Workers run in the **background**: the call returns immediately with the roster
-and the swarm's report is delivered after a later tool call, so the orchestrator
-keeps working instead of idling — and it is told never to guess a pending
-worker's findings. `wait: true` restores blocking for the cases that genuinely
-need results first. A report that lands after its turn ended opens a short
-delivery turn, so nothing is lost. The parent snapshot is taken when the swarm
-is spawned, so workers start from the workspace as it was at that moment.
-
-Besides its role, each task takes an optional **model** slug on the same
-endpoint — so one call can fan a swarm across several models. It defaults to the
-orchestrator's own model; set it when you want particular models per worker.
-
-The orchestrator can also address a worker by name with `message_subagent`. A
-running worker receives the message mid-task — a correction or extra context
-without killing it — while a finished one picks up where it left off, its
-conversation intact, in a fresh worktree seeded from the current workspace; its
-reply arrives in the background like any other report. The eight most recent
-finished workers stay reachable.
-
-While a swarm runs, each worker is pinned above the composer with its role, live
-activity, and token count; swarms past three cluster into a one-line summary, and
-`Ctrl+P` opens a scrollable board with every worker's state, elapsed time, and
-tokens. `/swarm <objective>` is the user-facing shortcut into the same path.
-
-### Reasoning effort
-
-`/effort minimal|low|medium|high|xhigh|max` dials how hard the model thinks, per
-profile; `/effort auto` clears it and leaves the provider's own default alone,
-which is what a fresh profile does. The same knob is **Reasoning effort** in
-`/config`.
-
-Each protocol wants it in a different shape, so Abacus translates. Chat
-completions get `reasoning_effort` and the Responses API gets `reasoning.effort`
-— both top out at `high`, so `xhigh` and `max` clamp down to it rather than
-sending a level those endpoints would reject.
-
-The Anthropic Messages API has two shapes, and which one a model accepts is not
-optional: Claude 4.6 and later take **adaptive thinking**
-(`thinking: {type: "adaptive"}` plus `output_config: {effort: …}`, where
-`minimal` disables thinking outright), while Claude 4.5 and earlier take the
-older manual **budget** (`thinking: {type: "enabled", budget_tokens: N}`, with
-`max_tokens` raised if needed so the budget never leaves the answer without
-room). The manual shape is deprecated on 4.6 and returns a hard 400 on 4.7+, so
-Abacus picks by model family — defaulting to adaptive for anything it does not
-recognize — and if a model rejects the manual shape anyway, it learns from the
-rejection, switches to adaptive, and retries once. Models without reasoning
-ignore the field.
-
-### The auxiliary model
-
-Not every model call is the main event. Rethink, the next-message
-recommendation, the tether's initial/pre-compaction intent snapshots and drift
-checks, and command-risk classification are all *secondary* — useful and
-potentially wasteful on a frontier
-model. Set **Auxiliary model** in `/config` (or `aux_model` on the profile) to a
-cheaper model on the same endpoint and those calls go there instead; leave it
-blank and they use the main model. Compaction deliberately stays on the main
-model: its rolling summary is load-bearing for the rest of the session. The
-auxiliary provider shares the session's billing counter, so its cost is visible
-rather than hidden.
-
-### Mode discipline
-
-Every session's first system prompt spells the modes out: exactly which actions
-need BUILD (writes, patches, path changes, `git commit`/`restore`/`checkout`,
-state-changing commands, delegation), which never do (reads, greps, git
-inspection, builds, linters, tests), and the ideal order of work — **scout and
-plan** in PLAN mode, writing the plan or spec first, then **build and follow**
-it in BUILD. Switch before the first mutating call, not after one is blocked.
-
-Models still slip, so slips are counted. A call blocked for mutating before
-switching to BUILD is recorded in `~/.abacus/modes.json`; past a couple of them
-a standing reminder joins every request, and past a handful it turns emphatic.
-Getting it right pays the debt back down — three self-directed mode switches
-forgive an earlier slip — so a model that learns stops being nagged instead of
-carrying its first mistakes forever.
-
-### Context compaction
-
-Long loops and goals accumulate context until the model window fills. Abacus
-compacts automatically in two tiers so a long run stays coherent instead of
-degrading: cheap **microcompaction** replaces stale, re-derivable tool output
-(old reads/greps/commands) with a placeholder once the conversation outgrows a
-recent window — keeping the most recent results verbatim — and a one-call
-**rolling summary** condenses the dropped middle as you near the ceiling. Both
-thresholds scale with the model's real context window; `/compact` forces an
-immediate shrink. Thresholds resolve most-authoritative-first: an explicit
-`--context-window`/`--max-output-tokens`, then the active profile's limits,
-then leftover `[agent]` fields from older configs, then detection from the
-provider's `/models`, then a per-family heuristic, then a conservative 128k/8k
-default. Both limits are per-profile and editable live in `/config`; blank or
-`auto` clears that profile and returns to detection. Detection is defended
-twice: an upstream that echoes its context window as the completion cap is
-ignored, and if a provider still rejects a value, Abacus reads the real ceiling
-out of the rejection, clamps, retries, and remembers it for the session.
+All of this is stored locally under `~/.abacus/`.
 
 ## Scheduled jobs
 
-```sh
-abacus cron add \
-  --name nightly-tests \
-  --schedule "0 2 * * *" \
-  --workspace "$PWD" \
-  --prompt "Run the test suite, diagnose failures, and report only" \
-  --timeout-minutes 90
-
-abacus cron list | run <id> | logs <id> -n 200 | disable <id> | remove <id>
-abacus cron daemon [--once] | install | uninstall
-```
-
-Jobs persist under `~/.abacus/cron`, evaluate in the machine's local timezone,
-and are protected by a single-instance daemon lock plus a transactional per-job
-lock so a job never runs concurrently, with bounded rotating logs. Scheduled runs
-reject mutations by default — add `--always-approve` only for a trusted job and
-workspace. Run `abacus cron daemon` in the foreground, or install the per-user
-launchd/systemd/Task Scheduler integration.
-
----
-
-## Providers and configuration
-
-`abacus setup`, `abacus models`, and `abacus doctor` get you connected and show
-what auto-detection landed on. Profiles are ordinary TOML:
-
-```toml
-version = 2
-default_profile = "local"
-
-[profiles.local]
-name = "Ollama"
-base_url = "http://localhost:11434/v1"
-model = "your-tool-capable-model"
-protocol = "chat-completions"   # chat-completions | responses | anthropic
-# aux_model = "a-smaller-model"   # secondary calls; blank = same as `model`
-# context_window = 128000         # this profile only; omit to auto-detect
-# max_output_tokens = 8000        # this profile only; omit to auto-detect
-
-[ui]
-permission_mode = "ask"
-vim_mode = true
-animations = true
-show_tooltips = true
-theme = "auto"   # auto | dark | light
-
-[agent]
-max_steps = 48
-tool_output_limit = 30000
-# tool_format = "auto"   # parse text-emitted tool calls from open-weight models
-
-[search]
-enabled = true
-backend = "auto"              # your searxng -> brave key -> bing
-                              # or "searxng" with an instance_url, or "brave" with an API key
-```
-
-`/config` is a keyboard-driven settings panel — profile, model, provider URL,
-protocol, permission mode, Vim bindings, per-profile context/output limits,
-Token Compression, One Stream, and feedback settings apply immediately and save atomically. On the **Active
-profile** row, Enter switches, `r` renames, `d` deletes, and `n` adds a
-provider. `/profile` does the same from the composer. `/config raw` opens the
-complete TOML document inside Abacus for every other setting. Override per run
-with `--profile`, `--model`, `--base-url`, `--protocol`, and tune this run's
-context budget with `--context-window 1m --max-output-tokens 32k`.
-
-## Headless and CI usage
+`abacus cron` runs headless prompts on a schedule:
 
 ```sh
-abacus -p "Explain this repository"
-abacus -p "Run the tests and fix failures" --always-approve
-abacus -p "List TODOs" --output-format json
-abacus -p "Implement the importer and output DONE when green" \
-  --loop --max-iterations 20 --completion-promise "DONE"
+abacus cron add --name nightly-tests --schedule "0 2 * * *" \
+  --prompt "Run the test suite and report failures" --timeout-minutes 90
+abacus cron list
+abacus cron install        # background service: launchd, systemd or Task Scheduler
 ```
 
-Headless writes are rejected unless `--always-approve` is present. `--loop`
-replays the prompt each iteration until the completion promise appears (default
-`COMPLETE`) or `--max-iterations` is reached; loop state persists to the session
-and a failure pauses the loop, matching `/loop`. Output formats are `plain`,
-one final `json` object, or newline-delimited `streaming-json`; `--no-session`
-disables persistence. Generate shell completions with `abacus completions bash`
-(zsh, fish, elvish, powershell).
+Schedules use the machine's local time. Jobs cannot change files unless created
+with `--always-approve`. `abacus cron daemon` runs the scheduler in the
+foreground instead of installing a service. `run`, `logs`, `enable`, `disable`
+and `remove` take a job ID.
 
-## Edge-case proofing
+## App server for GUIs
 
-The failure modes that quietly break other agents are engineered out here:
+`abacus app-server` serves one session over JSON-RPC on stdin and stdout, so a
+desktop front end can drive Abacus with streaming output, approvals and
+questions. One process serves one workspace.
 
-- **No secrets can be exfiltrated.** File and patch tools reject absolute paths,
-  parent traversal, symlink escapes, and secret `.env` files — the workspace
-  resolver walks every path against canonical roots.
-- **Writes are atomic** — content is written to a temp file and renamed, so an
-  interrupted write never leaves a half file.
-- **Patch corruption is caught.** Unified diffs are validated before application;
-  subagent patches are additionally gated on `git apply --check`.
-- **SSRF-guarded web access.** `read_page` refuses non-HTTP schemes and
-  private/loopback hosts (with DNS re-checking), so a crafted URL can't reach
-  your local network.
-- **Truncated history self-heals.** An interrupted turn can leave a truncated
-  tool call that strict providers reject forever — `/repair` fixes it, and tool
-  calls cut mid-arguments are dropped rather than kept.
-- **Ceiling detection is defended.** Output caps rejected by a provider are
-  learned, clamped, and retried — never blindly sent.
-- **Stubborn calls are bounded.** Repeated *mutating* tool calls stop after three
-  attempts (identical read-only inspection is exempt, since re-reading after an
-  edit is normal).
-- **Subagents are isolated.** Detached, throwaway git worktrees — even a
-  misbehaving worker can't corrupt the parent checkout.
+## Training traces
 
-## Feedback and activity
+Abacus records each model call as one JSON line in
+`~/.abacus/traces/<session-id>.jsonl`: the full request as the model saw it, the
+tool list, and the model's reply, including reasoning when the provider exposes
+it. The files are meant for fine-tuning and never leave your machine unless you
+use sync. Turn tracing off with **Training traces** in `/config`.
 
-`/feedback` posts to the Empero activity service with General, Bug, Feature, and
-Performance categories. It never automatically includes the conversation or
-source files; users may opt into extension diagnostics. So the maintainers can
-see aggregate usage, Abacus also sends small anonymous events — one on session
-open, a heartbeat every 45 seconds, and one on close — carrying only a random
-per-install id, token totals, model, and OS/arch/version. No prompts, code, or
-transcripts, ever. Disable reporting with `[activity] enabled = false` or
-`ABACUS_NO_ACTIVITY=1`; the receiving service is a separate project.
+`abacus pull ./traces` copies every trace into `./traces`. `abacus pull all` also
+rebuilds traces from every saved session on the machine.
 
-## Security boundary
+## Sync and remote sessions
 
-Approvals, worktrees, and workspace checks are guardrails, not an OS sandbox.
-Approved commands, plugin hooks, and MCP servers run with your user account. Use
-a container or VM for untrusted repositories or unattended work. See
-[SECURITY.md](SECURITY.md).
+Abacus Sync moves sessions and their traces between your machines. Sign in with
+`abacus sync login`, which opens a browser. Once you are signed in, Abacus pulls
+your remote sessions when it starts and pushes local sessions when it closes and
+after a minute of idle time. `abacus sync push` and `abacus sync pull` do the
+same by hand, `abacus sync status` shows the account, and `abacus sync logout`
+removes the saved token.
 
-## Development and release gates
+`/remote` shares the running session through Abacus Sync, so you can follow it
+and send prompts from a browser. Run `/remote` again to stop sharing.
 
-```sh
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test --all-targets
-cargo build --release --locked
-```
+## Security
 
-Tests cover streamed providers, approval-gated edits, dirty-state worktree
-isolation, plugin hooks, skill loading, cron persistence, and MCP negotiation
-over HTTP and stdio. CI checks stable Rust on macOS, Linux, and Windows plus the
-Rust 1.88 minimum. Tagged releases build native Linux x86-64, macOS Intel/Apple
-Silicon, and Windows x86-64 binaries with a checksum manifest.
+Approvals, PLAN mode, worktrees and path checks are guardrails, not a sandbox.
+File tools never write outside the workspace or to `.env` files, and refuse to
+read production environment files and credentials such as `~/.ssh`. An approved
+command, a plugin hook or an MCP server still runs with your user account and can
+read your files and reach the network. For untrusted repositories or unattended
+jobs, run Abacus in a container or VM. Details are in [SECURITY.md](SECURITY.md).
+
+## Feedback and activity reporting
+
+`/feedback` sends a message you write, with a category (General, Bug, Feature or
+Performance), to `https://abacus.empero.org/v1/feedback`. It includes the session
+ID, the workspace folder name, the Abacus version and your OS and architecture.
+It never includes the conversation or your code. Extension diagnostics are added
+only if you turn them on in the form with `Ctrl+D`. **Feedback** in `/config`
+turns `/feedback` off.
+
+Abacus also sends anonymous activity events to
+`https://abacus.empero.org/v1/activity`: one when a session opens, one every 45
+seconds while it is open, and one when it closes. They contain a random
+per-install ID, the session ID, the model name, token counts, session duration,
+and the Abacus version, OS and architecture. They contain no prompts, code or
+transcripts. To turn this off, set `ABACUS_NO_ACTIVITY=1` or put
+`enabled = false` under `[activity]` in `config.toml`.
+
+Abacus checks GitHub once a day for a newer release and tells you if there is
+one. It never downloads anything. Turn this off with **Update reminder** in
+`/config`.
 
 ## Scope
 
-Abacus is a coding tool, not a communications hub. It intentionally omits chat
-integrations and a web application. It ships lightweight `web_search` and
-`read_page` tools for looking things up, but full browser automation (JavaScript
-rendering, clicking, form-filling) is available only through an MCP server or
-plugin — never privileged in the core.
+Abacus is a coding tool. It has no chat-platform integrations. The built-in web
+tools search and fetch pages; browser automation (running JavaScript, clicking,
+filling forms) is available only through an MCP server or plugin.
 
 ## License
 

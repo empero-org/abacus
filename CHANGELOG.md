@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: typing `/<skill-name>` or a plugin's slash command in the TUI answered
+  "Unknown command" instead of running it, because every unrecognised `/`
+  command was refused before skills and plugins were consulted.
+- The README is rewritten: shorter, starting with install and first run, and
+  describing each feature by what you type and what happens.
+- Fixed: on macOS, `skill_update` refused a skill Abacus had just written,
+  saying it was not one Abacus manages. The workspace reaches the skill through
+  a symlinked path (`/var` is `/private/var`) while the discovered skill root is
+  the real one; the two are now compared as real paths.
+
 ## 0.6.3 — 2026-10-03
 
 - **The codebase is a fifth smaller, with no feature removed.** Turn options,

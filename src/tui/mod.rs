@@ -1740,7 +1740,9 @@ impl App {
         if self.running.is_some() {
             if prompt.starts_with('/') {
                 let prompt = self.input.take();
-                self.slash_command(prompt.trim());
+                if !self.slash_command(prompt.trim()) {
+                    self.status = "finish or interrupt the turn before running an extension command".to_owned();
+                }
             } else {
                 let prompt = self.input.take();
                 self.record_history(prompt.trim());
