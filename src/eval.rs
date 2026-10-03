@@ -591,6 +591,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(destination.join("nested/deep/leaf.txt")).unwrap(), "leaf");
     }
 
+    // `check.sh` runs through `bash`, which Windows resolves to WSL's launcher.
+    #[cfg(unix)]
     #[tokio::test]
     async fn check_script_decides_pass_and_keeps_output_only_on_failure() {
         let dir = tempfile::tempdir().unwrap();
@@ -612,6 +614,8 @@ mod tests {
         assert!(output.is_empty(), "{output}");
     }
 
+    // `check.sh` runs through `bash`, which Windows resolves to WSL's launcher.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_check_script_reads_the_mutated_workspace() {
         let dir = tempfile::tempdir().unwrap();

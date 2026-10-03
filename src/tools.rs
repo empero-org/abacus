@@ -1689,7 +1689,7 @@ mod tests {
 
         let approved = OutsideReads::default();
         let tools = ToolExecutor::new(workspace).with_outside_reads(approved.clone());
-        let call = tool_call("read_file", format!(r#"{{"path":"{}"}}"#, secret.display()));
+        let call = tool_call("read_file", json!({"path": secret}).to_string());
 
         // Nothing approved yet: the read is refused, and says why.
         let refused = tools.execute(&call).await;
