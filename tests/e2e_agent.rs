@@ -597,3 +597,34 @@ async fn an_oversized_tool_result_is_bound_instead_of_flooding_the_context() {
     assert!(bound.content.contains("filler filler"));
     assert!(bound.chars() > 20_000, "the full payload is kept");
 }
+
+/// LocalAI renders a strict chat template (Qwen 3.x) and reports its "System
+/// message must be at the beginning" as an error chunk on a 200 stream, not as
+/// a failed request. The rejection must still be learned: the retry carries
+/// one leading system message, and the session keeps doing so.
+#[tokio::test]
+async fn a_streamed_leading_system_rejection_is_learned_and_retried() {
+    let project = project(&[]);
+    let rejection = "data: {\"error\":{\"code\":\"server_error\",\"message\":\"rpc error: Jinja Exception: \
+                     System message must be at the beginning.\",\"type\":\"server_error\"}}\n\ndata: [DONE]\n\n";
+    let mock = Mock::script([rejection.to_owned(), says("Hello from Qwen.")]).await;
+
+    // The shape Abacus sends: the base prompt first, and the volatile context
+    // (summary, goal, mode) as a trailing system block.
+    let messages = vec![
+        json!({"role":"system","content":"You are Abacus."}),
+        json!({"role":"user","content":"Hi"}),
+        json!({"role":"system","content":"BUILD MODE is active."}),
+    ];
+    let completion = project.provider(&mock).ask(&messages, &[], &AtomicBool::new(false)).await.unwrap();
+    assert_eq!(completion.content, "Hello from Qwen.");
+
+    let roles = |request: &str| -> Vec<String> {
+        let body = &request[request.find("\r\n\r\n").map_or(0, |at| at + 4)..];
+        let sent: serde_json::Value = serde_json::from_str(body).unwrap();
+        sent["messages"].as_array().unwrap().iter().map(|m| m["role"].as_str().unwrap().to_owned()).collect()
+    };
+    let requests = mock.finish().await;
+    assert_eq!(roles(&requests[0]), ["system", "user", "system"], "the first request is sent as built");
+    assert_eq!(roles(&requests[1]), ["system", "user"], "the retry merges the system blocks at the front");
+}

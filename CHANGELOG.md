@@ -1,6 +1,27 @@
 # Changelog
 
-## Unreleased
+## 0.6.3 — 2026-10-03
+
+- **The codebase is a fifth smaller, with no feature removed.** Turn options,
+  configuration and provider profiles come from constructors; one session-state
+  type serves the TUI, headless mode and the app server; the provider streams
+  every protocol through one loop and one retry path; tool schemas, text
+  tool-call parsers, harness entries and JSON state files each have one
+  definition; and the 11,000-line TUI is split into modules. Along the way:
+  `/providers` pins apply to the running session instead of after a restart;
+  a prompt sent from a remote browser mid-turn steers the turn instead of being
+  dropped; worker reports that arrive together while idle are all delivered;
+  an unterminated text tool-call block no longer duplicates the text before it;
+  and a provider rejection can teach more than one correction per request.
+  Resuming a session reloads its intent snapshot, harness state and handles.
+  Overlay text fields gained word movement and Ctrl+U / Ctrl+K.
+
+- Fixed: a Qwen 3.x model served by LocalAI failed every request with a Jinja
+  exception, "System message must be at the beginning". LocalAI reports the
+  strict template's rejection as an error chunk on a successful stream rather
+  than as a failed request, so it bypassed the retry that merges the system
+  blocks. The rejection is now learned from the stream as well, and the request
+  is sent again with one leading system message, as before. (#2)
 
 - **`abacus app-server`**, a persistent machine-facing mode for desktop and
   editor front ends: JSON-RPC 2.0 over stdin/stdout, one process per workspace

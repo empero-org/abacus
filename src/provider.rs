@@ -322,6 +322,31 @@ impl Provider {
             Some(gate) => Some(gate.acquire().await.context("stream gate closed")?),
             None => None,
         };
+        match self.complete_once(messages, tools, deltas.clone(), cancel).await {
+            // A strict chat template raises this from inside the template, and
+            // some servers (LocalAI among them) report it as an error chunk on
+            // a 200 stream rather than as a failed request — so it lands here
+            // instead of on the request-level retry in `learn`. The lesson is
+            // the same: merge the system blocks for the rest of the session and
+            // ask once more. Nothing has been streamed to the UI, since the
+            // template is rendered before the first token.
+            Err(error)
+                if is_leading_system_rejection(&error)
+                    && !self.prefers_leading_system.swap(true, Ordering::Relaxed) =>
+            {
+                self.complete_once(messages, tools, deltas, cancel).await
+            }
+            result => result,
+        }
+    }
+
+    async fn complete_once(
+        &self,
+        messages: &[Value],
+        tools: &[Value],
+        deltas: mpsc::UnboundedSender<Chunk>,
+        cancel: &AtomicBool,
+    ) -> Result<Completion> {
         let (mut body, event, format): (_, EventFn, _) = match self.protocol {
             ProviderProtocol::ChatCompletions => {
                 (self.chat_body(messages, tools), Assembly::chat_event, self.tool_format)
