@@ -246,25 +246,34 @@ pub enum SyncCommand {
     },
     /// Remove the saved sync token
     Logout,
-    /// Show the current sync account
+    /// Show the account, this device, and what is waiting to sync
     Status,
     /// List sessions stored by the server
     Sessions,
-    /// Upload local sessions and their traces
+    /// Upload local sessions that changed since they last synced
     Push {
-        /// Upload one session ID or unique prefix (all local sessions by default)
+        /// Upload one session ID or unique prefix (every changed session by default)
         session: Option<String>,
         /// Replace a conflicting remote revision
         #[arg(long)]
         force: bool,
     },
-    /// Download remote sessions and required traces into local storage
+    /// Download sessions that changed on the server
     Pull {
-        /// Download one session ID (all remote sessions by default)
+        /// Download one session ID or prefix (everything that changed by default)
         session: Option<String>,
         /// Replace local sessions instead of preserving them as forks
         #[arg(long)]
         force: bool,
+    },
+    /// Print a single-use link that signs a phone into this account
+    Pair {
+        /// Open this session on the phone (ID or unique prefix)
+        #[arg(long)]
+        session: Option<String>,
+        /// Print only the URL
+        #[arg(long)]
+        url_only: bool,
     },
 }
 
@@ -575,6 +584,8 @@ pub struct Settings {
     pub search: crate::web::SearchSettings,
     #[serde(default)]
     pub trace: TraceSettings,
+    #[serde(default)]
+    pub remote: RemoteSettings,
 }
 
 impl Default for Settings {
@@ -593,6 +604,7 @@ impl Default for Settings {
             activity: ActivitySettings::default(),
             search: crate::web::SearchSettings::default(),
             trace: TraceSettings::default(),
+            remote: RemoteSettings::default(),
         }
     }
 }
@@ -1045,6 +1057,22 @@ impl Default for FeedbackSettings {
     }
 }
 
+/// Live sharing of interactive sessions through Abacus Sync.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteSettings {
+    /// Share every interactive session automatically once it has received its
+    /// first prompt, so it can be followed and steered from a phone. `/remote`
+    /// still turns it off for one session.
+    pub auto_share: bool,
+}
+
+impl Default for RemoteSettings {
+    fn default() -> Self {
+        Self { auto_share: true }
+    }
+}
+
 /// Anonymous session activity reporting (see [`crate::activity`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1165,6 +1193,53 @@ impl AbacusPaths {
         fs::create_dir_all(&self.sessions_dir).with_context(|| format!("could not create {}", self.root.display()))?;
         Ok(())
     }
+
+    /// A stable, anonymous per-install identifier, created on first use. It
+    /// names this machine to activity counting, the sync device registry and
+    /// remote control alike, so one install is one device everywhere.
+    pub fn install_id(&self) -> String {
+        let path = self.root.join("install_id");
+        let read = || {
+            fs::read_to_string(&path)
+                .ok()
+                .map(|existing| existing.trim().chars().take(100).collect::<String>())
+                .filter(|existing| !existing.is_empty())
+        };
+        if let Some(existing) = read() {
+            return existing;
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let _ = atomic_write(&path, id.as_bytes(), false);
+        // Another process may have created it first; whatever is on disk wins.
+        read().unwrap_or(id)
+    }
+
+    /// What this device last exchanged with the sync server (see
+    /// [`crate::sync_state`]).
+    pub fn sync_state_file(&self) -> PathBuf {
+        self.root.join("sync-state.json")
+    }
+}
+
+/// A name a person recognises in a device list: the host name, or "Abacus CLI"
+/// when the system will not say.
+pub fn device_name() -> String {
+    let host = ["HOSTNAME", "COMPUTERNAME"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok())
+        .or_else(|| fs::read_to_string("/proc/sys/kernel/hostname").ok())
+        .or_else(|| fs::read_to_string("/etc/hostname").ok())
+        .or_else(|| {
+            std::process::Command::new("hostname")
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+        })
+        .map(|host| host.trim().to_owned())
+        .filter(|host| !host.is_empty())
+        .unwrap_or_else(|| "Abacus CLI".to_owned());
+    host.chars().take(100).collect()
 }
 
 fn resolve_workspace(path: Option<&Path>) -> Result<PathBuf> {

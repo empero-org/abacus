@@ -16,6 +16,9 @@ use crate::{
     session::{Session, SessionState, SessionStore},
 };
 
+/// How long a headless run waits on session sync at either end.
+const SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     config: Config,
@@ -36,9 +39,10 @@ pub async fn run(
         .await?;
     let started = Instant::now();
     let activity_session = session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    // Bounded: a scripted run must not hang on an unreachable sync server.
     if crate::sync::is_configured(&crate::config::Credentials::load(&config.paths).unwrap_or_default())
-        && let Ok(count) = crate::sync::pull_workspace(&config.paths, &config.workspace).await
-        && count > 0
+        && let Ok(Ok(outcome)) = tokio::time::timeout(SYNC_TIMEOUT, crate::sync::pull_changes(&config.paths)).await
+        && outcome.pulled > 0
         && let (Some(current), Some(store)) = (session.as_ref(), store.as_ref())
         && let Ok(updated) = store.load(&current.id.to_string())
     {
@@ -201,7 +205,7 @@ pub async fn run(
         let _ = task.await;
     }
 
-    let session_id = persist_session(
+    let saved = persist_session(
         session,
         store,
         PersistedRun {
@@ -214,6 +218,12 @@ pub async fn run(
             active_secs: started.elapsed().as_secs(),
         },
     )?;
+    let session_id = saved.as_ref().map(|session| session.id.to_string());
+    // Awaited, not spawned: the process exits right after, which would cancel
+    // a background upload.
+    if let Some(session) = &saved {
+        let _ = tokio::time::timeout(SYNC_TIMEOUT, crate::sync::push_session(&config.paths, session)).await;
+    }
     if let Err(error) = services
         .run_hooks(
             "session_end",
@@ -291,7 +301,7 @@ fn persist_session(
     mut session: Option<Session>,
     store: Option<SessionStore>,
     run: PersistedRun<'_>,
-) -> Result<Option<String>> {
+) -> Result<Option<Session>> {
     let Some(store) = store else {
         return Ok(None);
     };
@@ -306,10 +316,7 @@ fn persist_session(
     session_value.tokens_used = run.tokens_used;
     session_value.active_secs = session_value.active_secs.saturating_add(run.active_secs);
     store.save(&session_value)?;
-    if let Ok(paths) = crate::config::AbacusPaths::discover() {
-        crate::sync::spawn_session_sync(&paths, &session_value);
-    }
-    Ok(Some(session_value.id.to_string()))
+    Ok(Some(session_value))
 }
 
 fn turn_options(
@@ -387,7 +394,9 @@ mod tests {
             },
         )
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .id
+        .to_string();
 
         let loaded = store.load(&id[..8]).unwrap();
         assert_eq!(loaded.tokens_used, 150_000_000);
@@ -422,7 +431,9 @@ mod tests {
             },
         )
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .id
+        .to_string();
 
         let loaded = store.load(&id[..8]).unwrap();
         assert_eq!(loaded.tokens_used, 15_500);

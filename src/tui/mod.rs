@@ -391,6 +391,8 @@ enum Background {
     Refined(String),
     Services(Result<Box<AgentServices>, String>),
     Remote(Remote),
+    /// A sync pass finished.
+    Sync(anyhow::Result<crate::sync::SyncOutcome>),
     /// A newer release exists.
     Update(crate::update::Available),
 }
@@ -640,11 +642,17 @@ pub async fn run(
     if let Some(error) = theme_error {
         app.fail(format!("{error}\nFalling back to the built-in theme."));
     }
+    if let Some(session) = &app.session {
+        crate::sync::session_opened(session.id);
+    }
     if crate::sync::is_configured(&app.credentials) {
-        let workspace = app.config.workspace.clone();
-        let paths_sync = app.config.paths.clone();
+        // Pull what changed elsewhere, then upload what an earlier close could
+        // not finish. The open session is never written over; a newer copy of
+        // it comes back as `held` for `sync_finished` to switch to.
+        let paths = app.config.paths.clone();
+        let events = app.background_tx.clone();
         tokio::spawn(async move {
-            let _ = crate::sync::pull_workspace(&paths_sync, &workspace).await;
+            let _ = events.send(Background::Sync(crate::sync::reconcile(&paths).await));
         });
     }
     // Heartbeat the open session so the dashboard shows live tokens and so a
@@ -676,12 +684,19 @@ pub async fn run(
             "\nSession saved — resume with: abacus --resume {id}  (or `abacus -c` for the latest in this workspace)"
         );
     }
-    if crate::sync::is_configured(&app.credentials)
-        && tokio::time::timeout(Duration::from_secs(3), crate::sync::push_all_updated_local(&app.config.paths))
-            .await
-            .is_err()
-    {
-        eprintln!("Session sync is still pending; it will retry next time Abacus opens.");
+    if crate::sync::is_configured(&app.credentials) {
+        match tokio::time::timeout(Duration::from_secs(3), crate::sync::push_dirty(&app.config.paths)).await {
+            Err(_) => eprintln!("Session sync is still pending; it will retry next time Abacus opens."),
+            Ok(Err(error)) => eprintln!("Session sync: {error:#}"),
+            Ok(Ok(outcome)) => {
+                for conflict in &outcome.conflicts {
+                    eprintln!(
+                        "Session sync: {conflict} also changed on another device; both copies are kept the next \
+                         time Abacus opens (or run `abacus sync pull`)."
+                    );
+                }
+            }
+        }
     }
     let status = if result.is_ok() { "completed" } else { "failed" };
     let hook_result = tokio::time::timeout(
@@ -938,7 +953,9 @@ async fn serve_remote(
     use tokio_tungstenite::tungstenite::Message;
     let trace = std::fs::read(trace).unwrap_or_default();
     client.push(&session, &trace, true).await.context("sync failed")?;
-    let socket_url = client.enable_remote(&session.id.to_string()).await?;
+    client.enable_remote(&session.id.to_string()).await?;
+    let ticket = client.agent_ticket(&session.id.to_string()).await?;
+    let socket_url = client.agent_socket_url(&ticket)?;
     let (socket, _) = tokio_tungstenite::connect_async(&socket_url).await?;
     let (mut sink, mut stream) = socket.split();
     let mut seq = 0_u64;
@@ -1950,8 +1967,12 @@ impl App {
         }
         self.last_auto_push = Some(Instant::now());
         self.sync_idle_since = None;
-        if let Some(session) = &self.session {
-            crate::sync::spawn_session_sync(&self.config.paths, session);
+        if let Some(session) = self.session.clone() {
+            let paths = self.config.paths.clone();
+            let events = self.background_tx.clone();
+            tokio::spawn(async move {
+                let _ = events.send(Background::Sync(crate::sync::sync_session(&paths, &session).await));
+            });
         }
     }
 
@@ -1959,6 +1980,15 @@ impl App {
     /// that travels with one. Steering and worker reports already in flight
     /// stay queued: they belong to the process, not to a session.
     fn adopt(&mut self, session: Option<Session>) {
+        if let Some(previous) = &self.session {
+            crate::sync::session_closed(previous.id);
+        }
+        if let Some(next) = &session {
+            crate::sync::session_opened(next.id);
+        }
+        // Traces are keyed by session id: the next persist opens the right one
+        // instead of appending this session's calls to the previous trace.
+        self.trace = None;
         let injections = self.state.injections.clone();
         let state = SessionState::open(&self.config, session.as_ref(), session_key(session.as_ref()));
         self.state = SessionState { injections, ..state };
@@ -2293,9 +2323,49 @@ impl App {
                     }
                 }
                 Background::Remote(event) => self.remote_event(event),
+                Background::Sync(result) => self.sync_finished(result),
             }
         }
         changed
+    }
+
+    /// Show what a sync pass did, and switch to a newer copy of the open
+    /// session when this one has nothing the other device lacks.
+    fn sync_finished(&mut self, result: anyhow::Result<crate::sync::SyncOutcome>) {
+        let mut outcome = match result {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if matches!(error.downcast_ref(), Some(crate::sync::SyncError::Unauthorized)) {
+                    self.fail("Session sync stopped: this device is signed out. Run `abacus sync login` to resume.");
+                    self.status = "sync signed out".to_owned();
+                } else {
+                    self.status = format!("sync failed: {}", crate::text::clip(&format!("{error:#}"), 80, "…"));
+                }
+                return;
+            }
+        };
+        for held in std::mem::take(&mut outcome.held) {
+            let current = self.session.as_ref().is_some_and(|session| session.id == held.session_id);
+            if !current || self.running.is_some() {
+                continue;
+            }
+            match crate::sync::accept_held(&self.config.paths, held) {
+                Ok(Some(session)) => {
+                    self.adopt(Some(session));
+                    self.say("This session continued on another device; showing the latest version.");
+                    outcome.pulled += 1;
+                }
+                // Changed here too: the next sync keeps both copies.
+                Ok(None) => {}
+                Err(error) => self.status = format!("sync failed: {error:#}"),
+            }
+        }
+        for notice in &outcome.notices {
+            self.say(notice.clone());
+        }
+        if let Some(summary) = outcome.summary() {
+            self.status = summary;
+        }
     }
 
     fn remote_event(&mut self, event: Remote) {

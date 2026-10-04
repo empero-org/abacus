@@ -37,6 +37,7 @@ pub mod setup;
 pub mod sft;
 pub mod subagent;
 pub mod sync;
+pub mod sync_state;
 pub mod task;
 pub mod tether;
 pub mod text;

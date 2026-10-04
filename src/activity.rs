@@ -11,7 +11,6 @@
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use uuid::Uuid;
 
 use crate::config::AbacusPaths;
 
@@ -50,7 +49,7 @@ impl ActivityReporter {
         Some(Self {
             client,
             base: endpoint.trim_end_matches('/').to_owned(),
-            install_id: install_id(paths),
+            install_id: paths.install_id(),
             ingest_token: std::env::var("ABACUS_INGEST_TOKEN").ok().filter(|token| !token.trim().is_empty()),
         })
     }
@@ -125,21 +124,4 @@ impl ActivityReporter {
         // Best-effort: a failed ping must never affect the agent.
         let _ = request.send().await;
     }
-}
-
-/// A stable, anonymous per-install identifier, generated once and persisted
-/// under the Abacus home so "unique users" can be counted without identifying
-/// anyone.
-fn install_id(paths: &AbacusPaths) -> String {
-    let path = paths.root.join("install_id");
-    if let Ok(existing) = std::fs::read_to_string(&path) {
-        let trimmed = existing.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_owned();
-        }
-    }
-    let id = Uuid::new_v4().to_string();
-    let _ = std::fs::create_dir_all(&paths.root);
-    let _ = std::fs::write(&path, &id);
-    id
 }
