@@ -1315,7 +1315,7 @@ impl TokenLedger {
         self.cache_write.fetch_add(usage.cache_write, Ordering::Relaxed);
     }
 
-    fn record(&self, usage: &Usage) {
+    pub(crate) fn record(&self, usage: &Usage) {
         self.add_total(usage.total);
         self.input.fetch_add(usage.prompt, Ordering::Relaxed);
         self.output.fetch_add(usage.completion, Ordering::Relaxed);

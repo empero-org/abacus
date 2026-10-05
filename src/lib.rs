@@ -47,4 +47,5 @@ pub mod tools;
 pub mod tui;
 pub mod ui;
 pub mod update;
+pub mod usage;
 pub mod web;

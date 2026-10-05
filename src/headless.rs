@@ -14,10 +14,13 @@ use crate::{
     ralph::{RalphLoop, RalphStatus},
     services::AgentServices,
     session::{Session, SessionState, SessionStore},
+    usage::UsageReporter,
 };
 
 /// How long a headless run waits on session sync at either end.
 const SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long the final usage report may hold up the exit.
+const USAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -39,8 +42,9 @@ pub async fn run(
         .await?;
     let started = Instant::now();
     let activity_session = session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let credentials = crate::config::Credentials::load(&config.paths).unwrap_or_default();
     // Bounded: a scripted run must not hang on an unreachable sync server.
-    if crate::sync::is_configured(&crate::config::Credentials::load(&config.paths).unwrap_or_default())
+    if crate::sync::is_configured(&credentials)
         && let Ok(Ok(outcome)) = tokio::time::timeout(SYNC_TIMEOUT, crate::sync::pull_changes(&config.paths)).await
         && outcome.pulled > 0
         && let (Some(current), Some(store)) = (session.as_ref(), store.as_ref())
@@ -51,7 +55,7 @@ pub async fn run(
     if let Some(reporter) = &reporter {
         reporter.report_start(&activity_session, &config.model).await;
     }
-    let heartbeat = reporter.as_ref().map(|reporter| reporter.heartbeat(activity_session.clone(), tokens));
+    let heartbeat = reporter.as_ref().map(|reporter| reporter.heartbeat(activity_session.clone(), tokens.clone()));
     let (events, mut receiver) = mpsc::unbounded_channel();
     let allow = Arc::new(AtomicBool::new(config.yes));
     // Keyed by the session id so promotion counts distinct sessions rather
@@ -77,6 +81,13 @@ pub async fn run(
         }
     }
     let session_id = session.as_ref().map(|session| session.id.to_string());
+    // Opened only now that a trace may have created the session, so the usage
+    // is filed under the id the session ends up with.
+    let usage = UsageReporter::new(&config.paths, &credentials, "headless");
+    if let Some(usage) = &usage {
+        usage.open_session(session_id.as_deref().unwrap_or(&activity_session), &config.model, tokens.clone());
+    }
+    let usage_task = usage.as_ref().map(UsageReporter::spawn_periodic);
     let trace = match (config.trace_enabled, session_id.as_deref()) {
         (true, Some(id)) => match crate::sft::TraceWriter::open(&config.paths.traces_dir, id) {
             Ok(writer) => Some(writer),
@@ -205,6 +216,9 @@ pub async fn run(
         let _ = task.await;
     }
 
+    if let Some(task) = usage_task {
+        task.abort();
+    }
     let saved = persist_session(
         session,
         store,
@@ -217,13 +231,23 @@ pub async fn run(
             tokens_used: provider.tokens_used(),
             active_secs: started.elapsed().as_secs(),
         },
-    )?;
-    let session_id = saved.as_ref().map(|session| session.id.to_string());
+    );
     // Awaited, not spawned: the process exits right after, which would cancel
-    // a background upload.
-    if let Some(session) = &saved {
-        let _ = tokio::time::timeout(SYNC_TIMEOUT, crate::sync::push_session(&config.paths, session)).await;
-    }
+    // a background upload. The two go out together so neither adds to the
+    // other's wait, and the usage is reported even when the save failed.
+    let upload = async {
+        if let Ok(Some(session)) = &saved {
+            let _ = tokio::time::timeout(SYNC_TIMEOUT, crate::sync::push_session(&config.paths, session)).await;
+        }
+    };
+    let report = async {
+        if let Some(usage) = &usage {
+            usage.finish(USAGE_TIMEOUT).await;
+        }
+    };
+    tokio::join!(upload, report);
+    let saved = saved?;
+    let session_id = saved.as_ref().map(|session| session.id.to_string());
     if let Err(error) = services
         .run_hooks(
             "session_end",
