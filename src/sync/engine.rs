@@ -1798,6 +1798,10 @@ pub(crate) mod tests {
     /// task queued behind it, and a pass abandoned at exit could not stop until
     /// it was done.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "timing on Windows is dominated by its 15.6 ms timer and scheduler noise; Linux and macOS cover this"
+    )]
     fn large_sessions_are_read_hashed_and_written_off_the_runtime() {
         use std::sync::Arc;
         use std::sync::atomic::AtomicU64;

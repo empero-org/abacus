@@ -1092,6 +1092,10 @@ mod tests {
     /// trace. It must happen off the runtime's workers: the terminal UI shares
     /// them, and a stalled worker is a frozen screen.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "timing on Windows is dominated by its 15.6 ms timer and scheduler noise; Linux and macOS cover this"
+    )]
     fn a_large_upload_is_prepared_without_holding_the_runtime() {
         use std::sync::atomic::AtomicU64;
         use std::time::Instant;
