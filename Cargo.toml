@@ -29,6 +29,7 @@ futures-util = "0.3"
 globset = "0.4"
 ignore = "0.4"
 pulldown-cmark = "0.13"
+qrcode = { version = "0.14", default-features = false }
 ratatui = "0.30.2"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }

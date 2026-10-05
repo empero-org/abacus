@@ -10,6 +10,7 @@ use crate::{
     input::{InputBuffer, InputMode},
     provider::Provider,
     ralph::{RalphLoop, RalphStatus},
+    remote::{AcceptResult, Bridge, By, Inbound, InputKind, LinkState, SnapshotReason},
     services::AgentServices,
     session::{Session, SessionState, SessionStore, SessionUsage},
     theme::{ThemeMode, border, danger, inverse, muted, primary, rail, secondary, success, surface, text, warning},
@@ -27,7 +28,6 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, SetTitle, disable_raw_mode, enable_raw_mode},
 };
-use futures_util::{SinkExt, StreamExt};
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -69,7 +69,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/config", "Change live settings"),
     ("/theme", "Switch dark, light, or auto theme"),
     ("/feedback", "Send product feedback"),
-    ("/remote", "Share this session through Abacus Sync"),
+    ("/remote", "Share this session live, or pair a phone: on, off, qr, url, status"),
     ("/mode", "Set auto, plan, or build mode"),
     ("/plan", "Toggle plan pin"),
     ("/thinking", "Show or hide the model's reasoning"),
@@ -160,6 +160,8 @@ struct PendingApproval {
     diff: Option<DiffDocument>,
     view: ApprovalView,
     respond: tokio::sync::oneshot::Sender<ApprovalDecision>,
+    /// The id browsers know this approval by, while the session is shared.
+    remote_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +187,8 @@ struct PendingUserQuestion {
     /// navigating options.
     editing_custom: bool,
     respond: tokio::sync::oneshot::Sender<crate::agent::UserAnswer>,
+    /// The id browsers know this question by, while the session is shared.
+    remote_id: Option<String>,
 }
 
 impl PendingUserQuestion {
@@ -206,6 +210,7 @@ impl PendingUserQuestion {
             custom: InputBuffer::new(),
             editing_custom: false,
             respond,
+            remote_id: None,
         }
     }
 
@@ -337,6 +342,7 @@ enum ConfigKey {
     FeedbackEnabled,
     FeedbackDiagnostics,
     FeedbackEndpoint,
+    RemoteAutoShare,
     AdvancedToml,
 }
 
@@ -390,19 +396,44 @@ enum Background {
     /// The outcome of a manual `/refine`.
     Refined(String),
     Services(Result<Box<AgentServices>, String>),
-    Remote(Remote),
+    /// The remote link reported something. `generation` names the bridge it
+    /// came from, so a stopped bridge's late events are ignored.
+    Remote {
+        generation: u64,
+        event: Inbound,
+    },
+    /// A phone pairing link arrived (or could not be made).
+    Pairing {
+        view: PairingView,
+        result: Result<crate::sync::Pairing, String>,
+    },
     /// A sync pass finished.
     Sync(anyhow::Result<crate::sync::SyncOutcome>),
     /// A newer release exists.
     Update(crate::update::Available),
 }
 
-/// What the `/remote` connection reports.
-enum Remote {
-    Status(String),
-    Prompt(String),
-    Interrupt,
-    Closed(String),
+/// How a requested pairing link is shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PairingView {
+    /// The QR overlay (`/remote qr`).
+    Qr,
+    /// A transcript line (`/remote url`).
+    Url,
+}
+
+/// The `/remote qr` overlay.
+enum QrOverlay {
+    Loading,
+    Ready {
+        url: String,
+        /// Half-block rows, or `None` when the link does not fit a code.
+        rows: Option<Vec<String>>,
+        expires_in: u64,
+        /// Whether the link opens this session or just the session list.
+        opens_session: bool,
+    },
+    Failed(String),
 }
 
 struct App {
@@ -460,8 +491,21 @@ struct App {
     /// Cleared on any keystroke: once you are back on the keyboard, a stale
     /// band beside the cursor is two highlights saying different things.
     pointer: Option<(u16, u16)>,
-    remote_task: Option<JoinHandle<()>>,
-    remote_outbound: Option<mpsc::UnboundedSender<String>>,
+    /// Live sharing of this session with the account's browsers, when on.
+    remote: Option<Bridge>,
+    /// Bumped for every bridge started; events carry it.
+    remote_generation: u64,
+    /// `/remote off` for this session: auto-share leaves it alone until the
+    /// session changes or `/remote` turns sharing back on.
+    remote_muted: bool,
+    /// Sharing was asked for explicitly, so the first connect says so in the
+    /// status line; auto-share connects quietly.
+    remote_announce: bool,
+    qr_overlay: Option<QrOverlay>,
+    /// Token usage reported to the signed-in account; `None` when signed out.
+    usage: Option<crate::usage::UsageReporter>,
+    /// The session the reporter's current run counts for.
+    usage_session: Option<String>,
     sync_idle_since: Option<Instant>,
     last_auto_push: Option<Instant>,
     last_board_version: u64,
@@ -645,6 +689,8 @@ pub async fn run(
     if let Some(session) = &app.session {
         crate::sync::session_opened(session.id);
     }
+    // A resumed session has had its first prompt: share it from the start.
+    app.maybe_auto_share();
     if crate::sync::is_configured(&app.credentials) {
         // Pull what changed elsewhere, then upload what an earlier close could
         // not finish. The open session is never written over; a newer copy of
@@ -659,12 +705,21 @@ pub async fn run(
     // session that is killed (terminal closed) drops off "active" instead of
     // lingering. The shared token counter survives model switches.
     let heartbeat = reporter.as_ref().map(|reporter| reporter.heartbeat(activity_session.clone(), app.tokens.clone()));
+    // Signed in, usage also counts toward the account: per run and model,
+    // reported every minute and once more on exit. Never any text.
+    app.usage = crate::usage::UsageReporter::new(&app.config.paths, &app.credentials, "tui");
+    app.track_usage_run();
+    let usage_ticker = app.usage.as_ref().map(crate::usage::UsageReporter::spawn_periodic);
     // Before the first frame: a reply an earlier run died in the middle of is
     // handed back at the top of the transcript.
     app.surface_recovered_reply();
     let result = event_loop(&mut terminal, &mut app).await;
     app.persist_session();
+    let remote = app.remote.take();
     if let Some(handle) = heartbeat {
+        handle.abort();
+    }
+    if let Some(handle) = usage_ticker {
         handle.abort();
     }
     let end_services = app.services.clone();
@@ -683,6 +738,14 @@ pub async fn run(
         eprintln!(
             "\nSession saved — resume with: abacus --resume {id}  (or `abacus -c` for the latest in this workspace)"
         );
+    }
+    // Tell the browsers, close the socket, and stop the session being
+    // controllable — a closed session is readable from the phone, not live.
+    if let Some(bridge) = remote {
+        bridge.shutdown("The session was closed in the terminal.", Duration::from_secs(2)).await;
+    }
+    if let Some(usage) = &app.usage {
+        usage.finish(Duration::from_secs(3)).await;
     }
     if crate::sync::is_configured(&app.credentials) {
         match tokio::time::timeout(Duration::from_secs(3), crate::sync::push_dirty(&app.config.paths)).await {
@@ -824,6 +887,7 @@ async fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut
     while !app.quit {
         dirty |= app.drain_agent_events();
         dirty |= app.drain_background();
+        app.tick_remote();
         app.maybe_idle_sync();
         // A worker that finished after its turn ended delivers here.
         dirty |= app.deliver_pending_injections();
@@ -846,7 +910,9 @@ async fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut
                     }
                     let before = app.input.text();
                     app.pointer = None;
-                    handle_key(app, key);
+                    if !app.qr_key(key) {
+                        handle_key(app, key);
+                    }
                     // Editing the prompt invalidates the highlighted
                     // suggestion, so reconcile the popup after every key.
                     app.sync_completion(&before);
@@ -939,63 +1005,6 @@ const SCROLLBAR_COLUMNS: u16 = 2;
 
 /// Content is centred and capped at this width on wide terminals.
 const CONTENT_COLUMNS: u16 = 112;
-
-/// Push the session, open the remote socket, and relay in both directions
-/// until the server hangs up: replies out, browser prompts and interrupts in.
-async fn serve_remote(
-    client: crate::sync::SyncClient,
-    session: Session,
-    trace: std::path::PathBuf,
-    snapshot: Vec<Value>,
-    mut replies: mpsc::UnboundedReceiver<String>,
-    events: &mpsc::UnboundedSender<Background>,
-) -> Result<()> {
-    use tokio_tungstenite::tungstenite::Message;
-    let trace = std::fs::read(trace).unwrap_or_default();
-    client.push(&session, &trace, true).await.context("sync failed")?;
-    client.enable_remote(&session.id.to_string()).await?;
-    let ticket = client.agent_ticket(&session.id.to_string()).await?;
-    let socket_url = client.agent_socket_url(&ticket)?;
-    let (socket, _) = tokio_tungstenite::connect_async(&socket_url).await?;
-    let (mut sink, mut stream) = socket.split();
-    let mut seq = 0_u64;
-    let mut frame = |kind: &str, payload: Value| {
-        seq += 1;
-        let id = uuid::Uuid::new_v4().to_string();
-        let frame = json!({"v": 1, "type": kind, "id": id, "seq": seq, "payload": payload});
-        Message::Text(frame.to_string().into())
-    };
-    sink.send(frame("snapshot", json!({"entries": snapshot}))).await?;
-    let status = "remote enabled — open the server /remote page".to_owned();
-    let _ = events.send(Background::Remote(Remote::Status(status)));
-    loop {
-        tokio::select! {
-            Some(text) = replies.recv() => {
-                sink.send(frame("entry", json!({"kind": "assistant", "text": text}))).await?;
-            }
-            message = stream.next() => {
-                let Some(message) = message else { break };
-                let message = message?;
-                let Some(incoming) = message.to_text().ok().and_then(|text| serde_json::from_str::<Value>(text).ok()) else {
-                    continue;
-                };
-                match incoming["type"].as_str().unwrap_or_default() {
-                    "prompt" => {
-                        if let Some(prompt) = incoming.pointer("/payload/text").and_then(Value::as_str) {
-                            let _ = events.send(Background::Remote(Remote::Prompt(prompt.to_owned())));
-                        }
-                    }
-                    "interrupt" => {
-                        let _ = events.send(Background::Remote(Remote::Interrupt));
-                    }
-                    "ping" => sink.send(frame("pong", json!({}))).await?,
-                    _ => {}
-                }
-            }
-        }
-    }
-    bail!("remote disconnected")
-}
 
 /// The slice of a tool result kept for expansion, bounded so one enormous
 /// result cannot grow the session's footprint without limit.
@@ -1253,8 +1262,13 @@ impl App {
             hub_rows: std::cell::Cell::new(1),
             catalogs: HashMap::new(),
             pointer: None,
-            remote_task: None,
-            remote_outbound: None,
+            remote: None,
+            remote_generation: 0,
+            remote_muted: false,
+            remote_announce: false,
+            qr_overlay: None,
+            usage: None,
+            usage_session: None,
             sync_idle_since: None,
             last_auto_push: None,
             last_board_version: 0,
@@ -1317,6 +1331,12 @@ impl App {
         // resetting here only affects blocks that came from somewhere else.
         self.receiving_delta = false;
         self.receiving_thinking = false;
+        // Browsers break their stream at the same place.
+        if matches!(entry.kind, EntryKind::System | EntryKind::Error | EntryKind::Rule)
+            && let Some(remote) = &mut self.remote
+        {
+            remote.break_text();
+        }
         self.entries_rev = self.entries_rev.wrapping_add(1);
         self.entries.push(entry);
     }
@@ -1450,6 +1470,7 @@ impl App {
                 // subagent's report would never trigger its turn.
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     if self.running.take().is_some() {
+                        self.remote_turn_ended(crate::remote::protocol::DoneReason::Failed);
                         self.fail(
                             "The turn ended unexpectedly (the agent task exited). \
                              Any partial output was saved to the recovery file.",
@@ -1460,6 +1481,10 @@ impl App {
                 }
             };
             changed = true;
+            // Mirrored first: the terminal's own handling consumes the event.
+            if let Some(remote) = &mut self.remote {
+                remote.on_event(&event, &self.provider.usage());
+            }
             match event {
                 AgentEvent::Delta(delta) => {
                     self.turn_output_chars = self.turn_output_chars.saturating_add(delta.len());
@@ -1573,9 +1598,7 @@ impl App {
                         }
                     }
                     self.persist_session();
-                    if let Some(remote) = &self.remote_outbound {
-                        let _ = remote.send(assistant_output.clone());
-                    }
+                    self.report_usage();
                     if !continue_loop {
                         self.sync_idle_since = Some(Instant::now());
                     }
@@ -1637,9 +1660,6 @@ impl App {
                     // refuse on every retry. Point at the way out.
                     let provider_rejection =
                         error.contains("provider stream error") || error.contains("provider returned");
-                    if let Some(remote) = &self.remote_outbound {
-                        let _ = remote.send(format!("Error: {error}"));
-                    }
                     self.fail(error);
                     if provider_rejection {
                         self.say(
@@ -1652,6 +1672,7 @@ impl App {
                         let _ = state.pause();
                     }
                     self.persist_session();
+                    self.report_usage();
                     self.sync_idle_since = Some(Instant::now());
                     self.follow = true;
                 }
@@ -1665,6 +1686,7 @@ impl App {
             && handle.is_finished()
             && matches!(self.event_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty))
         {
+            self.remote_turn_ended(crate::remote::protocol::DoneReason::Failed);
             self.close_turn();
             self.fail(
                 "The turn ended unexpectedly. Partial output was kept — \
@@ -1706,8 +1728,14 @@ impl App {
 
     fn set_approval(&mut self, request: ApprovalRequest) {
         self.overlay_hidden = false;
+        // A decision outranks a QR code; the overlay would hide the dialog.
+        self.qr_overlay = None;
         self.status = format!("approval needed: {}", request.tool);
         let diff = DiffDocument::parse(&request.details);
+        let remote_id = self
+            .remote
+            .as_mut()
+            .map(|remote| remote.approval_opened(&request.tool, &request.summary, &request.details));
         self.approval = Some(PendingApproval {
             tool: request.tool,
             summary: request.summary,
@@ -1715,6 +1743,7 @@ impl App {
             view: if diff.is_some() { ApprovalView::Unified } else { ApprovalView::Raw },
             diff,
             respond: request.respond,
+            remote_id,
         });
         self.approval_scroll = 0;
         self.approval_horizontal = 0;
@@ -1722,28 +1751,56 @@ impl App {
 
     fn set_user_question(&mut self, request: UserQuestionRequest) {
         self.overlay_hidden = false;
+        self.qr_overlay = None;
         self.status = format!("waiting for answer: {}", request.header);
-        self.question = Some(PendingUserQuestion::new(
+        let remote_id = self.remote.as_mut().map(|remote| {
+            remote.question_opened(&request.header, &request.question, &request.options, request.multi_select)
+        });
+        let mut question = PendingUserQuestion::new(
             request.header, request.question, request.options, request.multi_select, request.respond,
-        ));
+        );
+        question.remote_id = remote_id;
+        self.question = Some(question);
     }
 
-    /// Resolve an open user question and return the oneshot to the agent loop.
-    /// Dropping the pending state implicitly cancels the question.
+    /// Resolve an open user question from the keyboard and return the oneshot
+    /// to the agent loop. Dropping the pending state implicitly cancels the
+    /// question.
     fn answer_user_question(&mut self) {
+        if let Some(answer) = self.question.as_ref().map(PendingUserQuestion::resolve_answer) {
+            self.settle_question(answer, By::Terminal);
+        }
+    }
+
+    /// Hand `answer` to the agent, whoever gave it, and tell the browsers.
+    fn settle_question(&mut self, answer: crate::agent::UserAnswer, by: By) {
         if let Some(question) = self.question.take() {
-            let answer = question.resolve_answer();
+            if let (Some(remote), Some(id)) = (&mut self.remote, &question.remote_id) {
+                remote.question_resolved(id, &answer.selected_labels, answer.custom_text.as_deref(), by);
+            }
             let _ = question.respond.send(answer);
             self.status = "ready".to_owned();
         }
     }
 
     fn decide(&mut self, decision: ApprovalDecision) {
+        self.decide_by(decision, By::Terminal);
+    }
+
+    /// Answer the open approval, whoever decided, and tell the browsers.
+    fn decide_by(&mut self, decision: ApprovalDecision, by: By) {
         if let Some(approval) = self.approval.take() {
+            if let (Some(remote), Some(id)) = (&mut self.remote, &approval.remote_id) {
+                remote.approval_resolved(id, decision, by);
+            }
             let _ = approval.respond.send(decision);
-            self.status = match decision {
-                ApprovalDecision::Once | ApprovalDecision::Always => "approved".to_owned(),
-                ApprovalDecision::Reject => "rejected".to_owned(),
+            self.status = match (decision, by) {
+                (ApprovalDecision::Once | ApprovalDecision::Always, By::Terminal) => "approved".to_owned(),
+                (ApprovalDecision::Reject, By::Terminal) => "rejected".to_owned(),
+                (ApprovalDecision::Once | ApprovalDecision::Always, By::Browser) => {
+                    "approved from a browser".to_owned()
+                }
+                (ApprovalDecision::Reject, By::Browser) => "rejected from a browser".to_owned(),
             };
         }
     }
@@ -1777,6 +1834,9 @@ impl App {
     /// current tool call. Steering, not queueing: a correction that waits for
     /// the whole turn to end arrives too late to change what it was correcting.
     fn steer(&mut self, prompt: String) {
+        if let Some(remote) = &mut self.remote {
+            remote.user_prompt(&prompt);
+        }
         self.push_entry(Entry::new(EntryKind::User, prompt.clone()));
         self.state.injections.push(crate::agent::Injection::UserMessage(prompt));
         self.follow = true;
@@ -1857,6 +1917,12 @@ impl App {
         if display {
             self.push_entry(Entry::new(EntryKind::User, display_prompt.clone()));
         }
+        if let Some(remote) = &mut self.remote {
+            if display {
+                remote.user_prompt(&display_prompt);
+            }
+            remote.turn_started();
+        }
         let model_prompt = if display {
             expand_file_references(&self.config.workspace, &effective_prompt).unwrap_or_else(|error| {
                 self.status = format!("file reference warning: {error}");
@@ -1906,6 +1972,8 @@ impl App {
         self.running = Some(tokio::spawn(async move {
             run_turn(provider, messages, options, events).await;
         }));
+        // The first prompt is what makes a session worth sharing.
+        self.maybe_auto_share();
     }
 
     fn persist_session(&mut self) {
@@ -1949,6 +2017,34 @@ impl App {
         }
         if let Err(error) = store.save(session) {
             self.status = format!("session save failed: {error}");
+        }
+        // The first persist is where a new session gets its id.
+        self.track_usage_run();
+    }
+
+    /// Point the usage reporter at the current session: a new run whenever
+    /// the session changes (resume, fork, a new one getting its first prompt),
+    /// counting from the ledger as it stands now.
+    fn track_usage_run(&mut self) {
+        let Some(reporter) = &self.usage else {
+            return;
+        };
+        let Some(id) =
+            self.session.as_ref().filter(|session| !crate::sync::is_placeholder(session)).map(|session| session.id)
+        else {
+            return;
+        };
+        let id = id.to_string();
+        if self.usage_session.as_deref() != Some(id.as_str()) {
+            reporter.open_session(&id, &self.config.model, self.tokens.clone());
+            self.usage_session = Some(id);
+        }
+    }
+
+    /// A turn ended: report what it spent, in the background.
+    fn report_usage(&self) {
+        if let Some(reporter) = &self.usage {
+            reporter.spawn_report(false);
         }
     }
 
@@ -2002,6 +2098,8 @@ impl App {
         self.started = Instant::now();
         self.session = session; // `None` is recreated lazily on the first send
         self.scroll = 0;
+        self.track_usage_run();
+        self.rebind_remote();
     }
 
     fn new_session(&mut self) {
@@ -2063,6 +2161,8 @@ impl App {
         self.tokens.store_total(0);
         self.session_initial_active_secs = 0;
         self.started = Instant::now();
+        self.track_usage_run();
+        self.rebind_remote();
         self.say(
             "Session forked — the conversation continues in a new session; the \
              original is still saved.",
@@ -2187,61 +2287,6 @@ impl App {
         });
     }
 
-    /// `/remote`: share this session through Abacus Sync, or stop sharing it.
-    fn toggle_remote(&mut self) {
-        self.persist_session();
-        let Some(session) = self.session.clone() else {
-            self.status = "send a message before enabling remote".to_owned();
-            return;
-        };
-        let client = crate::sync::configured_client(&self.config.paths);
-        if let Some(task) = self.remote_task.take() {
-            task.abort();
-            self.remote_outbound = None;
-            if let Ok(client) = client {
-                tokio::spawn(async move {
-                    let _ = client.disable_remote(&session.id.to_string()).await;
-                });
-            }
-            self.status = "remote disabled".to_owned();
-            return;
-        }
-        let Ok(client) = client else {
-            self.status = "run `abacus sync login` before /remote".to_owned();
-            return;
-        };
-        let (outbound, replies) = mpsc::unbounded_channel();
-        self.remote_outbound = Some(outbound);
-        self.config.trace_enabled = true;
-        self.persist_session();
-        self.status = "enabling remote".to_owned();
-        // The transcript so far, so the browser opens on the history rather
-        // than on a blank page.
-        let snapshot = self
-            .entries
-            .iter()
-            .map(|entry| {
-                let kind = match entry.kind {
-                    EntryKind::User => "user",
-                    EntryKind::Assistant => "assistant",
-                    EntryKind::Tool => "tool",
-                    EntryKind::Thinking => "thinking",
-                    EntryKind::System | EntryKind::Rule => "system",
-                    EntryKind::Error => "error",
-                };
-                json!({"kind": kind, "text": entry.text, "tool": entry.tool})
-            })
-            .collect();
-        let trace = self.config.paths.traces_dir.join(format!("{}.jsonl", session.id));
-        let events = self.background_tx.clone();
-        self.remote_task = Some(tokio::spawn(async move {
-            let served = serve_remote(client, session, trace, snapshot, replies, &events).await;
-            if let Err(error) = served {
-                let _ = events.send(Background::Remote(Remote::Closed(format!("{error:#}"))));
-            }
-        }));
-    }
-
     fn start_services_reload(&mut self) {
         if !self.reload_services || self.services_reloading || self.running.is_some() {
             return;
@@ -2322,7 +2367,8 @@ impl App {
                         }
                     }
                 }
-                Background::Remote(event) => self.remote_event(event),
+                Background::Remote { generation, event } => self.remote_event(generation, event),
+                Background::Pairing { view, result } => self.pairing_ready(view, result),
                 Background::Sync(result) => self.sync_finished(result),
             }
         }
@@ -2368,36 +2414,235 @@ impl App {
         }
     }
 
-    fn remote_event(&mut self, event: Remote) {
-        match event {
-            Remote::Status(status) => self.status = status,
-            Remote::Closed(reason) => {
-                self.status = reason;
-                self.remote_task = None;
-                self.remote_outbound = None;
-            }
-            Remote::Interrupt => {
-                if let Some(handle) = self.running.take() {
-                    handle.abort();
-                    self.status = "interrupted via remote".to_owned();
-                }
-            }
-            Remote::Prompt(prompt) => {
-                // The browser echoing the last reply back must not start a loop.
-                let echoed = self
-                    .entries
-                    .iter()
-                    .rev()
-                    .find(|entry| entry.kind == EntryKind::Assistant)
-                    .is_some_and(|entry| entry.text.trim() == prompt.trim());
-                if echoed {
-                } else if self.running.is_some() {
-                    self.steer(prompt);
-                } else {
-                    self.start_turn(prompt.clone(), prompt, true);
-                }
-            }
+    // -----------------------------------------------------------------------
+    // Live sharing (`crate::remote`)
+    // -----------------------------------------------------------------------
+
+    /// Share the session if auto-share says so: the setting is on, this
+    /// device is signed in, the session has had its first prompt, and sharing
+    /// was not turned off for it with `/remote`.
+    fn maybe_auto_share(&mut self) {
+        if self.settings.remote.auto_share && !self.remote_muted && self.remote.is_none() {
+            let _ = self.start_remote();
         }
+    }
+
+    /// Start sharing the current session, or say why it cannot be shared.
+    fn start_remote(&mut self) -> Result<(), String> {
+        if !crate::sync::is_configured(&self.credentials) {
+            return Err("this device is not signed in to Abacus Sync — run `abacus sync login`".into());
+        }
+        // A placeholder is not a session yet; there is nothing to share.
+        let Some(session) = self.session.clone().filter(|session| !crate::sync::is_placeholder(session)) else {
+            return Err("send a message first — an empty session has nothing to share".into());
+        };
+        let client = crate::sync::configured_client(&self.config.paths).map_err(|error| format!("{error:#}"))?;
+        self.remote_generation += 1;
+        let generation = self.remote_generation;
+        let events = self.background_tx.clone();
+        let notify: crate::remote::Notify = Arc::new(move |event| {
+            let _ = events.send(Background::Remote { generation, event });
+        });
+        let mut bridge = Bridge::start(client, self.config.paths.clone(), session, notify);
+        // Whatever is already under way becomes part of the first snapshot.
+        if self.running.is_some() {
+            bridge.turn_started();
+        }
+        if let Some(approval) = &mut self.approval {
+            approval.remote_id = Some(bridge.approval_opened(&approval.tool, &approval.summary, &approval.details));
+        }
+        if let Some(question) = &mut self.question {
+            question.remote_id = Some(
+                bridge.question_opened(&question.header, &question.question, &question.options, question.multi_select),
+            );
+        }
+        self.remote = Some(bridge);
+        Ok(())
+    }
+
+    /// Whether the session is being shared (or trying to be).
+    fn sharing(&self) -> bool {
+        self.remote.as_ref().is_some_and(Bridge::is_active)
+    }
+
+    /// Stop sharing: the browsers are told `notice`, and the session stops
+    /// being controllable.
+    fn stop_remote(&mut self, notice: &str) {
+        if let Some(bridge) = self.remote.take() {
+            // The link finishes in the background; nothing here waits on it.
+            drop(bridge.stop(notice, true));
+        }
+    }
+
+    /// The session changed (resume, new, fork, a newer copy from another
+    /// device). Sharing follows the user to the new session; the old one stops
+    /// being controllable. The same session just gets a fresh snapshot.
+    fn rebind_remote(&mut self) {
+        let current = self.session.as_ref().map(|session| session.id.to_string());
+        if self.sharing() && self.remote.as_ref().map(Bridge::session_id) == current.as_deref() {
+            self.send_remote_snapshot(SnapshotReason::Requested);
+            return;
+        }
+        let followed = self.sharing();
+        self.stop_remote("The terminal switched to another session.");
+        self.remote_muted = false;
+        if followed {
+            let _ = self.start_remote();
+        } else {
+            self.maybe_auto_share();
+        }
+    }
+
+    fn send_remote_snapshot(&mut self, reason: SnapshotReason) {
+        let Some(bridge) = &mut self.remote else {
+            return;
+        };
+        let session = self.session.as_ref();
+        let info = crate::remote::SessionInfo {
+            id: bridge.session_id().to_owned(),
+            title: session.map(|session| session.title.clone()).unwrap_or_default(),
+            workspace: self.config.workspace.display().to_string(),
+            model: self.config.model.clone(),
+            mode: self.agent_mode.label().to_ascii_lowercase(),
+            app_version: env!("CARGO_PKG_VERSION").to_owned(),
+            started_at: session.map(|session| session.created_at.to_rfc3339()).unwrap_or_default(),
+        };
+        let usage = self.provider.usage();
+        let view = crate::remote::SnapshotView {
+            session: info,
+            entries: &self.entries,
+            live: self.running.is_some(),
+            usage: &usage,
+        };
+        bridge.send_snapshot(view, reason);
+    }
+
+    /// Every event-loop tick: send coalesced text, mirror the footer's live
+    /// label, and repair dropped frames with a snapshot.
+    fn tick_remote(&mut self) {
+        let Some(bridge) = &mut self.remote else {
+            return;
+        };
+        bridge.flush();
+        if self.running.is_some() {
+            bridge.thinking_label(&self.status);
+        }
+        if bridge.needs_resync() {
+            self.send_remote_snapshot(SnapshotReason::Requested);
+        }
+    }
+
+    fn remote_turn_ended(&mut self, reason: crate::remote::protocol::DoneReason) {
+        if let Some(bridge) = &mut self.remote {
+            bridge.turn_ended(reason, &self.provider.usage());
+        }
+    }
+
+    /// Something from the link: connection news, or browser input — which
+    /// goes through the same paths as the keyboard.
+    fn remote_event(&mut self, generation: u64, event: Inbound) {
+        if generation != self.remote_generation {
+            return;
+        }
+        let Some(bridge) = &mut self.remote else {
+            return;
+        };
+        bridge.observe(&event);
+        match event {
+            Inbound::Connected { reconnect } => {
+                let reason = if reconnect { SnapshotReason::Reconnect } else { SnapshotReason::Connect };
+                self.send_remote_snapshot(reason);
+                if std::mem::take(&mut self.remote_announce) {
+                    self.status = "sharing live — /remote qr opens it on your phone".to_owned();
+                }
+            }
+            Inbound::Closed { reason } => {
+                self.remote_announce = false;
+                self.status = format!("remote stopped: {reason}");
+            }
+            Inbound::Warning { message, .. } => self.status = format!("remote: {message}"),
+            Inbound::Peers { .. } | Inbound::Disconnected { .. } => {}
+            Inbound::SnapshotRequested => self.send_remote_snapshot(SnapshotReason::Requested),
+            Inbound::Prompt { ref_id, text } => self.remote_prompt(&ref_id, text),
+            Inbound::Answer { ref_id, question_id, selected, custom } => {
+                self.remote_answer(&ref_id, &question_id, selected, custom)
+            }
+            Inbound::Approve { ref_id, approval_id, decision } => self.remote_approve(&ref_id, &approval_id, decision),
+            Inbound::Interrupt { ref_id } => self.remote_interrupt(&ref_id),
+        }
+    }
+
+    fn remote_accepted(&mut self, ref_id: &str, kind: InputKind, result: AcceptResult, reason: Option<&str>) {
+        if let Some(bridge) = &mut self.remote {
+            bridge.accepted(ref_id, kind, result, reason);
+        }
+    }
+
+    /// A prompt typed in a browser: steers a running turn, or starts one.
+    /// Always a prompt, never a command — slash commands are how the terminal
+    /// changes model, workspace and settings, and a browser reaches none of it.
+    fn remote_prompt(&mut self, ref_id: &str, text: String) {
+        self.remote_accepted(ref_id, InputKind::Prompt, AcceptResult::Queued, None);
+        if self.running.is_some() {
+            self.steer(text);
+        } else {
+            self.start_turn(text.clone(), text, true);
+        }
+    }
+
+    fn remote_answer(&mut self, ref_id: &str, question_id: &str, selected: Vec<String>, custom: Option<String>) {
+        let Some(question) =
+            self.question.as_ref().filter(|question| question.remote_id.as_deref() == Some(question_id))
+        else {
+            return self.remote_accepted(ref_id, InputKind::Answer, AcceptResult::Rejected, Some("no open question"));
+        };
+        // Only labels the question offered; one of them unless it is multi-select.
+        let offered: Vec<&str> =
+            question.options.iter().map(|option| option.split(" — ").next().unwrap_or(option)).collect();
+        let mut labels: Vec<String> = selected.into_iter().filter(|label| offered.contains(&label.as_str())).collect();
+        if !question.multi_select {
+            labels.truncate(1);
+        }
+        let custom = custom.filter(|text| !text.trim().is_empty());
+        self.remote_accepted(ref_id, InputKind::Answer, AcceptResult::Applied, None);
+        self.settle_question(crate::agent::UserAnswer { selected_labels: labels, custom_text: custom }, By::Browser);
+    }
+
+    fn remote_approve(&mut self, ref_id: &str, approval_id: &str, decision: ApprovalDecision) {
+        if self.approval.as_ref().and_then(|approval| approval.remote_id.as_deref()) != Some(approval_id) {
+            return self.remote_accepted(ref_id, InputKind::Approve, AcceptResult::Rejected, Some("no open approval"));
+        }
+        self.remote_accepted(ref_id, InputKind::Approve, AcceptResult::Applied, None);
+        self.decide_by(decision, By::Browser);
+    }
+
+    /// Cooperative first, a hard stop when repeated — as Esc in the terminal.
+    fn remote_interrupt(&mut self, ref_id: &str) {
+        if self.running.is_none() {
+            return self.remote_accepted(
+                ref_id,
+                InputKind::Interrupt,
+                AcceptResult::Rejected,
+                Some("nothing is running"),
+            );
+        }
+        self.remote_accepted(ref_id, InputKind::Interrupt, AcceptResult::Applied, None);
+        if !self.request_interrupt() {
+            self.status = "interrupting (asked from a browser)…".to_owned();
+        }
+    }
+
+    /// Keys for the QR overlay, which sits above everything but a decision.
+    /// Returns whether it took the key.
+    fn qr_key(&mut self, key: KeyEvent) -> bool {
+        if self.qr_overlay.is_none() || self.approval.is_some() || self.question.is_some() {
+            return false;
+        }
+        let ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+        if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) || ctrl_c {
+            self.qr_overlay = None;
+        }
+        true
     }
 
     /// Ask a running turn to stop. The first request is cooperative: the turn
@@ -2427,6 +2672,8 @@ impl App {
         }
         if let Some(handle) = self.running.take() {
             handle.abort();
+            // An aborted turn never reports `Done`; settle the browsers here.
+            self.remote_turn_ended(crate::remote::protocol::DoneReason::Interrupted);
             self.approval = None;
             self.receiving_delta = false;
             // The aborted task will never send its `ToolFinished`, so settle

@@ -350,6 +350,7 @@ pub async fn handle(action: SyncCommand, paths: &AbacusPaths, _workspace: PathBu
                 println!("{}", pairing.pairing_url);
             } else {
                 println!("Open this link on your phone to sign in to {}:", client.server);
+                print!("{}", crate::remote::qr::render(&pairing.pairing_url));
                 println!();
                 println!("  {}", pairing.pairing_url);
                 println!();

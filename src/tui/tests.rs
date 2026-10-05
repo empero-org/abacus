@@ -2168,6 +2168,304 @@ async fn a_finished_turn_handle_without_a_done_event_releases_the_ui() {
     assert!(app.entries.last().is_some_and(|entry| { entry.text.contains("ended unexpectedly") }));
 }
 
+/// Share `app` through a bridge without a link; its frames land in the
+/// returned receiver.
+fn share(app: &mut App) -> mpsc::Receiver<crate::remote::protocol::Outbound> {
+    let (bridge, frames) = Bridge::detached("s1");
+    app.remote = Some(bridge);
+    frames
+}
+
+fn sent(frames: &mut mpsc::Receiver<crate::remote::protocol::Outbound>) -> Vec<Value> {
+    let mut out = Vec::new();
+    while let Ok(frame) = frames.try_recv() {
+        out.push(serde_json::to_value(frame).unwrap());
+    }
+    out
+}
+
+fn of_type<'a>(frames: &'a [Value], kind: &str) -> Vec<&'a Value> {
+    frames.iter().filter(|frame| frame["type"] == kind).collect()
+}
+
+#[tokio::test]
+async fn remote_command_explains_what_it_needs_when_signed_out() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    assert!(app.slash_command("/remote"));
+    assert_eq!(app.entries.last().unwrap().kind, EntryKind::Error);
+    assert!(app.entries.last().unwrap().text.contains("abacus sync login"), "{}", app.entries.last().unwrap().text);
+    assert!(app.remote.is_none());
+
+    assert!(app.slash_command("/remote status"));
+    assert!(app.entries.last().unwrap().text.starts_with("Remote: off"));
+    assert!(app.slash_command("/remote qr"));
+    assert!(app.entries.last().unwrap().text.contains("Pairing a phone needs Abacus Sync"));
+    assert!(app.qr_overlay.is_none());
+    assert!(app.slash_command("/remote sideways"));
+    assert!(app.entries.last().unwrap().text.contains("Usage: /remote [on|off|qr|url|status]"));
+}
+
+#[tokio::test]
+async fn remote_off_stops_sharing_and_keeps_auto_share_away_from_this_session() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    let _frames = share(&mut app);
+    assert!(app.slash_command("/remote status"));
+    assert!(app.entries.last().unwrap().text.contains("connecting"));
+    // Bare `/remote` toggles a live share off.
+    assert!(app.slash_command("/remote"));
+    assert!(app.remote.is_none());
+    assert!(app.remote_muted);
+    assert!(app.status.contains("remote off for this session"), "{}", app.status);
+    app.settings.remote.auto_share = true;
+    app.maybe_auto_share();
+    assert!(app.remote.is_none(), "muted sessions are not auto-shared");
+    // A different session starts unmuted.
+    app.adopt(None);
+    assert!(!app.remote_muted);
+}
+
+#[test]
+fn the_footer_badge_follows_the_link() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    app.entries = vec![Entry::new(EntryKind::Assistant, "hi")];
+    assert!(!render(&mut app, 120, 20).contains("live"), "no badge while not shared");
+    let _frames = share(&mut app);
+    assert!(render(&mut app, 120, 20).contains("connecting"));
+    let observe = |app: &mut App, event: Inbound| app.remote.as_mut().unwrap().observe(&event);
+    observe(&mut app, Inbound::Connected { reconnect: false });
+    let footer = render(&mut app, 120, 20);
+    assert!(footer.contains("live") && !footer.contains("viewer"), "{footer}");
+    observe(&mut app, Inbound::Peers { browsers: 2 });
+    assert!(render(&mut app, 120, 20).contains("live · 2 viewers"));
+    observe(&mut app, Inbound::Disconnected { reason: "lost".into(), retry_in: Duration::from_secs(1) });
+    assert!(render(&mut app, 120, 20).contains("reconnecting"));
+    observe(&mut app, Inbound::Closed { reason: "signed out".into() });
+    assert!(render(&mut app, 120, 20).contains("remote error"));
+    // The token breakdown still opens on the arrows with the badge before them.
+    let mut opened = false;
+    for column in 0..120 {
+        app.pointer = Some((column, 19));
+        if render(&mut app, 120, 20).contains("TOKENS") {
+            opened = true;
+            break;
+        }
+    }
+    assert!(opened);
+}
+
+#[tokio::test]
+async fn browser_approvals_take_the_terminal_decision_path() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    let mut frames = share(&mut app);
+    let (respond, receive) = tokio::sync::oneshot::channel();
+    app.set_approval(crate::agent::ApprovalRequest {
+        tool: "write_file".into(),
+        summary: "notes.txt".into(),
+        details: "Write notes.txt".into(),
+        respond,
+    });
+    let approval_id = app.approval.as_ref().unwrap().remote_id.clone().unwrap();
+    let opened = sent(&mut frames);
+    assert_eq!(of_type(&opened, "approval")[0]["payload"]["approval_id"], approval_id.as_str());
+
+    // A stale id is refused and leaves the dialog open.
+    let generation = app.remote_generation;
+    app.remote_event(
+        generation,
+        Inbound::Approve { ref_id: "b1".into(), approval_id: "a99".into(), decision: ApprovalDecision::Once },
+    );
+    assert!(app.approval.is_some());
+    let refused = sent(&mut frames);
+    assert_eq!(of_type(&refused, "accepted")[0]["payload"]["result"], "rejected");
+
+    app.remote_event(
+        generation,
+        Inbound::Approve { ref_id: "b2".into(), approval_id: approval_id.clone(), decision: ApprovalDecision::Always },
+    );
+    assert!(app.approval.is_none());
+    assert_eq!(receive.await.unwrap(), ApprovalDecision::Always);
+    let applied = sent(&mut frames);
+    assert_eq!(
+        of_type(&applied, "accepted")[0]["payload"],
+        json!({"ref_id":"b2","kind":"approve","result":"applied","reason":null})
+    );
+    assert_eq!(
+        of_type(&applied, "approval_resolved")[0]["payload"],
+        json!({"approval_id": approval_id, "decision": "always", "by": "browser"})
+    );
+
+    // Terminal decisions are announced too.
+    let (respond, _receive) = tokio::sync::oneshot::channel();
+    app.set_approval(crate::agent::ApprovalRequest {
+        tool: "run_command".into(),
+        summary: "ls".into(),
+        details: "$ ls".into(),
+        respond,
+    });
+    sent(&mut frames);
+    press(&mut app, KeyCode::Char('n'));
+    let resolved = sent(&mut frames);
+    assert_eq!(of_type(&resolved, "approval_resolved")[0]["payload"]["by"], "terminal");
+    assert_eq!(of_type(&resolved, "approval_resolved")[0]["payload"]["decision"], "reject");
+}
+
+#[tokio::test]
+async fn browser_answers_keep_to_the_offered_options() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    let mut frames = share(&mut app);
+    let (respond, receive) = tokio::sync::oneshot::channel();
+    app.set_user_question(crate::agent::UserQuestionRequest {
+        question: "Which?".into(),
+        header: "Pick".into(),
+        options: vec!["1 — Rewrite".into(), "2 — Patch".into()],
+        multi_select: false,
+        respond,
+    });
+    let question_id = app.question.as_ref().unwrap().remote_id.clone().unwrap();
+    sent(&mut frames);
+    let generation = app.remote_generation;
+    app.remote_event(
+        generation,
+        Inbound::Answer {
+            ref_id: "b1".into(),
+            question_id: question_id.clone(),
+            selected: vec!["9".into(), "2".into(), "1".into()],
+            custom: Some("  ".into()),
+        },
+    );
+    let answer = receive.await.unwrap();
+    assert_eq!(answer.selected_labels, ["2"], "unknown labels dropped, one kept for single-select");
+    assert!(answer.custom_text.is_none());
+    let frames = sent(&mut frames);
+    assert_eq!(of_type(&frames, "accepted")[0]["payload"]["result"], "applied");
+    assert_eq!(
+        of_type(&frames, "question_resolved")[0]["payload"],
+        json!({"question_id": question_id, "selected": ["2"], "custom": null, "by": "browser"})
+    );
+    // Nothing open any more: refused.
+    let mut frames_after = share(&mut app);
+    let generation = app.remote_generation;
+    app.remote_event(
+        generation,
+        Inbound::Answer { ref_id: "b2".into(), question_id: "q1".into(), selected: vec![], custom: None },
+    );
+    assert_eq!(of_type(&sent(&mut frames_after), "accepted")[0]["payload"]["reason"], "no open question");
+}
+
+#[tokio::test]
+async fn a_browser_prompt_starts_a_turn_as_a_prompt_never_a_command() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    let mut frames = share(&mut app);
+    let generation = app.remote_generation;
+    // Interrupting nothing is refused.
+    app.remote_event(generation, Inbound::Interrupt { ref_id: "b0".into() });
+    assert_eq!(of_type(&sent(&mut frames), "accepted")[0]["payload"]["result"], "rejected");
+
+    app.remote_event(generation, Inbound::Prompt { ref_id: "b1".into(), text: "/quit".into() });
+    assert!(!app.quit, "a browser cannot run slash commands");
+    assert!(app.running.is_some(), "the text went to the model as a prompt");
+    assert_eq!(app.messages.last().unwrap()["content"], "/quit");
+    let started = sent(&mut frames);
+    let kinds: Vec<&str> = started.iter().map(|frame| frame["type"].as_str().unwrap()).collect();
+    assert_eq!(kinds[..3], ["accepted", "entry", "status"]);
+    assert_eq!(started[0]["payload"]["result"], "queued");
+    assert_eq!(started[1]["payload"]["entry"]["text"], "/quit");
+
+    // While the turn runs, a second prompt steers it.
+    app.remote_event(generation, Inbound::Prompt { ref_id: "b2".into(), text: "also this".into() });
+    assert!(app.status.starts_with("steering"), "{}", app.status);
+    let steered = sent(&mut frames);
+    assert_eq!(of_type(&steered, "entry")[0]["payload"]["entry"]["text"], "also this");
+
+    // Interrupt: cooperative first.
+    app.remote_event(generation, Inbound::Interrupt { ref_id: "b3".into() });
+    assert!(app.cancel.load(Ordering::Relaxed));
+    assert_eq!(of_type(&sent(&mut frames), "accepted")[0]["payload"]["result"], "applied");
+    // A second one is the hard stop, which never reports Done: the bridge
+    // settles the browsers itself.
+    app.remote_event(generation, Inbound::Interrupt { ref_id: "b4".into() });
+    assert!(app.running.is_none());
+    let stopped = sent(&mut frames);
+    assert_eq!(of_type(&stopped, "done")[0]["payload"]["reason"], "interrupted");
+
+    // Events from an earlier bridge are ignored.
+    app.remote_event(generation + 1, Inbound::Prompt { ref_id: "b5".into(), text: "stale".into() });
+    assert!(app.running.is_none());
+}
+
+#[tokio::test]
+async fn snapshots_are_sent_on_connect_and_on_request() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    app.push_entry(Entry::new(EntryKind::User, "earlier"));
+    app.push_entry(Entry::new(EntryKind::Assistant, "reply"));
+    let mut frames = share(&mut app);
+    let generation = app.remote_generation;
+    app.remote_event(generation, Inbound::Connected { reconnect: false });
+    app.remote_event(generation, Inbound::SnapshotRequested);
+    app.remote_event(generation, Inbound::Connected { reconnect: true });
+    let snapshots = sent(&mut frames);
+    let reasons: Vec<&str> = snapshots.iter().map(|frame| frame["payload"]["reason"].as_str().unwrap()).collect();
+    assert_eq!(reasons, ["connect", "requested", "reconnect"]);
+    let payload = &snapshots[0]["payload"];
+    assert_eq!(payload["session"]["mode"], "auto");
+    assert_eq!(payload["session"]["model"], "test-model");
+    let texts: Vec<&str> = payload["entries"].as_array().unwrap().iter().map(|e| e["text"].as_str().unwrap()).collect();
+    assert_eq!(texts, ["earlier", "reply"]);
+}
+
+#[test]
+fn the_qr_overlay_shows_a_code_or_falls_back_to_the_link() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    let pairing = || crate::sync::Pairing {
+        pairing_url: format!("https://abacus.example/pair#t={}", "k".repeat(43)),
+        expires_in: 300,
+        session_id: Some("s1".into()),
+    };
+    // Closed before the link arrived: it stays closed.
+    app.pairing_ready(PairingView::Qr, Ok(pairing()));
+    assert!(app.qr_overlay.is_none());
+
+    app.qr_overlay = Some(QrOverlay::Loading);
+    assert!(render(&mut app, 100, 40).contains("Requesting a single-use link"));
+    app.pairing_ready(PairingView::Qr, Ok(pairing()));
+    let screen = render(&mut app, 100, 40);
+    assert!(screen.contains("PAIR A PHONE"));
+    let code = crate::remote::qr::rows(&pairing().pairing_url).unwrap();
+    assert!(code.iter().all(|row| screen.contains(row.as_str())), "the whole code is drawn:\n{screen}");
+    assert!(screen.contains("open this session"));
+    assert!(screen.contains("expires in 5 minutes"));
+    assert!(screen.contains("https://abacus.example/pair#t="), "the link is shown too");
+
+    // The classic 80×24: the code with one line under it.
+    let classic = render(&mut app, 80, 24);
+    assert!(code.iter().all(|row| classic.contains(row.as_str())), "{classic}");
+    assert!(classic.contains("Scan to open this session"), "{classic}");
+
+    let small = render(&mut app, 60, 16);
+    assert!(small.contains("too small for the QR code"), "{small}");
+    assert!(!small.contains(code[1].as_str()), "{small}");
+
+    // The overlay takes every key while it is up; Esc closes it.
+    let mut key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty());
+    assert!(app.qr_key(key));
+    assert!(app.qr_overlay.is_some());
+    key.code = KeyCode::Esc;
+    assert!(app.qr_key(key));
+    assert!(app.qr_overlay.is_none());
+    assert!(!app.qr_key(key), "closed, keys go back to the composer");
+}
+
+#[test]
+fn auto_share_is_a_config_row() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    assert_eq!(app.config_value(ConfigKey::RemoteAutoShare), on_off(true));
+    app.cycle_config_value(ConfigKey::RemoteAutoShare).unwrap();
+    assert!(!app.settings.remote.auto_share);
+    assert_eq!(app.config_value(ConfigKey::RemoteAutoShare), on_off(false));
+    let (_, row) = setting(ConfigKey::RemoteAutoShare);
+    assert_eq!(row.label, "Auto-share sessions");
+}
+
 fn test_app(base_url: &str) -> (TempDir, App) {
     let directory = tempdir().unwrap();
     let workspace = directory.path().join("workspace");

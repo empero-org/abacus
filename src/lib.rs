@@ -28,6 +28,7 @@ pub mod provider;
 pub mod ralph;
 pub mod recovery;
 pub mod refine;
+pub mod remote;
 pub mod roles;
 pub mod safety;
 pub mod schema;
