@@ -26,8 +26,8 @@ use super::client::{ChangesPage, Precondition, RemoteDocument, SessionMeta, Sync
 use crate::config::{AbacusPaths, atomic_write};
 use crate::session::{Session, SessionStore};
 use crate::sync_state::{
-    Fingerprint, Hashes, Local, LocalEntry, Rejected, SyncState, content_sha256, inspect, is_placeholder_document,
-    local_sessions, sha256_hex, trace_path,
+    Fingerprint, Hashes, Local, LocalEntry, Rejected, SessionRecord, Snapshot, SyncState, content_sha256, inspect,
+    is_placeholder_document, local_sessions, sha256_hex, trace_path,
 };
 
 /// Changes requested per page of the feed.
@@ -198,6 +198,37 @@ fn lineage(local: &Value, remote: &Value) -> Lineage {
     }
 }
 
+/// Whether a local copy this device has no record of holds nothing that the
+/// deleted revision `deleted` lacked: it is that revision byte for byte, a
+/// placeholder, or last changed no later than it. Such a copy is a leftover —
+/// typically of a delete that older versions of Abacus never applied — and
+/// follows the delete into the sync trash instead of coming back as a new
+/// session on every device that kept one.
+fn superseded(snapshot: &Snapshot, deleted: &SessionMeta) -> bool {
+    if is_placeholder_document(&snapshot.document) {
+        return true;
+    }
+    if !deleted.session_sha256.is_empty()
+        && snapshot.hashes.session == deleted.session_sha256
+        && snapshot.hashes.trace == deleted.trace_sha256
+    {
+        return true;
+    }
+    match (timestamp(snapshot.document["updated_at"].as_str()), timestamp(Some(&deleted.updated_at))) {
+        (Some(local), Some(deleted)) => local <= deleted,
+        _ => false,
+    }
+}
+
+/// An RFC 3339 time, or a naive one (servers on SQLite send those), as UTC.
+fn timestamp(value: Option<&str>) -> Option<chrono::DateTime<Utc>> {
+    let value = value?;
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|time| time.with_timezone(&Utc))
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f").map(|time| time.and_utc()))
+        .ok()
+}
+
 fn title_of(document: &Value, fallback: &str) -> String {
     document["title"].as_str().filter(|title| !title.is_empty()).unwrap_or(fallback).to_owned()
 }
@@ -340,7 +371,7 @@ impl<'a, R: Remote> Engine<'a, R> {
     async fn process(&mut self, work: Vec<Work>, index: &mut HashMap<Uuid, LocalEntry>) -> Result<bool, SyncError> {
         let mut downloads = Vec::new();
         for item in work {
-            if let Some(local_trace) = self.plan(&item, index) {
+            if let Some(local_trace) = self.plan(&item, index).await {
                 downloads.push((item, local_trace));
             }
         }
@@ -365,7 +396,7 @@ impl<'a, R: Remote> Engine<'a, R> {
         while let Some((id, fetched)) = results.next().await {
             match fetched {
                 Ok(fetched) => {
-                    if let Err(error) = self.apply(fetched, index) {
+                    if let Err(error) = self.apply(fetched, index).await {
                         self.outcome.errors.push(format!("{}: {error:#}", short(&id)));
                         complete = false;
                     }
@@ -388,7 +419,7 @@ impl<'a, R: Remote> Engine<'a, R> {
     /// Decide what a change needs without touching the network. `None` means
     /// it was handled here; otherwise it needs a download, and the value is
     /// the local trace's hash, if known, so an identical trace is not fetched.
-    fn plan(&mut self, item: &Work, index: &mut HashMap<Uuid, LocalEntry>) -> Option<Option<String>> {
+    async fn plan(&mut self, item: &Work, index: &mut HashMap<Uuid, LocalEntry>) -> Option<Option<String>> {
         let record = self.state.record(&item.id).cloned();
         if let Some(meta) = &item.meta {
             if meta.deleted {
@@ -405,10 +436,10 @@ impl<'a, R: Remote> Engine<'a, R> {
                 return None;
             }
         }
-        let Some(entry) = index.get(&item.id) else {
+        let Some(entry) = index.get(&item.id).cloned() else {
             return Some(None);
         };
-        match inspect(entry, record.as_ref()) {
+        match inspect_off(entry, record.clone()).await {
             Ok(Local::Clean(_)) => Some(record.map(|record| record.local_trace_sha256)),
             Ok(Local::Dirty(snapshot) | Local::Untracked(snapshot)) => {
                 // Byte-identical on both sides (an upload whose reply was
@@ -429,8 +460,13 @@ impl<'a, R: Remote> Engine<'a, R> {
 
     /// Put a downloaded revision in place, keeping anything local it would
     /// otherwise replace.
-    fn apply(&mut self, fetched: Fetched, index: &mut HashMap<Uuid, LocalEntry>) -> Result<()> {
+    async fn apply(&mut self, fetched: Fetched, index: &mut HashMap<Uuid, LocalEntry>) -> Result<()> {
         let Fetched { id, meta, document, trace } = fetched;
+        // The file is named after the document's id: one that names another
+        // session would be written over that session's file.
+        if document["id"].as_str() != Some(id.to_string().as_str()) {
+            bail!("the server sent a different session's document");
+        }
         let title = title_of(&document, &meta.title);
         let record = self.state.record(&id).cloned();
         if record.as_ref().is_some_and(|record| record.revision == Some(meta.revision)) {
@@ -455,7 +491,7 @@ impl<'a, R: Remote> Engine<'a, R> {
             return Ok(());
         }
         let local = match &entry {
-            Some(entry) => Some(inspect(entry, record.as_ref())?),
+            Some(entry) => Some(inspect_off(entry.clone(), record).await?),
             None => None,
         };
         let snapshot = match local {
@@ -463,7 +499,7 @@ impl<'a, R: Remote> Engine<'a, R> {
             Some(Local::Dirty(snapshot) | Local::Untracked(snapshot)) => Some(snapshot),
         };
         let Some(snapshot) = snapshot else {
-            let installed = install(self.paths, &mut self.state, &meta, &document, trace.as_deref(), entry.as_ref())?;
+            let installed = self.install(&meta, document, trace, entry).await?;
             index.insert(id, installed);
             self.outcome.pulled += 1;
             self.outcome.lines.push(format!("↓ {title} ({}) — revision {}", short(&id), meta.revision));
@@ -480,7 +516,7 @@ impl<'a, R: Remote> Engine<'a, R> {
         let relation = if self.force { Lineage::RemoteAhead } else { lineage(&snapshot.document, &document) };
         match relation {
             Lineage::RemoteAhead => {
-                let installed = install(self.paths, &mut self.state, &meta, &document, trace.as_deref(), Some(&entry))?;
+                let installed = self.install(&meta, document, trace, Some(entry)).await?;
                 index.insert(id, installed);
                 self.outcome.pulled += 1;
                 self.outcome.lines.push(format!("↓ {title} ({}) — revision {}", short(&id), meta.revision));
@@ -494,10 +530,11 @@ impl<'a, R: Remote> Engine<'a, R> {
                 self.outcome.skipped += 1;
             }
             Lineage::Diverged => {
-                let fork = fork(self.paths, &entry, snapshot.document, Some("(local fork)"))?;
-                let fork_id = fork.id;
-                index.insert(fork_id, fork);
-                let installed = install(self.paths, &mut self.state, &meta, &document, trace.as_deref(), Some(&entry))?;
+                let (paths, local, mine) = (self.paths.clone(), entry.clone(), snapshot.document);
+                let kept = off_runtime(move || fork(&paths, &local, mine, Some("(local fork)"))).await?;
+                let fork_id = kept.id;
+                index.insert(fork_id, kept);
+                let installed = self.install(&meta, document, trace, Some(entry)).await?;
                 index.insert(id, installed);
                 self.outcome.pulled += 1;
                 self.outcome.forked += 1;
@@ -510,6 +547,22 @@ impl<'a, R: Remote> Engine<'a, R> {
             }
         }
         Ok(())
+    }
+
+    /// [`install`] with the file work off the runtime.
+    async fn install(
+        &mut self,
+        meta: &SessionMeta,
+        document: Value,
+        trace: Option<Vec<u8>>,
+        existing: Option<LocalEntry>,
+    ) -> Result<LocalEntry> {
+        let (paths, revision) = (self.paths.clone(), meta.clone());
+        let written =
+            off_runtime(move || write_revision(&paths, &revision, &document, trace.as_deref(), existing.as_ref()))
+                .await?;
+        self.state.mark_synced(&written.entry.id, meta, &written.hashes, Some(written.fingerprint));
+        Ok(written.entry)
     }
 
     /// The server deleted a session. A copy unchanged since it last synced is
@@ -539,7 +592,7 @@ impl<'a, R: Remote> Engine<'a, R> {
             });
             return None;
         }
-        match self.settle(&entry, index) {
+        match self.settle(&entry, meta, index) {
             Ok(Some(kept)) => {
                 self.outcome.deleted += 1;
                 let notice = format!(
@@ -565,11 +618,17 @@ impl<'a, R: Remote> Engine<'a, R> {
     }
 
     /// Apply a remote delete to one local copy; returns the new id when
-    /// unsynced work was kept.
-    fn settle(&mut self, entry: &LocalEntry, index: &mut HashMap<Uuid, LocalEntry>) -> Result<Option<Uuid>> {
+    /// unsynced work was kept. `deleted` is the tombstone, when known.
+    fn settle(
+        &mut self,
+        entry: &LocalEntry,
+        deleted: Option<&SessionMeta>,
+        index: &mut HashMap<Uuid, LocalEntry>,
+    ) -> Result<Option<Uuid>> {
         let record = self.state.record(&entry.id).cloned();
         let kept = match inspect(entry, record.as_ref())? {
             Local::Clean(_) => None,
+            Local::Untracked(snapshot) if deleted.is_some_and(|deleted| superseded(&snapshot, deleted)) => None,
             Local::Dirty(snapshot) | Local::Untracked(snapshot) => {
                 let kept = fork(self.paths, entry, snapshot.document, None)?;
                 let kept_id = kept.id;
@@ -620,7 +679,7 @@ impl<'a, R: Remote> Engine<'a, R> {
         let mut uploads = Vec::new();
         for entry in entries {
             let named = only == Some(entry.id);
-            if let Some(plan) = self.plan_upload(&entry, named) {
+            if let Some(plan) = self.plan_upload(&entry, named).await {
                 uploads.push((entry, plan));
             }
         }
@@ -631,7 +690,7 @@ impl<'a, R: Remote> Engine<'a, R> {
         if !kept.is_empty() {
             let mut uploads = Vec::new();
             for entry in kept.iter().filter_map(|id| index.get(id).cloned()) {
-                if let Some(plan) = self.plan_upload(&entry, false) {
+                if let Some(plan) = self.plan_upload(&entry, false).await {
                     uploads.push((entry, plan));
                 }
             }
@@ -680,7 +739,7 @@ impl<'a, R: Remote> Engine<'a, R> {
     }
 
     /// Whether `entry` needs uploading, and against which revision.
-    fn plan_upload(&mut self, entry: &LocalEntry, named: bool) -> Option<UploadPlan> {
+    async fn plan_upload(&mut self, entry: &LocalEntry, named: bool) -> Option<UploadPlan> {
         let record = self.state.record(&entry.id).cloned();
         if let Some(record) = &record
             && !self.force
@@ -693,7 +752,7 @@ impl<'a, R: Remote> Engine<'a, R> {
         if !self.manual && backing_off(&entry.id) {
             return None;
         }
-        let local = match inspect(entry, record.as_ref()) {
+        let local = match inspect_off(entry.clone(), record.clone()).await {
             Ok(local) => local,
             Err(error) => {
                 self.outcome.errors.push(format!("{}: {error:#}", short(&entry.id)));
@@ -822,7 +881,14 @@ async fn fetch<R: Remote>(remote: &R, item: Work, local_trace: Option<String>) -
             return Ok(Fetched { id: item.id, meta, document: session, trace: None });
         }
         let trace = remote.trace(&id, meta.size_bytes).await?;
-        if meta.trace_sha256.is_empty() || sha256_hex(&trace) == meta.trace_sha256 {
+        let expected = meta.trace_sha256.clone();
+        let (trace, intact) = off_runtime(move || {
+            let intact = expected.is_empty() || sha256_hex(&trace) == expected;
+            Ok((trace, intact))
+        })
+        .await
+        .map_err(|error| SyncError::Transient(format!("{error:#}")))?;
+        if intact {
             return Ok(Fetched { id: item.id, meta, document: session, trace: Some(trace) });
         }
         if attempts >= 2 {
@@ -863,8 +929,15 @@ enum UploadError {
 
 /// Read a session and its trace as they are now and upload exactly that.
 async fn upload<R: Remote>(remote: &R, entry: LocalEntry, plan: UploadPlan, force: bool) -> Upload {
-    let fingerprint = Fingerprint::take(&entry.path, &entry.trace);
-    let (document, trace) = match read_for_upload(&entry) {
+    let source = entry.clone();
+    let read = off_runtime(move || {
+        let fingerprint = Fingerprint::take(&source.path, &source.trace);
+        let (document, trace) = read_for_upload(&source)?;
+        let hashes = Hashes::of(&document, sha256_hex(&trace));
+        Ok((fingerprint, document, trace, hashes))
+    })
+    .await;
+    let (fingerprint, document, trace, hashes) = match read {
         Ok(read) => read,
         Err(error) => {
             let mut upload = Upload::skipped(entry);
@@ -872,7 +945,6 @@ async fn upload<R: Remote>(remote: &R, entry: LocalEntry, plan: UploadPlan, forc
             return upload;
         }
     };
-    let hashes = Hashes::of(&document, sha256_hex(&trace));
     let title = title_of(&document, &short(&entry.id));
     if is_placeholder_document(&document) {
         return Upload { entry, title, hashes, fingerprint, result: Err(UploadError::Skipped) };
@@ -928,6 +1000,26 @@ pub(crate) fn install(
     trace: Option<&[u8]>,
     existing: Option<&LocalEntry>,
 ) -> Result<LocalEntry> {
+    let written = write_revision(paths, meta, document, trace, existing)?;
+    state.mark_synced(&written.entry.id, meta, &written.hashes, Some(written.fingerprint));
+    Ok(written.entry)
+}
+
+/// A revision on disk, and what to record about it.
+struct Written {
+    entry: LocalEntry,
+    hashes: Hashes,
+    fingerprint: Fingerprint,
+}
+
+/// The file half of [`install`].
+fn write_revision(
+    paths: &AbacusPaths,
+    meta: &SessionMeta,
+    document: &Value,
+    trace: Option<&[u8]>,
+    existing: Option<&LocalEntry>,
+) -> Result<Written> {
     let session = Session::deserialize(document).context("the server sent a session this version cannot read")?;
     let target = SessionStore::new(paths, session.workspace.clone()).path(session.id);
     let trace_target = trace_path(paths, &session.id);
@@ -943,8 +1035,21 @@ pub(crate) fn install(
     }
     let trace_sha = trace.map(sha256_hex).unwrap_or_else(|| meta.trace_sha256.clone());
     let hashes = Hashes::of(document, trace_sha);
-    state.mark_synced(&session.id, meta, &hashes, Some(Fingerprint::take(&target, &trace_target)));
-    Ok(LocalEntry { id: session.id, path: target, trace: trace_target })
+    let fingerprint = Fingerprint::take(&target, &trace_target);
+    Ok(Written { entry: LocalEntry { id: session.id, path: target, trace: trace_target }, hashes, fingerprint })
+}
+
+/// Run disk and CPU work — reading, hashing or writing a session and its
+/// trace — on the blocking pool. A large session is seconds of it: on a
+/// runtime worker that would hold up every task queued behind it, and a pass
+/// abandoned at exit could not stop until the work was done.
+async fn off_runtime<T: Send + 'static>(work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    tokio::task::spawn_blocking(work).await.context("sync work stopped")?
+}
+
+/// [`inspect`] off the runtime: a changed session is read and hashed whole.
+async fn inspect_off(entry: LocalEntry, record: Option<SessionRecord>) -> Result<Local> {
+    off_runtime(move || inspect(&entry, record.as_ref())).await
 }
 
 /// Keep a local copy under a new id, next to the original, with its trace.
@@ -1089,6 +1194,8 @@ pub(crate) mod tests {
             let meta = SessionMeta {
                 id: id.to_owned(),
                 title: document["title"].as_str().unwrap_or_default().to_owned(),
+                // The document's own time, which a tombstone keeps.
+                updated_at: document["updated_at"].as_str().unwrap_or_default().to_owned(),
                 revision,
                 change_id: inner.change,
                 session_sha256: session_sha256(document),
@@ -1323,6 +1430,30 @@ pub(crate) mod tests {
         assert_eq!(last(&desktop.load(&ids[2]).unwrap()), "re: follow-up");
     }
 
+    /// A download is filed under the id inside the document. One that names
+    /// another session must not be written over that session's file.
+    #[tokio::test]
+    async fn a_download_that_names_another_session_is_refused() {
+        let server = FakeServer::default();
+        let (laptop, desktop) = (Device::new(), Device::new());
+        let mine = desktop.session(&["only here"]);
+        let theirs = laptop.session(&["from the laptop"]);
+        laptop.reconcile(&server).await;
+
+        // The server answers for `theirs` with a document claiming to be `mine`.
+        let mut impostor = serde_json::to_value(laptop.load(&theirs.id).unwrap()).unwrap();
+        impostor["id"] = json!(mine.id.to_string());
+        let hashes = Hashes::of(&impostor, sha256_hex(b""));
+        server.touch(&theirs.id);
+        let revision = server.revision(&theirs.id).unwrap();
+        server.store(&theirs.id.to_string(), &impostor, b"", &hashes, Precondition::Revision(revision)).unwrap();
+
+        let outcome = desktop.pull(&server, 10).await;
+        assert_eq!((outcome.pulled, outcome.errors.len()), (0, 1), "{outcome:?}");
+        assert_eq!(last(&desktop.load(&mine.id).unwrap()), "re: only here");
+        assert!(desktop.load(&theirs.id).is_none());
+    }
+
     #[tokio::test]
     async fn a_failed_download_holds_the_cursor_until_it_succeeds() {
         let server = FakeServer::default();
@@ -1524,6 +1655,40 @@ pub(crate) mod tests {
         assert_eq!(outcome.pushed, 1);
     }
 
+    /// A device that synced with an older Abacus has no record of anything,
+    /// and kept its copies of sessions deleted elsewhere (deletes never
+    /// reached it). Such a copy follows the delete unless it holds work the
+    /// deleted revision lacks; it must not come back as a new session.
+    #[tokio::test]
+    async fn a_delete_settles_unrecorded_copies_unless_they_are_newer() {
+        let server = FakeServer::default();
+        let (laptop, desktop) = (Device::new(), Device::new());
+        let same = laptop.session(&["same everywhere"]);
+        let mut older = laptop.session(&["older here"]);
+        let newer = laptop.session(&["newer here"]);
+        laptop.reconcile(&server).await;
+        desktop.reconcile(&server).await;
+
+        // The laptop takes one further; the desktop another, unsynced.
+        laptop.say(&mut older, &["only on the laptop"]);
+        laptop.reconcile(&server).await;
+        let mut there = desktop.load(&newer.id).unwrap();
+        desktop.say(&mut there, &["only on the desktop"]);
+        for id in [same.id, older.id, newer.id] {
+            server.delete_now(&id);
+        }
+        desktop.forget_everything();
+
+        let outcome = desktop.reconcile(&server).await;
+        assert_eq!(outcome.deleted, 3, "{outcome:?}");
+        let [kept] = desktop.sessions().try_into().unwrap();
+        assert_eq!(last(&kept), "re: only on the desktop", "work the server never saw survives");
+        assert_eq!(outcome.pushed, 1, "and only that comes back: {outcome:?}");
+        for id in [same.id, older.id, newer.id] {
+            assert!(desktop.paths.root.join("sync-trash").join(format!("{id}.json")).exists());
+        }
+    }
+
     #[tokio::test]
     async fn an_upload_that_finds_the_session_deleted_keeps_the_work_as_a_new_session() {
         let server = FakeServer::default();
@@ -1626,6 +1791,70 @@ pub(crate) mod tests {
         assert_eq!(server.calls("put"), 1);
         device.say(&mut session, &["smaller"]);
         assert_eq!(device.reconcile(&server).await.pushed, 1);
+    }
+
+    /// Checking, reading, hashing and installing a large session is seconds of
+    /// disk and CPU. It runs off the runtime: on a worker it holds up every
+    /// task queued behind it, and a pass abandoned at exit could not stop until
+    /// it was done.
+    #[test]
+    fn large_sessions_are_read_hashed_and_written_off_the_runtime() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicU64;
+
+        let server = FakeServer::default();
+        let (laptop, desktop) = (Device::new(), Device::new());
+        let session = laptop.session(&["big"]);
+        // Noise, which no shortcut makes quick to hash.
+        let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+        let trace: Vec<u8> = (0..8 * 1024 * 1024)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                (seed >> 24) as u8
+            })
+            .collect();
+        std::fs::write(trace_path(&laptop.paths, &session.id), &trace).unwrap();
+
+        // What hashing it once costs on this machine, done where it is seen.
+        let started = Instant::now();
+        assert!(!sha256_hex(&trace).is_empty());
+        let work = started.elapsed();
+        if work < Duration::from_millis(40) {
+            // An optimised build hashes this too fast for a stall to show.
+            eprintln!("skipped: hashing the trace takes only {work:?} here");
+            return;
+        }
+
+        // One thread runs everything, so work done on it stops the ticker,
+        // which stands for everything else the runtime runs.
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let longest = runtime.block_on(async {
+            let worst = Arc::new(AtomicU64::new(0));
+            let ticking = worst.clone();
+            let ticker = tokio::spawn(async move {
+                let mut last = Instant::now();
+                loop {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    let now = Instant::now();
+                    ticking.fetch_max(now.duration_since(last).as_micros() as u64, Ordering::Relaxed);
+                    last = now;
+                }
+            });
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            worst.store(0, Ordering::Relaxed);
+            assert_eq!(laptop.push(&server, false).await.pushed, 1);
+            // The fake server never waits, so give the ticker its turn to
+            // see how long it was kept waiting.
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            assert_eq!(desktop.pull(&server, 10).await.pulled, 1);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            ticker.abort();
+            Duration::from_micros(worst.load(Ordering::Relaxed))
+        });
+        assert_eq!(std::fs::read(trace_path(&desktop.paths, &session.id)).unwrap(), trace);
+        assert!(longest < work / 2, "the runtime was held for {longest:?}; hashing the trace once takes {work:?}");
     }
 
     #[test]

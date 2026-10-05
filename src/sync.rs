@@ -31,7 +31,7 @@ pub use engine::{HeldUpdate, SyncOutcome};
 use crate::config::{AbacusPaths, Credentials, Settings, SyncCommand, SyncCredentials, device_name};
 use crate::session::{Session, SessionStore};
 use crate::sync_state::{Local, SyncState, inspect, is_placeholder_document, local_sessions};
-use client::{Retry, anonymous_client, decode};
+use client::{Retry, anonymous_client, check_server, decode};
 use engine::Engine;
 
 pub const AUTO_PUSH_IDLE: Duration = Duration::from_secs(60);
@@ -84,6 +84,7 @@ fn configured(credentials: &Credentials, paths: &AbacusPaths) -> Result<SyncClie
 enum Job {
     Reconcile,
     Pull,
+    PullOne(Uuid),
     PushAll,
     PushOne(Uuid),
 }
@@ -104,6 +105,7 @@ async fn run(paths: &AbacusPaths, job: Job) -> Result<SyncOutcome> {
             error => error,
         },
         Job::Pull => engine.pull(false).await,
+        Job::PullOne(id) => engine.pull_one(id).await,
         Job::PushAll => engine.push(None).await,
         Job::PushOne(id) => engine.push(Some(id)).await,
     };
@@ -124,6 +126,22 @@ pub async fn push_dirty(paths: &AbacusPaths) -> Result<SyncOutcome> {
 /// so uploads a previous close could not finish go out too.
 pub async fn reconcile(paths: &AbacusPaths) -> Result<SyncOutcome> {
     run(paths, Job::Reconcile).await
+}
+
+/// Close `id` in this process and settle what sync had to leave alone while it
+/// was open: a newer revision from another device, a refused upload, or a
+/// delete. Settled as any pull settles it — when both sides changed, the other
+/// device's revision becomes the session and this copy is kept as a fork. A
+/// front end calls it when it leaves a session for good (on exit): a session
+/// resumed at every start is open at every pull, and would otherwise never be
+/// settled. Costs one state read when nothing is waiting.
+pub async fn settle_closed(paths: &AbacusPaths, id: Uuid) -> Result<SyncOutcome> {
+    session_closed(id);
+    let waiting = SyncState::load(paths).record(&id).is_some_and(|record| record.pending() || record.deleted);
+    if !waiting {
+        return Ok(SyncOutcome::default());
+    }
+    run(paths, Job::PullOne(id)).await
 }
 
 /// Upload one session if it changed since it last synced, and say what
@@ -289,6 +307,8 @@ pub async fn handle(action: SyncCommand, paths: &AbacusPaths, _workspace: PathBu
     match action {
         SyncCommand::Login { server, email, password, password_login } => {
             let server = server.trim_end_matches('/').to_owned();
+            // Before a password or a code is sent anywhere.
+            check_server(&server)?;
             let login = if password_login || password.is_some() {
                 password_login_flow(paths, &server, email, password).await?
             } else {
@@ -431,11 +451,15 @@ async fn print_status(paths: &AbacusPaths, credentials: &Credentials) -> Result<
     };
     let state = SyncState::load_for(paths, &client.server, &client.email);
     let install_id = paths.install_id();
-    let short_install = match install_id.char_indices().nth(4) {
-        Some((cut, _)) if install_id.len() > 8 => {
-            format!("{}…{}", &install_id[..cut], &install_id[install_id.len() - 3..])
-        }
-        _ => install_id.clone(),
+    // By characters: the file is the user's to edit, and may hold any text.
+    let characters: Vec<char> = install_id.chars().collect();
+    let short_install = match characters.len() {
+        0..=8 => install_id.clone(),
+        count => format!(
+            "{}…{}",
+            characters[..4].iter().collect::<String>(),
+            characters[count - 3..].iter().collect::<String>()
+        ),
     };
     println!("Account      {account}");
     println!(
@@ -540,7 +564,7 @@ async fn print_sessions(paths: &AbacusPaths, credentials: &Credentials) -> Resul
         let live = if meta.remote_online { "  · live" } else { "" };
         println!(
             "{:<8}  {:>4}  {:<16}  {:>8}  {:<12}  {}{live}",
-            &meta.id[..meta.id.len().min(8)],
+            meta.id.chars().take(8).collect::<String>(),
             meta.revision,
             local_time(&meta.updated_at),
             human_size(meta.size_bytes),

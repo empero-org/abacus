@@ -1271,32 +1271,38 @@ pub fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) {
 }
 
 pub fn atomic_write(path: &Path, content: &[u8], private: bool) -> Result<()> {
+    // Unique per write, not just per process: sync writes from background
+    // threads, and two writes sharing a temporary file could tear each other.
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let parent = path.parent().context("path has no parent directory")?;
     fs::create_dir_all(parent)?;
     let temp = parent.join(format!(
-        ".{}.{}.tmp",
+        ".{}.{}.{}.tmp",
         path.file_name().and_then(|name| name.to_str()).unwrap_or("abacus"),
-        std::process::id()
+        std::process::id(),
+        WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
-    let mut file =
-        File::create(&temp).with_context(|| format!("could not create temporary file in {}", parent.display()))?;
-
-    #[cfg(unix)]
-    if private {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    let written = (|| -> Result<()> {
+        let mut file =
+            File::create(&temp).with_context(|| format!("could not create temporary file in {}", parent.display()))?;
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        let _ = private;
+        file.write_all(content)?;
+        file.sync_all()?;
+        drop(file);
+        // `rename` replaces an existing file in one step on Windows too.
+        // Removing it first would leave a moment with no file at all: a crash
+        // then loses it, and another process reading meanwhile finds nothing.
+        fs::rename(&temp, path).with_context(|| format!("could not replace {}", path.display()))
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temp);
     }
-    let _ = private;
-
-    file.write_all(content)?;
-    file.sync_all()?;
-    drop(file);
-
-    #[cfg(windows)]
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
-    fs::rename(&temp, path).with_context(|| format!("could not replace {}", path.display()))?;
+    written?;
 
     #[cfg(unix)]
     File::open(parent)?.sync_all()?;
@@ -1305,6 +1311,33 @@ pub fn atomic_write(path: &Path, content: &[u8], private: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Sync writes session files from background threads while the terminal
+    /// saves its own: writes to one file from several threads each land
+    /// whole, one after another, and leave no temporary file behind.
+    #[test]
+    fn concurrent_atomic_writes_land_whole() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let writers: Vec<_> = (0..8_u8)
+            .map(|writer| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let content = vec![b'a' + writer; 256 * 1024];
+                    for _ in 0..10 {
+                        super::atomic_write(&path, &content, true).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let content = std::fs::read(&path).unwrap();
+        assert_eq!(content.len(), 256 * 1024);
+        assert!(content.iter().all(|byte| *byte == content[0]), "one write, whole");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1, "no temporary files left");
+    }
 
     /// The pin is only meaningful if it reaches the request, and only safe if
     /// it stays off requests to endpoints that do not know the field.

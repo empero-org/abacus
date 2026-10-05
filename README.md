@@ -352,7 +352,9 @@ rebuilds traces from every saved session on the machine.
 Abacus Sync keeps your sessions, and their training traces, in step across your
 machines. The same account lets you follow a running session from your phone and
 answer it from there. Both use a sync server: `https://abacus.empero.org`, or the
-one you name with `abacus sync login --server <url>`.
+one you name with `abacus sync login --server <url>`. A server must use HTTPS
+unless it runs on the same machine; `ABACUS_SYNC_ALLOW_HTTP=1` allows plain HTTP
+on a network you trust.
 
 ### Sign in
 
@@ -402,8 +404,9 @@ When a session changed on two machines:
 
 A session you have open is never rewritten under you. If it continued on another
 machine and you changed nothing since it last synced, Abacus says so and shows
-the newer version once the agent is idle. If you changed it too, the next sync
-keeps both.
+the newer version once the agent is idle. If you changed it too, both are kept
+once it is no longer open: when you quit, or at the next sync after you switch
+to another session.
 
 A session deleted on the server, from the web app or by another machine, is
 deleted here too: its files move to `~/.abacus/sync-trash/` instead of being

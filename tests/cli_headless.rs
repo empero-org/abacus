@@ -378,3 +378,53 @@ async fn app_server_reports_each_finished_turn_and_closes_the_run_on_shutdown() 
         "the thread is uploaded after its turn"
     );
 }
+
+/// `--resume` after another device took the session further: the run must
+/// build on the newer copy. Pulling only after the session was read had the
+/// run continue the older copy and its upload replace the other device's turn
+/// everywhere.
+#[tokio::test]
+async fn headless_resume_continues_the_newest_copy_and_keeps_another_devices_turn() {
+    let sync = sync_server::SyncServer::start("secret-token").await;
+    let device = SignedIn::new(&sync, "secret-token");
+    let model = model_endpoint();
+    let output = device.command(&model, &["--prompt", "first", "--output-format", "json"]).output().await.unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let first: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let id = first["session_id"].as_str().unwrap().to_owned();
+
+    // Another device answers one more prompt in the same session.
+    let mut elsewhere = sync.stored(&id);
+    let messages = elsewhere["messages"].as_array_mut().unwrap();
+    messages.push(serde_json::json!({"role": "user", "content": "asked on the laptop"}));
+    messages.push(serde_json::json!({"role": "assistant", "content": "answered on the laptop"}));
+    sync.write(elsewhere, &sync.trace(&id));
+
+    let output = device
+        .command(&model, &["--resume", &id, "--prompt", "second", "--output-format", "json"])
+        .output()
+        .await
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+    let stored = sync.stored(&id);
+    let said: Vec<&str> = stored["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] != "system")
+        .filter_map(|message| message["content"].as_str())
+        .collect();
+    let laptop = said.iter().position(|text| *text == "asked on the laptop");
+    let here = said.iter().position(|text| *text == "second");
+    assert!(laptop.is_some(), "the other device's turn was overwritten: {said:?}");
+    assert!(here > laptop, "this run continues after it: {said:?}");
+    // Nothing diverged, so nothing was forked.
+    let sessions = std::fs::read_dir(device.directory.path().join("home/sessions"))
+        .unwrap()
+        .flatten()
+        .flat_map(|shard| std::fs::read_dir(shard.path()).unwrap().flatten())
+        .filter(|file| file.path().extension().is_some_and(|extension| extension == "json"))
+        .count();
+    assert_eq!(sessions, 1);
+}

@@ -407,3 +407,42 @@ async fn sync_a_server_that_refuses_gzip_is_sent_plain_bodies_from_then_on() {
     assert_eq!(puts[2].header("content-encoding"), None);
     assert_eq!(server.revision(&id), Some(2));
 }
+
+/// A session resumed at every start is open at every pull, so a newer copy
+/// from another device is held back each time and never settled. Leaving it
+/// settles it: both copies are kept, and nothing is left waiting.
+#[tokio::test]
+async fn sync_settles_a_held_session_once_it_is_closed() {
+    let server = SyncServer::start("t0k3n").await;
+    let device = Device::new(&server, "t0k3n");
+    let mut session = device.session(&["start"]);
+    let id = session.id.to_string();
+    sync::push_dirty(&device.paths).await.unwrap();
+
+    // Another device answers one more prompt; this one, with the session open, too.
+    let mut elsewhere = server.stored(&id);
+    let messages = elsewhere["messages"].as_array_mut().unwrap();
+    messages.push(json!({"role": "user", "content": "asked there"}));
+    messages.push(json!({"role": "assistant", "content": "answered there"}));
+    server.write(elsewhere, &server.trace(&id));
+    sync::session_opened(session.id);
+    device.say(&mut session, &["here"]);
+    let outcome = sync::reconcile(&device.paths).await.unwrap();
+    assert_eq!((outcome.held.len(), outcome.pushed), (1, 0), "{outcome:?}");
+    assert_eq!(last(&device.store().load(&id).unwrap()), "re: here", "the open copy is left alone");
+
+    let requests = server.seen("GET", "/").len();
+    let other = device.session(&["unrelated"]);
+    let quiet = sync::settle_closed(&device.paths, other.id).await.unwrap();
+    assert_eq!((quiet.pulled, server.seen("GET", "/").len()), (0, requests), "nothing waits on it");
+
+    let outcome = sync::settle_closed(&device.paths, session.id).await.unwrap();
+    assert_eq!(outcome.forked, 1, "{outcome:?}");
+    assert_eq!(last(&device.store().load(&id).unwrap()), "answered there");
+    let fork = device.sessions().into_iter().find(|kept| kept.title.ends_with("(local fork)")).unwrap();
+    assert_eq!(last(&fork), "re: here");
+    assert!(!SyncState::load(&device.paths).record(&session.id).unwrap().pending());
+    // The kept work goes up with the next upload, and the session is in step.
+    assert_eq!(sync::push_dirty(&device.paths).await.unwrap().pushed, 2, "the fork and the unrelated session");
+    assert_eq!(server.revision(&id), Some(2));
+}

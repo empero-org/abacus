@@ -253,6 +253,13 @@ async fn offload<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -
         .map_err(|error| SyncError::Transient(format!("could not prepare the upload: {error}")))
 }
 
+/// The hashes of an upload, computed on the blocking pool: a trace of up to
+/// 100 MiB is a noticeable stretch of CPU.
+async fn hash_off_runtime(document: &Value, trace: &[u8]) -> Result<Hashes, SyncError> {
+    let (document, trace) = (document.clone(), trace.to_vec());
+    offload(move || Hashes::of(&document, sha256_hex(&trace))).await
+}
+
 /// The precondition of a write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Precondition {
@@ -314,10 +321,7 @@ pub struct SyncClient {
 impl SyncClient {
     pub fn new(credentials: &SyncCredentials) -> Result<Self> {
         let server = credentials.server.trim_end_matches('/').to_owned();
-        let url = reqwest::Url::parse(&server).context("sync server is not a valid URL")?;
-        if !matches!(url.scheme(), "http" | "https") {
-            bail!("sync server must use HTTP or HTTPS");
-        }
+        check_server(&server)?;
         Ok(Self {
             http: Client::builder().user_agent(USER_AGENT).connect_timeout(CONNECT_TIMEOUT).build()?,
             server,
@@ -443,7 +447,7 @@ impl SyncClient {
         precondition: Precondition,
     ) -> Result<SessionMeta, SyncError> {
         let document = serde_json::to_value(session).map_err(|error| SyncError::Protocol(error.to_string()))?;
-        let hashes = Hashes::of(&document, sha256_hex(trace));
+        let hashes = hash_off_runtime(&document, trace).await?;
         self.put_document(&session.id.to_string(), &document, trace, &hashes, precondition).await
     }
 
@@ -611,6 +615,11 @@ impl SyncClient {
     /// The full agent socket URL for `ticket`, with the ticket encoded into the
     /// query.
     pub fn agent_socket_url(&self, ticket: &TicketResponse) -> Result<String> {
+        // A path on this server, never more: `@elsewhere/…` written after the
+        // server's address would name another host, and hand it the ticket.
+        if !ticket.ws_url.starts_with('/') {
+            bail!("the server sent an invalid remote socket path");
+        }
         let mut url = reqwest::Url::parse(&self.ws_url(&ticket.ws_url)?).context("invalid remote socket URL")?;
         url.query_pairs_mut().append_pair("ticket", &ticket.ticket);
         Ok(url.to_string())
@@ -640,7 +649,7 @@ impl SyncClient {
     pub async fn push(&self, session: &Session, trace: &[u8], force: bool) -> Result<u64> {
         let id = session.id.to_string();
         let document = serde_json::to_value(session).context("could not encode session")?;
-        let hashes = Hashes::of(&document, sha256_hex(trace));
+        let hashes = hash_off_runtime(&document, trace).await?;
         let mut state = self.home.as_ref().map(|paths| SyncState::load_for(paths, &self.server, &self.email));
         let known = state.as_ref().and_then(|state| state.record(&session.id)).and_then(|record| record.revision);
         let precondition = known.map_or(Precondition::Create, Precondition::Revision);
@@ -664,6 +673,43 @@ impl SyncClient {
         }
         Ok(meta.revision)
     }
+}
+
+/// Set to `1` to sign in to a plain-HTTP sync server on another machine.
+const ALLOW_HTTP_ENV: &str = "ABACUS_SYNC_ALLOW_HTTP";
+
+/// Refuse a sync server address that would expose the account. Over plain
+/// HTTP the bearer token, the password at sign-in, every session and trace,
+/// the remote tickets and the phone pairing links all cross the network in
+/// the clear, so `http://` is accepted only for a server on this machine, or
+/// when [`ALLOW_HTTP_ENV`] says the network in between is trusted.
+pub(crate) fn check_server(server: &str) -> Result<()> {
+    let allow = std::env::var(ALLOW_HTTP_ENV).is_ok_and(|value| matches!(value.trim(), "1" | "true" | "yes"));
+    check_server_with(server, allow)
+}
+
+fn check_server_with(server: &str, allow_http: bool) -> Result<()> {
+    let url = reqwest::Url::parse(server).context("sync server is not a valid URL")?;
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if allow_http || is_loopback(&url) => Ok(()),
+        "http" => bail!(
+            "sync server {server} must use HTTPS: plain HTTP would send your sign-in and sessions unencrypted \
+             (set {ALLOW_HTTP_ENV}=1 to allow it on a network you trust)"
+        ),
+        _ => bail!("sync server must use HTTP or HTTPS"),
+    }
+}
+
+/// `localhost`, `*.localhost`, `127.0.0.0/8` or `::1`.
+fn is_loopback(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host.parse::<std::net::IpAddr>().is_ok_and(|address| address.is_loopback())
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(body: &[u8]) -> Result<T, SyncError> {
@@ -726,10 +772,23 @@ pub(crate) fn error_for_status(status: StatusCode, body: &[u8]) -> SyncError {
     match status {
         StatusCode::UNAUTHORIZED => SyncError::Unauthorized,
         StatusCode::FORBIDDEN => SyncError::Forbidden(detail(body)),
+        // A switched-off feature is a 404 too, but it says nothing about the
+        // session: read as `Gone`, a pull would settle the local copy as
+        // deleted elsewhere and move it to the sync trash.
+        StatusCode::NOT_FOUND if error_code(body).as_deref() == Some("feature_disabled") => {
+            SyncError::Forbidden(detail(body))
+        }
         StatusCode::NOT_FOUND | StatusCode::GONE => SyncError::Gone,
         StatusCode::CONFLICT => conflict(body),
         _ => SyncError::Rejected { status: status.as_u16(), detail: detail(body) },
     }
+}
+
+/// The stable `code` of an error body, in the v1.1 envelope or the older
+/// FastAPI shape.
+fn error_code(body: &[u8]) -> Option<String> {
+    let value = serde_json::from_slice::<Value>(body).ok()?;
+    ["/error/code", "/detail/code"].iter().find_map(|path| value.pointer(path)?.as_str().map(str::to_owned))
 }
 
 /// A 409: a lost revision race, or a write to a session deleted elsewhere. The
@@ -738,9 +797,7 @@ pub(crate) fn error_for_status(status: StatusCode, body: &[u8]) -> SyncError {
 /// thing.
 fn conflict(body: &[u8]) -> SyncError {
     let current = conflict_meta(body).map(Box::new);
-    let code = serde_json::from_slice::<Value>(body).ok().and_then(|value| {
-        ["/error/code", "/detail/code"].iter().find_map(|path| value.pointer(path)?.as_str().map(str::to_owned))
-    });
+    let code = error_code(body);
     if code.as_deref() == Some("deleted") || current.as_ref().is_some_and(|current| current.deleted) {
         SyncError::Deleted(current)
     } else {
@@ -866,10 +923,25 @@ mod tests {
     }
 
     #[test]
+    fn plain_http_is_refused_unless_the_server_is_this_machine() {
+        for local in ["http://127.0.0.1:8765", "http://localhost:8000", "http://abacus.localhost", "http://[::1]:80"] {
+            assert!(check_server_with(local, false).is_ok(), "{local}");
+        }
+        assert!(check_server_with("https://abacus.empero.org", false).is_ok());
+        for remote in ["http://abacus.empero.org", "http://192.168.1.20:8000", "http://localhost.example.com"] {
+            let refused = check_server_with(remote, false).unwrap_err().to_string();
+            assert!(refused.contains("must use HTTPS") && refused.contains(ALLOW_HTTP_ENV), "{refused}");
+            assert!(check_server_with(remote, true).is_ok(), "{remote} with the opt-in");
+        }
+        assert!(check_server_with("ftp://abacus.empero.org", true).is_err());
+        assert!(check_server_with("not a url", true).is_err());
+    }
+
+    #[test]
     fn a_write_keeps_its_key_until_the_server_answers() {
         let client = |email: &str| {
             SyncClient::new(&SyncCredentials {
-                server: "http://keys.test".into(),
+                server: "https://keys.test".into(),
                 token: "t".into(),
                 email: email.into(),
             })
@@ -1085,6 +1157,15 @@ mod tests {
         assert!(error_for_status(StatusCode::UNAUTHORIZED, b"{}").is_fatal());
         assert!(matches!(error_for_status(StatusCode::GONE, b"{}"), SyncError::Gone));
         assert!(matches!(error_for_status(StatusCode::NOT_FOUND, b"{}"), SyncError::Gone));
+        // A feature the operator switched off is not a deleted session: it
+        // ends the pass instead of settling local copies as deleted.
+        let disabled = br#"{"error":{"code":"feature_disabled","message":"feature disabled","request_id":"r"},
+            "detail":{"code":"feature_disabled"}}"#;
+        let off = error_for_status(StatusCode::NOT_FOUND, disabled);
+        assert!(matches!(&off, SyncError::Forbidden(detail) if detail == "feature disabled"), "{off:?}");
+        assert!(off.is_fatal());
+        let unknown = br#"{"error":{"code":"not_found","message":"session not found"}}"#;
+        assert!(matches!(error_for_status(StatusCode::NOT_FOUND, unknown), SyncError::Gone));
         let SyncError::Rejected { status, detail } =
             error_for_status(StatusCode::PAYLOAD_TOO_LARGE, br#"{"detail":"trace too large"}"#)
         else {
@@ -1133,6 +1214,11 @@ mod tests {
         assert_eq!(client.ws_url("/v1/remote/agent/x").unwrap(), "wss://sync.example/v1/remote/agent/x");
         let ticket = TicketResponse { ticket: "a b&c".into(), expires_in: 60, ws_url: "/v1/remote/agent/x".into() };
         assert_eq!(client.agent_socket_url(&ticket).unwrap(), "wss://sync.example/v1/remote/agent/x?ticket=a+b%26c");
+        // Only a path: anything else could carry the ticket to another host.
+        for bad in ["@evil.example/v1/remote/agent/x", "wss://evil.example/x", ".evil.example/x"] {
+            let ticket = TicketResponse { ws_url: bad.into(), ..ticket.clone() };
+            assert!(client.agent_socket_url(&ticket).is_err(), "{bad}");
+        }
         let local = SyncClient::new(&SyncCredentials {
             server: "http://127.0.0.1:8765".into(),
             token: "t".into(),

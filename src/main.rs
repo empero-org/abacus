@@ -103,6 +103,12 @@ async fn main() -> Result<()> {
 
     let store = SessionStore::new(&paths, config.workspace.clone());
     let services = Arc::new(AgentServices::discover(&config.workspace, &config.paths, &settings).await?);
+    // A headless run continues whatever it resumes from the newest copy, so it
+    // syncs before reading it. The terminal and the app server sync in the
+    // background and protect the session they have open instead.
+    if cli.prompt.is_some() {
+        headless::pull_before_run(&paths).await;
+    }
     // Session creation is otherwise deferred until the first message is sent,
     // which avoids littering the store with empty sessions on every startup.
     let mut session = match (&cli.resume, cli.continue_last, config.no_session) {

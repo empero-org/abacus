@@ -991,13 +991,18 @@ impl App {
     }
 
     /// Flush what the front end can no longer wait for: the thread's last
-    /// upload and the closing usage report, together and each bounded.
+    /// upload and the closing usage report, together and each bounded. The
+    /// thread is closed first, so what sync left alone while it was open is
+    /// settled before the upload (see [`crate::sync::settle_closed`]).
     async fn close(&self) {
         let upload = async {
-            if self.thread.persisted {
-                let sync = crate::sync::push_session(&self.config.paths, &self.thread.session);
-                let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, sync).await;
-            }
+            let sync = async {
+                let _ = crate::sync::settle_closed(&self.config.paths, self.thread.session.id).await;
+                if self.thread.persisted {
+                    let _ = crate::sync::push_session(&self.config.paths, &self.thread.session).await;
+                }
+            };
+            let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, sync).await;
         };
         let report = async {
             if let Some(usage) = &self.usage {

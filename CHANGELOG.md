@@ -23,6 +23,11 @@
   `abacus sync status` now shows the cursor, the last pull and push, and what is
   waiting.
 
+- **Sync servers must use HTTPS.** Plain `http://` sent the sign-in token, the
+  password at sign-in, every session and the phone pairing links unencrypted. It
+  is now accepted only for a server on the same machine, or with
+  `ABACUS_SYNC_ALLOW_HTTP=1` on a network you trust.
+
 - **Follow a session from your phone.** Once you are signed in, every session
   that has received its first prompt is shared live with your account's
   browsers, and a phone can follow it: streamed replies and reasoning, tool

@@ -357,6 +357,51 @@ fn fork_command_does_the_same_as_ctrl_shift_enter() {
     assert!(blob.text.contains("forked"), "{}", blob.text);
 }
 
+/// Sync never writes over, trashes or forks a session this process has open.
+/// That covers sessions made here — by the first prompt, or by forking — and
+/// not only resumed ones: unprotected, a delete from another device moved the
+/// open file to the sync trash, the terminal wrote it back, and every later
+/// upload forked it again.
+#[test]
+fn sessions_made_here_are_open_to_sync_until_left() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    app.session_store = Some(SessionStore::new(&app.config.paths, app.config.workspace.clone()));
+    app.messages.push(json!({"role": "user", "content": "first prompt"}));
+    app.persist_session();
+    let created = app.session.as_ref().unwrap().id;
+    assert!(crate::sync::is_open(&created), "the first prompt's session");
+
+    app.fork_session();
+    let fork = app.session.as_ref().unwrap().id;
+    assert!(crate::sync::is_open(&fork), "the fork");
+    assert!(!crate::sync::is_open(&created), "the original is no longer open here");
+
+    app.new_session();
+    assert!(!crate::sync::is_open(&fork));
+}
+
+/// "Always" — from the keyboard or a phone — approves for the session it was
+/// given in, not for every session this process opens afterwards.
+#[test]
+fn an_always_approval_ends_with_its_session() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    app.session_store = Some(SessionStore::new(&app.config.paths, app.config.workspace.clone()));
+    app.messages.push(json!({"role": "user", "content": "edit the parser"}));
+    app.persist_session();
+    // What the agent does with an `Always` decision.
+    app.allow_mutations.store(true, Ordering::Relaxed);
+
+    app.fork_session();
+    assert!(app.allow_mutations.load(Ordering::Relaxed), "a fork continues the same work");
+    app.new_session();
+    assert!(!app.allow_mutations.load(Ordering::Relaxed), "a new session asks again");
+
+    // `--always-approve` is for the whole run.
+    app.config.yes = true;
+    app.new_session();
+    assert!(app.allow_mutations.load(Ordering::Relaxed));
+}
+
 #[test]
 fn fork_without_a_conversation_reports_instead_of_creating() {
     let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");

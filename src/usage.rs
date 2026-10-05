@@ -51,6 +51,11 @@ const MAX_REPORTS: usize = 50;
 /// Model ids are short; the server stores up to 500 characters.
 const MAX_MODEL_CHARS: usize = 200;
 
+/// The largest counter the server accepts. A larger one — a provider that
+/// reports nonsense — would be refused, and a refusal ends reporting for the
+/// rest of the process.
+const MAX_COUNTER: u64 = 1_000_000_000_000_000;
+
 /// Token counters of one `(run, model)`, or the difference between two ledger
 /// readings.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -238,11 +243,13 @@ impl UsageReporter {
     /// reported one last time in the background first.
     pub fn open_session(&self, session_id: &str, model: &str, ledger: Arc<TokenLedger>) {
         let mut inner = self.lock();
-        let previous = inner.run.replace(Run::new(session_id, model, ledger));
-        let closing = match previous {
+        // The closing run takes its last sample before the new one reads its
+        // baseline, so tokens recorded in between count once, not twice.
+        let closing = match inner.run.take() {
             Some(mut previous) if inner.stopped.is_none() => self.outgoing(&mut previous, true),
             _ => None,
         };
+        inner.run = Some(Run::new(session_id, model, ledger));
         drop(inner);
         self.spawn_delivery(closing);
     }
@@ -403,11 +410,11 @@ fn report_item(seq: u64, run_id: &str, session_id: &str, model: &str, counters: 
         "session_id": session_id,
         "model": model,
         "seq": seq,
-        "input_tokens": counters.input,
-        "output_tokens": counters.output,
-        "cache_read_tokens": counters.cache_read,
-        "cache_write_tokens": counters.cache_write,
-        "total_tokens": counters.total(),
+        "input_tokens": counters.input.min(MAX_COUNTER),
+        "output_tokens": counters.output.min(MAX_COUNTER),
+        "cache_read_tokens": counters.cache_read.min(MAX_COUNTER),
+        "cache_write_tokens": counters.cache_write.min(MAX_COUNTER),
+        "total_tokens": counters.total().min(MAX_COUNTER),
         "final": final_,
     })
 }
@@ -803,6 +810,18 @@ mod tests {
         let reports = server.reports_after(1).await;
         task.abort();
         assert_eq!(item(&reports[0], "model-a")["input_tokens"], 123);
+    }
+
+    /// The server refuses a counter above 10^15, and one refusal ends
+    /// reporting for the process; a runaway figure is capped instead.
+    #[test]
+    fn counters_stay_within_what_the_server_accepts() {
+        let huge = Counters { input: u64::MAX, output: 34, cache_read: 2 * MAX_COUNTER, cache_write: 0 };
+        let item = report_item(1, "run", "session", "model", huge, false);
+        assert_eq!(item["input_tokens"], MAX_COUNTER);
+        assert_eq!(item["output_tokens"], 34);
+        assert_eq!(item["cache_read_tokens"], MAX_COUNTER);
+        assert_eq!(item["total_tokens"], MAX_COUNTER);
     }
 
     #[test]

@@ -749,6 +749,19 @@ pub async fn run(
         usage.finish(Duration::from_secs(3)).await;
     }
     if crate::sync::is_configured(&app.credentials) {
+        // Closed now: a newer copy from another device, or a conflict, that
+        // sync had to leave alone while the session was open is settled first
+        // (resumed at every start, it would otherwise never be), and whatever
+        // it keeps goes up with the rest.
+        if let Some(session) = &app.session
+            && let Ok(Ok(outcome)) =
+                tokio::time::timeout(Duration::from_secs(3), crate::sync::settle_closed(&app.config.paths, session.id))
+                    .await
+        {
+            for notice in &outcome.notices {
+                eprintln!("Session sync: {notice}.");
+            }
+        }
         match tokio::time::timeout(Duration::from_secs(3), crate::sync::push_dirty(&app.config.paths)).await {
             Err(_) => eprintln!("Session sync is still pending; it will retry next time Abacus opens."),
             Ok(Err(error)) => eprintln!("Session sync: {error:#}"),
@@ -2046,6 +2059,10 @@ impl App {
                 .create(self.config.profile.clone(), self.config.model.clone(), self.messages.clone())
                 .map_err(|error| self.status = format!("session create failed: {error}"))
                 .ok();
+            // Open from here on, so sync leaves the file to this process.
+            if let Some(created) = &self.session {
+                crate::sync::session_opened(created.id);
+            }
         }
         let Some(session) = &mut self.session else {
             return;
@@ -2130,11 +2147,17 @@ impl App {
     /// that travels with one. Steering and worker reports already in flight
     /// stay queued: they belong to the process, not to a session.
     fn adopt(&mut self, session: Option<Session>) {
+        let same = matches!((&self.session, &session), (Some(previous), Some(next)) if previous.id == next.id);
         if let Some(previous) = &self.session {
             crate::sync::session_closed(previous.id);
         }
         if let Some(next) = &session {
             crate::sync::session_opened(next.id);
+        }
+        // "Always" approves for the session it was given in, whether it came
+        // from the keyboard or a phone; another session asks again.
+        if !same {
+            self.allow_mutations.store(self.config.yes, Ordering::Relaxed);
         }
         // Traces are keyed by session id: the next persist opens the right one
         // instead of appending this session's calls to the previous trace.
@@ -2208,6 +2231,11 @@ impl App {
             }
             fork
         };
+        // The fork is the session open here now; the original goes back to sync.
+        if let Some(original) = &self.session {
+            crate::sync::session_closed(original.id);
+        }
+        crate::sync::session_opened(fork.id);
         self.session = Some(fork);
         // Traces are keyed by session id; drop the writer so the next persist
         // reopens it for the fork instead of appending to the original's trace.

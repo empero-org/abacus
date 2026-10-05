@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use crate::{
     activity::ActivityReporter,
     agent::{AgentEvent, ApprovalDecision, TurnOptions, run_turn},
-    config::{Config, OutputFormat},
+    config::{AbacusPaths, Config, OutputFormat},
     provider::Provider,
     ralph::{RalphLoop, RalphStatus},
     services::AgentServices,
@@ -22,12 +22,24 @@ const SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// How long the final usage report may hold up the exit.
 const USAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Download what changed on other devices. Called before the run reads the
+/// session it resumes, so it continues the newest copy: a pull after the read
+/// would have the run build on the older copy, and its upload at the end would
+/// replace the other device's turns. Bounded: a scripted run must not hang on
+/// an unreachable sync server.
+pub async fn pull_before_run(paths: &AbacusPaths) {
+    let credentials = crate::config::Credentials::load(paths).unwrap_or_default();
+    if crate::sync::is_configured(&credentials) {
+        let _ = tokio::time::timeout(SYNC_TIMEOUT, crate::sync::pull_changes(paths)).await;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     config: Config,
     format: OutputFormat,
     messages: Vec<Value>,
-    mut session: Option<Session>,
+    session: Option<Session>,
     store: Option<SessionStore>,
     services: Arc<AgentServices>,
     loop_config: Option<RalphLoop>,
@@ -43,15 +55,6 @@ pub async fn run(
     let started = Instant::now();
     let activity_session = session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let credentials = crate::config::Credentials::load(&config.paths).unwrap_or_default();
-    // Bounded: a scripted run must not hang on an unreachable sync server.
-    if crate::sync::is_configured(&credentials)
-        && let Ok(Ok(outcome)) = tokio::time::timeout(SYNC_TIMEOUT, crate::sync::pull_changes(&config.paths)).await
-        && outcome.pulled > 0
-        && let (Some(current), Some(store)) = (session.as_ref(), store.as_ref())
-        && let Ok(updated) = store.load(&current.id.to_string())
-    {
-        session = Some(updated);
-    }
     if let Some(reporter) = &reporter {
         reporter.report_start(&activity_session, &config.model).await;
     }

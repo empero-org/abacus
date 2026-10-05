@@ -1015,7 +1015,12 @@ fn classify(error: SyncError) -> LinkError {
         SyncError::Transient(detail) => LinkError::Retry(format!("sync server unavailable: {detail}")),
         SyncError::Unauthorized => LinkError::Fatal("this device is signed out; run `abacus sync login`".into()),
         SyncError::Gone => LinkError::Fatal("the server does not offer live sharing for this session".into()),
-        SyncError::Rejected { status: 409, .. } => LinkError::Fatal("sharing was turned off for this session".into()),
+        // A ticket for a session whose sharing was turned off elsewhere
+        // (409 `remote_not_enabled`). Read as a sync conflict, it would say
+        // the session "changed on the server".
+        SyncError::Conflict(_) | SyncError::Deleted(_) => {
+            LinkError::Fatal("sharing was turned off for this session".into())
+        }
         other => LinkError::Fatal(other.to_string()),
     }
 }

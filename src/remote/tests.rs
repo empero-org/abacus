@@ -934,3 +934,14 @@ async fn a_disabled_session_or_a_refused_ticket_stops_the_link() {
 fn event_connected(relay: &FakeRelay) -> Inbound {
     Inbound::Connected { reconnect: relay.tickets.load(Ordering::SeqCst) > 1 }
 }
+
+/// What the sync server's refusals mean for the link: a ticket for a session
+/// whose sharing was turned off elsewhere is a 409, and says exactly that.
+#[test]
+fn refusals_from_the_server_stop_or_retry_the_link_with_the_right_words() {
+    let off = classify(SyncError::Conflict(None));
+    assert_eq!(off, LinkError::Fatal("sharing was turned off for this session".into()));
+    assert_eq!(classify(SyncError::Deleted(None)), off);
+    assert!(matches!(classify(SyncError::Transient("timed out".into())), LinkError::Retry(_)));
+    assert!(matches!(classify(SyncError::Unauthorized), LinkError::Fatal(reason) if reason.contains("signed out")));
+}
