@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.5 — 2026-10-05
 
 - **Sync moves only what changed.** Abacus Sync used to download every session
   whenever Abacus opened and upload everything whenever it closed. Each machine
