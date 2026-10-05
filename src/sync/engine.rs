@@ -5,7 +5,9 @@
 //! content changed since they last synced, conditional on the revision they
 //! were based on. Neither direction overwrites the other side's work: when
 //! both changed, the local copy is kept as a fork and the remote one
-//! installed, and a refused upload waits for the next pull to do that.
+//! installed, and a refused upload waits for the next pull to do that. An
+//! upload that finds its session deleted elsewhere settles it on the spot: the
+//! work becomes a new session and goes up in the same pass.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -217,6 +219,9 @@ pub(crate) struct Engine<'a, R: Remote> {
     page_size: u32,
     /// Never-prompted sessions found on the server, retired after the pass.
     retire: Vec<(Uuid, u64)>,
+    /// New sessions made from local work whose original was deleted elsewhere,
+    /// waiting for their first upload.
+    kept: Vec<Uuid>,
 }
 
 impl<'a, R: Remote> Engine<'a, R> {
@@ -230,6 +235,7 @@ impl<'a, R: Remote> Engine<'a, R> {
             manual: false,
             page_size: PAGE_SIZE,
             retire: Vec::new(),
+            kept: Vec::new(),
         }
     }
 
@@ -365,7 +371,9 @@ impl<'a, R: Remote> Engine<'a, R> {
                     }
                 }
                 // Deleted between the listing and the download.
-                Err(SyncError::Gone) => self.tombstone(id, None, index),
+                Err(SyncError::Gone) => {
+                    self.tombstone(id, None, index);
+                }
                 Err(SyncError::Transient(_)) if reported_offline => complete = false,
                 Err(error) => {
                     reported_offline |= matches!(error, SyncError::Transient(_));
@@ -509,13 +517,18 @@ impl<'a, R: Remote> Engine<'a, R> {
     /// with work the server never saw is kept under a new id, so that work
     /// survives and syncs without resurrecting the deleted one. A session
     /// open in this process is left alone until a later pull.
-    fn tombstone(&mut self, id: Uuid, meta: Option<&SessionMeta>, index: &mut HashMap<Uuid, LocalEntry>) {
+    fn tombstone(
+        &mut self,
+        id: Uuid,
+        meta: Option<&SessionMeta>,
+        index: &mut HashMap<Uuid, LocalEntry>,
+    ) -> Option<Uuid> {
         let Some(entry) = index.get(&id).cloned() else {
             if self.state.record(&id).is_some() {
                 self.state.forget(&id);
             }
             self.outcome.skipped += 1;
-            return;
+            return None;
         };
         let title = meta.map(|meta| meta.title.clone()).filter(|title| !title.is_empty()).unwrap_or_else(|| short(&id));
         if super::is_open(&id) {
@@ -524,7 +537,7 @@ impl<'a, R: Remote> Engine<'a, R> {
                 record.conflict = false;
                 record.behind = None;
             });
-            return;
+            return None;
         }
         match self.settle(&entry, index) {
             Ok(Some(kept)) => {
@@ -535,14 +548,19 @@ impl<'a, R: Remote> Engine<'a, R> {
                 );
                 self.outcome.lines.push(format!("– {notice}"));
                 self.outcome.notices.push(notice);
+                Some(kept)
             }
             Ok(None) => {
                 self.outcome.deleted += 1;
                 let notice = format!("“{title}” was deleted on another device");
                 self.outcome.lines.push(format!("– {notice} ({})", short(&id)));
                 self.outcome.notices.push(notice);
+                None
             }
-            Err(error) => self.outcome.errors.push(format!("{}: {error:#}", short(&id))),
+            Err(error) => {
+                self.outcome.errors.push(format!("{}: {error:#}", short(&id)));
+                None
+            }
         }
     }
 
@@ -597,7 +615,7 @@ impl<'a, R: Remote> Engine<'a, R> {
                 return Ok(());
             }
         }
-        let mut entries = index.into_values().collect::<Vec<_>>();
+        let mut entries = index.values().cloned().collect::<Vec<_>>();
         entries.sort_by_key(|entry| entry.id);
         let mut uploads = Vec::new();
         for entry in entries {
@@ -606,6 +624,33 @@ impl<'a, R: Remote> Engine<'a, R> {
                 uploads.push((entry, plan));
             }
         }
+        let mut complete = self.upload_all(uploads, &mut index).await?;
+        // Work kept from a session that turned out to be deleted elsewhere is
+        // a new session: it goes up now, not at the next sync.
+        let kept = std::mem::take(&mut self.kept);
+        if !kept.is_empty() {
+            let mut uploads = Vec::new();
+            for entry in kept.iter().filter_map(|id| index.get(id).cloned()) {
+                if let Some(plan) = self.plan_upload(&entry, false) {
+                    uploads.push((entry, plan));
+                }
+            }
+            complete &= self.upload_all(uploads, &mut index).await?;
+        }
+        if complete {
+            self.state.last_push_at = Some(Utc::now());
+        }
+        self.save();
+        Ok(())
+    }
+
+    /// Upload `uploads` (a few at a time) and record each result. Returns
+    /// whether every one ended in a way that needs no later retry.
+    async fn upload_all(
+        &mut self,
+        uploads: Vec<(LocalEntry, UploadPlan)>,
+        index: &mut HashMap<Uuid, LocalEntry>,
+    ) -> Result<bool, SyncError> {
         let (remote, force) = (self.remote, self.force);
         let offline = AtomicBool::new(false);
         let offline = &offline;
@@ -625,14 +670,13 @@ impl<'a, R: Remote> Engine<'a, R> {
             .buffer_unordered(PARALLEL);
         let mut complete = true;
         while let Some(outcome) = results.next().await {
-            complete &= outcome.result.is_ok() || matches!(outcome.result, Err(UploadError::Skipped));
-            self.record_upload(outcome)?;
+            complete &= matches!(
+                outcome.result,
+                Ok(_) | Err(UploadError::Skipped | UploadError::Remote(SyncError::Deleted(_)))
+            );
+            self.record_upload(outcome, index)?;
         }
-        if complete {
-            self.state.last_push_at = Some(Utc::now());
-        }
-        self.save();
-        Ok(())
+        Ok(complete)
     }
 
     /// Whether `entry` needs uploading, and against which revision.
@@ -686,7 +730,7 @@ impl<'a, R: Remote> Engine<'a, R> {
         })
     }
 
-    fn record_upload(&mut self, upload: Upload) -> Result<(), SyncError> {
+    fn record_upload(&mut self, upload: Upload, index: &mut HashMap<Uuid, LocalEntry>) -> Result<(), SyncError> {
         let Upload { entry, title, hashes, fingerprint, result } = upload;
         let id = entry.id;
         match result {
@@ -699,10 +743,14 @@ impl<'a, R: Remote> Engine<'a, R> {
             }
             Err(UploadError::Skipped) => {}
             Err(UploadError::Local(error)) => self.outcome.errors.push(format!("{}: {error:#}", short(&id))),
-            Err(UploadError::Remote(SyncError::Conflict(Some(current)))) if current.deleted => {
-                // Deleted on another device meanwhile; the next pull settles
-                // it like any other delete.
-                self.state.update(&id, |record| record.deleted = true);
+            Err(UploadError::Remote(SyncError::Deleted(current))) => {
+                // Deleted on another device meanwhile: settled as a pull
+                // would settle it, keeping what was changed here under a new
+                // id. A session open in this process only gets flagged, and
+                // is settled by a later pull once it is closed.
+                if let Some(kept) = self.tombstone(id, current.as_deref(), index) {
+                    self.kept.push(kept);
+                }
             }
             Err(UploadError::Remote(SyncError::Conflict(current))) => {
                 let behind = current.map(|current| current.revision);
@@ -1028,6 +1076,7 @@ pub(crate) mod tests {
         ) -> Result<SessionMeta, SyncError> {
             let mut inner = self.inner.lock().unwrap();
             let revision = match (inner.rows.get(id), precondition) {
+                (Some(row), _) if row.meta.deleted => return Err(SyncError::Deleted(Some(Box::new(row.meta.clone())))),
                 (Some(row), Precondition::Create) => return Err(SyncError::Conflict(Some(Box::new(row.meta.clone())))),
                 (Some(row), Precondition::Revision(revision)) if row.meta.revision != revision => {
                     return Err(SyncError::Conflict(Some(Box::new(row.meta.clone()))));
@@ -1473,6 +1522,60 @@ pub(crate) mod tests {
         // The kept work syncs as a new session; the deleted id stays deleted.
         assert_eq!(server.revision(&kept.id), Some(1));
         assert_eq!(outcome.pushed, 1);
+    }
+
+    #[tokio::test]
+    async fn an_upload_that_finds_the_session_deleted_keeps_the_work_as_a_new_session() {
+        let server = FakeServer::default();
+        let device = Device::new();
+        let mut session = device.session(&["start"]);
+        device.reconcile(&server).await;
+        server.delete_now(&session.id);
+        device.say(&mut session, &["unsynced work"]);
+
+        // No pull in between: the upload itself learns of the delete.
+        let outcome = device.push(&server, false).await;
+        assert_eq!((outcome.deleted, outcome.pushed, outcome.forked), (1, 1, 0), "{outcome:?}");
+        assert!(outcome.conflicts.is_empty() && outcome.errors.is_empty(), "not a revision conflict: {outcome:?}");
+        assert!(outcome.notices[0].contains("kept as a new session"), "{:?}", outcome.notices);
+        assert!(device.load(&session.id).is_none());
+        assert!(device.paths.root.join("sync-trash").join(format!("{}.json", session.id)).exists());
+        let [kept] = device.sessions().try_into().unwrap();
+        assert_eq!(last(&kept), "re: unsynced work");
+        assert_eq!(server.revision(&kept.id), Some(1), "uploaded in the same pass");
+        assert_eq!(server.calls("put"), 3, "the first upload, the refused one, and the new session");
+        assert!(device.state().last_push_at.is_some());
+        assert!(device.state().record(&session.id).is_none());
+
+        // Nothing is left to do.
+        let outcome = device.reconcile(&server).await;
+        assert_eq!((outcome.pushed, outcome.deleted), (0, 0), "{outcome:?}");
+    }
+
+    #[tokio::test]
+    async fn a_delete_found_by_an_upload_waits_while_the_session_is_open() {
+        let server = FakeServer::default();
+        let device = Device::new();
+        let mut session = device.session(&["start"]);
+        device.reconcile(&server).await;
+        server.delete_now(&session.id);
+        device.say(&mut session, &["unsynced work"]);
+
+        crate::sync::session_opened(session.id);
+        let outcome = device.push(&server, false).await;
+        crate::sync::session_closed(session.id);
+        assert_eq!((outcome.deleted, outcome.pushed), (0, 0), "{outcome:?}");
+        assert!(outcome.errors.is_empty() && outcome.conflicts.is_empty());
+        assert_eq!(last(&device.load(&session.id).unwrap()), "re: unsynced work", "the open file is left alone");
+        assert!(device.state().record(&session.id).unwrap().deleted);
+        assert_eq!(server.calls("put"), 2);
+
+        // Closed: the next sync settles it.
+        let outcome = device.reconcile(&server).await;
+        assert_eq!((outcome.deleted, outcome.pushed), (1, 1), "{outcome:?}");
+        assert!(device.load(&session.id).is_none());
+        let [kept] = device.sessions().try_into().unwrap();
+        assert_eq!(server.revision(&kept.id), Some(1));
     }
 
     #[tokio::test]

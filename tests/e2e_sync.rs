@@ -7,7 +7,7 @@ mod sync_server;
 use std::path::PathBuf;
 
 use abacus_agent::{
-    config::{AbacusPaths, Credentials, SyncCredentials},
+    config::{AbacusPaths, Credentials, SyncCommand, SyncCredentials},
     session::{Session, SessionStore},
     sync::{self, SyncError},
     sync_state::SyncState,
@@ -63,6 +63,21 @@ impl Device {
     fn sessions(&self) -> Vec<Session> {
         let store = self.store();
         store.list().unwrap().iter().map(|summary| store.load(&summary.id.to_string()).unwrap()).collect()
+    }
+
+    fn trace_file(&self, session: &Session) -> PathBuf {
+        self.paths.traces_dir.join(format!("{}.jsonl", session.id))
+    }
+
+    /// Grow the trace until its upload is well past the compression threshold.
+    fn pad_trace(&self, session: &Session) -> Vec<u8> {
+        let mut lines = std::fs::read(self.trace_file(session)).unwrap_or_default();
+        for step in 0..2_000 {
+            let line = json!({"step": step, "output": "the quick brown fox jumps over the lazy dog"});
+            lines.extend(format!("{line}\n").into_bytes());
+        }
+        std::fs::write(self.trace_file(session), &lines).unwrap();
+        lines
     }
 }
 
@@ -250,4 +265,145 @@ async fn sync_client_covers_remote_pairing_and_usage() {
     );
     let changes = client.changes(0, 10).await.unwrap();
     assert_eq!((changes.items.len(), changes.next_cursor, changes.has_more), (1, 1, false));
+}
+
+fn keys(puts: &[sync_server::Seen]) -> Vec<String> {
+    puts.iter().map(|seen| seen.header("idempotency-key").expect("every write carries a key").to_owned()).collect()
+}
+
+#[tokio::test]
+async fn sync_a_retried_write_keeps_its_key_and_is_replayed() {
+    let server = SyncServer::start("t").await;
+    let device = Device::new(&server, "t");
+    let mut session = device.session(&["hello"]);
+    let id = session.id.to_string();
+    // The upload lands, but its reply never arrives.
+    server.lose_replies(1);
+
+    let outcome = sync::push_dirty(&device.paths).await.unwrap();
+    assert_eq!((outcome.pushed, outcome.errors.len(), outcome.conflicts.len()), (1, 0, 0), "{outcome:?}");
+    let sent = keys(&server.seen("PUT", "/v1/sync/sessions/"));
+    assert_eq!(sent.len(), 2, "one retry");
+    assert_eq!(sent[0], sent[1], "the retry is the same write");
+    assert_eq!((server.replays(), server.revision(&id)), (1, Some(1)), "answered from the record, applied once");
+    assert_eq!(SyncState::load(&device.paths).record(&session.id).unwrap().revision, Some(1));
+
+    // The next write is another write: reusing the key would be refused.
+    device.say(&mut session, &["more"]);
+    sync::push_session(&device.paths, &session).await.unwrap();
+    let sent = keys(&server.seen("PUT", "/v1/sync/sessions/"));
+    assert_eq!(sent.len(), 3);
+    assert_ne!(sent[2], sent[0]);
+    assert_eq!(server.revision(&id), Some(2));
+}
+
+#[tokio::test]
+async fn sync_a_write_without_an_answer_is_sent_again_under_its_key() {
+    let server = SyncServer::start("t").await;
+    let device = Device::new(&server, "t");
+    let session = device.session(&["hello"]);
+    let id = session.id.to_string();
+    // Every attempt of one automatic pass goes unanswered.
+    server.lose_replies(3);
+
+    let outcome = sync::push_dirty(&device.paths).await.unwrap();
+    assert_eq!((outcome.pushed, outcome.errors.len()), (0, 1), "{outcome:?}");
+    assert!(SyncState::load(&device.paths).record(&session.id).is_none(), "nothing was confirmed");
+
+    // `abacus sync push` later: the same write, so the same key.
+    sync::handle(SyncCommand::Push { session: None, force: false }, &device.paths, device.workspace.clone())
+        .await
+        .unwrap();
+    let sent = keys(&server.seen("PUT", "/v1/sync/sessions/"));
+    assert_eq!(sent.len(), 4);
+    assert!(sent.iter().all(|key| *key == sent[0]), "{sent:?}");
+    assert_eq!((server.replays(), server.revision(&id)), (3, Some(1)));
+    assert_eq!(SyncState::load(&device.paths).record(&session.id).unwrap().revision, Some(1));
+}
+
+#[tokio::test]
+async fn sync_a_write_to_a_deleted_session_keeps_the_work_as_a_new_session() {
+    let server = SyncServer::start("t").await;
+    let device = Device::new(&server, "t");
+    let mut session = device.session(&["start"]);
+    let id = session.id.to_string();
+    sync::reconcile(&device.paths).await.unwrap();
+    server.delete(&id);
+    device.say(&mut session, &["after the delete"]);
+
+    // No pull in between: the upload is what finds out.
+    let outcome = sync::push_dirty(&device.paths).await.unwrap();
+    assert_eq!((outcome.deleted, outcome.pushed), (1, 1), "{outcome:?}");
+    assert!(outcome.conflicts.is_empty() && outcome.errors.is_empty(), "{outcome:?}");
+    let puts = server.seen("PUT", "/v1/sync/sessions/");
+    assert_eq!(puts.len(), 3, "the create, the write the tombstone refused, the kept work as a new session");
+    assert_eq!(puts[1].header("if-match"), Some("\"1\""));
+    assert_eq!(puts[2].header("if-none-match"), Some("*"));
+
+    let [kept] = device.sessions().try_into().unwrap();
+    assert_ne!(kept.id, session.id);
+    assert_eq!(last(&kept), "re: after the delete");
+    assert_eq!(server.revision(&kept.id.to_string()), Some(1));
+    assert_eq!(last_message(&server.stored(&kept.id.to_string())), "re: after the delete");
+    assert!(device.paths.root.join("sync-trash").join(format!("{id}.json")).exists());
+    assert!(SyncState::load(&device.paths).record(&session.id).is_none());
+    assert!(outcome.notices[0].contains("kept as a new session"), "{:?}", outcome.notices);
+}
+
+#[tokio::test]
+async fn sync_large_bodies_travel_gzipped_in_both_directions() {
+    let server = SyncServer::start("t").await;
+    let (laptop, desktop) = (Device::new(&server, "t"), Device::new(&server, "t"));
+    let small = laptop.session(&["tiny"]);
+    let big = laptop.session(&["big"]);
+    let trace = laptop.pad_trace(&big);
+
+    let outcome = sync::push_dirty(&laptop.paths).await.unwrap();
+    assert_eq!((outcome.pushed, outcome.errors.len()), (2, 0), "{outcome:?}");
+    let puts = server.seen("PUT", "/v1/sync/sessions/");
+    let upload = |session: &Session| puts.iter().find(|seen| seen.path.ends_with(&session.id.to_string())).unwrap();
+    assert_eq!(upload(&small).header("content-encoding"), None, "small bodies stay plain");
+    let large = upload(&big);
+    assert_eq!(large.header("content-encoding"), Some("gzip"));
+    assert!(large.body.len() * 10 < trace.len(), "{} bytes sent for a {} byte trace", large.body.len(), trace.len());
+    assert_eq!(large.json()["device_id"], laptop.paths.install_id());
+    assert_eq!(server.trace(&big.id.to_string()), trace, "the server holds the original bytes");
+
+    let outcome = sync::pull_changes(&desktop.paths).await.unwrap();
+    assert_eq!(outcome.pulled, 2, "{outcome:?}");
+    for get in server.seen("GET", "/v1/sync/sessions/") {
+        assert!(get.header("accept-encoding").is_some_and(|value| value.contains("gzip")), "{get:?}");
+    }
+    assert!(server.gzipped_responses() >= 1, "the trace came down compressed");
+    assert_eq!(std::fs::read(desktop.trace_file(&big)).unwrap(), trace);
+    let client = sync::configured_client(&desktop.paths).unwrap();
+    assert_eq!(client.trace(&big.id.to_string()).await.unwrap(), trace);
+    assert_eq!(client.session(&big.id.to_string()).await.unwrap().0.id, big.id);
+}
+
+#[tokio::test]
+async fn sync_a_server_that_refuses_gzip_is_sent_plain_bodies_from_then_on() {
+    let server = SyncServer::start("t").await;
+    server.refuse_gzip();
+    let device = Device::new(&server, "t");
+    let mut session = device.session(&["big"]);
+    let id = session.id.to_string();
+    let trace = device.pad_trace(&session);
+
+    let outcome = sync::push_dirty(&device.paths).await.unwrap();
+    assert_eq!((outcome.pushed, outcome.errors.len()), (1, 0), "{outcome:?}");
+    let puts = server.seen("PUT", "/v1/sync/sessions/");
+    assert_eq!(puts.len(), 2, "tried compressed, then plain");
+    assert_eq!((puts[0].header("content-encoding"), puts[1].header("content-encoding")), (Some("gzip"), None));
+    let sent = keys(&puts);
+    assert_eq!(sent[0], sent[1], "the same write");
+    assert_eq!(server.trace(&id), trace);
+
+    // Remembered: the next large write does not try again.
+    device.say(&mut session, &["more"]);
+    sync::push_session(&device.paths, &session).await.unwrap();
+    let puts = server.seen("PUT", "/v1/sync/sessions/");
+    assert_eq!(puts.len(), 3);
+    assert_eq!(puts[2].header("content-encoding"), None);
+    assert_eq!(server.revision(&id), Some(2));
 }

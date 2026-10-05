@@ -5,12 +5,16 @@
 //! it — a proxy page or a wrong URL fails loudly as a protocol error instead of
 //! being parsed as data.
 
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use flate2::Compression;
+use flate2::write::GzEncoder;
 use reqwest::{Client, Method, RequestBuilder, StatusCode, header};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -32,6 +36,24 @@ const MAX_TRANSFER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// A trace download whose size is unknown may still be up to the server's
 /// 100 MiB limit.
 const UNKNOWN_TRACE_SIZE: u64 = 100 * 1024 * 1024;
+/// Upload bodies at least this large are sent gzip-compressed: smaller ones
+/// cost more in CPU and a header than they save on the wire.
+const GZIP_MIN_BYTES: usize = 64 * 1024;
+
+/// Servers that refused a compressed upload (415) during this process, which
+/// then get plain bodies. Process-wide because every sync pass builds its own
+/// client.
+static GZIP_REFUSED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
+
+/// Writes whose outcome is unknown, by account and session: what each was
+/// first sent as. Process-wide for the same reason as [`GZIP_REFUSED`].
+static UNSETTLED_WRITES: LazyLock<Mutex<HashMap<String, UnsettledWrite>>> = LazyLock::new(Mutex::default);
+
+struct UnsettledWrite {
+    /// What the server fingerprints a write by: method, precondition, content.
+    identity: String,
+    key: String,
+}
 
 /// Why a request failed, in the terms a caller acts on.
 #[derive(Debug, Clone)]
@@ -43,6 +65,10 @@ pub enum SyncError {
     /// A conditional write lost: the server holds a different revision. The
     /// current metadata is included when the server sent it.
     Conflict(Option<Box<SessionMeta>>),
+    /// A write to a session that was deleted on another device (409
+    /// `deleted`). Not a revision conflict: no revision of it can be written
+    /// again, so the caller keeps the local work under a new session id.
+    Deleted(Option<Box<SessionMeta>>),
     /// The session does not exist on the server, or was deleted.
     Gone,
     /// The server refused this request for good (too large, invalid).
@@ -68,6 +94,7 @@ impl std::fmt::Display for SyncError {
             }
             Self::Forbidden(detail) => write!(formatter, "the sync server refused access: {detail}"),
             Self::Conflict(_) => write!(formatter, "the session changed on the server since this device last synced"),
+            Self::Deleted(_) => write!(formatter, "the session was deleted on another device"),
             Self::Gone => write!(formatter, "not found on the server"),
             Self::Rejected { status, detail } => {
                 write!(formatter, "the sync server rejected the request ({status}): {detail}")
@@ -378,9 +405,10 @@ impl SyncClient {
         self.put_document(&session.id.to_string(), &document, trace, &hashes, precondition).await
     }
 
-    /// Upload one revision. A 409 whose current revision already holds exactly
-    /// this content is a success: an earlier attempt landed and only its reply
-    /// was lost.
+    /// Upload one revision, gzip-compressed once the body is large. A 409
+    /// whose current revision already holds exactly this content is a success:
+    /// an earlier attempt landed and only its reply was lost (the server's
+    /// `Idempotency-Key` replay normally answers that case first).
     pub(crate) async fn put_document(
         &self,
         id: &str,
@@ -397,19 +425,26 @@ impl SyncClient {
             device_id: &device,
         };
         let body = serde_json::to_vec(&body).map_err(|error| SyncError::Protocol(error.to_string()))?;
-        let size = body.len() as u64;
-        let mut request = self
-            .request(Method::PUT, &format!("/v1/sync/sessions/{id}"))
-            .header(header::CONTENT_TYPE, "application/json")
-            .header("Idempotency-Key", uuid::Uuid::new_v4().to_string())
-            .timeout(transfer_timeout(size))
-            .body(body);
-        request = match precondition {
-            Precondition::Create => request.header(header::IF_NONE_MATCH, "*"),
-            Precondition::Revision(revision) => request.header(header::IF_MATCH, format!("\"{revision}\"")),
+        // The server answers a repeat of this exact write with the stored
+        // reply, but only when it carries the key the first attempt did.
+        let key = self.write_key(id, &format!("PUT {precondition:?} {} {} {device}", hashes.session, hashes.trace));
+        let packed = if body.len() >= GZIP_MIN_BYTES && !self.refused_gzip() { gzip(&body) } else { None };
+        let sent = match packed {
+            Some(packed) => match self.send_put(id, packed, true, precondition, &key).await {
+                // A server (or a proxy in front of it) that cannot read
+                // compressed bodies: the same write goes again as plain JSON,
+                // and later ones skip the attempt.
+                Err(SyncError::Rejected { status: 415, .. }) => {
+                    GZIP_REFUSED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(self.server.clone());
+                    self.send_put(id, body, false, precondition, &key).await
+                }
+                other => other,
+            },
+            None => self.send_put(id, body, false, precondition, &key).await,
         };
-        match self.json::<MetaReply>(request).await {
-            Ok(reply) => Ok(reply.meta),
+        self.write_settled(id, &sent);
+        match sent {
+            Ok(meta) => Ok(meta),
             Err(SyncError::Conflict(Some(current)))
                 if !current.deleted
                     && current.session_sha256 == hashes.session
@@ -421,12 +456,77 @@ impl SyncClient {
         }
     }
 
+    async fn send_put(
+        &self,
+        id: &str,
+        body: Vec<u8>,
+        compressed: bool,
+        precondition: Precondition,
+        key: &str,
+    ) -> Result<SessionMeta, SyncError> {
+        let mut request = self
+            .request(Method::PUT, &format!("/v1/sync/sessions/{id}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("Idempotency-Key", key)
+            .timeout(transfer_timeout(body.len() as u64))
+            .body(body);
+        if compressed {
+            request = request.header(header::CONTENT_ENCODING, "gzip");
+        }
+        request = match precondition {
+            Precondition::Create => request.header(header::IF_NONE_MATCH, "*"),
+            Precondition::Revision(revision) => request.header(header::IF_MATCH, format!("\"{revision}\"")),
+        };
+        Ok(self.json::<MetaReply>(request).await?.meta)
+    }
+
     /// `DELETE /v1/sync/sessions/{id}`: leave a tombstone.
     pub async fn delete(&self, id: &str, revision: u64) -> Result<SessionMeta, SyncError> {
+        let key = self.write_key(id, &format!("DELETE {revision}"));
         let request = self
             .request(Method::DELETE, &format!("/v1/sync/sessions/{id}"))
+            .header("Idempotency-Key", key)
             .header(header::IF_MATCH, format!("\"{revision}\""));
-        Ok(self.json::<MetaReply>(request).await?.meta)
+        let result = self.json::<MetaReply>(request).await.map(|reply| reply.meta);
+        self.write_settled(id, &result);
+        result
+    }
+
+    fn refused_gzip(&self) -> bool {
+        GZIP_REFUSED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).contains(&self.server)
+    }
+
+    /// Where this account's pending write to `session` is remembered.
+    fn write_slot(&self, session: &str) -> String {
+        format!("{}\n{}\n{session}", self.server, self.email)
+    }
+
+    /// The `Idempotency-Key` for a write. One logical write keeps one key
+    /// through every attempt: the backoff loop resends the request it was
+    /// given, and a write whose outcome stayed unknown (the reply was lost, or
+    /// the server was unavailable) is sent again with the key it first had, so
+    /// a server that did apply it replays its answer instead of refusing the
+    /// retry as a conflict with itself. Any other write gets a new key; the
+    /// server rejects a key reused for a different request.
+    fn write_key(&self, session: &str, identity: &str) -> String {
+        let mut writes = UNSETTLED_WRITES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let slot = self.write_slot(session);
+        match writes.get(&slot) {
+            Some(write) if write.identity == identity => write.key.clone(),
+            _ => {
+                let key = uuid::Uuid::new_v4().to_string();
+                writes.insert(slot, UnsettledWrite { identity: identity.to_owned(), key: key.clone() });
+                key
+            }
+        }
+    }
+
+    /// Forget a write's key once the server has answered it either way; only
+    /// an unknown outcome keeps it for the retry.
+    fn write_settled<T>(&self, session: &str, result: &Result<T, SyncError>) {
+        if !matches!(result, Err(SyncError::Transient(_))) {
+            UNSETTLED_WRITES.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&self.write_slot(session));
+        }
     }
 
     /// Make a session controllable from the account's browsers, owned by this
@@ -585,8 +685,24 @@ pub(crate) fn error_for_status(status: StatusCode, body: &[u8]) -> SyncError {
         StatusCode::UNAUTHORIZED => SyncError::Unauthorized,
         StatusCode::FORBIDDEN => SyncError::Forbidden(detail(body)),
         StatusCode::NOT_FOUND | StatusCode::GONE => SyncError::Gone,
-        StatusCode::CONFLICT => SyncError::Conflict(conflict_meta(body).map(Box::new)),
+        StatusCode::CONFLICT => conflict(body),
         _ => SyncError::Rejected { status: status.as_u16(), detail: detail(body) },
+    }
+}
+
+/// A 409: a lost revision race, or a write to a session deleted elsewhere. The
+/// server says the latter with code `deleted`; servers before that code sent a
+/// plain conflict whose current revision is the tombstone, which is the same
+/// thing.
+fn conflict(body: &[u8]) -> SyncError {
+    let current = conflict_meta(body).map(Box::new);
+    let code = serde_json::from_slice::<Value>(body).ok().and_then(|value| {
+        ["/error/code", "/detail/code"].iter().find_map(|path| value.pointer(path)?.as_str().map(str::to_owned))
+    });
+    if code.as_deref() == Some("deleted") || current.as_ref().is_some_and(|current| current.deleted) {
+        SyncError::Deleted(current)
+    } else {
+        SyncError::Conflict(current)
     }
 }
 
@@ -620,6 +736,14 @@ fn detail(body: &[u8]) -> String {
         Err(_) => String::from_utf8_lossy(body).into_owned(),
     };
     crate::text::clip(text.trim(), 300, "…")
+}
+
+/// `bytes` as a gzip stream. Fast rather than small: the JSON of a session
+/// shrinks several-fold at any level, and this runs while a person waits.
+fn gzip(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut encoder = GzEncoder::new(Vec::with_capacity(bytes.len() / 4), Compression::fast());
+    encoder.write_all(bytes).ok()?;
+    encoder.finish().ok()
 }
 
 fn transfer_timeout(bytes: u64) -> Duration {
@@ -665,16 +789,85 @@ mod tests {
         assert_eq!((current.id.as_str(), current.revision, current.session_sha256.as_str()), ("a", 7, "s"));
 
         // The pre-1.1 FastAPI shape.
-        let legacy = br#"{"detail":{"code":"conflict","current":{"id":"b","revision":3,"deleted":true}}}"#;
+        let legacy = br#"{"detail":{"code":"conflict","current":{"id":"b","revision":3}}}"#;
         let SyncError::Conflict(Some(current)) = error_for_status(StatusCode::CONFLICT, legacy) else {
             panic!("legacy conflict");
         };
-        assert!(current.deleted && current.revision == 3);
+        assert_eq!(current.revision, 3);
 
         // A create that raced a missing row says so without metadata.
         let bare = br#"{"detail":{"code":"conflict","message":"create requires If-None-Match: *"}}"#;
         assert!(matches!(error_for_status(StatusCode::CONFLICT, bare), SyncError::Conflict(None)));
         assert!(matches!(error_for_status(StatusCode::CONFLICT, b"<html>"), SyncError::Conflict(None)));
+    }
+
+    #[test]
+    fn a_write_to_a_deleted_session_is_not_a_revision_conflict() {
+        let body = br#"{"error":{"code":"deleted","message":"session was deleted","request_id":"r",
+            "current":{"id":"a","revision":9,"deleted":true,"title":"Gone"}},
+            "detail":{"code":"deleted","current":{"id":"a","revision":9,"deleted":true}}}"#;
+        let SyncError::Deleted(Some(current)) = error_for_status(StatusCode::CONFLICT, body) else {
+            panic!("409 deleted is its own error");
+        };
+        assert_eq!((current.revision, current.title.as_str(), current.deleted), (9, "Gone", true));
+        assert!(!error_for_status(StatusCode::CONFLICT, body).is_fatal());
+
+        // Only the legacy envelope.
+        let legacy = br#"{"detail":{"code":"deleted","current":{"id":"a","revision":4,"deleted":true}}}"#;
+        assert!(matches!(error_for_status(StatusCode::CONFLICT, legacy), SyncError::Deleted(Some(_))));
+        // A server that predates the code reports the tombstone as the conflict's current revision.
+        let older = br#"{"detail":{"code":"conflict","current":{"id":"a","revision":4,"deleted":true}}}"#;
+        assert!(matches!(error_for_status(StatusCode::CONFLICT, older), SyncError::Deleted(Some(_))));
+        // The code alone is enough.
+        let bare = br#"{"error":{"code":"deleted","message":"session was deleted"}}"#;
+        assert!(matches!(error_for_status(StatusCode::CONFLICT, bare), SyncError::Deleted(None)));
+    }
+
+    #[test]
+    fn a_write_keeps_its_key_until_the_server_answers() {
+        let client = |email: &str| {
+            SyncClient::new(&SyncCredentials {
+                server: "http://keys.test".into(),
+                token: "t".into(),
+                email: email.into(),
+            })
+            .unwrap()
+        };
+        let (first, other_account) = (client("a@keys.test"), client("b@keys.test"));
+        let put = "PUT Revision(1) s t d";
+        let key = first.write_key("session-1", put);
+        assert_eq!(first.write_key("session-1", put), key, "a retry of the same write");
+        assert_ne!(first.write_key("session-2", put), key, "another session is another write");
+        assert_ne!(other_account.write_key("session-1", put), key, "keys are per account");
+
+        // The server could not be reached: the outcome is unknown, so the
+        // retry may be a write the server already applied.
+        first.write_settled::<()>("session-1", &Err(SyncError::Transient("timed out".into())));
+        assert_eq!(first.write_key("session-1", put), key);
+
+        // Different content or a different revision is a different write.
+        let changed = first.write_key("session-1", "PUT Revision(1) s2 t d");
+        assert_ne!(changed, key);
+        assert_ne!(first.write_key("session-1", "PUT Revision(2) s2 t d"), changed);
+
+        // Any answer settles it, a refusal included.
+        let key = first.write_key("session-1", put);
+        first.write_settled::<()>("session-1", &Err(SyncError::Rejected { status: 422, detail: "x".into() }));
+        assert_ne!(first.write_key("session-1", put), key);
+        let key = first.write_key("session-1", put);
+        first.write_settled("session-1", &Ok(()));
+        assert_ne!(first.write_key("session-1", put), key);
+    }
+
+    #[test]
+    fn large_bodies_shrink_and_survive_a_round_trip() {
+        use std::io::Read;
+        let body = serde_json::to_vec(&json!({"trace": "ABCD".repeat(100_000)})).unwrap();
+        let packed = gzip(&body).unwrap();
+        assert!(packed.len() * 20 < body.len(), "{} of {}", packed.len(), body.len());
+        let mut unpacked = Vec::new();
+        flate2::read::GzDecoder::new(packed.as_slice()).read_to_end(&mut unpacked).unwrap();
+        assert_eq!(unpacked, body);
     }
 
     #[test]

@@ -5,12 +5,14 @@
 
 use std::{
     collections::BTreeMap,
+    io::{Read, Write},
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
 
 use abacus_agent::sync_state::{session_sha256, sha256_hex};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -32,8 +34,14 @@ impl Seen {
         self.headers.get(name).map(String::as_str)
     }
 
+    /// The body as JSON, gunzipped first when it was sent compressed.
     pub fn json(&self) -> Value {
-        serde_json::from_slice(&self.body).unwrap_or(Value::Null)
+        let body = if self.header("content-encoding") == Some("gzip") {
+            gunzip(&self.body).unwrap_or_default()
+        } else {
+            self.body.clone()
+        };
+        serde_json::from_slice(&body).unwrap_or(Value::Null)
     }
 }
 
@@ -47,11 +55,41 @@ struct Row {
     trace_sha256: String,
 }
 
+/// A write the server answered, kept for `Idempotency-Key` replays.
+struct Remembered {
+    fingerprint: String,
+    status: u16,
+    body: Vec<u8>,
+}
+
 #[derive(Default)]
 struct State {
     rows: BTreeMap<String, Row>,
     change: u64,
     seen: Vec<Seen>,
+    /// 2xx answers to writes sent with an `Idempotency-Key`.
+    remembered: BTreeMap<String, Remembered>,
+    replays: usize,
+    /// Writes still to be applied but never answered: the connection just
+    /// closes, as when a reply is lost in transit.
+    lose_replies: usize,
+    /// Answer compressed request bodies with 415.
+    refuse_gzip: bool,
+    gzipped_responses: usize,
+}
+
+/// What goes back on the wire; `None` for the status closes the connection
+/// without a word.
+struct Reply {
+    status: Option<u16>,
+    body: Vec<u8>,
+    headers: Vec<(&'static str, String)>,
+}
+
+impl Reply {
+    fn new((status, body): (u16, Vec<u8>)) -> Self {
+        Self { status: Some(status), body, headers: Vec::new() }
+    }
 }
 
 pub struct SyncServer {
@@ -92,6 +130,31 @@ impl SyncServer {
     pub fn seen(&self, method: &str, prefix: &str) -> Vec<Seen> {
         let state = self.state.lock().unwrap();
         state.seen.iter().filter(|seen| seen.method == method && seen.path.starts_with(prefix)).cloned().collect()
+    }
+
+    /// The next `count` writes are applied and then go unanswered.
+    pub fn lose_replies(&self, count: usize) {
+        self.state.lock().unwrap().lose_replies = count;
+    }
+
+    /// Refuse request bodies sent with `Content-Encoding: gzip`, as a proxy
+    /// or an older server would.
+    pub fn refuse_gzip(&self) {
+        self.state.lock().unwrap().refuse_gzip = true;
+    }
+
+    /// Writes answered from the idempotency record instead of being applied.
+    pub fn replays(&self) -> usize {
+        self.state.lock().unwrap().replays
+    }
+
+    /// Responses sent compressed.
+    pub fn gzipped_responses(&self) -> usize {
+        self.state.lock().unwrap().gzipped_responses
+    }
+
+    pub fn trace(&self, id: &str) -> Vec<u8> {
+        self.state.lock().unwrap().rows[id].trace.clone()
     }
 
     pub fn revision(&self, id: &str) -> Option<u64> {
@@ -240,6 +303,7 @@ fn handle(request: &Seen, state: &mut State, token: &str) -> (u16, Vec<u8>) {
             let expected = revision_of(request.headers.get("if-match"));
             let current = match state.rows.get(*id) {
                 None => return error(404, "not_found", "session not found", None),
+                Some(row) if row.deleted => return ok(json!({"meta": meta(id, row)})),
                 Some(row) => (row.revision, meta(id, row)),
             };
             if expected != Some(current.0) {
@@ -272,6 +336,9 @@ fn put(request: &Seen, state: &mut State, id: &str) -> (u16, Vec<u8>) {
     let expected = revision_of(request.headers.get("if-match"));
     let create = request.header("if-none-match") == Some("*");
     let revision = match state.rows.get(id) {
+        Some(row) if row.deleted => {
+            return error(409, "deleted", "session was deleted", Some(meta(id, row)));
+        }
         Some(row) if create || expected != Some(row.revision) => {
             return error(409, "conflict", "revision does not match", Some(meta(id, row)));
         }
@@ -287,30 +354,116 @@ fn put(request: &Seen, state: &mut State, id: &str) -> (u16, Vec<u8>) {
     ok(reply)
 }
 
+/// What the server's sync endpoints add around [`handle`]: gzip request and
+/// response bodies, and `Idempotency-Key` replays.
+fn respond(request: &Seen, state: &mut State, token: &str) -> Reply {
+    let mut request = request.clone();
+    if request.header("content-encoding") == Some("gzip") {
+        if state.refuse_gzip {
+            return Reply::new(error(415, "unsupported_media_type", "Content-Encoding must be identity", None));
+        }
+        match gunzip(&request.body) {
+            Some(plain) => {
+                request.body = plain;
+                request.headers.remove("content-encoding");
+            }
+            None => return Reply::new(error(400, "invalid_request", "request body is not valid gzip", None)),
+        }
+    }
+    let write = matches!(request.method.as_str(), "PUT" | "DELETE") && request.path.starts_with("/v1/sync/sessions/");
+    let key = request.header("idempotency-key").filter(|_| write).map(str::to_owned);
+    let fingerprint = {
+        let body = request.json();
+        format!(
+            "{} {} {:?} {:?} {} {} {}",
+            request.method,
+            request.path,
+            request.header("if-match"),
+            request.header("if-none-match"),
+            session_sha256(&body["session"]),
+            body["trace_sha256"],
+            body["device_id"],
+        )
+    };
+    if let Some(key) = &key
+        && let Some(done) = state.remembered.get(key)
+    {
+        if done.fingerprint != fingerprint {
+            let reused = "this Idempotency-Key was already used for a different request";
+            return Reply::new(error(422, "idempotency_key_reused", reused, None));
+        }
+        let mut reply = Reply::new((done.status, done.body.clone()));
+        reply.headers.push(("idempotent-replayed", "true".to_owned()));
+        state.replays += 1;
+        return lose_or(reply, write, state);
+    }
+    let (status, body) = handle(&request, state, token);
+    if let Some(key) = key
+        && (200..300).contains(&status)
+    {
+        state.remembered.insert(key, Remembered { fingerprint, status, body: body.clone() });
+    }
+    let mut reply = Reply::new((status, body));
+    let accepts_gzip = request.header("accept-encoding").is_some_and(|value| value.contains("gzip"));
+    let download = request.method == "GET" && request.path.starts_with("/v1/sync/sessions/");
+    if accepts_gzip && download && status == 200 && reply.body.len() >= 1024 {
+        reply.body = gzip(&reply.body);
+        reply.headers.push(("content-encoding", "gzip".to_owned()));
+        state.gzipped_responses += 1;
+    }
+    lose_or(reply, write, state)
+}
+
+/// Drop the answer to a write while writes are being lost.
+fn lose_or(reply: Reply, write: bool, state: &mut State) -> Reply {
+    if write && state.lose_replies > 0 {
+        state.lose_replies -= 1;
+        return Reply { status: None, body: Vec::new(), headers: Vec::new() };
+    }
+    reply
+}
+
+fn gzip(bytes: &[u8]) -> Vec<u8> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    encoder.write_all(bytes).unwrap();
+    encoder.finish().unwrap()
+}
+
+fn gunzip(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut plain = Vec::new();
+    GzDecoder::new(bytes).read_to_end(&mut plain).ok()?;
+    Some(plain)
+}
+
 async fn serve(mut stream: TcpStream, state: Arc<Mutex<State>>, token: String) {
     let Some(request) = read(&mut stream).await else { return };
-    let (status, body) = {
+    let reply = {
         let mut state = state.lock().unwrap();
-        let reply = handle(&request, &mut state, &token);
+        let reply = respond(&request, &mut state, &token);
         state.seen.push(request.clone());
         reply
     };
+    let Some(status) = reply.status else { return };
     let reason = match status {
         200 => "OK",
         201 => "Created",
         202 => "Accepted",
+        400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
         409 => "Conflict",
         410 => "Gone",
+        415 => "Unsupported Media Type",
+        422 => "Unprocessable Entity",
         _ => "Error",
     };
+    let extra: String = reply.headers.iter().map(|(name, value)| format!("{name}: {value}\r\n")).collect();
     let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nabacus-protocol: 1\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-        body.len()
+        "HTTP/1.1 {status} {reason}\r\nabacus-protocol: 1\r\ncontent-type: application/json\r\n{extra}content-length: {}\r\nconnection: close\r\n\r\n",
+        reply.body.len()
     );
     let _ = stream.write_all(head.as_bytes()).await;
-    let _ = stream.write_all(&body).await;
+    let _ = stream.write_all(&reply.body).await;
     let _ = stream.shutdown().await;
 }
 
