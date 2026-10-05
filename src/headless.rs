@@ -9,19 +9,37 @@ use tokio::sync::mpsc;
 use crate::{
     activity::ActivityReporter,
     agent::{AgentEvent, ApprovalDecision, TurnOptions, run_turn},
-    config::{Config, OutputFormat},
+    config::{AbacusPaths, Config, OutputFormat},
     provider::Provider,
     ralph::{RalphLoop, RalphStatus},
     services::AgentServices,
     session::{Session, SessionState, SessionStore},
+    usage::UsageReporter,
 };
+
+/// How long a headless run waits on session sync at either end.
+const SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long the final usage report may hold up the exit.
+const USAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Download what changed on other devices. Called before the run reads the
+/// session it resumes, so it continues the newest copy: a pull after the read
+/// would have the run build on the older copy, and its upload at the end would
+/// replace the other device's turns. Bounded: a scripted run must not hang on
+/// an unreachable sync server.
+pub async fn pull_before_run(paths: &AbacusPaths) {
+    let credentials = crate::config::Credentials::load(paths).unwrap_or_default();
+    if crate::sync::is_configured(&credentials) {
+        let _ = tokio::time::timeout(SYNC_TIMEOUT, crate::sync::pull_changes(paths)).await;
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     config: Config,
     format: OutputFormat,
     messages: Vec<Value>,
-    mut session: Option<Session>,
+    session: Option<Session>,
     store: Option<SessionStore>,
     services: Arc<AgentServices>,
     loop_config: Option<RalphLoop>,
@@ -36,18 +54,11 @@ pub async fn run(
         .await?;
     let started = Instant::now();
     let activity_session = session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    if crate::sync::is_configured(&crate::config::Credentials::load(&config.paths).unwrap_or_default())
-        && let Ok(count) = crate::sync::pull_workspace(&config.paths, &config.workspace).await
-        && count > 0
-        && let (Some(current), Some(store)) = (session.as_ref(), store.as_ref())
-        && let Ok(updated) = store.load(&current.id.to_string())
-    {
-        session = Some(updated);
-    }
+    let credentials = crate::config::Credentials::load(&config.paths).unwrap_or_default();
     if let Some(reporter) = &reporter {
         reporter.report_start(&activity_session, &config.model).await;
     }
-    let heartbeat = reporter.as_ref().map(|reporter| reporter.heartbeat(activity_session.clone(), tokens));
+    let heartbeat = reporter.as_ref().map(|reporter| reporter.heartbeat(activity_session.clone(), tokens.clone()));
     let (events, mut receiver) = mpsc::unbounded_channel();
     let allow = Arc::new(AtomicBool::new(config.yes));
     // Keyed by the session id so promotion counts distinct sessions rather
@@ -73,6 +84,13 @@ pub async fn run(
         }
     }
     let session_id = session.as_ref().map(|session| session.id.to_string());
+    // Opened only now that a trace may have created the session, so the usage
+    // is filed under the id the session ends up with.
+    let usage = UsageReporter::new(&config.paths, &credentials, "headless");
+    if let Some(usage) = &usage {
+        usage.open_session(session_id.as_deref().unwrap_or(&activity_session), &config.model, tokens.clone());
+    }
+    let usage_task = usage.as_ref().map(UsageReporter::spawn_periodic);
     let trace = match (config.trace_enabled, session_id.as_deref()) {
         (true, Some(id)) => match crate::sft::TraceWriter::open(&config.paths.traces_dir, id) {
             Ok(writer) => Some(writer),
@@ -201,7 +219,10 @@ pub async fn run(
         let _ = task.await;
     }
 
-    let session_id = persist_session(
+    if let Some(task) = usage_task {
+        task.abort();
+    }
+    let saved = persist_session(
         session,
         store,
         PersistedRun {
@@ -213,7 +234,23 @@ pub async fn run(
             tokens_used: provider.tokens_used(),
             active_secs: started.elapsed().as_secs(),
         },
-    )?;
+    );
+    // Awaited, not spawned: the process exits right after, which would cancel
+    // a background upload. The two go out together so neither adds to the
+    // other's wait, and the usage is reported even when the save failed.
+    let upload = async {
+        if let Ok(Some(session)) = &saved {
+            let _ = tokio::time::timeout(SYNC_TIMEOUT, crate::sync::push_session(&config.paths, session)).await;
+        }
+    };
+    let report = async {
+        if let Some(usage) = &usage {
+            usage.finish(USAGE_TIMEOUT).await;
+        }
+    };
+    tokio::join!(upload, report);
+    let saved = saved?;
+    let session_id = saved.as_ref().map(|session| session.id.to_string());
     if let Err(error) = services
         .run_hooks(
             "session_end",
@@ -291,7 +328,7 @@ fn persist_session(
     mut session: Option<Session>,
     store: Option<SessionStore>,
     run: PersistedRun<'_>,
-) -> Result<Option<String>> {
+) -> Result<Option<Session>> {
     let Some(store) = store else {
         return Ok(None);
     };
@@ -306,10 +343,7 @@ fn persist_session(
     session_value.tokens_used = run.tokens_used;
     session_value.active_secs = session_value.active_secs.saturating_add(run.active_secs);
     store.save(&session_value)?;
-    if let Ok(paths) = crate::config::AbacusPaths::discover() {
-        crate::sync::spawn_session_sync(&paths, &session_value);
-    }
-    Ok(Some(session_value.id.to_string()))
+    Ok(Some(session_value))
 }
 
 fn turn_options(
@@ -387,7 +421,9 @@ mod tests {
             },
         )
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .id
+        .to_string();
 
         let loaded = store.load(&id[..8]).unwrap();
         assert_eq!(loaded.tokens_used, 150_000_000);
@@ -422,7 +458,9 @@ mod tests {
             },
         )
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .id
+        .to_string();
 
         let loaded = store.load(&id[..8]).unwrap();
         assert_eq!(loaded.tokens_used, 15_500);

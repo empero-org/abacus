@@ -182,6 +182,14 @@ pub(super) const SETTINGS: &[(&str, &[Setting])] = &[
         ],
     ),
     (
+        "REMOTE",
+        &[toggled(
+            ConfigKey::RemoteAutoShare,
+            "Auto-share sessions",
+            "While signed in to Abacus Sync, share each session live with your phone or browser once it has a prompt. /remote turns it off for one session.",
+        )],
+    ),
+    (
         "ADVANCED",
         &[toggled(
             ConfigKey::AdvancedToml,
@@ -305,6 +313,7 @@ impl App {
         let profile = self.settings.profiles.get(&profile_name).context("default profile no longer exists")?.clone();
         let prior_profile = self.config.profile.clone();
         let prior_key = self.config.api_key.clone();
+        let prior_model = self.config.model.clone();
         self.config.profile = profile_name.clone();
         // Roles are read before `model` moves out of the clone below. Only
         // explicit assignments travel: an unassigned role stays `None` so the
@@ -378,6 +387,12 @@ impl App {
         self.allow_mutations.store(always, std::sync::atomic::Ordering::Relaxed);
         if !self.settings.ui.vim_mode {
             self.mode = InputMode::Insert;
+        }
+        // What was spent so far counts for the model it was spent on.
+        if let Some(usage) = &self.usage
+            && prior_model != self.config.model
+        {
+            usage.note_model(&self.config.model);
         }
         let mut provider = Provider::with_tokens(&self.config, self.tokens.clone())?;
         // Same conversation, new configuration: keep the session id so a host
@@ -518,6 +533,15 @@ impl App {
             }
             ConfigKey::FeedbackEnabled => toggle(&mut self.settings.feedback.enabled),
             ConfigKey::FeedbackDiagnostics => toggle(&mut self.settings.feedback.include_diagnostics),
+            ConfigKey::RemoteAutoShare => {
+                toggle(&mut self.settings.remote.auto_share);
+                // Turning it on shares the current session now; turning it
+                // off leaves a live share alone — `/remote off` ends that.
+                if self.settings.remote.auto_share {
+                    self.remote_muted = false;
+                    self.maybe_auto_share();
+                }
+            }
             ConfigKey::AdvancedToml => {
                 self.open_raw_config();
                 return Ok(());
@@ -818,6 +842,7 @@ impl App {
             ConfigKey::FeedbackEnabled => on_off(self.settings.feedback.enabled),
             ConfigKey::FeedbackDiagnostics => on_off(self.settings.feedback.include_diagnostics),
             ConfigKey::FeedbackEndpoint => self.settings.feedback.endpoint.clone(),
+            ConfigKey::RemoteAutoShare => on_off(self.settings.remote.auto_share),
             ConfigKey::AdvancedToml => format!(
                 "{} skills · {} plugins · {} MCP servers",
                 self.settings.skills.paths.len(),

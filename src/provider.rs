@@ -165,6 +165,10 @@ impl Provider {
             // dead connection or a wedged server -- including on non-streaming
             // requests -- without punishing slow-but-alive ones.
             .read_timeout(Duration::from_secs(180))
+            // Sync enables reqwest's gzip feature for the whole crate. Never
+            // advertise it to a model endpoint: a compressing proxy buffers an
+            // event stream until a block fills, and tokens then arrive in lumps.
+            .no_gzip()
             .build()
             .context("could not create HTTP client")?;
         Ok(Self {
@@ -1315,7 +1319,7 @@ impl TokenLedger {
         self.cache_write.fetch_add(usage.cache_write, Ordering::Relaxed);
     }
 
-    fn record(&self, usage: &Usage) {
+    pub(crate) fn record(&self, usage: &Usage) {
         self.add_total(usage.total);
         self.input.fetch_add(usage.prompt, Ordering::Relaxed);
         self.output.fetch_add(usage.completion, Ordering::Relaxed);

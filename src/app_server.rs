@@ -28,7 +28,7 @@
 //! **stdout is the protocol.** Every diagnostic goes to stderr, or the frame
 //! stream is corrupt and the front end desynchronises.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -45,6 +45,7 @@ use crate::{
     provider::Provider,
     services::AgentServices,
     session::{Session, SessionState, SessionStore},
+    usage::UsageReporter,
 };
 
 /// Bumped when a frame's shape changes in a way a front end must notice.
@@ -55,6 +56,11 @@ pub const PROTOCOL_VERSION: u32 = 1;
 const METHOD_NOT_FOUND: i32 = -32601;
 const INVALID_PARAMS: i32 = -32602;
 const SERVER_ERROR: i32 = -32000;
+
+/// How long shutting down waits on the last upload and usage report. The front
+/// end has already gone; this only keeps the exit from hanging on a dead
+/// network.
+const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// Tools whose call is a shell command, and so maps onto the client's
 /// command-execution rendering rather than a generic function call.
@@ -168,6 +174,10 @@ struct App {
     pending_approvals: HashMap<String, oneshot::Sender<ApprovalDecision>>,
     pending_questions: HashMap<String, oneshot::Sender<UserAnswer>>,
     counter: u64,
+    /// Account-tied usage, present only while signed in to Abacus Sync.
+    usage: Option<UsageReporter>,
+    /// Sync problems already told to the front end.
+    sync_warned: Arc<std::sync::Mutex<HashSet<String>>>,
 }
 
 /// Run the server until stdin closes.
@@ -183,6 +193,8 @@ pub async fn run(
     let provider = Provider::with_tokens(&config, tokens.clone())?;
     let allow = Arc::new(AtomicBool::new(config.yes));
     let mode = config.mode.unwrap_or(AgentMode::Auto);
+    let credentials = crate::config::Credentials::load(&config.paths).unwrap_or_default();
+    let usage = UsageReporter::new(&config.paths, &credentials, "app-server");
     let mut app = App {
         thread: ThreadState::new(&config, session),
         config,
@@ -199,7 +211,21 @@ pub async fn run(
         pending_approvals: HashMap::new(),
         pending_questions: HashMap::new(),
         counter: 0,
+        usage,
+        sync_warned: Arc::default(),
     };
+    app.thread_opened();
+    let usage_task = app.usage.as_ref().map(UsageReporter::spawn_periodic);
+    if crate::sync::is_configured(&credentials) {
+        // Pull what changed on other devices and upload what an earlier exit
+        // left behind, without holding up the first request. The open thread
+        // is protected from being written over; a session pulled in now shows
+        // up in the next `thread/list`.
+        let paths = app.config.paths.clone();
+        tokio::spawn(async move {
+            let _ = crate::sync::reconcile(&paths).await;
+        });
+    }
 
     // One event channel for the process, not per turn: a turn's tail events can
     // land after the front end has already asked for the next one, and a
@@ -264,6 +290,10 @@ pub async fn run(
             }
         }
     }
+    if let Some(task) = usage_task {
+        task.abort();
+    }
+    app.close().await;
     Ok(())
 }
 
@@ -360,8 +390,10 @@ impl App {
             }
             "thread/start" => {
                 self.require_idle()?;
+                self.thread_closed();
                 self.thread = ThreadState::new(&self.config, None);
                 self.tokens.store_total(0);
+                self.thread_opened();
                 notify("thread/started", json!({"threadId": self.thread_id()}));
                 Ok(self.thread_snapshot())
             }
@@ -370,8 +402,10 @@ impl App {
                 let id = params["threadId"].as_str().ok_or_else(|| anyhow!("threadId required"))?;
                 let store = self.store.as_ref().ok_or_else(|| anyhow!("sessions off"))?;
                 let session = store.load(id)?;
+                self.thread_closed();
                 self.tokens.store_total(session.tokens_used);
                 self.thread = ThreadState::new(&self.config, Some(session));
+                self.thread_opened();
                 Ok(self.thread_snapshot())
             }
             "thread/name/set" => {
@@ -523,6 +557,11 @@ impl App {
             "model" => {
                 self.require_idle()?;
                 let model = value.as_str().ok_or_else(|| anyhow!("model must be a string"))?;
+                // What the old model spent so far is credited to it before the
+                // ledger starts counting for the new one.
+                if let Some(usage) = &self.usage {
+                    usage.note_model(model);
+                }
                 self.config.model = model.to_owned();
                 self.provider = Provider::with_tokens(&self.config, self.tokens.clone())?;
                 let model = model.to_owned();
@@ -795,6 +834,9 @@ impl App {
         let turn = self.turn_id.take().unwrap_or_default();
         self.persist();
         self.report_diff(&turn);
+        if let Some(usage) = &self.usage {
+            usage.spawn_report(false);
+        }
         notify(
             "thread/tokenUsage/updated",
             json!({
@@ -895,7 +937,80 @@ impl App {
             return;
         }
         self.thread.persisted = true;
-        crate::sync::spawn_session_sync(&self.config.paths, session);
+        self.sync_after_turn();
+    }
+
+    /// Upload the thread in the background. A conflict or a sign-in that no
+    /// longer works is told to the front end, since nothing else will: the
+    /// upload runs after the reply it belongs to, with no one waiting on it.
+    /// Other failures (offline, a busy server) retry on the next turn without
+    /// comment.
+    fn sync_after_turn(&self) {
+        let session = self.thread.session.clone();
+        let paths = self.config.paths.clone();
+        let warned = self.sync_warned.clone();
+        tokio::spawn(async move {
+            let problems = match crate::sync::sync_session(&paths, &session).await {
+                Ok(outcome) => outcome
+                    .conflicts
+                    .iter()
+                    .map(|conflict| {
+                        format!(
+                            "{conflict} also changed on another device; both copies are kept the next time Abacus opens"
+                        )
+                    })
+                    .collect(),
+                Err(error) if matches!(error.downcast_ref(), Some(crate::sync::SyncError::Unauthorized)) => {
+                    vec![
+                        "Session sync stopped: this device is signed out. Run `abacus sync login` to resume."
+                            .to_owned(),
+                    ]
+                }
+                Err(_) => Vec::new(),
+            };
+            for message in problems {
+                // Once per message: the same conflict would otherwise come back after every turn.
+                if warned.lock().is_ok_and(|mut seen| seen.insert(message.clone())) {
+                    notify("warning", json!({"message": message}));
+                }
+            }
+        });
+    }
+
+    /// Record the thread as open: sync must not write over it, and its
+    /// tokens are reported as a run of their own.
+    fn thread_opened(&self) {
+        crate::sync::session_opened(self.thread.session.id);
+        if let Some(usage) = &self.usage {
+            usage.open_session(&self.thread_id(), &self.config.model, self.tokens.clone());
+        }
+    }
+
+    fn thread_closed(&self) {
+        crate::sync::session_closed(self.thread.session.id);
+    }
+
+    /// Flush what the front end can no longer wait for: the thread's last
+    /// upload and the closing usage report, together and each bounded. The
+    /// thread is closed first, so what sync left alone while it was open is
+    /// settled before the upload (see [`crate::sync::settle_closed`]).
+    async fn close(&self) {
+        let upload = async {
+            let sync = async {
+                let _ = crate::sync::settle_closed(&self.config.paths, self.thread.session.id).await;
+                if self.thread.persisted {
+                    let _ = crate::sync::push_session(&self.config.paths, &self.thread.session).await;
+                }
+            };
+            let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, sync).await;
+        };
+        let report = async {
+            if let Some(usage) = &self.usage {
+                usage.finish(SHUTDOWN_TIMEOUT).await;
+            }
+        };
+        tokio::join!(upload, report);
+        self.thread_closed();
     }
 }
 

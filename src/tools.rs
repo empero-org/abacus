@@ -1419,8 +1419,11 @@ fn parse_args<T: for<'de> Deserialize<'de>>(arguments: &str) -> Result<T> {
     serde_json::from_str(arguments).context("invalid tool arguments")
 }
 
+/// What [`truncate`] leaves where it cut.
+pub(crate) const OUTPUT_TRUNCATED: &str = "\n… output truncated";
+
 fn truncate(value: String, max: usize) -> String {
-    crate::text::clip_bytes(&value, max, "\n… output truncated")
+    crate::text::clip_bytes(&value, max, OUTPUT_TRUNCATED)
 }
 
 fn unified_diff(path: &str, old: &str, new: &str) -> String {

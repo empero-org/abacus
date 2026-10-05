@@ -246,25 +246,34 @@ pub enum SyncCommand {
     },
     /// Remove the saved sync token
     Logout,
-    /// Show the current sync account
+    /// Show the account, this device, and what is waiting to sync
     Status,
     /// List sessions stored by the server
     Sessions,
-    /// Upload local sessions and their traces
+    /// Upload local sessions that changed since they last synced
     Push {
-        /// Upload one session ID or unique prefix (all local sessions by default)
+        /// Upload one session ID or unique prefix (every changed session by default)
         session: Option<String>,
         /// Replace a conflicting remote revision
         #[arg(long)]
         force: bool,
     },
-    /// Download remote sessions and required traces into local storage
+    /// Download sessions that changed on the server
     Pull {
-        /// Download one session ID (all remote sessions by default)
+        /// Download one session ID or prefix (everything that changed by default)
         session: Option<String>,
         /// Replace local sessions instead of preserving them as forks
         #[arg(long)]
         force: bool,
+    },
+    /// Print a single-use link that signs a phone into this account
+    Pair {
+        /// Open this session on the phone (ID or unique prefix)
+        #[arg(long)]
+        session: Option<String>,
+        /// Print only the URL
+        #[arg(long)]
+        url_only: bool,
     },
 }
 
@@ -575,6 +584,8 @@ pub struct Settings {
     pub search: crate::web::SearchSettings,
     #[serde(default)]
     pub trace: TraceSettings,
+    #[serde(default)]
+    pub remote: RemoteSettings,
 }
 
 impl Default for Settings {
@@ -593,6 +604,7 @@ impl Default for Settings {
             activity: ActivitySettings::default(),
             search: crate::web::SearchSettings::default(),
             trace: TraceSettings::default(),
+            remote: RemoteSettings::default(),
         }
     }
 }
@@ -1045,6 +1057,22 @@ impl Default for FeedbackSettings {
     }
 }
 
+/// Live sharing of interactive sessions through Abacus Sync.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteSettings {
+    /// Share every interactive session automatically once it has received its
+    /// first prompt, so it can be followed and steered from a phone. `/remote`
+    /// still turns it off for one session.
+    pub auto_share: bool,
+}
+
+impl Default for RemoteSettings {
+    fn default() -> Self {
+        Self { auto_share: true }
+    }
+}
+
 /// Anonymous session activity reporting (see [`crate::activity`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1165,6 +1193,53 @@ impl AbacusPaths {
         fs::create_dir_all(&self.sessions_dir).with_context(|| format!("could not create {}", self.root.display()))?;
         Ok(())
     }
+
+    /// A stable, anonymous per-install identifier, created on first use. It
+    /// names this machine to activity counting, the sync device registry and
+    /// remote control alike, so one install is one device everywhere.
+    pub fn install_id(&self) -> String {
+        let path = self.root.join("install_id");
+        let read = || {
+            fs::read_to_string(&path)
+                .ok()
+                .map(|existing| existing.trim().chars().take(100).collect::<String>())
+                .filter(|existing| !existing.is_empty())
+        };
+        if let Some(existing) = read() {
+            return existing;
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let _ = atomic_write(&path, id.as_bytes(), false);
+        // Another process may have created it first; whatever is on disk wins.
+        read().unwrap_or(id)
+    }
+
+    /// What this device last exchanged with the sync server (see
+    /// [`crate::sync_state`]).
+    pub fn sync_state_file(&self) -> PathBuf {
+        self.root.join("sync-state.json")
+    }
+}
+
+/// A name a person recognises in a device list: the host name, or "Abacus CLI"
+/// when the system will not say.
+pub fn device_name() -> String {
+    let host = ["HOSTNAME", "COMPUTERNAME"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok())
+        .or_else(|| fs::read_to_string("/proc/sys/kernel/hostname").ok())
+        .or_else(|| fs::read_to_string("/etc/hostname").ok())
+        .or_else(|| {
+            std::process::Command::new("hostname")
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+        })
+        .map(|host| host.trim().to_owned())
+        .filter(|host| !host.is_empty())
+        .unwrap_or_else(|| "Abacus CLI".to_owned());
+    host.chars().take(100).collect()
 }
 
 fn resolve_workspace(path: Option<&Path>) -> Result<PathBuf> {
@@ -1196,40 +1271,97 @@ pub fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) {
 }
 
 pub fn atomic_write(path: &Path, content: &[u8], private: bool) -> Result<()> {
+    // Unique per write, not just per process: sync writes from background
+    // threads, and two writes sharing a temporary file could tear each other.
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let parent = path.parent().context("path has no parent directory")?;
     fs::create_dir_all(parent)?;
     let temp = parent.join(format!(
-        ".{}.{}.tmp",
+        ".{}.{}.{}.tmp",
         path.file_name().and_then(|name| name.to_str()).unwrap_or("abacus"),
-        std::process::id()
+        std::process::id(),
+        WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
-    let mut file =
-        File::create(&temp).with_context(|| format!("could not create temporary file in {}", parent.display()))?;
-
-    #[cfg(unix)]
-    if private {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    let written = (|| -> Result<()> {
+        let mut file =
+            File::create(&temp).with_context(|| format!("could not create temporary file in {}", parent.display()))?;
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        let _ = private;
+        file.write_all(content)?;
+        file.sync_all()?;
+        drop(file);
+        // `rename` replaces an existing file in one step on Windows too.
+        // Removing it first would leave a moment with no file at all: a crash
+        // then loses it, and another process reading meanwhile finds nothing.
+        replace(&temp, path).with_context(|| format!("could not replace {}", path.display()))
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temp);
     }
-    let _ = private;
-
-    file.write_all(content)?;
-    file.sync_all()?;
-    drop(file);
-
-    #[cfg(windows)]
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
-    fs::rename(&temp, path).with_context(|| format!("could not replace {}", path.display()))?;
+    written?;
 
     #[cfg(unix)]
     File::open(parent)?.sync_all()?;
     Ok(())
 }
 
+/// Move `from` over `to`. On Windows the replace is refused while anything
+/// holds the target open without delete sharing (another writer finishing its
+/// own replace, a reader, an antivirus scan of the file just written), with
+/// "access denied" or a sharing violation. Those holds last milliseconds, so a
+/// few short retries turn a spurious failure into a slightly later success.
+fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        const ACCESS_DENIED: i32 = 5;
+        const SHARING_VIOLATION: i32 = 32;
+        let mut delay = std::time::Duration::from_millis(2);
+        for _ in 0..10 {
+            match fs::rename(from, to) {
+                Err(error) if matches!(error.raw_os_error(), Some(ACCESS_DENIED | SHARING_VIOLATION)) => {
+                    std::thread::sleep(delay);
+                    delay = (delay * 2).min(std::time::Duration::from_millis(100));
+                }
+                result => return result,
+            }
+        }
+    }
+    fs::rename(from, to)
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// Sync writes session files from background threads while the terminal
+    /// saves its own: writes to one file from several threads each land
+    /// whole, one after another, and leave no temporary file behind.
+    #[test]
+    fn concurrent_atomic_writes_land_whole() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let writers: Vec<_> = (0..8_u8)
+            .map(|writer| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let content = vec![b'a' + writer; 256 * 1024];
+                    for _ in 0..10 {
+                        super::atomic_write(&path, &content, true).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let content = std::fs::read(&path).unwrap();
+        assert_eq!(content.len(), 256 * 1024);
+        assert!(content.iter().all(|byte| *byte == content[0]), "one write, whole");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1, "no temporary files left");
+    }
 
     /// The pin is only meaningful if it reaches the request, and only safe if
     /// it stays off requests to endpoints that do not know the field.

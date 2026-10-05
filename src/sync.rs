@@ -1,30 +1,209 @@
+//! Abacus Sync: account sign-in, and keeping sessions and their traces in
+//! step across devices.
+//!
+//! * [`client`] speaks the server's REST API (typed errors, timeouts, retries).
+//! * [`engine`] pulls the change feed and pushes changed sessions.
+//! * [`crate::sync_state`] remembers what this device last exchanged.
+//!
+//! Front ends call [`reconcile`] / [`pull_changes`] when a session opens,
+//! [`push_session`] after a turn or when idle, and [`push_dirty`] on close.
+//! Every pass is incremental: an unchanged session costs one `stat`, an
+//! unchanged server costs one request.
+
+mod client;
+mod engine;
+
+use std::collections::BTreeMap;
 use std::io::{self, Write};
+use std::path::PathBuf;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use reqwest::{Client, StatusCode, header};
+use anyhow::{Context, Result, anyhow, bail};
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use serde_json::json;
-use sha2::{Digest, Sha256};
+use serde_json::{Value, json};
+use uuid::Uuid;
 
-use crate::{
-    config::{AbacusPaths, Credentials, SyncCommand, SyncCredentials},
-    session::{Session, SessionStore},
-};
+pub use client::{Account, ChangesPage, Pairing, Precondition, SessionMeta, SyncClient, SyncError, TicketResponse};
+pub use engine::{HeldUpdate, SyncOutcome};
 
-const PROTOCOL: &str = "1";
-pub const AUTO_PUSH_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+use crate::config::{AbacusPaths, Credentials, Settings, SyncCommand, SyncCredentials, device_name};
+use crate::session::{Session, SessionStore};
+use crate::sync_state::{Local, SyncState, inspect, is_placeholder_document, local_sessions};
+use client::{Retry, anonymous_client, check_server, decode};
+use engine::Engine;
+
+pub const AUTO_PUSH_IDLE: Duration = Duration::from_secs(60);
+
+/// One sync pass at a time per process: the open-time pull, the idle push and
+/// the close-time push would otherwise race each other for the same files.
+static SYNC_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// Sessions an interactive front end has open in this process. A pull never
+/// writes over one of these: the front end would save its in-memory copy over
+/// the download and the next push would quietly undo the other device's work.
+/// The newer revision is handed over in [`SyncOutcome::held`] instead.
+static OPEN_SESSIONS: Mutex<Vec<Uuid>> = Mutex::new(Vec::new());
+
+pub fn session_opened(id: Uuid) {
+    OPEN_SESSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(id);
+}
+
+pub fn session_closed(id: Uuid) {
+    let mut open = OPEN_SESSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(index) = open.iter().position(|candidate| *candidate == id) {
+        open.swap_remove(index);
+    }
+}
+
+pub(crate) fn is_open(id: &Uuid) -> bool {
+    OPEN_SESSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).contains(id)
+}
+
+pub fn is_configured(credentials: &Credentials) -> bool {
+    credentials.sync.is_some()
+}
+
+/// A session that has never received a prompt is not a session yet. The
+/// transcript always opens with the system prompt, so "empty" means no user
+/// message has ever been added.
+pub fn is_placeholder(session: &Session) -> bool {
+    session.title == "New session" && !session.messages.iter().any(|message| message["role"] == "user")
+}
+
+pub fn configured_client(paths: &AbacusPaths) -> Result<SyncClient> {
+    configured(&Credentials::load(paths)?, paths)
+}
+
+fn configured(credentials: &Credentials, paths: &AbacusPaths) -> Result<SyncClient> {
+    let credentials = credentials.sync.as_ref().context("sync is not configured; run `abacus sync login`")?;
+    Ok(SyncClient::new(credentials)?.with_home(paths))
+}
+
+enum Job {
+    Reconcile,
+    Pull,
+    PullOne(Uuid),
+    PushAll,
+    PushOne(Uuid),
+}
+
+/// Run one automatic pass. Signed out is not an error: there is nothing to do.
+async fn run(paths: &AbacusPaths, job: Job) -> Result<SyncOutcome> {
+    let credentials = Credentials::load(paths)?;
+    if credentials.sync.is_none() {
+        return Ok(SyncOutcome::default());
+    }
+    let client = configured(&credentials, paths)?;
+    let _guard = SYNC_LOCK.lock().await;
+    let state = SyncState::load_for(paths, &client.server, &client.email);
+    let mut engine = Engine::new(&client, paths, state);
+    let result = match job {
+        Job::Reconcile => match engine.pull(false).await {
+            Ok(()) => engine.push(None).await,
+            error => error,
+        },
+        Job::Pull => engine.pull(false).await,
+        Job::PullOne(id) => engine.pull_one(id).await,
+        Job::PushAll => engine.push(None).await,
+        Job::PushOne(id) => engine.push(Some(id)).await,
+    };
+    Ok(engine.finish(result)?)
+}
+
+/// Download what changed on the server since the last pull.
+pub async fn pull_changes(paths: &AbacusPaths) -> Result<SyncOutcome> {
+    run(paths, Job::Pull).await
+}
+
+/// Upload every local session that changed since it last synced.
+pub async fn push_dirty(paths: &AbacusPaths) -> Result<SyncOutcome> {
+    run(paths, Job::PushAll).await
+}
+
+/// [`pull_changes`], then [`push_dirty`]: what a front end does when it opens,
+/// so uploads a previous close could not finish go out too.
+pub async fn reconcile(paths: &AbacusPaths) -> Result<SyncOutcome> {
+    run(paths, Job::Reconcile).await
+}
+
+/// Close `id` in this process and settle what sync had to leave alone while it
+/// was open: a newer revision from another device, a refused upload, or a
+/// delete. Settled as any pull settles it — when both sides changed, the other
+/// device's revision becomes the session and this copy is kept as a fork. A
+/// front end calls it when it leaves a session for good (on exit): a session
+/// resumed at every start is open at every pull, and would otherwise never be
+/// settled. Costs one state read when nothing is waiting.
+pub async fn settle_closed(paths: &AbacusPaths, id: Uuid) -> Result<SyncOutcome> {
+    session_closed(id);
+    let waiting = SyncState::load(paths).record(&id).is_some_and(|record| record.pending() || record.deleted);
+    if !waiting {
+        return Ok(SyncOutcome::default());
+    }
+    run(paths, Job::PullOne(id)).await
+}
+
+/// Upload one session if it changed since it last synced, and say what
+/// happened (a refused upload shows up in [`SyncOutcome::conflicts`]).
+pub async fn sync_session(paths: &AbacusPaths, session: &Session) -> Result<SyncOutcome> {
+    if is_placeholder(session) || !SessionStore::new(paths, session.workspace.clone()).path(session.id).exists() {
+        return Ok(SyncOutcome::default());
+    }
+    run(paths, Job::PushOne(session.id)).await
+}
+
+/// Upload one session if it changed since it last synced.
+pub async fn push_session(paths: &AbacusPaths, session: &Session) -> Result<()> {
+    let outcome = sync_session(paths, session).await?;
+    match outcome.errors.into_iter().next() {
+        Some(error) => Err(anyhow!(error)),
+        None => Ok(()),
+    }
+}
+
+/// [`push_session`] in the background, best effort.
+pub fn spawn_session_sync(paths: &AbacusPaths, session: &Session) {
+    let paths = paths.clone();
+    let session = session.clone();
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(async move {
+            let _ = push_session(&paths, &session).await;
+        });
+    }
+}
+
+/// Install a newer revision of a session this process has open, provided the
+/// open copy has not changed since it last synced, and return it as loaded
+/// from disk. `Ok(None)` means it has changed; the next sync resolves that as
+/// a conflict, keeping both.
+pub fn accept_held(paths: &AbacusPaths, update: HeldUpdate) -> Result<Option<Session>> {
+    let Some(sync) = Credentials::load(paths)?.sync else {
+        return Ok(None);
+    };
+    let workspace = Session::deserialize(&update.document).context("unreadable session")?.workspace;
+    let mut state = SyncState::load_for(paths, &sync.server, &sync.email);
+    let Some(id) = engine::accept(paths, &mut state, update)? else {
+        return Ok(None);
+    };
+    state.save()?;
+    SessionStore::new(paths, workspace).load(&id.to_string()).map(Some)
+}
+
+#[deprecated(note = "use `pull_changes`, which downloads only what changed")]
+pub async fn pull_workspace(paths: &AbacusPaths, _workspace: &std::path::Path) -> Result<usize> {
+    Ok(pull_changes(paths).await?.pulled)
+}
+
+#[deprecated(note = "use `push_dirty`")]
+pub async fn push_all_updated_local(paths: &AbacusPaths) -> Result<usize> {
+    Ok(push_dirty(paths).await?.pushed)
+}
 
 #[derive(Debug, Deserialize)]
 struct LoginResponse {
     access_token: String,
     user: Account,
-}
-
-#[derive(Debug, Deserialize)]
-struct Account {
-    email: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,102 +215,34 @@ struct DeviceStart {
     interval: u64,
 }
 
-#[derive(Debug, Deserialize)]
-struct SessionList {
-    items: Vec<RemoteSession>,
+/// Who is signing in, so the account's device list can name this machine and
+/// usage can be tied to it.
+fn identity(paths: &AbacusPaths) -> Value {
+    json!({
+        "device_name": device_name(),
+        "install_id": paths.install_id(),
+        "client": {
+            "kind": "cli",
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "app_version": env!("CARGO_PKG_VERSION"),
+        },
+    })
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct RemoteSession {
-    pub(crate) id: String,
-    pub(crate) title: String,
-    pub(crate) model: String,
-    pub(crate) updated_at: String,
-    pub(crate) revision: u64,
-    #[serde(default)]
-    pub(crate) remote_online: bool,
+fn with_identity(paths: &AbacusPaths, mut body: Value) -> Value {
+    if let (Some(body), Value::Object(identity)) = (body.as_object_mut(), identity(paths)) {
+        body.extend(identity);
+    }
+    body
 }
 
-#[derive(Debug, Deserialize)]
-struct PutResponse {
-    meta: RemoteSession,
-}
-
-#[derive(Clone)]
-pub struct SyncClient {
-    http: Client,
-    server: String,
-    token: String,
-}
-
-impl SyncClient {
-    pub fn new(credentials: &SyncCredentials) -> Result<Self> {
-        let server = credentials.server.trim_end_matches('/').to_owned();
-        let url = reqwest::Url::parse(&server).context("sync server is not a valid URL")?;
-        if !matches!(url.scheme(), "http" | "https") {
-            bail!("sync server must use HTTP or HTTPS");
-        }
-        Ok(Self {
-            http: Client::builder().user_agent(concat!("abacus-agent/", env!("CARGO_PKG_VERSION"))).build()?,
-            server,
-            token: credentials.token.clone(),
-        })
-    }
-
-    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        self.http
-            .request(method, format!("{}{}", self.server, path))
-            .bearer_auth(&self.token)
-            .header("Abacus-Protocol", PROTOCOL)
-            .header(header::ACCEPT, "application/json")
-    }
-
-    async fn account(&self) -> Result<Account> {
-        decode(self.request(reqwest::Method::GET, "/v1/auth/me").send().await?).await
-    }
-
-    pub(crate) async fn sessions(&self) -> Result<Vec<RemoteSession>> {
-        let response: SessionList =
-            decode(self.request(reqwest::Method::GET, "/v1/sync/sessions").send().await?).await?;
-        Ok(response.items)
-    }
-
-    async fn revision(&self, id: &str) -> Result<Option<u64>> {
-        Ok(self.sessions().await?.into_iter().find(|item| item.id == id).map(|item| item.revision))
-    }
-
-    pub async fn push(&self, session: &Session, trace: &[u8], force: bool) -> Result<u64> {
-        let revision = self.revision(&session.id.to_string()).await?;
-        if revision.is_some() && !force {
-            bail!(
-                "remote session {} already exists; use --force to replace revision {}",
-                session.id,
-                revision.unwrap_or_default()
-            );
-        }
-        self.push_at_revision(session, trace, revision).await
-    }
-
-    async fn push_at_revision(&self, session: &Session, trace: &[u8], revision: Option<u64>) -> Result<u64> {
-        let digest = format!("{:x}", Sha256::digest(trace));
-        let body = json!({
-            "session": session,
-            "trace_base64": STANDARD.encode(trace),
-            "trace_sha256": digest,
-            "device_id": device_id(),
-        });
-        let mut request = self.request(reqwest::Method::PUT, &format!("/v1/sync/sessions/{}", session.id));
-        request = if let Some(revision) = revision {
-            request.header(header::IF_MATCH, format!("\"{revision}\""))
-        } else {
-            request.header(header::IF_NONE_MATCH, "*")
-        };
-        let response: PutResponse = decode(request.json(&body).send().await?).await?;
-        Ok(response.meta.revision)
-    }
-}
-
-async fn password_login_flow(server: &str, email: Option<String>, password: Option<String>) -> Result<LoginResponse> {
+async fn password_login_flow(
+    paths: &AbacusPaths,
+    server: &str,
+    email: Option<String>,
+    password: Option<String>,
+) -> Result<LoginResponse> {
     let email = match email {
         Some(value) => value,
         None => prompt("Email: ")?,
@@ -142,19 +253,19 @@ async fn password_login_flow(server: &str, email: Option<String>, password: Opti
     };
     let response = anonymous_client()?
         .post(format!("{server}/v1/auth/login"))
-        .header("Abacus-Protocol", PROTOCOL)
-        .json(&json!({"email": email, "password": password, "device_name": device_id()}))
+        .header("Abacus-Protocol", client::PROTOCOL)
+        .json(&with_identity(paths, json!({"email": email, "password": password})))
         .send()
         .await?;
     decode(response).await
 }
 
-async fn device_login_flow(server: &str) -> Result<LoginResponse> {
+async fn device_login_flow(paths: &AbacusPaths, server: &str) -> Result<LoginResponse> {
     let start: DeviceStart = decode(
         anonymous_client()?
             .post(format!("{server}/v1/auth/device"))
-            .header("Abacus-Protocol", PROTOCOL)
-            .json(&json!({"device_name": device_id()}))
+            .header("Abacus-Protocol", client::PROTOCOL)
+            .json(&identity(paths))
             .send()
             .await?,
     )
@@ -175,16 +286,14 @@ async fn device_login_flow(server: &str) -> Result<LoginResponse> {
         tokio::time::sleep(interval).await;
         let response = anonymous_client()?
             .post(format!("{server}/v1/auth/device/token"))
-            .header("Abacus-Protocol", PROTOCOL)
+            .header("Abacus-Protocol", client::PROTOCOL)
             .json(&json!({"device_code": start.device_code}))
             .send()
             .await?;
         match response.status() {
-            StatusCode::OK => return decode(response).await,
-            StatusCode::PRECONDITION_REQUIRED => continue,
-            StatusCode::TOO_MANY_REQUESTS => {
-                interval += Duration::from_secs(1);
-            }
+            reqwest::StatusCode::OK => return decode(response).await,
+            reqwest::StatusCode::PRECONDITION_REQUIRED => continue,
+            reqwest::StatusCode::TOO_MANY_REQUESTS => interval += Duration::from_secs(1),
             other => {
                 let detail = response.text().await.unwrap_or_default();
                 bail!("sync server returned {other}: {}", detail.chars().take(1000).collect::<String>());
@@ -193,101 +302,314 @@ async fn device_login_flow(server: &str) -> Result<LoginResponse> {
     }
 }
 
-fn anonymous_client() -> Result<Client> {
-    Ok(Client::builder().user_agent(concat!("abacus-agent/", env!("CARGO_PKG_VERSION"))).build()?)
-}
-
-async fn decode<T: for<'de> Deserialize<'de>>(response: reqwest::Response) -> Result<T> {
-    let status = response.status();
-    if response.headers().get("Abacus-Protocol").and_then(|value| value.to_str().ok()) != Some(PROTOCOL) {
-        bail!("sync server did not confirm Abacus protocol version {PROTOCOL}");
-    }
-    let body = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        let detail: String = body.chars().take(1000).collect();
-        bail!("sync server returned {status}: {detail}");
-    }
-    serde_json::from_str(&body).context("sync server returned invalid JSON")
-}
-
-pub async fn handle(action: SyncCommand, paths: &AbacusPaths, workspace: std::path::PathBuf) -> Result<()> {
+pub async fn handle(action: SyncCommand, paths: &AbacusPaths, _workspace: PathBuf) -> Result<()> {
     let mut credentials = Credentials::load(paths)?;
     match action {
         SyncCommand::Login { server, email, password, password_login } => {
             let server = server.trim_end_matches('/').to_owned();
+            // Before a password or a code is sent anywhere.
+            check_server(&server)?;
             let login = if password_login || password.is_some() {
-                password_login_flow(&server, email, password).await?
+                password_login_flow(paths, &server, email, password).await?
             } else {
-                device_login_flow(&server).await?
+                device_login_flow(paths, &server).await?
             };
             credentials.sync =
                 Some(SyncCredentials { server, token: login.access_token, email: login.user.email.clone() });
             credentials.save(paths)?;
-            println!("Signed in as {}. Sessions now sync automatically across devices.", login.user.email);
+            println!(
+                "Signed in as {} on {}. Sessions now sync automatically across devices.",
+                login.user.email,
+                device_name()
+            );
         }
         SyncCommand::Logout => {
             credentials.sync = None;
             credentials.save(paths)?;
             println!("Signed out of session sync.");
         }
-        SyncCommand::Status => {
-            let client = configured(&credentials)?;
-            let account = client.account().await?;
-            println!("Signed in as {} at {}", account.email, client.server);
-        }
-        SyncCommand::Sessions => {
-            for session in configured(&credentials)?.sessions().await? {
-                let online = if session.remote_online { " remote" } else { "" };
-                println!(
-                    "{}\t{}\t{}\t{}\tr{}{}",
-                    &session.id[..session.id.len().min(8)],
-                    session.title,
-                    session.model,
-                    session.updated_at,
-                    session.revision,
-                    online
-                );
-            }
-        }
+        SyncCommand::Status => print_status(paths, &credentials).await?,
+        SyncCommand::Sessions => print_sessions(paths, &credentials).await?,
         SyncCommand::Push { session, force } => {
-            let client = configured(&credentials)?;
-            let store = SessionStore::new(paths, workspace);
-            let sessions = if let Some(id) = session {
-                vec![store.load(&id)?]
-            } else {
-                store
-                    .list()?
-                    .into_iter()
-                    .map(|summary| store.load(&summary.id.to_string()))
-                    .collect::<Result<Vec<_>>>()?
-            };
-            for session in sessions {
-                let trace_path = paths.traces_dir.join(format!("{}.jsonl", session.id));
-                let trace = std::fs::read(&trace_path).unwrap_or_default();
-                let revision = client.push(&session, &trace, force).await?;
-                println!("Synced {} ({}) at revision {revision}", session.title, session.id);
-            }
+            let client = configured(&credentials, paths)?.with_retry(Retry::MANUAL);
+            let only = session.as_deref().map(|prefix| resolve_local(paths, prefix)).transpose()?;
+            let _guard = SYNC_LOCK.lock().await;
+            let state = SyncState::load_for(paths, &client.server, &client.email);
+            let mut engine = Engine::new(&client, paths, state).manual(force);
+            let result = engine.push(only).await;
+            print_outcome(&engine.finish(result)?, "Nothing to upload: every local session is in sync.")?;
         }
         SyncCommand::Pull { session, force } => {
-            let client = configured(&credentials)?;
-            let ids = if let Some(id) = session {
-                vec![id]
-            } else {
-                client.sessions().await?.into_iter().map(|item| item.id).collect()
+            let client = configured(&credentials, paths)?.with_retry(Retry::MANUAL);
+            let only = match session.as_deref() {
+                Some(prefix) => Some(resolve_remote(&client, prefix).await?),
+                None => None,
             };
-            for id in ids {
-                let (session, trace) = client.pull(&id).await?;
-                install_pulled(paths, session.clone(), &trace, force)?;
-                println!("Downloaded {} ({})", session.title, session.id);
+            let _guard = SYNC_LOCK.lock().await;
+            let state = SyncState::load_for(paths, &client.server, &client.email);
+            let mut engine = Engine::new(&client, paths, state).manual(force);
+            // A command re-reads the whole feed: one listing, and nothing
+            // already here is downloaded again.
+            let result = match only {
+                Some(id) => engine.pull_one(id).await,
+                None => engine.pull(true).await,
+            };
+            print_outcome(&engine.finish(result)?, "Nothing to download: this device has every session.")?;
+        }
+        SyncCommand::Pair { session, url_only } => {
+            let client = configured(&credentials, paths)?.with_retry(Retry::MANUAL);
+            let session = match session.as_deref() {
+                Some(prefix) => Some(resolve_remote(&client, prefix).await?.to_string()),
+                None => None,
+            };
+            let pairing = match client.pairing_url(session.as_deref()).await {
+                Err(SyncError::Gone) => bail!("{} does not offer phone pairing yet", client.server),
+                pairing => pairing?,
+            };
+            if url_only {
+                println!("{}", pairing.pairing_url);
+            } else {
+                println!("Open this link on your phone to sign in to {}:", client.server);
+                print!("{}", crate::remote::qr::render(&pairing.pairing_url));
+                println!();
+                println!("  {}", pairing.pairing_url);
+                println!();
+                let minutes = pairing.expires_in.div_ceil(60).max(1);
+                println!(
+                    "It works once and expires in {minutes} minute{}. Anyone with it can use your account until then.",
+                    if minutes == 1 { "" } else { "s" }
+                );
             }
         }
     }
     Ok(())
 }
 
-fn configured(credentials: &Credentials) -> Result<SyncClient> {
-    let credentials = credentials.sync.as_ref().context("sync is not configured; run `abacus sync login`")?;
-    SyncClient::new(credentials)
+/// What a sync command did, one line per session. An error or an unresolved
+/// conflict makes the command fail, so scripts notice what did not sync.
+fn print_outcome(outcome: &SyncOutcome, nothing: &str) -> Result<()> {
+    for line in &outcome.lines {
+        println!("{line}");
+    }
+    for error in &outcome.errors {
+        eprintln!("error: {error}");
+    }
+    if outcome.lines.is_empty() && outcome.errors.is_empty() {
+        println!("{nothing}");
+    }
+    match outcome.errors.len() + outcome.conflicts.len() {
+        0 => Ok(()),
+        count => bail!("{} could not be synced", plural(count, "session")),
+    }
+}
+
+/// A local session by id or unique prefix, in any workspace.
+fn resolve_local(paths: &AbacusPaths, prefix: &str) -> Result<Uuid> {
+    let matches =
+        local_sessions(paths).into_keys().filter(|id| id.to_string().starts_with(prefix.trim())).collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => bail!("no local session matches `{prefix}`"),
+        [id] => Ok(*id),
+        _ => bail!("session prefix `{prefix}` is ambiguous"),
+    }
+}
+
+/// A server session by id or unique prefix.
+async fn resolve_remote(client: &SyncClient, prefix: &str) -> Result<Uuid> {
+    if let Ok(id) = Uuid::parse_str(prefix.trim()) {
+        return Ok(id);
+    }
+    let matches = client
+        .sessions()
+        .await?
+        .into_iter()
+        .filter(|meta| meta.id.starts_with(prefix.trim()))
+        .filter_map(|meta| Uuid::parse_str(&meta.id).ok())
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => bail!("no session on the server matches `{prefix}`"),
+        [id] => Ok(*id),
+        _ => bail!("session prefix `{prefix}` is ambiguous"),
+    }
+}
+
+async fn print_status(paths: &AbacusPaths, credentials: &Credentials) -> Result<()> {
+    let Some(sync) = &credentials.sync else {
+        println!("Not signed in. Run `abacus sync login` to sync sessions across devices.");
+        return Ok(());
+    };
+    let client = configured(credentials, paths)?;
+    let (account, shared) = match client.account().await {
+        Ok(account) => {
+            let shared = client.sessions().await.map(|items| items.iter().filter(|meta| meta.remote_online).count());
+            (format!("{}  ({})", account.email, client.server), shared.ok())
+        }
+        Err(SyncError::Unauthorized) => {
+            (format!("{}  ({}) — sign-in expired; run `abacus sync login`", sync.email, client.server), None)
+        }
+        Err(error) => (format!("{}  ({}) — {error}", sync.email, client.server), None),
+    };
+    let state = SyncState::load_for(paths, &client.server, &client.email);
+    let install_id = paths.install_id();
+    // By characters: the file is the user's to edit, and may hold any text.
+    let characters: Vec<char> = install_id.chars().collect();
+    let short_install = match characters.len() {
+        0..=8 => install_id.clone(),
+        count => format!(
+            "{}…{}",
+            characters[..4].iter().collect::<String>(),
+            characters[count - 3..].iter().collect::<String>()
+        ),
+    };
+    println!("Account      {account}");
+    println!(
+        "Device       {} · install {short_install} · abacus {} {}/{}",
+        device_name(),
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    println!(
+        "Sync         cursor {} · last pull {} · last push {}",
+        state.cursor,
+        ago(state.last_pull_at),
+        ago(state.last_push_at)
+    );
+
+    let mut counts = BTreeMap::<&str, usize>::new();
+    let local = local_sessions(paths);
+    for entry in local.values() {
+        let record = state.record(&entry.id);
+        if let Some(record) = record {
+            if record.deleted {
+                *counts.entry("deleted").or_default() += 1;
+                continue;
+            }
+            if record.conflict {
+                *counts.entry("conflicts").or_default() += 1;
+            }
+            if record.behind.is_some() {
+                *counts.entry("behind").or_default() += 1;
+            }
+            if record.rejected.is_some() {
+                *counts.entry("refused").or_default() += 1;
+            }
+        }
+        match inspect(entry, record) {
+            Ok(Local::Clean(_)) => *counts.entry("synced").or_default() += 1,
+            Ok(Local::Dirty(_)) => *counts.entry("dirty").or_default() += 1,
+            Ok(Local::Untracked(snapshot)) if is_placeholder_document(&snapshot.document) => {
+                *counts.entry("placeholders").or_default() += 1
+            }
+            Ok(Local::Untracked(_)) => *counts.entry("dirty").or_default() += 1,
+            Err(_) => *counts.entry("unreadable").or_default() += 1,
+        }
+    }
+    let count = |key: &str| counts.get(key).copied().unwrap_or(0);
+    let mut line = format!(
+        "{} · {} dirty · {}",
+        plural(local.len() - count("placeholders"), "session"),
+        count("dirty"),
+        plural(count("conflicts"), "conflict")
+    );
+    for (key, label) in [
+        ("behind", "newer on the server"),
+        ("deleted", "deleted elsewhere, waiting to settle"),
+        ("refused", "refused by the server"),
+        ("unreadable", "unreadable"),
+    ] {
+        if count(key) > 0 {
+            line.push_str(&format!(" · {} {label}", count(key)));
+        }
+    }
+    println!("Local        {line}");
+    let auto_share = Settings::load(paths).map(|settings| settings.remote.auto_share).unwrap_or(true);
+    let shared = shared.map_or_else(String::new, |shared| format!(" · {} shared now", plural(shared, "session")));
+    println!("Remote       auto-share {}{shared}", if auto_share { "on" } else { "off" });
+    if count("conflicts") > 0 {
+        println!();
+        println!(
+            "`abacus sync pull` resolves conflicts by keeping both copies; `abacus sync push --force` keeps this device's."
+        );
+    }
+    Ok(())
+}
+
+async fn print_sessions(paths: &AbacusPaths, credentials: &Credentials) -> Result<()> {
+    let client = configured(credentials, paths)?;
+    let mut remote = client.sessions().await?;
+    if remote.is_empty() {
+        println!("No sessions on the server yet.");
+        return Ok(());
+    }
+    remote.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let state = SyncState::load_for(paths, &client.server, &client.email);
+    let local = local_sessions(paths);
+    println!("{:<8}  {:>4}  {:<16}  {:>8}  {:<12}  TITLE", "ID", "REV", "UPDATED", "SIZE", "THIS DEVICE");
+    for meta in &remote {
+        let here = Uuid::parse_str(&meta.id).ok().map_or("—", |id| {
+            let record = state.record(&id);
+            match (local.get(&id), record) {
+                (None, _) => "not here",
+                (Some(_), Some(record)) if record.conflict => "conflict",
+                (Some(entry), Some(record)) if record.revision == Some(meta.revision) => {
+                    match inspect(entry, Some(record)) {
+                        Ok(Local::Clean(_)) => "in sync",
+                        _ => "changed here",
+                    }
+                }
+                (Some(_), _) => "behind",
+            }
+        });
+        let live = if meta.remote_online { "  · live" } else { "" };
+        println!(
+            "{:<8}  {:>4}  {:<16}  {:>8}  {:<12}  {}{live}",
+            meta.id.chars().take(8).collect::<String>(),
+            meta.revision,
+            local_time(&meta.updated_at),
+            human_size(meta.size_bytes),
+            here,
+            crate::text::clip(&meta.title, 60, "…"),
+        );
+    }
+    Ok(())
+}
+
+fn plural(count: usize, noun: &str) -> String {
+    format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
+}
+
+fn ago(time: Option<DateTime<Utc>>) -> String {
+    let Some(time) = time else {
+        return "never".to_owned();
+    };
+    let seconds = (Utc::now() - time).num_seconds().max(0);
+    match seconds {
+        0..60 => format!("{seconds} s ago"),
+        60..3600 => format!("{} min ago", seconds / 60),
+        3600..86400 => format!("{} h ago", seconds / 3600),
+        _ => format!("{} d ago", seconds / 86400),
+    }
+}
+
+/// A server timestamp in local time. Older servers on SQLite send naive
+/// timestamps, which are UTC.
+fn local_time(value: &str) -> String {
+    let parsed = DateTime::parse_from_rfc3339(value)
+        .map(|time| time.with_timezone(&Utc))
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f").map(|naive| naive.and_utc()));
+    match parsed {
+        Ok(time) => time.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string(),
+        Err(_) => crate::text::clip(value, 16, ""),
+    }
+}
+
+fn human_size(bytes: u64) -> String {
+    match bytes {
+        0..1024 => format!("{bytes} B"),
+        1024..1_048_576 => format!("{:.1} KB", bytes as f64 / 1024.0),
+        _ => format!("{:.1} MB", bytes as f64 / 1_048_576.0),
+    }
 }
 
 fn prompt(label: &str) -> Result<String> {
@@ -313,135 +635,6 @@ fn prompt_password() -> Result<String> {
         println!();
     }
     Ok(value.trim_end().to_owned())
-}
-
-fn device_id() -> String {
-    std::env::var("HOSTNAME").or_else(|_| std::env::var("COMPUTERNAME")).unwrap_or_else(|_| "Abacus CLI".to_owned())
-}
-
-pub fn is_configured(credentials: &Credentials) -> bool {
-    credentials.sync.is_some()
-}
-
-pub fn spawn_session_sync(paths: &AbacusPaths, session: &Session) {
-    let paths = paths.clone();
-    let session = session.clone();
-    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-        runtime.spawn(async move {
-            let _ = push_session_best_effort(&paths, &session).await;
-        });
-    }
-}
-
-pub async fn push_all_updated_local(paths: &AbacusPaths) -> Result<usize> {
-    push_all_updated_local_inner(paths, false).await
-}
-
-async fn push_all_updated_local_inner(paths: &AbacusPaths, force: bool) -> Result<usize> {
-    let Some(client) = optional_client(paths)? else {
-        return Ok(0);
-    };
-    let base = &paths.sessions_dir;
-    if !base.exists() {
-        return Ok(0);
-    }
-    let mut pushed = 0;
-    for workspace_dir in std::fs::read_dir(base)? {
-        let workspace_dir = workspace_dir?;
-        let directory = workspace_dir.path();
-        if !directory.is_dir() {
-            continue;
-        }
-        for entry in std::fs::read_dir(&directory)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("json") {
-                continue;
-            }
-            let Ok(content) = std::fs::read(&path) else {
-                continue;
-            };
-            let Ok(session) = serde_json::from_slice::<Session>(&content) else {
-                continue;
-            };
-            if !force && is_placeholder(&session) {
-                continue;
-            }
-            let trace = std::fs::read(paths.traces_dir.join(format!("{}.jsonl", session.id))).unwrap_or_default();
-            let revision = client.revision(&session.id.to_string()).await.ok().flatten();
-            let result = if force {
-                client.push(&session, &trace, true).await
-            } else {
-                client.push_at_revision(&session, &trace, revision).await
-            };
-            match result {
-                Ok(_) => pushed += 1,
-                Err(error) => {
-                    let message = format!("{error:#}");
-                    if message.contains("409") || message.contains("conflict") {
-                        eprintln!("sync push conflict for {}: use `abacus sync push --force`", session.id);
-                    }
-                }
-            }
-        }
-    }
-    Ok(pushed)
-}
-
-pub async fn pull_workspace(
-    paths: &AbacusPaths,
-    // Kept for call-site symmetry with the per-workspace API; pulls are global
-    // so every device sees every session regardless of where it was started.
-    _workspace: &std::path::Path,
-) -> Result<usize> {
-    let Some(client) = optional_client(paths)? else {
-        return Ok(0);
-    };
-    let mut pulled = 0;
-    for remote in client.sessions().await? {
-        let (session, trace) = client.pull(&remote.id).await?;
-        if is_placeholder(&session) {
-            // Screens that were opened but never used are noise on every
-            // device; retire them from the server instead of reinstalling.
-            let _ = client.delete_session(&remote.id, remote.revision).await;
-            continue;
-        }
-        install_pulled(paths, session, &trace, true)?;
-        pulled += 1;
-    }
-    Ok(pulled)
-}
-
-fn optional_client(paths: &AbacusPaths) -> Result<Option<SyncClient>> {
-    let credentials = Credentials::load(paths)?;
-    credentials.sync.as_ref().map(SyncClient::new).transpose()
-}
-
-async fn push_session_best_effort(paths: &AbacusPaths, session: &Session) -> Result<()> {
-    let Some(client) = optional_client(paths)? else {
-        return Ok(());
-    };
-    let _ = push_one(&client, paths, session).await;
-    Ok(())
-}
-
-pub fn is_placeholder(session: &Session) -> bool {
-    // A session that has never received a prompt is not a session yet. The
-    // transcript always opens with the system prompt, so "empty" means no user
-    // message has ever been added.
-    session.title == "New session" && !session.messages.iter().any(|message| message["role"] == "user")
-}
-
-async fn push_one(client: &SyncClient, paths: &AbacusPaths, session: &Session) -> Result<u64> {
-    if is_placeholder(session) {
-        let revision = client.revision(&session.id.to_string()).await.ok().flatten();
-        return Ok(revision.unwrap_or_default());
-    }
-    let trace = std::fs::read(paths.traces_dir.join(format!("{}.jsonl", session.id))).unwrap_or_default();
-    // Read immediately before the conditional write. A concurrent writer still
-    // produces a conflict; automatic sync never retries by overwriting it.
-    let revision = client.revision(&session.id.to_string()).await.ok().flatten();
-    client.push_at_revision(session, &trace, revision).await
 }
 
 #[cfg(test)]
@@ -472,93 +665,36 @@ mod tests {
         assert!(is_configured(&credentials));
         assert_eq!(AUTO_PUSH_IDLE, std::time::Duration::from_secs(60));
     }
-}
 
-#[derive(Debug, Deserialize)]
-struct TicketResponse {
-    ticket: String,
-}
-
-impl SyncClient {
-    pub async fn enable_remote(&self, session_id: &str) -> Result<String> {
-        let response =
-            self.request(reqwest::Method::POST, &format!("/v1/remote/sessions/{session_id}/enable")).send().await?;
-        let _: serde_json::Value = decode(response).await?;
-        let ticket: TicketResponse = decode(
-            self.request(reqwest::Method::POST, "/v1/remote/tickets")
-                .json(&json!({"session_id": session_id, "role": "agent"}))
-                .send()
-                .await?,
-        )
-        .await?;
-        let mut url = reqwest::Url::parse(&self.server)?;
-        url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
-            .map_err(|_| anyhow::anyhow!("could not create remote WebSocket URL"))?;
-        url.set_path(&format!("/v1/remote/agent/{session_id}"));
-        url.set_query(Some(&format!("ticket={}", ticket.ticket)));
-        Ok(url.to_string())
+    #[test]
+    fn sign_in_identifies_the_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AbacusPaths::under(dir.path().to_path_buf());
+        let body = with_identity(&paths, json!({"email": "a@b"}));
+        assert_eq!(body["email"], "a@b");
+        assert_eq!(body["install_id"], paths.install_id());
+        assert_eq!(body["install_id"], paths.install_id(), "stable across calls");
+        assert_eq!(body["client"]["kind"], "cli");
+        assert_eq!(body["client"]["app_version"], env!("CARGO_PKG_VERSION"));
+        assert!(!body["device_name"].as_str().unwrap().is_empty());
     }
 
-    pub async fn disable_remote(&self, session_id: &str) -> Result<()> {
-        let response =
-            self.request(reqwest::Method::POST, &format!("/v1/remote/sessions/{session_id}/disable")).send().await?;
-        let _: serde_json::Value = decode(response).await?;
-        Ok(())
-    }
-}
-
-pub fn configured_client(paths: &AbacusPaths) -> Result<SyncClient> {
-    configured(&Credentials::load(paths)?)
-}
-
-#[derive(Debug, Deserialize)]
-struct GetResponse {
-    session: Session,
-}
-
-impl SyncClient {
-    async fn pull(&self, session_id: &str) -> Result<(Session, Vec<u8>)> {
-        let document: GetResponse =
-            decode(self.request(reqwest::Method::GET, &format!("/v1/sync/sessions/{session_id}")).send().await?)
-                .await?;
-        let response =
-            self.request(reqwest::Method::GET, &format!("/v1/sync/sessions/{session_id}/trace")).send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            bail!("sync trace download returned {status}");
-        }
-        Ok((document.session, response.bytes().await?.to_vec()))
+    #[test]
+    fn signed_out_sync_does_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AbacusPaths::under(dir.path().to_path_buf());
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let outcome = runtime.block_on(reconcile(&paths)).unwrap();
+        assert_eq!((outcome.pulled, outcome.pushed), (0, 0));
     }
 
-    async fn delete_session(&self, session_id: &str, revision: u64) -> Result<()> {
-        let response = self
-            .request(reqwest::Method::DELETE, &format!("/v1/sync/sessions/{session_id}"))
-            .header(header::IF_MATCH, format!("\"{revision}\""))
-            .send()
-            .await?;
-        let _: serde_json::Value = decode(response).await?;
-        Ok(())
+    #[test]
+    fn status_helpers_read_well() {
+        assert_eq!(ago(None), "never");
+        assert_eq!(ago(Some(Utc::now() - chrono::Duration::seconds(125))), "2 min ago");
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(1_572_864), "1.5 MB");
+        assert_eq!(local_time("not a time"), "not a time");
+        assert!(local_time("2026-10-04T21:13:00.123456").starts_with("2026-10-0"));
     }
-}
-
-fn install_pulled(paths: &AbacusPaths, session: Session, trace: &[u8], force: bool) -> Result<()> {
-    let store = SessionStore::new(paths, session.workspace.clone());
-    if let Ok(local) = store.load(&session.id.to_string())
-        && !force
-    {
-        let mut fork = local;
-        fork.id = uuid::Uuid::new_v4();
-        fork.title = format!("{} (local fork)", fork.title);
-        store.save(&fork)?;
-        let source = paths.traces_dir.join(format!("{}.jsonl", session.id));
-        let destination = paths.traces_dir.join(format!("{}.jsonl", fork.id));
-        if source.exists() {
-            std::fs::copy(source, destination)?;
-        }
-        eprintln!("Preserved the previous local copy as {}", fork.id);
-    }
-    store.save(&session)?;
-    std::fs::create_dir_all(&paths.traces_dir)?;
-    crate::config::atomic_write(&paths.traces_dir.join(format!("{}.jsonl", session.id)), trace, true)?;
-    Ok(())
 }

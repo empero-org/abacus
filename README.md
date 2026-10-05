@@ -108,11 +108,12 @@ selected block, `Y` copies the last reply, `i` returns to typing. Press `F1` or
 | `/memories`, `/papercuts` | Show or delete what Abacus has learned |
 | `/usage` | Local token usage and activity |
 | `/tools`, `/skills`, `/plugins`, `/mcps` | Show what the agent can use |
+| `/remote [on\|off\|qr\|url\|status]` | Share this session live with your phone (see Sync and remote) |
 | `/feedback` | Send feedback to the maintainers |
 | `/quit` | Exit |
 
 `/help` lists the rest, including `/theme`, `/thinking`, `/providers`,
-`/harness`, `/refine` and `/remote`.
+`/harness` and `/refine`.
 
 ### Sessions
 
@@ -346,17 +347,146 @@ use sync. Turn tracing off with **Training traces** in `/config`.
 `abacus pull ./traces` copies every trace into `./traces`. `abacus pull all` also
 rebuilds traces from every saved session on the machine.
 
-## Sync and remote sessions
+## Sync and remote
 
-Abacus Sync moves sessions and their traces between your machines. Sign in with
-`abacus sync login`, which opens a browser. Once you are signed in, Abacus pulls
-your remote sessions when it starts and pushes local sessions when it closes and
-after a minute of idle time. `abacus sync push` and `abacus sync pull` do the
-same by hand, `abacus sync status` shows the account, and `abacus sync logout`
-removes the saved token.
+Abacus Sync keeps your sessions, and their training traces, in step across your
+machines. The same account lets you follow a running session from your phone and
+answer it from there. Both use a sync server: `https://abacus.empero.org`, or the
+one you name with `abacus sync login --server <url>`. A server must use HTTPS
+unless it runs on the same machine; `ABACUS_SYNC_ALLOW_HTTP=1` allows plain HTTP
+on a network you trust.
 
-`/remote` shares the running session through Abacus Sync, so you can follow it
-and send prompts from a browser. Run `/remote` again to stop sharing.
+### Sign in
+
+```sh
+abacus sync login      # sign in on this machine
+abacus sync status     # the account, this device and what is waiting to sync
+abacus sync sessions   # the sessions the server holds, and how each compares to this machine
+abacus sync logout     # forget the saved token
+```
+
+`abacus sync login` prints a page address and a short code. Open the page in any
+browser, sign in with the magic link it emails you, and enter the code; the
+terminal signs in as soon as you approve it. `--password-login` asks for your
+email and password in the terminal instead. After that, syncing needs no
+commands.
+
+### What syncs, and when
+
+- When Abacus opens, it downloads the sessions that changed on the server since
+  the last time, then uploads any that an earlier close could not.
+- After a turn, a minute of idle time uploads the session you are in.
+- When Abacus closes, it uploads every session that changed.
+- A headless run (`-p`) downloads at its start and uploads its session at its
+  end, waiting at most ten seconds each time.
+
+Only what changed moves: an unchanged session costs a file check and an unchanged
+server costs one request, and large uploads are compressed. A session that has
+not had a prompt yet is not a session, and stays local. If the server cannot be
+reached, Abacus retries with a growing delay and carries on without it.
+
+`abacus sync push [session]` and `abacus sync pull [session]` do the same by
+hand, for every session or one ID or prefix. The state of the exchange is kept
+in `~/.abacus/sync-state.json`.
+
+### Conflicts and forks
+
+An upload names the revision it was built on, and the server refuses it if that
+revision is no longer current, so one machine never overwrites another's work.
+When a session changed on two machines:
+
+- A pull makes the other machine's version the session and keeps yours beside it
+  as `<title> (local fork)`.
+- A push the server refused is reported as a conflict, and `abacus sync status`
+  counts it. `abacus sync pull` resolves it by keeping both copies.
+  `abacus sync push --force` replaces the server's copy with yours, and
+  `abacus sync pull --force` replaces yours with the server's.
+
+A session you have open is never rewritten under you. If it continued on another
+machine and you changed nothing since it last synced, Abacus says so and shows
+the newer version once the agent is idle. If you changed it too, both are kept
+once it is no longer open: when you quit, or at the next sync after you switch
+to another session.
+
+A session deleted on the server, from the web app or by another machine, is
+deleted here too: its files move to `~/.abacus/sync-trash/` instead of being
+erased. If you had changed it since it last synced, your changes are kept as a
+new session with the same title and uploaded, and the deleted one stays deleted.
+
+### Follow a session from your phone
+
+While you are signed in, Abacus shares each session as soon as it has received
+its first prompt, including sessions you resume. Sharing is a live link from the
+terminal to the server. Everything still runs in your terminal, and a browser can
+only send the few kinds of input listed below.
+
+| Command | Effect |
+| --- | --- |
+| `/remote` | Stop sharing this session, or start again |
+| `/remote on`, `/remote off` | Share or stop explicitly. Off holds for this session even with auto-share on |
+| `/remote qr` | Show a QR code that signs your phone in |
+| `/remote url` | Print the same link as text |
+| `/remote status` | Whether this session is shared, and how many browsers are watching |
+
+A badge in the footer shows the link: `⇄ connecting`, `⇄ live` (with
+`· 2 viewers` when browsers are watching), `⇄ reconnecting` while it retries, or
+`⇄ remote error` when it gave up, and `/remote` then tries again. No badge means
+the session is not shared. Sessions that are synced but not running are readable
+on the phone, not controllable; open them in Abacus to continue.
+
+To share only when you ask, turn auto-share off in `config.toml`, or use
+**Auto-share sessions** in `/config`. `/remote` then shares the current session.
+
+```toml
+[remote]
+auto_share = true   # the default once you are signed in
+```
+
+### Pair a phone
+
+```sh
+abacus sync pair                     # a QR code and the link under it
+abacus sync pair --session 1a2b3c    # open that session on the phone
+abacus sync pair --url-only          # print only the link
+```
+
+`/remote qr` does the same for the session you are in. Scan the code with the
+phone's camera and its browser is signed in to your account, then opens the
+session, or your session list. The link works once and expires within minutes.
+Until then, anyone who has it can use your account, so do not paste it anywhere.
+
+The phone can:
+
+- follow the session live: streamed replies and reasoning, tool calls with their
+  output (long output is clipped), approval requests, questions and mode changes;
+- send a prompt, which steers a running turn or starts a new one;
+- answer a question the agent asked;
+- allow, allow for the rest of the session, or reject an approval, as `y`, `a`
+  and `n` do in the terminal;
+- interrupt a running turn.
+
+The phone cannot run slash commands, because a message that starts with `/` is
+sent as plain text. It cannot change the model, mode, workspace or any setting,
+and the agent's tools still ask for approval the way they always do.
+
+### What leaves your machine
+
+- Sync uploads whole sessions and their training traces to the server: your
+  conversation, tool output, and any code in them. Do not sign in on a machine
+  whose sessions must stay on it. Turn off **Training traces** in `/config` to
+  stop recording traces.
+- While a session is shared, its live transcript passes through the server to the
+  browsers watching it.
+- When you are signed in, Abacus reports token usage to your account, so it can
+  show what you spend: after each turn, every minute while a session is open, and
+  on exit. A report holds the model name, counts of input, output and cached
+  tokens, a random per-install ID, the session ID, this machine's name, and the
+  Abacus version, OS and architecture. It never holds a prompt, a reply, code or
+  a file path.
+  `ABACUS_NO_USAGE=1` stops these reports.
+- The anonymous activity events described under
+  [Feedback and activity reporting](#feedback-and-activity-reporting) are
+  separate and unchanged. `ABACUS_NO_ACTIVITY=1` turns them off.
 
 ## Security
 
@@ -383,6 +513,9 @@ per-install ID, the session ID, the model name, token counts, session duration,
 and the Abacus version, OS and architecture. They contain no prompts, code or
 transcripts. To turn this off, set `ABACUS_NO_ACTIVITY=1` or put
 `enabled = false` under `[activity]` in `config.toml`.
+
+If you are signed in to Abacus Sync, Abacus also reports token counts to your
+account, as described under Sync and remote. `ABACUS_NO_USAGE=1` turns that off.
 
 Abacus checks GitHub once a day for a newer release and tells you if there is
 one. It never downloads anything. Turn this off with **Update reminder** in

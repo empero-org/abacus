@@ -389,6 +389,9 @@ impl HttpClient {
             client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
                 .timeout(Duration::from_secs(config.timeout_seconds.clamp(1, 600)))
+                // Streamable HTTP servers may answer with an event stream, which a
+                // compressing proxy would hold back; see the provider client.
+                .no_gzip()
                 .build()?,
             url,
             headers,

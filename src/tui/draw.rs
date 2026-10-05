@@ -42,7 +42,9 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     // The picker is checked first because it can be opened *from* the config
     // panel; behind it, the panel would be drawn over its own child and the
     // selection would be invisible.
-    if app.picker.is_some() {
+    if app.qr_overlay.is_some() && app.approval.is_none() && app.question.is_none() {
+        draw_qr(frame, area, app);
+    } else if app.picker.is_some() {
         draw_picker(frame, area, app);
     } else if app.raw_config.is_some() {
         draw_raw_config(frame, area, app);
@@ -646,18 +648,23 @@ pub(super) fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     // from the provider's prompt cache. That breakdown is on hover.
     let usage = app.provider.usage();
     let cached = usage.cache_rate().is_some();
-    let mut right = vec![
+    // Live sharing leads the readout, so a glance tells whether a phone is
+    // watching (or the link is down) before reading the numbers.
+    let mut right = remote_badge(app).map_or_else(Vec::new, |badge| vec![badge, ui::dot()]);
+    let badge_width = ui::spans_width(&right) as u16;
+    right.extend([
         fg(format!("↑ {}", ui::format_count(usage.input)), if cached { rail() } else { muted() }),
         fg(format!("  ↓ {}", ui::format_count(usage.output)), muted()),
         ui::dot(),
         fg(format!("ctx {}/{} ", ui::format_count(ctx_tokens), ui::format_count(ctx_window)), ctx_color),
-    ];
+    ]);
     right.extend(ui::meter(percent, 8, ctx_color));
     let right_width = ui::spans_width(&right) as u16;
     // The arrows' own cells, so the pointer resting on them can open the
     // breakdown. Measured from the right edge because the row is right-aligned.
-    let arrows_width = ui::spans_width(&right[..2]) as u16;
-    let arrows_x = area.x + area.width.saturating_sub(right_width);
+    let arrows_start = if badge_width > 0 { 2 } else { 0 };
+    let arrows_width = ui::spans_width(&right[arrows_start..arrows_start + 2]) as u16;
+    let arrows_x = area.x + area.width.saturating_sub(right_width) + badge_width;
     let hovering_tokens = app
         .pointer
         .is_some_and(|(column, row)| row == area.y && column >= arrows_x && column < arrows_x + arrows_width);
@@ -726,6 +733,117 @@ pub(super) fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(Line::from(right)).alignment(Alignment::Right), area);
     if hovering_tokens {
         draw_usage_tooltip(frame, area, arrows_x, &usage);
+    }
+}
+
+/// The footer's live-sharing badge: nothing while the session is not shared,
+/// then connecting, live (with how many browsers watch), reconnecting, or the
+/// link having given up.
+pub(super) fn remote_badge(app: &App) -> Option<Span<'static>> {
+    let bridge = app.remote.as_ref()?;
+    let mark = if std::ptr::eq(ui::glyphs(), &ui::Glyphs::ASCII) { "<>" } else { "⇄" };
+    let (label, color) = match bridge.state() {
+        LinkState::Connecting => ("connecting".to_owned(), muted()),
+        LinkState::Live if bridge.browsers() == 0 => ("live".to_owned(), muted()),
+        LinkState::Live => (format!("live · {}", super::commands::viewers(bridge.browsers())), primary()),
+        LinkState::Reconnecting(_) => ("reconnecting".to_owned(), warning()),
+        LinkState::Stopped(_) => ("remote error".to_owned(), danger()),
+    };
+    Some(fg(format!("{mark} {label}"), color))
+}
+
+/// The `/remote qr` overlay: a QR code that opens the session on a phone,
+/// the link under it for typing or copying, and what the link can do. When
+/// the terminal is too small for the code, the link alone.
+pub(super) fn draw_qr(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let Some(overlay) = &app.qr_overlay else {
+        return;
+    };
+    let hints = [("esc", "close")];
+    let (url, rows, expires_in, opens_session) = match overlay {
+        QrOverlay::Ready { url, rows, expires_in, opens_session } => (url, rows, *expires_in, *opens_session),
+        QrOverlay::Loading | QrOverlay::Failed(_) => {
+            let line = match overlay {
+                QrOverlay::Failed(error) => fg(format!("Could not create a pairing link: {error}"), danger()),
+                _ => fg("Requesting a single-use link…", muted()),
+            };
+            let width = 60.min(area.width.saturating_sub(4));
+            let lines = ui::wrap(&[line], width.saturating_sub(4) as usize, &[], &[]);
+            let popup = ui::centered(width, lines.len() as u16 + 2, area);
+            let inner = open_overlay(frame, popup, "PAIR A PHONE", secondary(), &hints);
+            frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+            return;
+        }
+    };
+    let target = if opens_session { "this session" } else { "your sessions" };
+    let expiry = super::commands::expiry(expires_in);
+    let fine_print = format!("Works once · expires in {expiry} · signs in as you — keep it private");
+
+    let code = rows.as_deref().unwrap_or_default();
+    let code_width = code.first().map_or(0, |row| row.chars().count()) as u16;
+    let room = Rect { height: area.height.saturating_sub(2), width: area.width.saturating_sub(2), ..area };
+    let width = (code_width + 4).max(74).min(room.width);
+    // Borders and padding take four columns and two rows.
+    let text_width = width.saturating_sub(4) as usize;
+    let link = ui::wrap(&[fg(url.clone(), muted())], text_width, &[], &[]);
+    let fine = ui::wrap(&[fg(fine_print, rail())], text_width, &[], &[]);
+    let code_fits = !code.is_empty() && code_width + 4 <= room.width;
+    let code_rows = code.len() as u16 + 2;
+    // Most generous first: the code with the link and the fine print; then,
+    // on a short screen such as 80×24, the code with one line under it (the
+    // link stays a `/remote url` away); then the link alone.
+    let full = code_fits && code_rows + 2 + link.len() as u16 + 1 + fine.len() as u16 <= room.height;
+    let compact = code_fits && code_rows < room.height;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if full || compact {
+        let paint = qr_style();
+        let pad = (text_width.saturating_sub(code_width as usize)) / 2;
+        for row in code {
+            lines.push(Line::from(vec![Span::raw(" ".repeat(pad)), Span::styled(row.clone(), paint)]));
+        }
+    }
+    if full {
+        lines.push(Line::from(""));
+        lines.push(Line::from(fg(format!("Scan with your phone's camera to open {target}."), text())));
+        lines.extend(link);
+        lines.push(Line::from(""));
+        lines.extend(fine);
+    } else if compact {
+        let caption = format!("Scan to open {target} · works once · {expiry}");
+        lines.push(Line::from(fg(ui::truncate(&caption, text_width), text())));
+    } else {
+        let reason = if code.is_empty() {
+            "This link is too long for a QR code"
+        } else {
+            "The window is too small for the QR code"
+        };
+        lines.extend(ui::wrap(
+            &[fg(format!("{reason} — open this link on your phone to see {target}:"), text())],
+            text_width,
+            &[],
+            &[],
+        ));
+        lines.extend(link);
+        lines.push(Line::from(""));
+        lines.extend(fine);
+    }
+
+    let popup = ui::centered(width, lines.len() as u16 + 2, area);
+    let inner = open_overlay(frame, popup, "PAIR A PHONE", secondary(), &hints);
+    lines.truncate(inner.height as usize);
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+}
+
+/// Black on white, whatever the theme: phone cameras read dark modules on a
+/// light ground. Fixed palette entries rather than the theme's colours, which
+/// a light/dark theme would otherwise swap.
+fn qr_style() -> Style {
+    match crate::theme::ColorDepth::detect() {
+        crate::theme::ColorDepth::Ansi16 | crate::theme::ColorDepth::None => {
+            Style::default().fg(Color::Black).bg(Color::White)
+        }
+        _ => Style::default().fg(Color::Indexed(16)).bg(Color::Indexed(231)),
     }
 }
 

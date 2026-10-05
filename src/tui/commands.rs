@@ -2,6 +2,21 @@
 
 use super::*;
 
+/// `n viewers`, for the remote badge and status.
+pub(super) fn viewers(count: usize) -> String {
+    match count {
+        0 => "no viewers".to_owned(),
+        1 => "1 viewer".to_owned(),
+        n => format!("{n} viewers"),
+    }
+}
+
+/// A pairing link's lifetime, in words.
+pub(super) fn expiry(seconds: u64) -> String {
+    let minutes = seconds.div_ceil(60).max(1);
+    format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
+}
+
 /// The row a 1-based `number` names in a listing.
 pub(super) fn numbered<'a, T>(rows: &'a [T], number: &str) -> Option<&'a T> {
     rows.get(number.trim().parse::<usize>().ok()?.saturating_sub(1))
@@ -41,7 +56,7 @@ impl App {
             "/config" => self.open_config(argument),
             "/theme" => self.theme_command(argument),
             "/feedback" => self.open_feedback(),
-            "/remote" => self.toggle_remote(),
+            "/remote" => self.remote_command(argument),
             "/compact" => self.compact_command(),
             "/repair" => self.repair_command(),
             "/papercuts" => self.papercuts_command(argument),
@@ -79,6 +94,145 @@ impl App {
     pub(super) fn set_agent_mode(&mut self, mode: AgentMode) {
         self.agent_mode = mode;
         self.status = format!("{} mode", mode.label().to_ascii_lowercase());
+        if let Some(remote) = &mut self.remote {
+            remote.mode_changed(mode, "set in the terminal");
+        }
+    }
+
+    /// `/remote [on|off|qr|url|status]`: share this session live with the
+    /// account's browsers, stop sharing it, pair a phone, or say how it is
+    /// going. Bare `/remote` toggles.
+    pub(super) fn remote_command(&mut self, argument: &str) {
+        match argument.to_ascii_lowercase().as_str() {
+            "" if self.sharing() => self.remote_off(),
+            "" | "on" => self.remote_on(),
+            "off" => self.remote_off(),
+            "qr" | "pair" => self.open_pairing(PairingView::Qr),
+            "url" | "link" => self.open_pairing(PairingView::Url),
+            "status" => {
+                let summary = self.remote_summary();
+                self.say(summary);
+            }
+            other => self.fail(format!("Unknown /remote option `{other}`. Usage: /remote [on|off|qr|url|status]")),
+        }
+    }
+
+    fn remote_on(&mut self) {
+        if self.sharing() {
+            self.status = "already sharing — /remote qr opens it on your phone".to_owned();
+            return;
+        }
+        // A bridge that gave up is replaced, not resumed.
+        self.remote = None;
+        self.remote_muted = false;
+        self.persist_session();
+        match self.start_remote() {
+            Ok(()) => {
+                self.remote_announce = true;
+                self.status = "sharing — connecting…".to_owned();
+            }
+            Err(reason) => self.fail(format!("Cannot share this session: {reason}.")),
+        }
+    }
+
+    fn remote_off(&mut self) {
+        // Off sticks for this session: auto-share does not bring it back.
+        self.remote_muted = true;
+        self.remote_announce = false;
+        if self.sharing() {
+            self.stop_remote("Sharing was turned off in the terminal.");
+            self.status = "remote off for this session — /remote turns it back on".to_owned();
+        } else {
+            self.remote = None;
+            self.status = "this session is not shared".to_owned();
+        }
+    }
+
+    /// Ask the server for a single-use link that signs a phone in, opening
+    /// this session when it is shared.
+    fn open_pairing(&mut self, view: PairingView) {
+        if !crate::sync::is_configured(&self.credentials) {
+            return self.fail("Pairing a phone needs Abacus Sync. Run `abacus sync login` first.");
+        }
+        let client = match crate::sync::configured_client(&self.config.paths) {
+            Ok(client) => client,
+            Err(error) => return self.fail(format!("Cannot pair a phone: {error:#}")),
+        };
+        let session =
+            self.remote.as_ref().filter(|bridge| bridge.is_active()).map(|bridge| bridge.session_id().to_owned());
+        match view {
+            PairingView::Qr => self.qr_overlay = Some(QrOverlay::Loading),
+            PairingView::Url => self.status = "requesting a pairing link…".to_owned(),
+        }
+        let events = self.background_tx.clone();
+        tokio::spawn(async move {
+            let mut result = client.pairing_url(session.as_deref()).await;
+            // Sharing may still be starting up; a link to the session list
+            // pairs the phone all the same.
+            if session.is_some() && matches!(result, Err(crate::sync::SyncError::Gone)) {
+                result = client.pairing_url(None).await;
+            }
+            let result = result.map_err(|error| match error {
+                crate::sync::SyncError::Gone => "this sync server does not offer phone pairing yet".to_owned(),
+                other => other.to_string(),
+            });
+            let _ = events.send(Background::Pairing { view, result });
+        });
+    }
+
+    pub(super) fn pairing_ready(&mut self, view: PairingView, result: Result<crate::sync::Pairing, String>) {
+        match (view, result) {
+            (PairingView::Qr, result) => {
+                // Closed while the request was out: leave it closed.
+                if self.qr_overlay.is_none() {
+                    return;
+                }
+                self.qr_overlay = Some(match result {
+                    Ok(pairing) => QrOverlay::Ready {
+                        rows: crate::remote::qr::rows(&pairing.pairing_url),
+                        opens_session: pairing.session_id.is_some(),
+                        expires_in: pairing.expires_in,
+                        url: pairing.pairing_url,
+                    },
+                    Err(error) => QrOverlay::Failed(error),
+                });
+            }
+            (PairingView::Url, Ok(pairing)) => {
+                let opens = if pairing.session_id.is_some() { "this session" } else { "your sessions" };
+                self.say(format!(
+                    "Open this link on your phone to see {opens}. It works once and expires in {} — and it signs \
+                     in as you, so keep it to yourself:\n{}",
+                    expiry(pairing.expires_in),
+                    pairing.pairing_url
+                ));
+                self.status = "pairing link ready".to_owned();
+            }
+            (PairingView::Url, Err(error)) => self.fail(format!("Could not create a pairing link: {error}")),
+        }
+    }
+
+    /// One line on the state of sharing, for `/remote status`.
+    pub(super) fn remote_summary(&self) -> String {
+        let auto = if self.settings.remote.auto_share { "on" } else { "off" };
+        let Some(bridge) = &self.remote else {
+            return if !crate::sync::is_configured(&self.credentials) {
+                "Remote: off — sign in with `abacus sync login` to share sessions with your phone.".to_owned()
+            } else if self.remote_muted {
+                format!("Remote: off for this session (/remote turns it on). Auto-share is {auto}.")
+            } else if self.settings.remote.auto_share {
+                "Remote: off — sharing starts with this session's first prompt (auto-share is on).".to_owned()
+            } else {
+                "Remote: off. Auto-share is off; /remote shares this session.".to_owned()
+            };
+        };
+        match bridge.state() {
+            LinkState::Connecting => "Remote: connecting…".to_owned(),
+            LinkState::Live => {
+                format!("Remote: live · {}. /remote qr opens it on your phone.", viewers(bridge.browsers()))
+            }
+            LinkState::Reconnecting(reason) => format!("Remote: reconnecting — {reason}."),
+            LinkState::Stopped(reason) => format!("Remote: stopped — {reason}. /remote tries again."),
+        }
     }
 
     /// Show or hide the model's reasoning, everywhere, and persist the choice.
