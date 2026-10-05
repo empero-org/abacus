@@ -1000,6 +1000,11 @@ impl ToolCall {
 
 #[derive(Debug, Clone)]
 pub struct Entry {
+    /// What this block is called for as long as the process lives: numbered by
+    /// the transcript when it takes the entry, counting up and never reused, so
+    /// it survives other entries being merged away or rewound. `0` until then.
+    /// Live sharing names a block by it (see `crate::remote`).
+    pub id: u64,
     pub kind: EntryKind,
     pub text: String,
     pub tool: Option<ToolCall>,
@@ -1007,11 +1012,11 @@ pub struct Entry {
 
 impl Entry {
     pub fn new(kind: EntryKind, text: impl Into<String>) -> Self {
-        Self { kind, text: text.into(), tool: None }
+        Self { id: 0, kind, text: text.into(), tool: None }
     }
 
     pub fn tool(call: ToolCall) -> Self {
-        Self { kind: EntryKind::Tool, text: String::new(), tool: Some(call) }
+        Self { id: 0, kind: EntryKind::Tool, text: String::new(), tool: Some(call) }
     }
 }
 

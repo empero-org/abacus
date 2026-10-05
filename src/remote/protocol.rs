@@ -76,8 +76,9 @@ pub struct ToolInfo {
     pub duration_ms: Option<u64>,
 }
 
-/// One transcript block as a browser renders it. `id` is stable from the
-/// snapshot that introduced it until the next snapshot.
+/// One transcript block as a browser renders it. `id` names the block for as
+/// long as it exists, live and in every snapshot (see the module docs of
+/// `crate::remote`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub id: String,
@@ -178,7 +179,8 @@ pub enum AcceptResult {
     Queued,
     /// An approval or answer was applied.
     Applied,
-    /// Nothing matched (no such pending id, invalid input).
+    /// Nothing matched (no such pending id, invalid input); the answer says
+    /// why.
     Rejected,
 }
 
@@ -282,11 +284,15 @@ pub struct ToolFrame {
     pub duration_ms: Option<u64>,
 }
 
+/// What an approval's `details` hold, so a browser knows how to draw them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalKind {
+    /// A unified diff: `---` and `+++` headers, then `@@` hunks.
     Diff,
+    /// `$ <command>`.
     Command,
+    /// Plain text, as the terminal would show it.
     Other,
 }
 
@@ -301,24 +307,54 @@ pub struct ApprovalFrame {
 }
 
 impl ApprovalFrame {
+    /// `details` is the preview the tool wrote for the terminal's dialog; it is
+    /// normalised to what `kind` promises. A command is always `$ <command>`,
+    /// an edit a unified diff, and a preview the tool cut short loses its
+    /// marker line (which would read as part of a diff) and sets
+    /// `details_clipped` instead.
     pub fn new(approval_id: String, tool: &str, summary: &str, details: &str) -> Self {
-        let kind = if crate::diff::DiffDocument::parse(details).is_some() {
-            ApprovalKind::Diff
-        } else if tool == "run_command" {
-            ApprovalKind::Command
-        } else {
-            ApprovalKind::Other
+        let (details, cut) = match details.strip_suffix(crate::tools::OUTPUT_TRUNCATED) {
+            Some(whole) => (whole, true),
+            None => (details, false),
         };
-        let (details, details_clipped) = clip_head_json(details, MAX_APPROVAL_DETAILS);
+        // The tool settles it before the text does: a command that carries a
+        // patch (`git apply <<EOF …`) is still a command.
+        let (kind, details) = if tool == "run_command" {
+            let command = details.strip_prefix("$ ").unwrap_or(details);
+            (ApprovalKind::Command, format!("$ {}", command.trim_end()))
+        } else if is_unified_diff(details) {
+            (ApprovalKind::Diff, details.trim_end_matches('\n').to_owned())
+        } else {
+            (ApprovalKind::Other, details.to_owned())
+        };
+        let (details, clipped) = clip_head_json(&details, MAX_APPROVAL_DETAILS);
         Self {
             approval_id,
             tool: clip_text(tool, MAX_LABEL).0,
             summary: clip_text(summary, MAX_LABEL).0,
             kind,
             details,
-            details_clipped,
+            details_clipped: clipped || cut,
         }
     }
+}
+
+/// Whether `text` is a unified diff a browser can draw: an old-file header, a
+/// new-file header after it, and a hunk header after that. Anything git adds
+/// before the headers (`diff --git`, `index`) is allowed; a lone `---` rule or
+/// a heredoc that merely mentions the markers is not.
+fn is_unified_diff(text: &str) -> bool {
+    let (mut old, mut new) = (false, false);
+    for line in text.lines() {
+        if line.starts_with("--- ") {
+            old = true;
+        } else if old && line.starts_with("+++ ") {
+            new = true;
+        } else if new && line.starts_with("@@") {
+            return true;
+        }
+    }
+    false
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -344,12 +380,13 @@ pub struct QuestionFrame {
 }
 
 impl QuestionFrame {
-    /// `options` arrive as the terminal displays them, `label — description`.
+    /// `options` arrive as the terminal displays them, `label — description`
+    /// (see [`crate::agent::split_option`]); the description is kept whole.
     pub fn new(question_id: String, header: &str, text: &str, options: &[String], multi: bool) -> Self {
         let options = options
             .iter()
             .map(|option| {
-                let (label, description) = option.split_once(" — ").unwrap_or((option.as_str(), ""));
+                let (label, description) = crate::agent::split_option(option);
                 QuestionOption {
                     label: clip_text(label, MAX_LABEL).0,
                     description: clip_text(description, MAX_OPTION).0,
@@ -426,6 +463,8 @@ pub struct Accepted {
     pub ref_id: String,
     pub kind: InputKind,
     pub result: AcceptResult,
+    /// Why the input was refused, as a short sentence the browser shows as it
+    /// is ("no open approval with that id"). Always set for a refusal.
     pub reason: Option<String>,
 }
 
@@ -589,19 +628,19 @@ fn parse_input(kind: &str, id: String, payload: &Value) -> Incoming {
     let input = match kind {
         "prompt" => {
             let Some(text) = payload.get("text").and_then(Value::as_str) else {
-                return invalid(InputKind::Prompt, "missing text");
+                return invalid(InputKind::Prompt, "prompt has no text");
             };
             if text.trim().is_empty() {
-                return invalid(InputKind::Prompt, "empty prompt");
+                return invalid(InputKind::Prompt, "prompt is empty");
             }
             if text.len() > MAX_PROMPT {
-                return invalid(InputKind::Prompt, "prompt is longer than 32 KiB");
+                return invalid(InputKind::Prompt, "prompt is too large (max 32 KiB)");
             }
             Input::Prompt { text: text.to_owned() }
         }
         "answer" => {
             let Some(question_id) = payload.get("question_id").and_then(Value::as_str) else {
-                return invalid(InputKind::Answer, "missing question_id");
+                return invalid(InputKind::Answer, "answer does not say which question it is for");
             };
             let selected = match payload.get("selected") {
                 None | Some(Value::Null) => Vec::new(),
@@ -610,20 +649,21 @@ fn parse_input(kind: &str, id: String, payload: &Value) -> Incoming {
                         items.iter().map(|item| item.as_str().map(str::to_owned)).collect();
                     match labels {
                         Some(labels) if labels.len() <= 64 => labels,
-                        _ => return invalid(InputKind::Answer, "selected must be a short list of labels"),
+                        Some(_) => return invalid(InputKind::Answer, "too many options selected (max 64)"),
+                        None => return invalid(InputKind::Answer, "selected options must be text labels"),
                     }
                 }
-                Some(_) => return invalid(InputKind::Answer, "selected must be a list"),
+                Some(_) => return invalid(InputKind::Answer, "selected options must be a list of labels"),
             };
             let custom = payload.get("custom").and_then(Value::as_str).map(str::to_owned);
             if custom.as_ref().is_some_and(|custom| custom.len() > MAX_PROMPT) {
-                return invalid(InputKind::Answer, "answer is longer than 32 KiB");
+                return invalid(InputKind::Answer, "answer is too large (max 32 KiB)");
             }
             Input::Answer { question_id: question_id.to_owned(), selected, custom }
         }
         "approve" => {
             let Some(approval_id) = payload.get("approval_id").and_then(Value::as_str) else {
-                return invalid(InputKind::Approve, "missing approval_id");
+                return invalid(InputKind::Approve, "decision does not say which approval it is for");
             };
             let decision = match payload.get("decision").and_then(Value::as_str) {
                 Some("allow") => Decision::Allow,
@@ -1056,6 +1096,87 @@ mod tests {
         assert_eq!(ApprovalFrame::new("a".into(), "move_file", "a → b", "Move a").kind, ApprovalKind::Other);
     }
 
+    /// The previews the tools really write for the dialog, through the frame.
+    #[test]
+    fn approval_details_are_a_unified_diff_a_command_line_or_plain_text() {
+        let frame = |tool: &str, details: &str| ApprovalFrame::new("a1".into(), tool, "x", details);
+
+        // An edit: the diff the tool made, headers and hunks, without its
+        // trailing newline.
+        let edit = "--- a/src/x.rs\n+++ b/src/x.rs\n@@ -1,2 +1,2 @@\n keep\n-old\n+new\n";
+        let framed = frame("edit_file", edit);
+        assert_eq!(framed.kind, ApprovalKind::Diff);
+        assert_eq!(framed.details, edit.trim_end());
+        assert!(!framed.details_clipped);
+        // A patch the model wrote, with git's lines in front of the headers.
+        let patch = "diff --git a/f b/f\nindex 1..2 100644\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b";
+        assert_eq!(frame("apply_patch", patch).kind, ApprovalKind::Diff);
+
+        // A command is `$ <command>`; the tool's own wording is kept, and a
+        // preview that lacks the prefix gets it.
+        let command = frame("run_command", "$ cargo test --all");
+        assert_eq!((command.kind, command.details.as_str()), (ApprovalKind::Command, "$ cargo test --all"));
+        assert_eq!(frame("run_command", "cargo test\n").details, "$ cargo test");
+        // Whatever a command contains, it stays a command: a heredoc that
+        // carries a patch is not an edit.
+        let heredoc = "$ git apply <<'EOF'\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\nEOF";
+        let applied = frame("run_command", heredoc);
+        assert_eq!((applied.kind, applied.details.as_str()), (ApprovalKind::Command, heredoc));
+
+        // Headers with no hunk, an unchanged file, a failed preview, or a
+        // plain description are text.
+        assert_eq!(frame("edit_file", "--- a/f\n+++ b/f\n").kind, ApprovalKind::Other);
+        assert_eq!(frame("write_file", "No changes.").kind, ApprovalKind::Other);
+        assert_eq!(frame("edit_file", "Could not prepare preview: no such file").kind, ApprovalKind::Other);
+        assert_eq!(frame("git_commit", "git commit -m \"x\" -- a.rs").kind, ApprovalKind::Other);
+        // A rule line in prose is not a diff header.
+        assert_eq!(frame("append_file", "--- notes\n+++ more\ntext").kind, ApprovalKind::Other);
+    }
+
+    #[test]
+    fn a_preview_the_tool_cut_short_is_flagged_not_left_with_its_marker() {
+        let long = format!("--- a/f\n+++ b/f\n@@ -1 +1 @@\n+{}{}", "x".repeat(100), crate::tools::OUTPUT_TRUNCATED);
+        let framed = ApprovalFrame::new("a1".into(), "write_file", "f", &long);
+        assert_eq!(framed.kind, ApprovalKind::Diff);
+        assert!(framed.details_clipped);
+        assert!(!framed.details.contains("output truncated"), "{}", framed.details);
+        assert!(framed.details.ends_with('x'));
+        let command = ApprovalFrame::new(
+            "a2".into(),
+            "run_command",
+            "x",
+            &format!("$ {}{}", "y".repeat(50), crate::tools::OUTPUT_TRUNCATED),
+        );
+        assert!(command.details_clipped && command.details.ends_with('y'));
+        // Cut by this side's own limit, it is flagged as before.
+        let huge = format!("$ {}", "z".repeat(MAX_APPROVAL_DETAILS * 2));
+        let clipped = ApprovalFrame::new("a3".into(), "run_command", "x", &huge);
+        assert!(clipped.details_clipped && clipped.details.starts_with("$ z"));
+    }
+
+    #[test]
+    fn question_options_split_into_label_and_description() {
+        let options = |texts: &[&str]| {
+            let texts: Vec<String> = texts.iter().map(|text| (*text).to_owned()).collect();
+            QuestionFrame::new("q1".into(), "H", "T", &texts, false).options
+        };
+        let option =
+            |label: &str, description: &str| QuestionOption { label: label.into(), description: description.into() };
+        // Label alone, label and description, and a description that itself
+        // contains a dash separator: it is kept whole.
+        assert_eq!(
+            options(&["Yes", "Rewrite — start over", "Patch — small — and safe"]),
+            [option("Yes", ""), option("Rewrite", "start over"), option("Patch", "small — and safe")]
+        );
+        // Padding is not part of either; a dash without spaces is not a separator.
+        assert_eq!(options(&["  A  —  details  ", "a-b—c"]), [option("A", "details"), option("a-b—c", "")]);
+        // What the terminal answers with is the label the frame names.
+        for text in ["Rewrite — start over", "Patch — small — and safe", "  A  —  details  ", "Plain"] {
+            let [frame_option] = options(&[text]).try_into().unwrap();
+            assert_eq!(crate::agent::split_option(text).0, frame_option.label);
+        }
+    }
+
     #[test]
     fn browser_frames_from_the_spec_parse() {
         let parse = |text: &str| parse_incoming(text);
@@ -1127,13 +1248,33 @@ mod tests {
 
     #[test]
     fn invalid_browser_input_is_refused_with_a_reason() {
+        let invalid = |frame: &str| match parse_incoming(frame) {
+            Incoming::Invalid { kind, reason, .. } => (kind, reason),
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+        // Each reason is a sentence the browser shows as it is.
         let long = "p".repeat(MAX_PROMPT + 1);
         let frame = json!({"v":1,"type":"prompt","id":"b1","seq":1,"payload":{"text":long}}).to_string();
-        assert!(matches!(parse_incoming(&frame), Incoming::Invalid { kind: InputKind::Prompt, .. }));
+        assert_eq!(invalid(&frame), (InputKind::Prompt, "prompt is too large (max 32 KiB)".to_owned()));
         let frame = r#"{"v":1,"type":"approve","id":"b2","seq":2,"payload":{"approval_id":"a1","decision":"yolo"}}"#;
-        assert!(matches!(parse_incoming(frame), Incoming::Invalid { kind: InputKind::Approve, .. }));
+        assert_eq!(invalid(frame), (InputKind::Approve, "decision must be allow, deny or always".to_owned()));
         let frame = r#"{"v":1,"type":"prompt","id":"b3","seq":3,"payload":{"text":"   "}}"#;
-        assert!(matches!(parse_incoming(frame), Incoming::Invalid { kind: InputKind::Prompt, .. }));
+        assert_eq!(invalid(frame), (InputKind::Prompt, "prompt is empty".to_owned()));
+        let frame = r#"{"v":1,"type":"prompt","id":"b3","seq":3,"payload":{}}"#;
+        assert_eq!(invalid(frame), (InputKind::Prompt, "prompt has no text".to_owned()));
+        let frame = r#"{"v":1,"type":"answer","id":"b4","seq":4,"payload":{"selected":["1"]}}"#;
+        assert_eq!(invalid(frame).1, "answer does not say which question it is for");
+        let frame = r#"{"v":1,"type":"answer","id":"b4","seq":4,"payload":{"question_id":"q1","selected":"1"}}"#;
+        assert_eq!(invalid(frame).1, "selected options must be a list of labels");
+        let frame = r#"{"v":1,"type":"answer","id":"b4","seq":4,"payload":{"question_id":"q1","selected":[1]}}"#;
+        assert_eq!(invalid(frame).1, "selected options must be text labels");
+        let many =
+            json!({"v":1,"type":"answer","id":"b4","seq":4,"payload":{"question_id":"q1","selected":vec!["x"; 65]}});
+        assert_eq!(invalid(&many.to_string()).1, "too many options selected (max 64)");
+        let big = json!({"v":1,"type":"answer","id":"b4","seq":4,"payload":{"question_id":"q1","custom":long}});
+        assert_eq!(invalid(&big.to_string()).1, "answer is too large (max 32 KiB)");
+        let frame = r#"{"v":1,"type":"approve","id":"b5","seq":5,"payload":{"decision":"allow"}}"#;
+        assert_eq!(invalid(frame).1, "decision does not say which approval it is for");
         // Input without an id cannot be answered or deduplicated.
         assert_eq!(parse_incoming(r#"{"v":1,"type":"prompt","payload":{"text":"hi"}}"#), Incoming::Ignored);
     }

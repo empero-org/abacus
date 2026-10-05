@@ -203,12 +203,54 @@ struct MetaReply {
     meta: SessionMeta,
 }
 
+/// Everything of an upload's JSON body except the trace, which [`encode_put`]
+/// adds as `trace_base64`.
 #[derive(Serialize)]
 struct PutBody<'a> {
     session: &'a Value,
-    trace_base64: String,
     trace_sha256: &'a str,
     device_id: &'a str,
+}
+
+/// An upload's body, ready to send.
+struct PutPayload {
+    json: Vec<u8>,
+    /// The same body gzip-compressed, when it is large enough to be worth it
+    /// and the server takes compressed bodies.
+    packed: Option<Vec<u8>>,
+}
+
+/// Build an upload's body: the session and the trace (base64) as JSON, and
+/// gzip of that when `compress` and the body is large. Encoding a trace of up
+/// to 100 MiB and compressing it takes seconds of CPU, so callers run this on
+/// the blocking pool ([`offload`]), never on a runtime worker.
+fn encode_put(
+    document: &Value,
+    trace: &[u8],
+    trace_sha256: &str,
+    device: &str,
+    compress: bool,
+) -> Result<PutPayload, SyncError> {
+    let head = PutBody { session: document, trace_sha256, device_id: device };
+    let mut json = serde_json::to_string(&head).map_err(|error| SyncError::Protocol(error.to_string()))?;
+    // Reopen the object to add the trace: base64 needs no JSON escaping, so
+    // it is written straight in instead of being built, scanned and copied.
+    json.pop();
+    json.reserve(trace.len() / 3 * 4 + 32);
+    json.push_str(",\"trace_base64\":\"");
+    STANDARD.encode_string(trace, &mut json);
+    json.push_str("\"}");
+    let json = json.into_bytes();
+    let packed = if compress && json.len() >= GZIP_MIN_BYTES { gzip(&json) } else { None };
+    Ok(PutPayload { json, packed })
+}
+
+/// Run CPU-bound `work` on the blocking pool, so it cannot hold up a runtime
+/// worker — and with it the terminal UI, which shares the runtime.
+async fn offload<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, SyncError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| SyncError::Transient(format!("could not prepare the upload: {error}")))
 }
 
 /// The precondition of a write.
@@ -409,6 +451,10 @@ impl SyncClient {
     /// whose current revision already holds exactly this content is a success:
     /// an earlier attempt landed and only its reply was lost (the server's
     /// `Idempotency-Key` replay normally answers that case first).
+    ///
+    /// Building the body (base64, JSON, gzip) is seconds of CPU for a large
+    /// trace; it runs on the blocking pool over copies of what it needs, which
+    /// costs a memcpy of the trace but keeps the runtime free.
     pub(crate) async fn put_document(
         &self,
         id: &str,
@@ -418,17 +464,13 @@ impl SyncClient {
         precondition: Precondition,
     ) -> Result<SessionMeta, SyncError> {
         let device = if self.install_id.is_empty() { crate::config::device_name() } else { self.install_id.clone() };
-        let body = PutBody {
-            session: document,
-            trace_base64: STANDARD.encode(trace),
-            trace_sha256: &hashes.trace,
-            device_id: &device,
-        };
-        let body = serde_json::to_vec(&body).map_err(|error| SyncError::Protocol(error.to_string()))?;
         // The server answers a repeat of this exact write with the stored
         // reply, but only when it carries the key the first attempt did.
         let key = self.write_key(id, &format!("PUT {precondition:?} {} {} {device}", hashes.session, hashes.trace));
-        let packed = if body.len() >= GZIP_MIN_BYTES && !self.refused_gzip() { gzip(&body) } else { None };
+        let compress = !self.refused_gzip();
+        let (document, trace, trace_sha256) = (document.clone(), trace.to_vec(), hashes.trace.clone());
+        let PutPayload { json, packed } =
+            offload(move || encode_put(&document, &trace, &trace_sha256, &device, compress)).await??;
         let sent = match packed {
             Some(packed) => match self.send_put(id, packed, true, precondition, &key).await {
                 // A server (or a proxy in front of it) that cannot read
@@ -436,11 +478,11 @@ impl SyncClient {
                 // and later ones skip the attempt.
                 Err(SyncError::Rejected { status: 415, .. }) => {
                     GZIP_REFUSED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(self.server.clone());
-                    self.send_put(id, body, false, precondition, &key).await
+                    self.send_put(id, json, false, precondition, &key).await
                 }
                 other => other,
             },
-            None => self.send_put(id, body, false, precondition, &key).await,
+            None => self.send_put(id, json, false, precondition, &key).await,
         };
         self.write_settled(id, &sent);
         match sent {
@@ -868,6 +910,173 @@ mod tests {
         let mut unpacked = Vec::new();
         flate2::read::GzDecoder::new(packed.as_slice()).read_to_end(&mut unpacked).unwrap();
         assert_eq!(unpacked, body);
+    }
+
+    fn unpack(packed: &[u8]) -> Vec<u8> {
+        use std::io::Read;
+        let mut unpacked = Vec::new();
+        flate2::read::GzDecoder::new(packed).read_to_end(&mut unpacked).unwrap();
+        unpacked
+    }
+
+    #[test]
+    fn an_upload_body_carries_the_session_the_trace_and_who_sent_it() {
+        let document =
+            json!({"id": "s1", "title": "quotes \" and \\ and\nnewlines and é 漢 \u{1}", "messages": [{"n": 1}]});
+        // Every byte value, so nothing about the trace depends on it being text.
+        let trace: Vec<u8> = (0..=255).cycle().take(10_000).collect();
+        let payload = encode_put(&document, &trace, "abc123", "laptop", true).unwrap();
+        let body: Value = serde_json::from_slice(&payload.json).unwrap();
+        assert_eq!(body["session"], document);
+        assert_eq!(body["trace_sha256"], "abc123");
+        assert_eq!(body["device_id"], "laptop");
+        assert_eq!(STANDARD.decode(body["trace_base64"].as_str().unwrap()).unwrap(), trace);
+        assert_eq!(body.as_object().unwrap().len(), 4, "no other fields: {body}");
+        assert!(payload.packed.is_none(), "small bodies are not compressed");
+
+        // No trace at all is an empty one.
+        let bare = encode_put(&document, &[], "e3b0", "laptop", true).unwrap();
+        let body: Value = serde_json::from_slice(&bare.json).unwrap();
+        assert_eq!(body["trace_base64"], "");
+        // Lengths that do not fill the last base64 group are padded as usual.
+        for length in 1..=5_usize {
+            let payload = encode_put(&json!({}), &trace[..length], "x", "d", false).unwrap();
+            let body: Value = serde_json::from_slice(&payload.json).unwrap();
+            assert_eq!(STANDARD.decode(body["trace_base64"].as_str().unwrap()).unwrap(), &trace[..length]);
+        }
+    }
+
+    #[test]
+    fn large_upload_bodies_are_compressed_unless_the_server_refuses() {
+        let document = json!({"id": "s1"});
+        let trace = "the quick brown fox ".repeat(20_000).into_bytes();
+        let payload = encode_put(&document, &trace, "h", "d", true).unwrap();
+        let packed = payload.packed.expect("a 400 KB trace is worth compressing");
+        assert!(packed.len() * 10 < payload.json.len(), "{} of {}", packed.len(), payload.json.len());
+        assert_eq!(unpack(&packed), payload.json, "the same body, compressed");
+        let refused = encode_put(&document, &trace, "h", "d", false).unwrap();
+        assert!(refused.packed.is_none());
+        assert_eq!(refused.json, payload.json);
+
+        // The threshold is on the body that would be sent.
+        let just_under = encode_put(&document, &vec![b'a'; GZIP_MIN_BYTES / 4 * 3 - 200], "h", "d", true).unwrap();
+        assert!(just_under.json.len() < GZIP_MIN_BYTES && just_under.packed.is_none());
+        let just_over = encode_put(&document, &vec![b'a'; GZIP_MIN_BYTES / 4 * 3 + 200], "h", "d", true).unwrap();
+        assert!(just_over.json.len() >= GZIP_MIN_BYTES && just_over.packed.is_some());
+    }
+
+    #[tokio::test]
+    async fn offloaded_work_runs_off_the_thread_that_asked() {
+        // A current-thread runtime has only the test's own thread to run tasks
+        // on, which is what a blocked worker looks like to everything else.
+        let caller = std::thread::current().id();
+        let worker = offload(|| std::thread::current().id()).await.unwrap();
+        assert_ne!(worker, caller);
+        // A panic while preparing a body is reported, not carried into the caller.
+        let panicked = offload(|| -> u8 { panic!("boom") }).await;
+        assert!(matches!(panicked, Err(SyncError::Transient(detail)) if detail.contains("could not prepare")));
+    }
+
+    /// Answer one request on a local port, as a sync server would a good
+    /// write; what was received (head, body) comes back through the channel.
+    fn serve_one_write() -> (String, std::sync::mpsc::Receiver<(String, Vec<u8>)>) {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (mut data, mut chunk) = (Vec::new(), vec![0_u8; 64 * 1024]);
+            let (head_end, length) = loop {
+                let read = stream.read(&mut chunk).unwrap();
+                assert!(read > 0, "the client hung up before it finished");
+                data.extend_from_slice(&chunk[..read]);
+                let searched = &data[..data.len().min(16 * 1024)];
+                if let Some(end) = searched.windows(4).position(|window| window == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&data[..end]).to_lowercase();
+                    let length = head.lines().find_map(|line| line.strip_prefix("content-length:")).unwrap();
+                    break (end + 4, length.trim().parse::<usize>().unwrap());
+                }
+            };
+            while data.len() < head_end + length {
+                let read = stream.read(&mut chunk).unwrap();
+                assert!(read > 0, "the client hung up before it finished");
+                data.extend_from_slice(&chunk[..read]);
+            }
+            let body = br#"{"meta":{"id":"s1","revision":1}}"#;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nabacus-protocol: 1\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                 connection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+            let _ = sent.send((String::from_utf8_lossy(&data[..head_end]).into_owned(), data[head_end..].to_vec()));
+        });
+        (format!("http://{address}"), received)
+    }
+
+    /// Preparing a large upload (base64, then gzip) is seconds of CPU for a big
+    /// trace. It must happen off the runtime's workers: the terminal UI shares
+    /// them, and a stalled worker is a frozen screen.
+    #[test]
+    fn a_large_upload_is_prepared_without_holding_the_runtime() {
+        use std::sync::atomic::AtomicU64;
+        use std::time::Instant;
+
+        // Noise, which neither compresses away nor is quick to compress.
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let trace: Vec<u8> = (0..2 * 1024 * 1024)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect();
+        let document = json!({"id": "s1"});
+
+        // What preparing that body costs on this machine, done where it is seen.
+        let device = crate::config::device_name();
+        let started = Instant::now();
+        let prepared = encode_put(&document, &trace, "t", &device, true).unwrap();
+        let work = started.elapsed();
+        if work < Duration::from_millis(40) {
+            // An optimised build chews through this too fast for a stall to show.
+            eprintln!("skipped: preparing the body takes only {work:?} here");
+            return;
+        }
+
+        // One thread runs everything, so if the body were built on it nothing
+        // else — the ticker below standing for the UI — could run meanwhile.
+        let (server, received) = serve_one_write();
+        let client = SyncClient::new(&SyncCredentials { server, token: "t".into(), email: "a@b".into() }).unwrap();
+        let hashes = Hashes { session: "s".into(), content: "c".into(), trace: "t".into() };
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let longest = runtime.block_on(async {
+            let worst = Arc::new(AtomicU64::new(0));
+            let ticking = worst.clone();
+            let ticker = tokio::spawn(async move {
+                let mut last = Instant::now();
+                loop {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    let now = Instant::now();
+                    ticking.fetch_max(now.duration_since(last).as_micros() as u64, Ordering::Relaxed);
+                    last = now;
+                }
+            });
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            worst.store(0, Ordering::Relaxed);
+            let meta = client.put_document("s1", &document, &trace, &hashes, Precondition::Create).await.unwrap();
+            ticker.abort();
+            assert_eq!(meta.revision, 1);
+            Duration::from_micros(worst.load(Ordering::Relaxed))
+        });
+
+        let (head, body) = received.recv().unwrap();
+        assert!(head.to_lowercase().contains("content-encoding: gzip"), "{head}");
+        assert_eq!(unpack(&body), prepared.json, "the same body, built off the runtime");
+        assert!(longest < work / 2, "the runtime was held for {longest:?} by an upload that takes {work:?} to prepare");
     }
 
     #[test]

@@ -68,6 +68,21 @@ pub struct ApprovalRequest {
     pub respond: oneshot::Sender<ApprovalDecision>,
 }
 
+/// Between an option's label and its description in the text a question's
+/// options are shown as (`label — description`).
+pub const OPTION_SEPARATOR: &str = " — ";
+
+/// A question option as shown, taken apart: the label an answer names it by,
+/// and its description (empty when it has none). The first separator splits, so
+/// a description may contain one itself; a label that does is read as ending
+/// there, in the terminal's own answers as much as anywhere. Both are trimmed.
+pub fn split_option(option: &str) -> (&str, &str) {
+    match option.split_once(OPTION_SEPARATOR) {
+        Some((label, description)) => (label.trim(), description.trim()),
+        None => (option.trim(), ""),
+    }
+}
+
 /// A request from the agent to ask the user a question. The agent waits until
 /// `respond` is resolved — either with a chosen option (single- or multi-select)
 /// or with a freely typed answer. The model "stop" while the question is open
@@ -1119,7 +1134,7 @@ async fn request_user_question(
                 if opt.description.is_empty() {
                     opt.label.clone()
                 } else {
-                    format!("{} — {}", opt.label, opt.description)
+                    format!("{}{OPTION_SEPARATOR}{}", opt.label, opt.description)
                 }
             })
             .collect(),

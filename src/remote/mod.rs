@@ -7,6 +7,26 @@
 //! the terminal handles through the same code paths as its own keyboard: the
 //! terminal stays the only thing that executes anything, and a browser can
 //! reach nothing — workspace, model, configuration — that has no frame type.
+//!
+//! # Block ids
+//!
+//! A browser keeps a row's state (expanded, scrolled to) by its entry id, and
+//! a snapshot replaces its transcript wholesale, so the same block must have
+//! the same id live and in every snapshot:
+//!
+//! - A block of the terminal's transcript is `e<n>`, `n` being the number the
+//!   transcript gave the entry ([`ui::Entry::id`]). Numbers count up and are
+//!   never reused, so a row survives other entries being merged away or
+//!   rewound, and a new block can never take over an old one's id. A tool's
+//!   call is `t<n>` alike. An entry the transcript never numbered (only in
+//!   tests) is `p<position>`.
+//! - A block with no entry of the terminal's — reasoning the terminal hides —
+//!   is `x<k>`, counted by the bridge; it is in a snapshot only while it is
+//!   still streaming.
+//! - What became of an approval or a question is a system row, `resolved-<id>`
+//!   or `answered-<id>`, which the bridge keeps because the terminal's
+//!   transcript has no entry for it. The line saying earlier entries were left
+//!   out of a snapshot is always `earlier`.
 
 pub(crate) mod link;
 pub mod protocol;
@@ -105,9 +125,6 @@ pub enum LinkState {
 pub struct SnapshotView<'a> {
     pub session: SessionInfo,
     pub entries: &'a [ui::Entry],
-    /// A turn is running, so the transcript's last block may be the one still
-    /// streaming.
-    pub live: bool,
     pub usage: &'a TokenUsage,
 }
 
@@ -133,9 +150,22 @@ const SNAPSHOT_MAX_ENTRIES: usize = 2_000;
 const MAX_STATUS_LABEL: usize = 200;
 const MAX_ERROR: usize = 8 * 1024;
 
+/// How many approval and question outcomes a snapshot can replay; the oldest
+/// go first.
+const MAX_NOTES: usize = 1_000;
+
+/// The longest an approval's target or an answer is quoted in the row that
+/// records it.
+const MAX_NOTE_QUOTE: usize = 120;
+
+/// The line a snapshot starts with when it leaves earlier entries out.
+const OMITTED_ID: &str = "earlier";
+
 /// The block currently streaming to the browsers.
 struct OpenText {
     id: String,
+    /// The terminal entry it is written into, if it has one.
+    entry: Option<u64>,
     kind: DeltaKind,
     /// The block so far, up to the entry limit, for `entry{complete}` and for
     /// a snapshot taken mid-stream.
@@ -143,6 +173,14 @@ struct OpenText {
     clipped: bool,
     /// Streamed but not yet sent.
     pending: String,
+}
+
+/// A block that ended: what a continuation of its entry starts from.
+struct Finished {
+    entry: u64,
+    kind: DeltaKind,
+    text: String,
+    clipped: bool,
 }
 
 struct OpenTool {
@@ -153,15 +191,38 @@ struct OpenTool {
     started: Instant,
 }
 
+/// How an approval or a question ended, as the row browsers show for it. The
+/// terminal's transcript has no entry for either — they are dialogs there — so
+/// the bridge keeps the row for the snapshots a resyncing browser asks for.
+struct Note {
+    /// `resolved-<approval id>` or `answered-<question id>`.
+    id: String,
+    /// The number the terminal's next transcript entry was going to get when
+    /// it happened. The row goes before the first entry numbered at or above
+    /// it, which keeps its place whatever is merged or rewound after.
+    before: u64,
+    text: String,
+}
+
+impl Note {
+    fn entry(&self) -> Entry {
+        Entry::block(self.id.clone(), EntryKind::System, &self.text)
+    }
+}
+
 pub struct Bridge {
     session_id: String,
     frames: mpsc::Sender<Outbound>,
     stop: Option<oneshot::Sender<Stop>>,
     task: Option<JoinHandle<()>>,
-    next_entry: u64,
     next_approval: u64,
     next_question: u64,
-    next_call: u64,
+    /// Counts the blocks that have no entry of the terminal's (`x<k>`).
+    next_loose: u64,
+    /// The newest block that ended, while the terminal may yet write on into
+    /// its entry (see `stream`).
+    finished: Option<Finished>,
+    notes: Vec<Note>,
     text: Option<OpenText>,
     tool: Option<OpenTool>,
     last_delta: Instant,
@@ -199,10 +260,11 @@ impl Bridge {
             frames,
             stop: None,
             task: None,
-            next_entry: 0,
             next_approval: 0,
             next_question: 0,
-            next_call: 0,
+            next_loose: 0,
+            finished: None,
+            notes: Vec::new(),
             text: None,
             tool: None,
             last_delta: Instant::now(),
@@ -288,13 +350,13 @@ impl Bridge {
     // -----------------------------------------------------------------------
 
     /// A prompt entered in the terminal (or steering a running turn), so the
-    /// browsers mirror what was typed.
-    pub fn user_prompt(&mut self, text: &str) {
+    /// browsers mirror what was typed. `entry` is the transcript entry that
+    /// holds it.
+    pub fn user_prompt(&mut self, entry: u64, text: &str) {
         self.close_text();
-        let id = self.entry_id();
         self.emit(Outbound::Entry(EntryFrame {
             phase: Phase::Complete,
-            entry: Entry::block(id, EntryKind::User, text),
+            entry: Entry::block(entry_id(entry), EntryKind::User, text),
         }));
     }
 
@@ -305,16 +367,19 @@ impl Bridge {
     }
 
     /// Mirror one agent event. Called before the terminal handles it, so it
-    /// only borrows.
-    pub fn on_event(&mut self, event: &AgentEvent, usage: &TokenUsage) {
+    /// only borrows. `entry` is the transcript entry the terminal is about to
+    /// write the event into or create for it — text and reasoning that carry
+    /// on an entry, a tool call — and `None` for an event it keeps no entry
+    /// for (reasoning it hides) or none at all.
+    pub fn on_event(&mut self, event: &AgentEvent, usage: &TokenUsage, entry: Option<u64>) {
         match event {
-            AgentEvent::Delta(text) => self.stream(DeltaKind::Text, text),
-            AgentEvent::Reasoning(piece) => self.stream(DeltaKind::Reasoning, piece),
+            AgentEvent::Delta(text) => self.stream(DeltaKind::Text, text, entry),
+            AgentEvent::Reasoning(piece) => self.stream(DeltaKind::Reasoning, piece, entry),
             // The ids are assigned by `approval_opened`/`question_opened`,
             // once the terminal holds the request.
             AgentEvent::Approval(_) | AgentEvent::UserQuestion(_) => self.close_text(),
-            AgentEvent::ToolStarted { name, summary } => self.tool_started(name, summary),
-            AgentEvent::ToolFinished { name, output } => self.tool_finished(name, output),
+            AgentEvent::ToolStarted { name, summary } => self.tool_started(name, summary, entry),
+            AgentEvent::ToolFinished { name, output } => self.tool_finished(name, output, entry),
             AgentEvent::ModeChanged { mode, reason } => self.mode_changed(*mode, reason),
             AgentEvent::Notice(text) => self.notice(text, Level::Info),
             AgentEvent::TraceFailed { error } => {
@@ -356,21 +421,11 @@ impl Bridge {
                 duration_ms: Some(millis(open.started)),
             }));
         }
-        if let Some(approval) = self.approval.take() {
-            self.emit(Outbound::ApprovalResolved(ApprovalResolved {
-                approval_id: approval.approval_id,
-                decision: protocol::Resolution::Reject,
-                by: By::Terminal,
-            }));
-        }
-        if let Some(question) = self.question.take() {
-            self.emit(Outbound::QuestionResolved(QuestionResolved {
-                question_id: question.question_id,
-                selected: Vec::new(),
-                custom: None,
-                by: By::Terminal,
-            }));
-        }
+        // An approval or a question still open was never decided. `done`
+        // clears both in the browsers; a resolution frame would make them
+        // read it as a decision ("Denied in the terminal") nobody made.
+        self.approval = None;
+        self.question = None;
         let elapsed_ms = self.turn_started.take().map_or(0, millis);
         self.emit(Outbound::Done(DoneFrame { reason, elapsed_ms, usage: usage.into() }));
         let label = match reason {
@@ -422,16 +477,25 @@ impl Bridge {
         id
     }
 
-    pub fn approval_resolved(&mut self, id: &str, decision: ApprovalDecision, by: By) {
-        if self.approval.as_ref().is_some_and(|approval| approval.approval_id == id) {
-            self.approval = None;
-        }
+    /// An approval was decided — and only then: one that is still open when
+    /// the turn ends is dropped by [`Bridge::turn_ended`] without a word.
+    /// `next_entry` is the number the terminal's next transcript entry will
+    /// get, which is where the row recording the decision belongs.
+    pub fn approval_resolved(&mut self, id: &str, decision: ApprovalDecision, by: By, next_entry: u64) {
+        let open = self.approval.take_if(|approval| approval.approval_id == id);
+        let text = approval_note(open.as_ref(), decision, by);
+        self.note(format!("resolved-{id}"), next_entry, text);
         self.emit(Outbound::ApprovalResolved(ApprovalResolved {
             approval_id: id.to_owned(),
             decision: decision.into(),
             by,
         }));
         self.set_status(State::Thinking, "thinking");
+    }
+
+    /// Why no open approval has this id, for the refusal's `reason`.
+    pub fn approval_miss(&self, id: &str) -> &'static str {
+        if self.noted(&format!("resolved-{id}")) { "approval already decided" } else { "no open approval with that id" }
     }
 
     /// A question dialog opened; returns its id for the terminal to keep.
@@ -447,10 +511,11 @@ impl Bridge {
         id
     }
 
-    pub fn question_resolved(&mut self, id: &str, selected: &[String], custom: Option<&str>, by: By) {
-        if self.question.as_ref().is_some_and(|question| question.question_id == id) {
-            self.question = None;
-        }
+    /// A question was answered; see [`Bridge::approval_resolved`].
+    pub fn question_resolved(&mut self, id: &str, selected: &[String], custom: Option<&str>, by: By, next_entry: u64) {
+        let open = self.question.take_if(|question| question.question_id == id);
+        let text = answer_note(open.as_ref(), selected, custom, by);
+        self.note(format!("answered-{id}"), next_entry, text);
         self.emit(Outbound::QuestionResolved(QuestionResolved {
             question_id: id.to_owned(),
             selected: selected.to_vec(),
@@ -460,58 +525,68 @@ impl Bridge {
         self.set_status(State::Thinking, "thinking");
     }
 
-    /// Tell the browsers what became of their input.
-    pub fn accepted(&mut self, ref_id: &str, kind: InputKind, result: AcceptResult, reason: Option<&str>) {
-        self.emit(Outbound::Accepted(Accepted {
-            ref_id: ref_id.to_owned(),
-            kind,
-            result,
-            reason: reason.map(str::to_owned),
-        }));
+    /// Why no open question has this id, for the refusal's `reason`.
+    pub fn question_miss(&self, id: &str) -> &'static str {
+        if self.noted(&format!("answered-{id}")) {
+            "question already answered"
+        } else {
+            "no open question with that id"
+        }
     }
 
-    /// Send the whole transcript, paged. Entry ids are fresh except for the
-    /// block still streaming, which keeps the id its deltas use.
+    /// The terminal dropped its transcript from the entry numbered `first`
+    /// on (a rewind, or a different transcript altogether with `0`): what
+    /// became of approvals and questions in the part that went is no longer
+    /// part of the conversation.
+    pub fn entries_dropped(&mut self, first: u64) {
+        self.notes.retain(|note| note.before <= first);
+    }
+
+    /// Tell the browsers what became of their input. A refusal always says why,
+    /// in words the browser shows as they are.
+    pub fn accepted(&mut self, ref_id: &str, kind: InputKind, result: AcceptResult, reason: Option<&str>) {
+        let reason = match (result, reason) {
+            (_, Some(reason)) => Some(reason.to_owned()),
+            (AcceptResult::Rejected, None) => Some("the terminal could not act on that".to_owned()),
+            _ => None,
+        };
+        self.emit(Outbound::Accepted(Accepted { ref_id: ref_id.to_owned(), kind, result, reason }));
+    }
+
+    /// Send the whole transcript, paged. Every block has the id it has live
+    /// (see the module docs), so a browser keeps what it knows of a row across
+    /// the resync, and the rows recording approvals and questions come back in
+    /// the places they were first seen.
     pub fn send_snapshot(&mut self, view: SnapshotView<'_>, reason: SnapshotReason) {
         self.flush_delta();
         self.resync = false;
-        let open_text = self.text.as_ref().map(|open| (open.id.clone(), open.kind));
-        let open_tool = self.tool.as_ref().map(|open| (open.entry_id.clone(), open.call_id.clone()));
         let start = window_start(view.entries);
-        let mut entries = Vec::with_capacity(view.entries.len() - start + 2);
+        let mut entries = Vec::with_capacity(view.entries.len() - start + self.notes.len() + 2);
         if start > 0 {
-            let id = self.entry_id();
             let text = format!(
                 "{start} earlier entr{} not shown live; the full transcript is under Sessions.",
                 if start == 1 { "y is" } else { "ies are" }
             );
-            entries.push(Entry::block(id, EntryKind::System, &text));
+            entries.push(Entry::block(OMITTED_ID.to_owned(), EntryKind::System, &text));
         }
-        let mut text_placed = false;
-        let last = view.entries.len().saturating_sub(1);
+        // Rows from before the window went out with the entries around them.
+        let mut notes = self
+            .notes
+            .iter()
+            .filter(|note| start == 0 || view.entries.get(start).is_none_or(|first| note.before > first.id))
+            .peekable();
         for (index, entry) in view.entries.iter().enumerate().skip(start) {
-            let tail = view.live && index == last;
-            let streaming = open_text.as_ref().filter(|(_, kind)| tail && matches_stream(entry.kind, *kind));
-            let running = open_tool
-                .as_ref()
-                .filter(|_| tail && entry.tool.as_ref().is_some_and(|call| call.status == ui::ToolStatus::Running));
-            let (id, call_id) = match (streaming, running) {
-                (Some((id, _)), _) => {
-                    text_placed = true;
-                    (id.clone(), None)
-                }
-                (None, Some((id, call_id))) => (id.clone(), Some(call_id.clone())),
-                (None, None) => (self.entry_id(), None),
-            };
-            let call_id = match (entry.kind, call_id) {
-                (ui::EntryKind::Tool, None) => Some(self.call_id()),
-                (_, call_id) => call_id,
-            };
-            entries.push(convert(entry, id, call_id));
+            while let Some(note) = notes.next_if(|note| entry.id != 0 && note.before <= entry.id) {
+                entries.push(note.entry());
+            }
+            entries.push(convert(entry, index));
         }
+        entries.extend(notes.map(Note::entry));
         // Reasoning streams to the browsers even when the terminal hides it,
         // so the block may exist only here.
-        if !text_placed && let Some(open) = &self.text {
+        if let Some(open) = &self.text
+            && !entries.iter().any(|entry| entry.id == open.id)
+        {
             let kind = if open.kind == DeltaKind::Text { EntryKind::Assistant } else { EntryKind::Reasoning };
             let mut entry = Entry::block(open.id.clone(), kind, &open.text);
             entry.clipped |= open.clipped;
@@ -548,19 +623,33 @@ impl Bridge {
     // Internals
     // -----------------------------------------------------------------------
 
-    fn stream(&mut self, kind: DeltaKind, text: &str) {
+    fn stream(&mut self, kind: DeltaKind, text: &str, entry: Option<u64>) {
         if text.is_empty() {
             return;
         }
-        if self.text.as_ref().is_some_and(|open| open.kind != kind) {
+        // A different kind, or a different entry than the block was written
+        // into (the terminal began one the bridge was not told of): a new block.
+        if self.text.as_ref().is_some_and(|open| open.kind != kind || open.entry != entry) {
             self.close_text();
         }
         if self.text.is_none() {
-            let id = self.entry_id();
-            let entry_kind = if kind == DeltaKind::Text { EntryKind::Assistant } else { EntryKind::Reasoning };
-            let entry = Entry { id: id.clone(), kind: entry_kind, text: String::new(), clipped: false, tool: None };
-            self.emit(Outbound::Entry(EntryFrame { phase: Phase::Start, entry }));
-            self.text = Some(OpenText { id, kind, text: String::new(), clipped: false, pending: String::new() });
+            // The terminal writes on into an entry the bridge ended when
+            // something it does not show came between (reasoning it hides): the
+            // browsers' row goes on too, instead of a second one with the same
+            // text in a snapshot.
+            let resumed = self.finished.take_if(|done| Some(done.entry) == entry && done.kind == kind);
+            let (id, text, clipped) = match resumed {
+                Some(done) => (entry_id(done.entry), done.text, done.clipped),
+                None => {
+                    let id = self.block_id(entry);
+                    let entry_kind = if kind == DeltaKind::Text { EntryKind::Assistant } else { EntryKind::Reasoning };
+                    let block =
+                        Entry { id: id.clone(), kind: entry_kind, text: String::new(), clipped: false, tool: None };
+                    self.emit(Outbound::Entry(EntryFrame { phase: Phase::Start, entry: block }));
+                    (id, String::new(), false)
+                }
+            };
+            self.text = Some(OpenText { id, entry, kind, text, clipped, pending: String::new() });
             if self.status.state != State::Thinking {
                 self.set_status(State::Thinking, "thinking");
             }
@@ -611,16 +700,19 @@ impl Bridge {
         let mut entry = Entry::block(open.id, kind, &open.text);
         entry.clipped |= open.clipped;
         self.push(Outbound::Entry(EntryFrame { phase: Phase::Complete, entry }));
+        if let Some(entry) = open.entry {
+            self.finished = Some(Finished { entry, kind: open.kind, text: open.text, clipped: open.clipped });
+        }
     }
 
-    fn tool_started(&mut self, name: &str, summary: &str) {
+    fn tool_started(&mut self, name: &str, summary: &str, entry: Option<u64>) {
         self.close_text();
         // Tools run one after another; one still open never reported back.
         if let Some(open) = self.tool.take() {
             self.emit(Outbound::Tool(finish_frame(open, ToolState::Ok, String::new(), false)));
         }
-        let entry_id = self.entry_id();
-        let call_id = self.call_id();
+        let entry_id = self.block_id(entry);
+        let call_id = call_id(&entry_id);
         let summary = protocol::clip_text(summary, 512).0;
         self.emit(Outbound::Tool(ToolFrame {
             entry_id: entry_id.clone(),
@@ -637,17 +729,21 @@ impl Bridge {
         self.set_status(State::Tool, &format!("running {name}"));
     }
 
-    fn tool_finished(&mut self, name: &str, output: &str) {
+    fn tool_finished(&mut self, name: &str, output: &str, entry: Option<u64>) {
         self.close_text();
+        // One that began before sharing did: the entry it is in names it.
         let open = match self.tool.take() {
             Some(open) => open,
-            None => OpenTool {
-                entry_id: self.entry_id(),
-                call_id: self.call_id(),
-                name: name.to_owned(),
-                summary: String::new(),
-                started: Instant::now(),
-            },
+            None => {
+                let entry_id = self.block_id(entry);
+                OpenTool {
+                    call_id: call_id(&entry_id),
+                    entry_id,
+                    name: name.to_owned(),
+                    summary: String::new(),
+                    started: Instant::now(),
+                }
+            }
         };
         let status = if tool_failed(output) { ToolState::Failed } else { ToolState::Ok };
         let (output, clipped) = protocol::clip_tool_output(output);
@@ -682,14 +778,92 @@ impl Bridge {
         }
     }
 
-    fn entry_id(&mut self) -> String {
-        self.next_entry += 1;
-        format!("e{}", self.next_entry)
+    /// The id of a block written into terminal entry `entry`, or one of the
+    /// bridge's own when the terminal keeps none.
+    fn block_id(&mut self, entry: Option<u64>) -> String {
+        entry.map(entry_id).unwrap_or_else(|| {
+            self.next_loose += 1;
+            format!("x{}", self.next_loose)
+        })
     }
 
-    fn call_id(&mut self) -> String {
-        self.next_call += 1;
-        format!("t{}", self.next_call)
+    /// Remember how an approval or question ended, replacing any earlier note
+    /// of the same id.
+    fn note(&mut self, id: String, before: u64, text: String) {
+        self.notes.retain(|note| note.id != id);
+        self.notes.push(Note { id, before, text });
+        let excess = self.notes.len().saturating_sub(MAX_NOTES);
+        self.notes.drain(..excess);
+    }
+
+    fn noted(&self, id: &str) -> bool {
+        self.notes.iter().any(|note| note.id == id)
+    }
+}
+
+/// The id of the browsers' block for the terminal transcript entry numbered
+/// `entry` (see the module docs).
+fn entry_id(entry: u64) -> String {
+    format!("e{entry}")
+}
+
+/// A tool call's id: its entry's, in the `t` namespace.
+fn call_id(entry_id: &str) -> String {
+    format!("t{}", entry_id.strip_prefix('e').unwrap_or(entry_id))
+}
+
+/// Where a decision was made, as the rows record it.
+fn made(by: By) -> &'static str {
+    match by {
+        By::Terminal => "in the terminal",
+        By::Browser => "from phone",
+    }
+}
+
+/// `text` on one line, short enough to quote in a row.
+fn quote(text: &str) -> String {
+    crate::text::clip(&crate::text::squeeze(text), MAX_NOTE_QUOTE, "…")
+}
+
+/// "Allowed write_file notes.txt · from phone": what was decided about which
+/// call, and by whom.
+fn approval_note(approval: Option<&ApprovalFrame>, decision: ApprovalDecision, by: By) -> String {
+    let subject = match approval {
+        Some(approval) if approval.summary.trim().is_empty() || approval.summary == approval.tool => {
+            approval.tool.clone()
+        }
+        Some(approval) => format!("{} {}", approval.tool, quote(&approval.summary)),
+        None => "the request".to_owned(),
+    };
+    let outcome = match decision {
+        ApprovalDecision::Once => format!("Allowed {subject}"),
+        ApprovalDecision::Always => format!("Allowed {subject} for this session"),
+        ApprovalDecision::Reject => format!("Denied {subject}"),
+    };
+    format!("{outcome} · {}", made(by))
+}
+
+/// `Answered "Yes" · in the terminal`. An option answers with what it says
+/// rather than its label (the labels may be bare numbers), and typed text
+/// takes the place of the options, as it does for the browsers' own row.
+fn answer_note(question: Option<&QuestionFrame>, selected: &[String], custom: Option<&str>, by: By) -> String {
+    let said = match custom.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(text) => quote(text),
+        None => {
+            let said: Vec<&str> = selected
+                .iter()
+                .map(|label| {
+                    let option = question.and_then(|question| question.options.iter().find(|o| &o.label == label));
+                    option.map(|option| option.description.as_str()).filter(|text| !text.is_empty()).unwrap_or(label)
+                })
+                .collect();
+            quote(&said.join(", "))
+        }
+    };
+    if said.is_empty() {
+        format!("Skipped the question · {}", made(by))
+    } else {
+        format!("Answered \"{said}\" · {}", made(by))
     }
 }
 
@@ -715,13 +889,6 @@ fn tool_failed(output: &str) -> bool {
     head.starts_with("Error:") || head.starts_with("error:") || head.starts_with("User rejected")
 }
 
-fn matches_stream(kind: ui::EntryKind, stream: DeltaKind) -> bool {
-    matches!(
-        (kind, stream),
-        (ui::EntryKind::Assistant, DeltaKind::Text) | (ui::EntryKind::Thinking, DeltaKind::Reasoning)
-    )
-}
-
 /// Index of the first entry a snapshot includes: as many recent entries as
 /// fit [`SNAPSHOT_BUDGET`] and [`SNAPSHOT_MAX_ENTRIES`].
 fn window_start(entries: &[ui::Entry]) -> usize {
@@ -736,8 +903,10 @@ fn window_start(entries: &[ui::Entry]) -> usize {
     0
 }
 
-/// A terminal transcript block as a browser entry.
-fn convert(entry: &ui::Entry, id: String, call_id: Option<String>) -> Entry {
+/// A terminal transcript block as a browser entry; `index` is its place in
+/// the transcript, which names an entry the transcript never numbered.
+fn convert(entry: &ui::Entry, index: usize) -> Entry {
+    let id = if entry.id == 0 { format!("p{index}") } else { entry_id(entry.id) };
     let kind = match entry.kind {
         ui::EntryKind::User => EntryKind::User,
         ui::EntryKind::Thinking => EntryKind::Reasoning,
@@ -763,13 +932,14 @@ fn convert(entry: &ui::Entry, id: String, call_id: Option<String>) -> Entry {
         ui::ToolStatus::Ok => ToolState::Ok,
         ui::ToolStatus::Failed => ToolState::Failed,
     };
+    let call_id = call_id(&id);
     Entry {
         id,
         kind,
         text: String::new(),
         clipped: false,
         tool: Some(ToolInfo {
-            call_id: call_id.unwrap_or_default(),
+            call_id,
             name: call.name.clone(),
             summary: protocol::clip_text(&call.summary, 512).0,
             status,

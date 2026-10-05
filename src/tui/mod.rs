@@ -220,8 +220,7 @@ impl PendingUserQuestion {
             if *on {
                 // Strip the trailing " — description" added for display, keeping
                 // just the option label so the LLM sees clean identifiers.
-                let raw = self.options[index].split(" — ").next().unwrap_or(&self.options[index]);
-                selected_labels.push(raw.to_owned());
+                selected_labels.push(crate::agent::split_option(&self.options[index]).0.to_owned());
             }
         }
         let custom_text = self.custom.text();
@@ -464,6 +463,8 @@ struct App {
     hive_scroll: u16,
     ralph_loop: Option<RalphLoop>,
     entries: Vec<Entry>,
+    /// The number the transcript gave its newest entry (`Entry::id`).
+    last_entry_id: u64,
     input: InputBuffer,
     mode: InputMode,
     running: Option<JoinHandle<()>>,
@@ -1080,6 +1081,16 @@ fn settle(call: &mut ToolCall, output: &str, duration_ms: Option<u64>) {
     call.duration_ms = duration_ms;
 }
 
+/// Give each of `entries` the next number after `last`, and return the last
+/// one handed out.
+fn number_entries(entries: &mut [Entry], mut last: u64) -> u64 {
+    for entry in entries {
+        last += 1;
+        entry.id = last;
+    }
+    last
+}
+
 fn entries_from_messages(messages: &[Value]) -> Vec<Entry> {
     let mut entries = Vec::new();
     for message in messages {
@@ -1169,6 +1180,7 @@ impl App {
         for diagnostic in services.diagnostics() {
             entries.push(Entry::new(EntryKind::Error, format!("Extension warning: {diagnostic}")));
         }
+        let last_entry_id = number_entries(&mut entries, 0);
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (background_tx, background_rx) = mpsc::unbounded_channel();
         // Detached, so a slow or unreachable GitHub never delays the first
@@ -1242,6 +1254,7 @@ impl App {
             hive_scroll: 0,
             ralph_loop,
             entries,
+            last_entry_id,
             input: InputBuffer::new(),
             mode: InputMode::Insert,
             running: None,
@@ -1321,8 +1334,9 @@ impl App {
         })
     }
 
-    /// Append a transcript entry, invalidating the memoised wrap.
-    fn push_entry(&mut self, entry: Entry) {
+    /// Append a transcript entry, invalidating the memoised wrap. Returns the
+    /// number the entry was given.
+    fn push_entry(&mut self, mut entry: Entry) -> u64 {
         // Any new block closes an open stream. Streaming appends to the *last*
         // entry, so anything pushed mid-turn — a steering message, a notice, a
         // side note — would otherwise swallow the tokens that came after it:
@@ -1338,7 +1352,35 @@ impl App {
             remote.break_text();
         }
         self.entries_rev = self.entries_rev.wrapping_add(1);
+        self.last_entry_id += 1;
+        entry.id = self.last_entry_id;
         self.entries.push(entry);
+        self.last_entry_id
+    }
+
+    /// The number the next entry pushed will get.
+    fn next_entry_id(&self) -> u64 {
+        self.last_entry_id + 1
+    }
+
+    /// The entry live sharing should name for `event`: the one the terminal is
+    /// about to write it into or create for it (see `Bridge::on_event`).
+    fn mirror_target(&self, event: &AgentEvent) -> Option<u64> {
+        let last = self.entries.last().map(|entry| entry.id);
+        match event {
+            AgentEvent::Delta(_) if self.receiving_delta => last,
+            // Reasoning is only an entry while it is shown.
+            AgentEvent::Reasoning(_) if !self.settings.ui.show_thinking => None,
+            AgentEvent::Reasoning(_) if self.receiving_thinking => last,
+            AgentEvent::Delta(_) | AgentEvent::Reasoning(_) | AgentEvent::ToolStarted { .. } => {
+                Some(self.next_entry_id())
+            }
+            AgentEvent::ToolFinished { .. } => {
+                let open = self.entries.last().filter(|entry| entry.kind == EntryKind::Tool);
+                Some(open.map_or_else(|| self.next_entry_id(), |entry| entry.id))
+            }
+            _ => None,
+        }
     }
 
     /// Tell the user something, in the transcript, and bring it into view.
@@ -1354,7 +1396,12 @@ impl App {
     }
 
     /// Replace the whole transcript, as a session resume does.
-    fn set_entries(&mut self, entries: Vec<Entry>) {
+    fn set_entries(&mut self, mut entries: Vec<Entry>) {
+        self.last_entry_id = number_entries(&mut entries, self.last_entry_id);
+        // What became of approvals and questions belonged to the old one.
+        if let Some(remote) = &mut self.remote {
+            remote.entries_dropped(0);
+        }
         self.entries_rev = self.entries_rev.wrapping_add(1);
         self.entries = entries;
     }
@@ -1482,8 +1529,9 @@ impl App {
             };
             changed = true;
             // Mirrored first: the terminal's own handling consumes the event.
+            let target = self.mirror_target(&event);
             if let Some(remote) = &mut self.remote {
-                remote.on_event(&event, &self.provider.usage());
+                remote.on_event(&event, &self.provider.usage(), target);
             }
             match event {
                 AgentEvent::Delta(delta) => {
@@ -1775,8 +1823,9 @@ impl App {
     /// Hand `answer` to the agent, whoever gave it, and tell the browsers.
     fn settle_question(&mut self, answer: crate::agent::UserAnswer, by: By) {
         if let Some(question) = self.question.take() {
+            let next = self.next_entry_id();
             if let (Some(remote), Some(id)) = (&mut self.remote, &question.remote_id) {
-                remote.question_resolved(id, &answer.selected_labels, answer.custom_text.as_deref(), by);
+                remote.question_resolved(id, &answer.selected_labels, answer.custom_text.as_deref(), by, next);
             }
             let _ = question.respond.send(answer);
             self.status = "ready".to_owned();
@@ -1790,8 +1839,9 @@ impl App {
     /// Answer the open approval, whoever decided, and tell the browsers.
     fn decide_by(&mut self, decision: ApprovalDecision, by: By) {
         if let Some(approval) = self.approval.take() {
+            let next = self.next_entry_id();
             if let (Some(remote), Some(id)) = (&mut self.remote, &approval.remote_id) {
-                remote.approval_resolved(id, decision, by);
+                remote.approval_resolved(id, decision, by, next);
             }
             let _ = approval.respond.send(decision);
             self.status = match (decision, by) {
@@ -1834,10 +1884,10 @@ impl App {
     /// current tool call. Steering, not queueing: a correction that waits for
     /// the whole turn to end arrives too late to change what it was correcting.
     fn steer(&mut self, prompt: String) {
+        let entry = self.push_entry(Entry::new(EntryKind::User, prompt.clone()));
         if let Some(remote) = &mut self.remote {
-            remote.user_prompt(&prompt);
+            remote.user_prompt(entry, &prompt);
         }
-        self.push_entry(Entry::new(EntryKind::User, prompt.clone()));
         self.state.injections.push(crate::agent::Injection::UserMessage(prompt));
         self.follow = true;
         self.status = "steering · delivered after the current step".to_owned();
@@ -1888,6 +1938,7 @@ impl App {
             return;
         };
         let prompt = self.entries[entry_index].text.clone();
+        let first_dropped = self.entries[entry_index].id;
         self.entries.truncate(entry_index);
         self.entries_rev = self.entries_rev.wrapping_add(1);
         self.clear_cursor();
@@ -1898,6 +1949,11 @@ impl App {
         self.input.insert_str(&prompt);
         self.follow = true;
         self.persist_session();
+        // The browsers still hold what was rewound; a snapshot replaces it.
+        if let Some(remote) = &mut self.remote {
+            remote.entries_dropped(first_dropped);
+        }
+        self.send_remote_snapshot(SnapshotReason::Requested);
         self.status = "rewound — edit and resend, or esc esc to step further back".to_owned();
     }
 
@@ -1914,12 +1970,10 @@ impl App {
         self.last_outcome = None;
         self.clear_draft();
         self.cancel.store(false, Ordering::Relaxed);
-        if display {
-            self.push_entry(Entry::new(EntryKind::User, display_prompt.clone()));
-        }
+        let user_entry = display.then(|| self.push_entry(Entry::new(EntryKind::User, display_prompt.clone())));
         if let Some(remote) = &mut self.remote {
-            if display {
-                remote.user_prompt(&display_prompt);
+            if let Some(entry) = user_entry {
+                remote.user_prompt(entry, &display_prompt);
             }
             remote.turn_started();
         }
@@ -2508,12 +2562,7 @@ impl App {
             started_at: session.map(|session| session.created_at.to_rfc3339()).unwrap_or_default(),
         };
         let usage = self.provider.usage();
-        let view = crate::remote::SnapshotView {
-            session: info,
-            entries: &self.entries,
-            live: self.running.is_some(),
-            usage: &usage,
-        };
+        let view = crate::remote::SnapshotView { session: info, entries: &self.entries, usage: &usage };
         bridge.send_snapshot(view, reason);
     }
 
@@ -2594,23 +2643,37 @@ impl App {
         let Some(question) =
             self.question.as_ref().filter(|question| question.remote_id.as_deref() == Some(question_id))
         else {
-            return self.remote_accepted(ref_id, InputKind::Answer, AcceptResult::Rejected, Some("no open question"));
+            let reason = self
+                .remote
+                .as_ref()
+                .map_or("no open question with that id", |bridge| bridge.question_miss(question_id));
+            return self.remote_accepted(ref_id, InputKind::Answer, AcceptResult::Rejected, Some(reason));
         };
         // Only labels the question offered; one of them unless it is multi-select.
-        let offered: Vec<&str> =
-            question.options.iter().map(|option| option.split(" — ").next().unwrap_or(option)).collect();
+        let offered: Vec<&str> = question.options.iter().map(|option| crate::agent::split_option(option).0).collect();
+        let chose = !selected.is_empty();
         let mut labels: Vec<String> = selected.into_iter().filter(|label| offered.contains(&label.as_str())).collect();
         if !question.multi_select {
             labels.truncate(1);
         }
         let custom = custom.filter(|text| !text.trim().is_empty());
+        // Answering with options this question does not have would settle it
+        // with nothing; leave it open for a real answer instead.
+        if chose && labels.is_empty() && custom.is_none() {
+            let reason = "none of the selected options belong to this question";
+            return self.remote_accepted(ref_id, InputKind::Answer, AcceptResult::Rejected, Some(reason));
+        }
         self.remote_accepted(ref_id, InputKind::Answer, AcceptResult::Applied, None);
         self.settle_question(crate::agent::UserAnswer { selected_labels: labels, custom_text: custom }, By::Browser);
     }
 
     fn remote_approve(&mut self, ref_id: &str, approval_id: &str, decision: ApprovalDecision) {
         if self.approval.as_ref().and_then(|approval| approval.remote_id.as_deref()) != Some(approval_id) {
-            return self.remote_accepted(ref_id, InputKind::Approve, AcceptResult::Rejected, Some("no open approval"));
+            let reason = self
+                .remote
+                .as_ref()
+                .map_or("no open approval with that id", |bridge| bridge.approval_miss(approval_id));
+            return self.remote_accepted(ref_id, InputKind::Approve, AcceptResult::Rejected, Some(reason));
         }
         self.remote_accepted(ref_id, InputKind::Approve, AcceptResult::Applied, None);
         self.decide_by(decision, By::Browser);
@@ -2623,7 +2686,7 @@ impl App {
                 ref_id,
                 InputKind::Interrupt,
                 AcceptResult::Rejected,
-                Some("nothing is running"),
+                Some("nothing is running to interrupt"),
             );
         }
         self.remote_accepted(ref_id, InputKind::Interrupt, AcceptResult::Applied, None);

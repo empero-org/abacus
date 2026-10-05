@@ -2276,7 +2276,10 @@ async fn browser_approvals_take_the_terminal_decision_path() {
     );
     assert!(app.approval.is_some());
     let refused = sent(&mut frames);
-    assert_eq!(of_type(&refused, "accepted")[0]["payload"]["result"], "rejected");
+    assert_eq!(
+        of_type(&refused, "accepted")[0]["payload"],
+        json!({"ref_id":"b1","kind":"approve","result":"rejected","reason":"no open approval with that id"})
+    );
 
     app.remote_event(
         generation,
@@ -2293,6 +2296,13 @@ async fn browser_approvals_take_the_terminal_decision_path() {
         of_type(&applied, "approval_resolved")[0]["payload"],
         json!({"approval_id": approval_id, "decision": "always", "by": "browser"})
     );
+
+    // A second browser deciding the same approval is told it was too late.
+    app.remote_event(
+        generation,
+        Inbound::Approve { ref_id: "b3".into(), approval_id: approval_id.clone(), decision: ApprovalDecision::Reject },
+    );
+    assert_eq!(of_type(&sent(&mut frames), "accepted")[0]["payload"]["reason"], "approval already decided");
 
     // Terminal decisions are announced too.
     let (respond, _receive) = tokio::sync::oneshot::channel();
@@ -2336,20 +2346,74 @@ async fn browser_answers_keep_to_the_offered_options() {
     let answer = receive.await.unwrap();
     assert_eq!(answer.selected_labels, ["2"], "unknown labels dropped, one kept for single-select");
     assert!(answer.custom_text.is_none());
-    let frames = sent(&mut frames);
-    assert_eq!(of_type(&frames, "accepted")[0]["payload"]["result"], "applied");
+    let answered = sent(&mut frames);
+    assert_eq!(of_type(&answered, "accepted")[0]["payload"]["result"], "applied");
     assert_eq!(
-        of_type(&frames, "question_resolved")[0]["payload"],
+        of_type(&answered, "question_resolved")[0]["payload"],
         json!({"question_id": question_id, "selected": ["2"], "custom": null, "by": "browser"})
     );
-    // Nothing open any more: refused.
-    let mut frames_after = share(&mut app);
+    // Answered already: refused, and told why. An id nothing ever had says so.
+    let answer_again = |app: &mut App, ref_id: &str, question_id: &str| {
+        let generation = app.remote_generation;
+        app.remote_event(
+            generation,
+            Inbound::Answer { ref_id: ref_id.into(), question_id: question_id.into(), selected: vec![], custom: None },
+        );
+    };
+    answer_again(&mut app, "b2", &question_id);
+    let refused = sent(&mut frames);
+    assert_eq!(
+        of_type(&refused, "accepted")[0]["payload"],
+        json!({"ref_id":"b2","kind":"answer","result":"rejected","reason":"question already answered"})
+    );
+    answer_again(&mut app, "b3", "q99");
+    assert_eq!(of_type(&sent(&mut frames), "accepted")[0]["payload"]["reason"], "no open question with that id");
+}
+
+#[tokio::test]
+async fn a_browser_answer_naming_no_offered_option_leaves_the_question_open() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    let mut frames = share(&mut app);
+    let (respond, receive) = tokio::sync::oneshot::channel();
+    app.set_user_question(crate::agent::UserQuestionRequest {
+        question: "Which?".into(),
+        header: "Pick".into(),
+        options: vec!["Rewrite — start over, from scratch — all of it".into(), "Patch".into()],
+        multi_select: false,
+        respond,
+    });
+    let question_id = app.question.as_ref().unwrap().remote_id.clone().unwrap();
+    let opened = sent(&mut frames);
+    // The description is sent whole, whatever dashes it contains.
+    assert_eq!(
+        of_type(&opened, "question")[0]["payload"]["options"],
+        json!([
+            {"label": "Rewrite", "description": "start over, from scratch — all of it"},
+            {"label": "Patch", "description": ""},
+        ])
+    );
     let generation = app.remote_generation;
     app.remote_event(
         generation,
-        Inbound::Answer { ref_id: "b2".into(), question_id: "q1".into(), selected: vec![], custom: None },
+        Inbound::Answer {
+            ref_id: "b1".into(),
+            question_id: question_id.clone(),
+            selected: vec!["Start over".into()],
+            custom: None,
+        },
     );
-    assert_eq!(of_type(&sent(&mut frames_after), "accepted")[0]["payload"]["reason"], "no open question");
+    assert!(app.question.is_some(), "an answer that picks nothing does not settle the question");
+    assert_eq!(
+        of_type(&sent(&mut frames), "accepted")[0]["payload"],
+        json!({"ref_id":"b1","kind":"answer","result":"rejected",
+               "reason":"none of the selected options belong to this question"})
+    );
+    // The label before the first dash is what answers.
+    app.remote_event(
+        generation,
+        Inbound::Answer { ref_id: "b2".into(), question_id, selected: vec!["Rewrite".into()], custom: None },
+    );
+    assert_eq!(receive.await.unwrap().selected_labels, ["Rewrite"]);
 }
 
 #[tokio::test]
@@ -2359,7 +2423,9 @@ async fn a_browser_prompt_starts_a_turn_as_a_prompt_never_a_command() {
     let generation = app.remote_generation;
     // Interrupting nothing is refused.
     app.remote_event(generation, Inbound::Interrupt { ref_id: "b0".into() });
-    assert_eq!(of_type(&sent(&mut frames), "accepted")[0]["payload"]["result"], "rejected");
+    let refused = sent(&mut frames);
+    assert_eq!(of_type(&refused, "accepted")[0]["payload"]["result"], "rejected");
+    assert_eq!(of_type(&refused, "accepted")[0]["payload"]["reason"], "nothing is running to interrupt");
 
     app.remote_event(generation, Inbound::Prompt { ref_id: "b1".into(), text: "/quit".into() });
     assert!(!app.quit, "a browser cannot run slash commands");
@@ -2411,6 +2477,227 @@ async fn snapshots_are_sent_on_connect_and_on_request() {
     assert_eq!(payload["session"]["model"], "test-model");
     let texts: Vec<&str> = payload["entries"].as_array().unwrap().iter().map(|e| e["text"].as_str().unwrap()).collect();
     assert_eq!(texts, ["earlier", "reply"]);
+}
+
+/// What each `entry` start and `tool` start frame in `frames` introduced: its
+/// kind and the id it was given.
+fn starts(frames: &[Value]) -> Vec<(String, String)> {
+    frames
+        .iter()
+        .filter_map(|frame| {
+            let payload = &frame["payload"];
+            match (frame["type"].as_str()?, payload["phase"].as_str()?) {
+                ("entry", "start") => {
+                    Some((payload["entry"]["kind"].as_str()?.to_owned(), payload["entry"]["id"].as_str()?.to_owned()))
+                }
+                ("tool", "start") => Some(("tool".to_owned(), payload["entry_id"].as_str()?.to_owned())),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn snapshot_rows(frames: &[Value]) -> Vec<(String, String)> {
+    let page = of_type(frames, "snapshot")[0];
+    page["payload"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| (entry["kind"].as_str().unwrap().to_owned(), entry["id"].as_str().unwrap().to_owned()))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_snapshot_names_rows_as_the_live_frames_did_even_after_the_terminal_merged_some() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    let mut frames = share(&mut app);
+    for event in [
+        AgentEvent::Delta("Reading.".into()),
+        AgentEvent::ToolStarted { name: "read_file".into(), summary: "a.rs".into() },
+        AgentEvent::ToolFinished { name: "read_file".into(), output: "fn a() {}".into() },
+        AgentEvent::ToolStarted { name: "read_file".into(), summary: "b.rs".into() },
+        AgentEvent::ToolFinished { name: "read_file".into(), output: "fn b() {}".into() },
+        AgentEvent::Delta("Done.".into()),
+    ] {
+        let _ = app.event_tx.send(event);
+    }
+    assert!(app.drain_agent_events());
+    assert_eq!(app.entries.len(), 3, "the terminal made one row of the two reads");
+
+    // Live, each block is named by the number the terminal gave its entry.
+    let live = sent(&mut frames);
+    let pair = |kind: &str, id: &str| (kind.to_owned(), id.to_owned());
+    assert_eq!(
+        starts(&live),
+        [pair("assistant", "e1"), pair("tool", "e2"), pair("tool", "e3"), pair("assistant", "e4")]
+    );
+
+    // A resync names what is left the same: the merged row is the first read's,
+    // and the reply after it keeps its number instead of taking the vacant one.
+    let generation = app.remote_generation;
+    app.remote_event(generation, Inbound::SnapshotRequested);
+    let snapshot = sent(&mut frames);
+    assert_eq!(snapshot_rows(&snapshot), [pair("assistant", "e1"), pair("tool", "e2"), pair("assistant", "e4")]);
+    let tool = &of_type(&snapshot, "snapshot")[0]["payload"]["entries"][1]["tool"];
+    assert_eq!((tool["name"].as_str(), tool["call_id"].as_str()), (Some("explored"), Some("t2")));
+
+    // Whatever comes next cannot take over the vacant number either.
+    let _ = app.event_tx.send(AgentEvent::ToolStarted { name: "write_file".into(), summary: "c.rs".into() });
+    assert!(app.drain_agent_events());
+    assert_eq!(starts(&sent(&mut frames)), [pair("tool", "e5")]);
+    app.remote_event(generation, Inbound::SnapshotRequested);
+    let again = sent(&mut frames);
+    assert_eq!(
+        snapshot_rows(&again),
+        [pair("assistant", "e1"), pair("tool", "e2"), pair("assistant", "e4"), pair("tool", "e5")]
+    );
+}
+
+#[tokio::test]
+async fn a_resync_shows_how_dialogs_ended_where_they_happened_and_only_once() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    let mut frames = share(&mut app);
+    let _ = app.event_tx.send(AgentEvent::Delta("I will write it.".into()));
+    assert!(app.drain_agent_events());
+
+    // A phone allows the write; the tool row follows it.
+    let (respond, _receive) = tokio::sync::oneshot::channel();
+    app.set_approval(crate::agent::ApprovalRequest {
+        tool: "write_file".into(),
+        summary: "notes.txt".into(),
+        details: "--- a/notes.txt\n+++ b/notes.txt\n@@ -0,0 +1 @@\n+hello\n".into(),
+        respond,
+    });
+    let approval_id = app.approval.as_ref().unwrap().remote_id.clone().unwrap();
+    let generation = app.remote_generation;
+    app.remote_event(
+        generation,
+        Inbound::Approve { ref_id: "b1".into(), approval_id, decision: ApprovalDecision::Once },
+    );
+    let _ = app.event_tx.send(AgentEvent::ToolStarted { name: "write_file".into(), summary: "notes.txt".into() });
+    let _ = app.event_tx.send(AgentEvent::ToolFinished { name: "write_file".into(), output: "wrote 1 line".into() });
+    assert!(app.drain_agent_events());
+
+    // The terminal answers a question.
+    let (respond, _receive) = tokio::sync::oneshot::channel();
+    app.set_user_question(crate::agent::UserQuestionRequest {
+        question: "Which?".into(),
+        header: "Pick".into(),
+        options: vec!["1 — Rewrite".into(), "2 — Patch".into()],
+        multi_select: false,
+        respond,
+    });
+    app.settle_question(
+        crate::agent::UserAnswer { selected_labels: vec!["2".into()], custom_text: None },
+        By::Terminal,
+    );
+    sent(&mut frames);
+
+    app.remote_event(generation, Inbound::Connected { reconnect: false });
+    let first = sent(&mut frames);
+    let rows = snapshot_rows(&first);
+    let ids: Vec<&str> = rows.iter().map(|(_, id)| id.as_str()).collect();
+    assert_eq!(ids, ["e1", "resolved-a1", "e2", "answered-q1"]);
+    let entries = of_type(&first, "snapshot")[0]["payload"]["entries"].as_array().unwrap();
+    assert_eq!(entries[1]["text"], "Allowed write_file notes.txt · from phone");
+    assert_eq!(entries[3]["text"], "Answered \"Patch\" · in the terminal");
+
+    // Nothing is added or doubled by asking again, or by a reconnect.
+    app.remote_event(generation, Inbound::SnapshotRequested);
+    app.remote_event(generation, Inbound::Connected { reconnect: true });
+    let more = sent(&mut frames);
+    let all = of_type(&more, "snapshot");
+    assert_eq!(all.len(), 2);
+    for snapshot in all {
+        assert_eq!(snapshot["payload"]["entries"], of_type(&first, "snapshot")[0]["payload"]["entries"]);
+    }
+}
+
+#[tokio::test]
+async fn rewinding_resyncs_the_browsers_without_what_was_rewound() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    app.settings.ui.vim_mode = false;
+    app.messages = vec![
+        serde_json::json!({"role":"system","content":"s"}),
+        serde_json::json!({"role":"user","content":"first"}),
+        serde_json::json!({"role":"assistant","content":"one"}),
+        serde_json::json!({"role":"user","content":"second"}),
+        serde_json::json!({"role":"assistant","content":"two"}),
+    ];
+    for (kind, text) in [
+        (EntryKind::User, "first"),
+        (EntryKind::Assistant, "one"),
+        (EntryKind::User, "second"),
+        (EntryKind::Assistant, "two"),
+    ] {
+        app.push_entry(Entry::new(kind, text));
+    }
+    let mut frames = share(&mut app);
+    // The second turn had an approval, decided in the terminal.
+    let (respond, _receive) = tokio::sync::oneshot::channel();
+    app.set_approval(crate::agent::ApprovalRequest {
+        tool: "write_file".into(),
+        summary: "x".into(),
+        details: "d".into(),
+        respond,
+    });
+    app.decide(ApprovalDecision::Once);
+    sent(&mut frames);
+
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.input.text(), "second");
+    let resync = sent(&mut frames);
+    let rows = snapshot_rows(&resync);
+    assert_eq!(rows.iter().map(|(_, id)| id.as_str()).collect::<Vec<_>>(), ["e1", "e2"]);
+    assert_eq!(of_type(&resync, "snapshot")[0]["payload"]["reason"], "requested");
+
+    // The prompt sent again is a new row with a number of its own, not the
+    // rewound one's.
+    let generation = app.remote_generation;
+    app.remote_event(generation, Inbound::Prompt { ref_id: "b1".into(), text: "second again".into() });
+    let sent_again = sent(&mut frames);
+    assert_eq!(of_type(&sent_again, "entry")[0]["payload"]["entry"]["id"], "e5");
+}
+
+#[tokio::test]
+async fn a_turn_that_ends_with_an_approval_open_does_not_claim_a_denial() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    let mut frames = share(&mut app);
+    let dialog = |app: &mut App| {
+        let (respond, receive) = tokio::sync::oneshot::channel();
+        app.set_approval(crate::agent::ApprovalRequest {
+            tool: "run_command".into(),
+            summary: "rm -rf target".into(),
+            details: "$ rm -rf target".into(),
+            respond,
+        });
+        receive
+    };
+
+    // The turn reports its end while the dialog is up.
+    let _receive = dialog(&mut app);
+    sent(&mut frames);
+    let _ = app.event_tx.send(AgentEvent::Done { messages: Vec::new(), reason: DoneReason::Complete });
+    assert!(app.drain_agent_events());
+    let ended = sent(&mut frames);
+    assert!(of_type(&ended, "approval_resolved").is_empty(), "{ended:?}");
+    assert_eq!(of_type(&ended, "done")[0]["payload"]["reason"], "complete");
+
+    // So does a hard interrupt, which the turn never reports.
+    app.approval = None;
+    let _receive = dialog(&mut app);
+    app.running = Some(tokio::spawn(std::future::pending::<()>()));
+    sent(&mut frames);
+    app.interrupt();
+    let stopped = sent(&mut frames);
+    assert!(of_type(&stopped, "approval_resolved").is_empty(), "{stopped:?}");
+    assert_eq!(of_type(&stopped, "done")[0]["payload"]["reason"], "interrupted");
+
+    // No resync invents a decision for it either.
+    app.remote_event(app.remote_generation, Inbound::SnapshotRequested);
+    let snapshot = sent(&mut frames);
+    assert!(snapshot_rows(&snapshot).iter().all(|(_, id)| !id.starts_with("resolved-")), "{snapshot:?}");
 }
 
 #[test]
