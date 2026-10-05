@@ -849,7 +849,18 @@ impl App {
             return;
         }
         let mode = self.settings.ui.theme.resolve();
-        let file = crate::theme::ThemeFile::from_theme(name, mode, &crate::theme::active());
+        // The full palette, not the one adapted to this terminal: a 16- or
+        // 256-colour rendering writes names like `white` or `indexed(123)`
+        // that a theme file cannot load back, and NO_COLOR writes nothing.
+        let full = crate::theme::ColorDepth::TrueColor;
+        let palette = match &self.settings.ui.theme {
+            crate::theme::ThemeChoice::Named(current) => {
+                crate::theme::load(&self.config.paths.themes_dir, current, full).ok()
+            }
+            _ => None,
+        }
+        .unwrap_or_else(|| crate::theme::Theme::for_mode_at(mode, full));
+        let file = crate::theme::ThemeFile::from_theme(name, mode, &palette);
         let directory = self.config.paths.themes_dir.clone();
         let path = directory.join(format!("{name}.json"));
         let written = std::fs::create_dir_all(&directory).and_then(|()| {

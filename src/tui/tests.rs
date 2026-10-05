@@ -1810,6 +1810,13 @@ fn exporting_a_theme_writes_a_file_that_loads_back() {
     let path = app.config.paths.themes_dir.join("mine.json");
     assert!(path.exists(), "export wrote {}", path.display());
     assert_eq!(crate::theme::available(&app.config.paths.themes_dir), vec!["mine"]);
+    // Literal hex whatever this terminal renders: a 16-colour export used to
+    // write names like `white` that no theme file can load back.
+    let exported: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for (role, value) in exported["colors"].as_object().expect("a colors table") {
+        let text = value.as_str().unwrap_or_default();
+        assert!(text.is_empty() || text.starts_with('#'), "{role} exported as `{text}`");
+    }
 
     app.theme_command("mine");
     assert_eq!(app.settings.ui.theme, crate::theme::ThemeChoice::Named("mine".to_owned()));
