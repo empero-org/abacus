@@ -1297,7 +1297,7 @@ pub fn atomic_write(path: &Path, content: &[u8], private: bool) -> Result<()> {
         // `rename` replaces an existing file in one step on Windows too.
         // Removing it first would leave a moment with no file at all: a crash
         // then loses it, and another process reading meanwhile finds nothing.
-        fs::rename(&temp, path).with_context(|| format!("could not replace {}", path.display()))
+        replace(&temp, path).with_context(|| format!("could not replace {}", path.display()))
     })();
     if written.is_err() {
         let _ = fs::remove_file(&temp);
@@ -1307,6 +1307,30 @@ pub fn atomic_write(path: &Path, content: &[u8], private: bool) -> Result<()> {
     #[cfg(unix)]
     File::open(parent)?.sync_all()?;
     Ok(())
+}
+
+/// Move `from` over `to`. On Windows the replace is refused while anything
+/// holds the target open without delete sharing (another writer finishing its
+/// own replace, a reader, an antivirus scan of the file just written), with
+/// "access denied" or a sharing violation. Those holds last milliseconds, so a
+/// few short retries turn a spurious failure into a slightly later success.
+fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        const ACCESS_DENIED: i32 = 5;
+        const SHARING_VIOLATION: i32 = 32;
+        let mut delay = std::time::Duration::from_millis(2);
+        for _ in 0..10 {
+            match fs::rename(from, to) {
+                Err(error) if matches!(error.raw_os_error(), Some(ACCESS_DENIED | SHARING_VIOLATION)) => {
+                    std::thread::sleep(delay);
+                    delay = (delay * 2).min(std::time::Duration::from_millis(100));
+                }
+                result => return result,
+            }
+        }
+    }
+    fs::rename(from, to)
 }
 
 #[cfg(test)]

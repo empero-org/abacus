@@ -1125,7 +1125,7 @@ mod tests {
         let client = SyncClient::new(&SyncCredentials { server, token: "t".into(), email: "a@b".into() }).unwrap();
         let hashes = Hashes { session: "s".into(), content: "c".into(), trace: "t".into() };
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        let longest = runtime.block_on(async {
+        let (idle, longest) = runtime.block_on(async {
             let worst = Arc::new(AtomicU64::new(0));
             let ticking = worst.clone();
             let ticker = tokio::spawn(async move {
@@ -1138,17 +1138,28 @@ mod tests {
                 }
             });
             tokio::time::sleep(Duration::from_millis(20)).await;
+            // The gap the ticker shows with nothing in its way: about 1 ms on
+            // Linux, the 15.6 ms timer tick on Windows.
             worst.store(0, Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            let idle = Duration::from_micros(worst.swap(0, Ordering::Relaxed));
             let meta = client.put_document("s1", &document, &trace, &hashes, Precondition::Create).await.unwrap();
             ticker.abort();
             assert_eq!(meta.revision, 1);
-            Duration::from_micros(worst.load(Ordering::Relaxed))
+            (idle, Duration::from_micros(worst.load(Ordering::Relaxed)))
         });
 
         let (head, body) = received.recv().unwrap();
         assert!(head.to_lowercase().contains("content-encoding: gzip"), "{head}");
         assert_eq!(unpack(&body), prepared.json, "the same body, built off the runtime");
-        assert!(longest < work / 2, "the runtime was held for {longest:?} by an upload that takes {work:?} to prepare");
+        if work < idle * 4 {
+            eprintln!("skipped: preparing takes {work:?}, too close to this timer's {idle:?} tick to tell a stall");
+            return;
+        }
+        assert!(
+            longest < idle + work / 2,
+            "the runtime was held for {longest:?} by an upload that takes {work:?} to prepare (idle tick {idle:?})"
+        );
     }
 
     #[test]
