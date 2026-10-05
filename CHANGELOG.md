@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+- **Sync moves only what changed.** Abacus Sync used to download every session
+  whenever Abacus opened and upload everything whenever it closed. Each machine
+  now remembers what it last exchanged with the server (in
+  `~/.abacus/sync-state.json`), reads the server's change feed from a saved
+  cursor, downloads only the sessions that moved, and uploads only the ones that
+  changed, each conditional on the revision it was built on, so one machine never
+  overwrites another's work. Sessions sync when Abacus opens, after a minute of
+  idle time and when it closes, in the terminal UI, in headless runs and in the
+  app server. When a session changed on two machines, the other machine's
+  version is installed and yours is kept as `<title> (local fork)`. A session
+  deleted elsewhere moves to `~/.abacus/sync-trash/`, and changes you had made
+  to it are kept as a new session and uploaded. A session open in the terminal
+  is never rewritten under you; once the agent is idle Abacus switches to the
+  newer version if you changed nothing, and keeps both otherwise. An unreachable
+  server costs one timeout and a growing delay instead of stalling a close.
+  Every write carries an idempotency key that its retries reuse, so a reply lost
+  in transit is replayed by the server instead of showing up as a conflict with
+  yourself, and large uploads and downloads are gzip-compressed.
+  `abacus sync status` now shows the cursor, the last pull and push, and what is
+  waiting.
+
+- **Follow a session from your phone.** Once you are signed in, every session
+  that has received its first prompt is shared live with your account's
+  browsers, and a phone can follow it: streamed replies and reasoning, tool
+  calls and their output, approvals and questions. From the phone you can send a
+  prompt, answer a question, allow or reject an approval and interrupt a turn.
+  It cannot run slash commands or change the model, mode, workspace or settings.
+  `/remote on|off|qr|url|status` controls the current session (bare `/remote`
+  still toggles it), a footer badge shows the link and how many browsers are
+  watching, and `[remote] auto_share = false` (or **Auto-share sessions** in
+  `/config`) shares only when you ask. The link reconnects with a fresh ticket
+  and backoff, paces itself under the server's limits, and gives way when
+  another terminal takes the session over.
+
+- **Pair a phone with a QR code.** `abacus sync pair` and `/remote qr` print a
+  QR code and a single-use link that signs a phone into your account, opening
+  the session you are in when it is shared. `--session` names one, and
+  `--url-only` prints just the link.
+
+- **Token usage on your account.** When you are signed in, Abacus reports
+  cumulative input, output and cache token counts per model to your account
+  after each turn, every minute while a session is open and on exit. Reports
+  hold counters and identifiers only, never a prompt, a reply, code or a path,
+  and a retried or duplicated report cannot count twice. Set `ABACUS_NO_USAGE=1`
+  to turn them off. The anonymous activity events are unchanged, and
+  `ABACUS_NO_ACTIVITY=1` still turns those off.
+
 - Fixed: typing `/<skill-name>` or a plugin's slash command in the TUI answered
   "Unknown command" instead of running it, because every unrecognised `/`
   command was refused before skills and plugins were consulted.
