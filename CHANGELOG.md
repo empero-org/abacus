@@ -14,6 +14,21 @@
   back as a reasoning item. When the startup sync pulls, forks or deletes
   sessions, the server sends `sessions/synced` so the front end can list again.
 
+- **The app server completes and expands what a desktop composer sends.**
+  - `commands/list` names the skills, plugin commands, `/btw` and
+    `/compact`.
+  - `files/search` finds workspace files for `@` completion. It is the TUI's
+    own search, which now also ranks a match at the start of a file name
+    ahead of one buried in a path.
+  - `turn/start` expands `/skill request` and plugin commands as the TUI does,
+    and `/btw` becomes a side note for the running turn.
+  - `thread/compact` compacts on request.
+  - Text files ride along as `file` (name and text) or `localFile` (path)
+    input parts, up to 256 KB each. A file in the workspace is named by its
+    path there, so the model can open it.
+  - User messages, live or resumed, list their attached files apart from the
+    text.
+
 - **Images reach the model everywhere, not only from the terminal UI.**
   - On the OpenAI Responses API a prompt with an image used to be dropped
     whole, text included, so the model answered as if nothing had been sent.

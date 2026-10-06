@@ -111,6 +111,11 @@ impl PluginRegistry {
         self.commands.get(name).map(|(_, command)| command)
     }
 
+    /// Every plugin command, by name.
+    pub fn commands(&self) -> impl Iterator<Item = &PluginCommand> {
+        self.commands.values().map(|(_, command)| command)
+    }
+
     pub fn mcp_configs(&self) -> BTreeMap<String, McpServerConfig> {
         let mut output = BTreeMap::new();
         for plugin in self.plugins.values() {

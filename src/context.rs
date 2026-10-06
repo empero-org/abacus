@@ -8,6 +8,38 @@ use serde_json::{Value, json};
 /// rather than inlined text.
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 
+/// Caps for files attached to a prompt as text: one file, and all of them
+/// together. Enough for a long source file or a log excerpt; past it, the
+/// model is better off reading the file with its tools.
+pub const MAX_ATTACHED_FILE: usize = 256_000;
+pub const MAX_ATTACHED_TOTAL: usize = 1_000_000;
+
+/// Check a file a client attached as text: within the cap and not binary.
+pub fn check_text_attachment(name: &str, text: &str) -> Result<()> {
+    if text.len() > MAX_ATTACHED_FILE {
+        bail!("{name} is larger than {} KB; ask the agent to read it instead", MAX_ATTACHED_FILE / 1000);
+    }
+    if text.contains('\0') {
+        bail!("{name} looks binary; only text files can be attached");
+    }
+    Ok(())
+}
+
+/// Read a file the person attached as text. Like images, it may live anywhere:
+/// they picked it themselves.
+pub fn read_text_attachment(path: &Path) -> Result<String> {
+    let size = path.metadata().with_context(|| format!("cannot read {}", path.display()))?.len();
+    let name = path.display().to_string();
+    if size > MAX_ATTACHED_FILE as u64 {
+        bail!("{name} is larger than {} KB; ask the agent to read it instead", MAX_ATTACHED_FILE / 1000);
+    }
+    let bytes = std::fs::read(path).with_context(|| format!("cannot read {name}"))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| anyhow::anyhow!("{name} is not UTF-8 text; only text files can be attached"))?;
+    check_text_attachment(&name, &text)?;
+    Ok(text)
+}
+
 /// Cap per image and across all images in one message; a screenshot is
 /// typically well under this, and past it providers reject the request
 /// anyway.
@@ -60,6 +92,50 @@ pub fn expand_file_references(workspace: &Path, prompt: &str) -> Result<String> 
         expanded.push_str(&format!("\n\n<attached_file path=\"{path}\">\n{content}\n</attached_file>"));
     }
     Ok(expanded)
+}
+
+/// Workspace files matching `query`, for `@file` completion: gitignore-aware,
+/// and bounded so it stays cheap enough to run on every keystroke. A match at
+/// the start of the path ranks first, then one at the start of the file name,
+/// then one anywhere; within a rank, shorter paths first.
+pub fn search_files(workspace: &Path, query: &str, limit: usize) -> Vec<String> {
+    const MAX_SCANNED: usize = 8_000;
+    let needle = query.to_ascii_lowercase();
+    let mut ranked: [Vec<String>; 3] = Default::default();
+    let mut scanned = 0_usize;
+    for entry in ignore::WalkBuilder::new(workspace).max_depth(Some(12)).build().flatten() {
+        if scanned >= MAX_SCANNED {
+            break;
+        }
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let Ok(relative) = entry.path().strip_prefix(workspace) else {
+            continue;
+        };
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        scanned += 1;
+        let lower = relative.to_ascii_lowercase();
+        let name = lower.rsplit('/').next().unwrap_or(&lower);
+        if needle.is_empty() || lower.starts_with(&needle) {
+            ranked[0].push(relative);
+        } else if name.starts_with(&needle) {
+            ranked[1].push(relative);
+        } else if lower.contains(&needle) {
+            ranked[2].push(relative);
+        }
+        if ranked[0].len() >= limit && !needle.is_empty() {
+            break;
+        }
+    }
+    ranked
+        .into_iter()
+        .flat_map(|mut rank| {
+            rank.sort_by(|left, right| left.len().cmp(&right.len()).then_with(|| left.cmp(right)));
+            rank
+        })
+        .take(limit)
+        .collect()
 }
 
 /// Collect image attachments referenced by the prompt and build the user
@@ -269,6 +345,19 @@ mod tests {
             &format!("[image:../{}] and [image:{}]", secret.file_name().unwrap().to_str().unwrap(), secret.display()),
         );
         assert!(content.is_string(), "traversal must not attach: {content}");
+    }
+
+    #[test]
+    fn file_search_ranks_path_then_name_then_anywhere() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src/bin")).unwrap();
+        for file in ["main.rs", "src/main.rs", "src/bin/domain.rs", "notes.md"] {
+            std::fs::write(dir.path().join(file), "").unwrap();
+        }
+        assert_eq!(search_files(dir.path(), "main", 10), ["main.rs", "src/main.rs", "src/bin/domain.rs"]);
+        assert_eq!(search_files(dir.path(), "SRC/M", 10), ["src/main.rs"]);
+        assert_eq!(search_files(dir.path(), "", 2).len(), 2);
+        assert!(search_files(dir.path(), "zzz", 10).is_empty());
     }
 
     #[test]

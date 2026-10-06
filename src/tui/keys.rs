@@ -629,40 +629,9 @@ pub(super) fn slash_suggestions(input: &str) -> Vec<(&'static str, &'static str)
 }
 
 /// Up to eight workspace files matching `partial` (the text after `@`), used for
-/// `@file` mention completion. gitignore-aware and bounded so it stays cheap to
-/// recompute on each keystroke; prefix matches rank ahead of substring matches.
+/// `@file` mention completion.
 pub(super) fn file_suggestions(workspace: &std::path::Path, partial: &str) -> Vec<String> {
-    pub(super) const MAX_RESULTS: usize = 8;
-    pub(super) const MAX_SCANNED: usize = 8_000;
-    let needle = partial.to_ascii_lowercase();
-    let mut prefix = Vec::new();
-    let mut contains = Vec::new();
-    let mut scanned = 0_usize;
-    for entry in ignore::WalkBuilder::new(workspace).max_depth(Some(12)).build().flatten() {
-        if scanned >= MAX_SCANNED {
-            break;
-        }
-        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
-            continue;
-        }
-        let Ok(relative) = entry.path().strip_prefix(workspace) else {
-            continue;
-        };
-        let relative = relative.to_string_lossy().replace('\\', "/");
-        scanned += 1;
-        let lower = relative.to_ascii_lowercase();
-        if needle.is_empty() || lower.starts_with(&needle) {
-            prefix.push(relative);
-        } else if lower.contains(&needle) {
-            contains.push(relative);
-        }
-        if prefix.len() >= MAX_RESULTS && !needle.is_empty() {
-            break;
-        }
-    }
-    prefix.sort();
-    contains.sort();
-    prefix.into_iter().chain(contains).take(MAX_RESULTS).collect()
+    crate::context::search_files(workspace, partial, 8)
 }
 
 /// What the completion popup is currently offering: the entries (value, hint)

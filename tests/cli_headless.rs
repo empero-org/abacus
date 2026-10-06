@@ -428,3 +428,123 @@ async fn headless_resume_continues_the_newest_copy_and_keeps_another_devices_tur
         .count();
     assert_eq!(sessions, 1);
 }
+
+/// A model endpoint like [`model_endpoint`] that also keeps every request it
+/// was sent, so a test can see what the model was given.
+fn recording_model_endpoint() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let record = seen.clone();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let request = read_request(&mut stream);
+            let response = if request.starts_with("GET /v1/models") {
+                "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_owned()
+            } else {
+                record.lock().unwrap().push(request);
+                let body = format!(
+                    "data: {{\"choices\":[{{\"delta\":{{\"content\":\"done\"}}}}]}}\n\ndata: {MODEL_USAGE}\n\ndata: [DONE]\n\n"
+                );
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+            };
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    (format!("http://{address}/v1"), seen)
+}
+
+/// What the desktop composer leans on: commands to complete after `/`, files
+/// to complete after `@`, a skill invoked by name, and a file attached as text.
+#[tokio::test]
+async fn app_server_completes_commands_and_files_and_expands_what_the_person_typed() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let sync = sync_server::SyncServer::start("secret-token").await;
+    let device = SignedIn::new(&sync, "secret-token");
+    let home = device.directory.path().join("home");
+    std::fs::create_dir_all(home.join("skills/review")).unwrap();
+    std::fs::write(
+        home.join("skills/review/SKILL.md"),
+        "---\nname: review\ndescription: Review code carefully\n---\nCheck every edge case.\n",
+    )
+    .unwrap();
+    let work = device.directory.path().join("work");
+    std::fs::create_dir_all(work.join("src")).unwrap();
+    std::fs::write(work.join("src/parser.rs"), "fn parse() {}").unwrap();
+
+    let (model, requests) = recording_model_endpoint();
+    let mut child = device
+        .command(&model, &["app-server"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let request = |id: u32, method: &str, params: serde_json::Value| {
+        format!("{}\n", serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
+    };
+    for frame in [
+        request(1, "initialize", serde_json::json!({})),
+        request(2, "commands/list", serde_json::json!({})),
+        request(3, "files/search", serde_json::json!({"query": "pars"})),
+        request(4, "turn/start", serde_json::json!({"text": "/btw while idle"})),
+        request(
+            5,
+            "turn/start",
+            serde_json::json!({"input": [
+                {"type": "text", "text": "/review the parser"},
+                {"type": "file", "name": "notes.txt", "text": "remember the edge"},
+            ]}),
+        ),
+    ] {
+        input.write_all(frame.as_bytes()).await.unwrap();
+    }
+
+    let mut replies = std::collections::HashMap::new();
+    let mut user_item = serde_json::Value::Null;
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if let Some(id) = frame["id"].as_u64() {
+                replies.insert(id, frame.clone());
+            }
+            if frame["method"] == "item/completed" && frame["params"]["item"]["type"] == "userMessage" {
+                user_item = frame["params"]["item"].clone();
+            }
+            if frame["method"] == "turn/completed" {
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert_eq!(finished, Ok(true), "the turn should complete");
+
+    let initialize = &replies[&1]["result"]["capabilities"];
+    assert_eq!((initialize["commands"].clone(), initialize["fileSearch"].clone()), (true.into(), true.into()));
+    let commands = replies[&2]["result"]["commands"].as_array().unwrap();
+    let named = |name: &str| commands.iter().find(|command| command["name"] == name).cloned();
+    assert_eq!(named("review").unwrap()["kind"], "skill");
+    assert_eq!(named("btw").unwrap()["kind"], "builtin");
+    assert_eq!(replies[&3]["result"]["files"], serde_json::json!(["src/parser.rs"]));
+    assert!(replies[&4]["error"]["message"].as_str().unwrap().contains("while a turn is running"));
+
+    // The transcript shows what was typed; the model gets the skill and the file.
+    assert_eq!(user_item["text"], "/review the parser");
+    assert_eq!(user_item["files"], serde_json::json!(["notes.txt"]));
+    let sent = requests.lock().unwrap().join("\n");
+    assert!(sent.contains("Check every edge case."), "the skill's instructions reach the model");
+    assert!(sent.contains("remember the edge"), "the attached file reaches the model");
+
+    input.write_all(request(6, "shutdown", serde_json::json!({})).as_bytes()).await.unwrap();
+    drop(input);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait()).await;
+}

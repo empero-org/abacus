@@ -376,6 +376,11 @@ impl App {
                     // `turn/start` takes `image` (data URL) and `localImage`
                     // (path) input parts alongside text.
                     "imageInput": true,
+                    // ...and `file` (name and text) and `localFile` (path).
+                    "fileInput": true,
+                    "fileSearch": true,
+                    "commands": true,
+                    "compact": true,
                 },
                 "thread": self.thread_snapshot(),
             })),
@@ -430,7 +435,19 @@ impl App {
 
             // ---- turns ------------------------------------------------------
             "turn/start" | "turn/steer" => {
-                let TurnInput { text, images } = turn_input(&params)?;
+                let TurnInput { text, images, files } = turn_input(&params, &self.config.workspace)?;
+                let typed = text.clone();
+                // A slash command means what it means in the TUI: a skill or
+                // plugin command becomes its prompt, `/btw` a side note.
+                let (text, command) = match self.slash(&text)? {
+                    Slash::Prompt(prompt) => (prompt, true),
+                    Slash::SideNote(note) => {
+                        self.thread.state.injections.push(crate::agent::Injection::SideNote(note));
+                        return Ok(json!({"noted": true, "turnId": self.turn_id()}));
+                    }
+                    Slash::None => (text, false),
+                };
+                let text = with_files(text, files);
                 // Mid-turn input steers rather than queueing a second turn —
                 // the same rule the TUI follows, so the model can change course
                 // at the next tool boundary instead of after everything it has
@@ -448,8 +465,38 @@ impl App {
                 }
                 let text = crate::context::expand_file_references(&self.config.workspace, &text).unwrap_or(text);
                 let content = self.user_content(&text, images);
-                self.start_turn(content, events);
+                self.start_turn(content, command.then_some(typed), events);
                 Ok(json!({"turnId": self.turn_id(), "threadId": self.thread_id()}))
+            }
+            "commands/list" => {
+                let mut commands = vec![
+                    json!({"name": "btw", "description": "Note something for the running turn without derailing it", "kind": "builtin"}),
+                    json!({"name": "compact", "description": "Compact the conversation's context", "kind": "builtin"}),
+                ];
+                if let Ok(skills) = self.services.skills.read() {
+                    commands.extend(
+                        skills.list().map(
+                            |skill| json!({"name": skill.name, "description": skill.description, "kind": "skill"}),
+                        ),
+                    );
+                }
+                commands.extend(self.services.plugins.commands().map(
+                    |command| json!({"name": command.name, "description": command.description, "kind": "plugin"}),
+                ));
+                Ok(json!({"commands": commands}))
+            }
+            "files/search" => {
+                let query = params["query"].as_str().unwrap_or_default();
+                let limit = params["limit"].as_u64().map_or(20, |limit| limit.clamp(1, 200) as usize);
+                Ok(json!({"files": crate::context::search_files(&self.config.workspace, query, limit)}))
+            }
+            "thread/compact" => {
+                self.require_idle()?;
+                let before = self.thread.messages.len();
+                let target = self.config.model_limits.compaction_budget().recent_budget_chars;
+                self.thread.messages = crate::agent::compact_messages(&self.thread.messages, target);
+                self.persist();
+                Ok(json!({"before": before, "after": self.thread.messages.len()}))
             }
             "turn/interrupt" => {
                 self.cancel.store(true, Ordering::Relaxed);
@@ -668,8 +715,42 @@ impl App {
         crate::context::with_images(content, images)
     }
 
-    fn start_turn(&mut self, content: Value, events: &mpsc::UnboundedSender<AgentEvent>) {
-        let item = user_item(&content);
+    /// What a leading `/name` means here, matching the TUI: a skill or plugin
+    /// command expands to its prompt, and `/btw` is a side note for the
+    /// running turn. Anything else, a path included, is just text.
+    fn slash(&self, text: &str) -> Result<Slash> {
+        let Some(rest) = text.trim_start().strip_prefix('/') else {
+            return Ok(Slash::None);
+        };
+        let (name, argument) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        let argument = argument.trim();
+        if name == "btw" {
+            if argument.is_empty() {
+                return Err(anyhow!("usage: /btw <side question or remark>"));
+            }
+            if self.turn_id.is_none() {
+                return Err(anyhow!("/btw is for while a turn is running — ask it directly instead"));
+            }
+            return Ok(Slash::SideNote(argument.to_owned()));
+        }
+        if let Ok(skills) = self.services.skills.read()
+            && skills.get(name).is_some()
+        {
+            return Ok(Slash::Prompt(skills.invocation(name, argument)?));
+        }
+        if let Some(command) = self.services.plugins.command(name) {
+            return Ok(Slash::Prompt(command.prompt.replace("{{args}}", argument)));
+        }
+        Ok(Slash::None)
+    }
+
+    /// `shown` is what the person typed when it differs from what the model
+    /// gets (a slash command's expansion), so the transcript shows the former.
+    fn start_turn(&mut self, content: Value, shown: Option<String>, events: &mpsc::UnboundedSender<AgentEvent>) {
+        let mut item = user_item(&content);
+        if let Some(shown) = shown {
+            item["text"] = json!(shown);
+        }
         self.thread.messages.push(json!({"role": "user", "content": content}));
         let turn = self.next("turn");
         self.turn_id = Some(turn.clone());
@@ -679,7 +760,8 @@ impl App {
         notify("turn/started", json!({"threadId": self.thread_id(), "turnId": turn}));
         // The user's own message is an item too, so a client that replays
         // `item/*` alone reconstructs the whole transcript.
-        self.item("completed", json!({"id": item_id, "type": "userMessage", "text": item.0, "images": item.1}));
+        item["id"] = json!(item_id);
+        self.item("completed", item);
 
         let options = TurnOptions {
             mode: self.mode,
@@ -1084,19 +1166,30 @@ fn parse_numstat(line: &str) -> Option<Value> {
     }))
 }
 
-/// What a client sent as a turn: its text, and its images as data URLs.
+/// What a leading slash in a prompt turned out to be.
+enum Slash {
+    Prompt(String),
+    SideNote(String),
+    None,
+}
+
+/// What a client sent as a turn: its text, its images as data URLs, and the
+/// files it attached as (label, contents).
 #[derive(Debug, PartialEq)]
 struct TurnInput {
     text: String,
     images: Vec<String>,
+    files: Vec<(String, String)>,
 }
 
-fn turn_input(params: &Value) -> Result<TurnInput> {
+fn turn_input(params: &Value, workspace: &std::path::Path) -> Result<TurnInput> {
     // Accept the structured `input: [{type:"text",text}]` form and a bare
     // `text`, so a hand-written client is not forced through the array form.
     // Images come as `{type:"image", url}` (a data URL) or `{type:"localImage",
-    // path}` (a file the client's user picked; read here).
-    let mut input = TurnInput { text: String::new(), images: Vec::new() };
+    // path}` (a file the client's user picked; read here). Other files come as
+    // `{type:"file", name, text}` or `{type:"localFile", path}`; an image sent
+    // as a localFile is taken as an image.
+    let mut input = TurnInput { text: String::new(), images: Vec::new(), files: Vec::new() };
     if let Some(text) = params["text"].as_str() {
         input.text = text.to_owned();
     } else if let Some(items) = params["input"].as_array() {
@@ -1113,6 +1206,25 @@ fn turn_input(params: &Value) -> Result<TurnInput> {
                     let path = item["path"].as_str().ok_or_else(|| anyhow!("a localImage input needs a path"))?;
                     input.images.push(crate::context::image_data_url(std::path::Path::new(path))?);
                 }
+                "file" => {
+                    let name = item["name"].as_str().ok_or_else(|| anyhow!("a file input needs a name"))?;
+                    let text = item["text"].as_str().ok_or_else(|| anyhow!("a file input needs its text"))?;
+                    crate::context::check_text_attachment(name, text)?;
+                    input.files.push((name.to_owned(), text.to_owned()));
+                }
+                "localFile" => {
+                    let path = std::path::Path::new(
+                        item["path"].as_str().ok_or_else(|| anyhow!("a localFile input needs a path"))?,
+                    );
+                    if crate::context::is_image_path(path) {
+                        input.images.push(crate::context::image_data_url(path)?);
+                    } else {
+                        // Named by its place in the workspace when it has one,
+                        // so the model can open or edit it by that path.
+                        let label = path.strip_prefix(workspace).unwrap_or(path).display().to_string();
+                        input.files.push((label, crate::context::read_text_attachment(path)?));
+                    }
+                }
                 other => return Err(anyhow!("unsupported input type `{other}`")),
             }
         }
@@ -1120,16 +1232,52 @@ fn turn_input(params: &Value) -> Result<TurnInput> {
     } else {
         return Err(anyhow!("turn input required"));
     }
-    if input.text.trim().is_empty() && input.images.is_empty() {
+    if input.text.trim().is_empty() && input.images.is_empty() && input.files.is_empty() {
         return Err(anyhow!("turn input is empty"));
+    }
+    let total: usize = input.files.iter().map(|(_, text)| text.len()).sum();
+    if total > crate::context::MAX_ATTACHED_TOTAL {
+        return Err(anyhow!(
+            "the attached files are larger than {} KB together",
+            crate::context::MAX_ATTACHED_TOTAL / 1000
+        ));
     }
     Ok(input)
 }
 
-/// A user message as a client item: its text, and its images when it has any.
-fn user_item(content: &Value) -> (String, Option<Vec<&str>>) {
+/// Attached files ride after the prompt in the same `<attached_file>` blocks
+/// `@file` references use.
+fn with_files(mut text: String, files: Vec<(String, String)>) -> String {
+    for (label, content) in files {
+        text.push_str(&format!("\n\n<attached_file path=\"{label}\">\n{content}\n</attached_file>"));
+    }
+    text
+}
+
+/// A user message as a client item: what the person wrote, with the files and
+/// images that went along listed apart instead of inlined.
+fn user_item(content: &Value) -> Value {
+    let text = crate::text::content_text(content);
+    const MARK: &str = "\n\n<attached_file path=\"";
+    let (said, attached) = text.split_once(MARK).map_or((text.as_ref(), ""), |(said, rest)| (said, rest));
+    let files: Vec<&str> = if attached.is_empty() {
+        Vec::new()
+    } else {
+        // The first block's path starts `attached`; each later one follows a mark.
+        std::iter::once(attached)
+            .chain(attached.split(MARK).skip(1))
+            .filter_map(|block| block.split_once('"').map(|(path, _)| path))
+            .collect()
+    };
     let images = crate::text::content_images(content);
-    (crate::text::content_text(content).into_owned(), (!images.is_empty()).then_some(images))
+    let mut item = json!({"type": "userMessage", "text": said});
+    if !images.is_empty() {
+        item["images"] = json!(images);
+    }
+    if !files.is_empty() {
+        item["files"] = json!(files);
+    }
+    item
 }
 
 /// The token ledger as a client sees it. `cacheRate` is omitted rather than
@@ -1174,9 +1322,13 @@ fn history_items(messages: &[Value]) -> Vec<Value> {
             // The system prompt is scaffolding, not conversation.
             "system" => continue,
             "user" => {
-                let (text, images) = user_item(&message["content"]);
-                if !text.trim().is_empty() || images.is_some() {
-                    items.push(json!({"id": id, "type": "userMessage", "text": text, "images": images}));
+                let mut item = user_item(&message["content"]);
+                let empty = item["text"].as_str().is_none_or(|text| text.trim().is_empty())
+                    && item.get("images").is_none()
+                    && item.get("files").is_none();
+                if !empty {
+                    item["id"] = json!(id);
+                    items.push(item);
                 }
             }
             "assistant" => {
@@ -1229,13 +1381,73 @@ mod tests {
         }
     }
 
+    fn turn_input_in_tests(params: &Value) -> Result<TurnInput> {
+        turn_input(params, std::path::Path::new("/workspace"))
+    }
+
+    #[test]
+    fn turn_input_takes_files_by_text_and_by_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let notes = dir.path().join("notes.md");
+        std::fs::write(&notes, "# notes").unwrap();
+        let shot = dir.path().join("shot.png");
+        std::fs::write(&shot, b"png bytes").unwrap();
+        let binary = dir.path().join("blob.bin");
+        std::fs::write(&binary, [0_u8, 159, 146, 150]).unwrap();
+
+        let input = turn(
+            dir.path(),
+            json!({"input": [
+                {"type": "text", "text": "review these"},
+                {"type": "file", "name": "pasted.txt", "text": "hello"},
+                {"type": "localFile", "path": notes},
+                {"type": "localFile", "path": shot},
+            ]}),
+        )
+        .unwrap();
+        // A file inside the workspace is named by its place in it.
+        assert_eq!(
+            input.files,
+            [("pasted.txt".to_owned(), "hello".to_owned()), ("notes.md".to_owned(), "# notes".to_owned())]
+        );
+        assert_eq!(input.images.len(), 1, "an image sent as a file is an image");
+
+        assert!(turn(dir.path(), json!({"input": [{"type": "localFile", "path": binary}]})).is_err());
+        assert!(
+            turn(dir.path(), json!({"input": [{"type": "file", "name": "big.txt", "text": "x".repeat(300_000)}]}))
+                .is_err()
+        );
+        // Files alone are a prompt.
+        assert!(turn(dir.path(), json!({"input": [{"type": "file", "name": "a.txt", "text": "a"}]})).is_ok());
+    }
+
+    fn turn(workspace: &std::path::Path, params: Value) -> Result<TurnInput> {
+        turn_input(&params, workspace)
+    }
+
+    #[test]
+    fn user_items_list_attached_files_apart_from_what_was_said() {
+        let text = with_files(
+            "compare these".to_owned(),
+            vec![("a.rs".to_owned(), "fn a() {}".to_owned()), ("docs/b.md".to_owned(), "# b".to_owned())],
+        );
+        let item = user_item(&json!(text));
+        assert_eq!(item["text"], "compare these");
+        assert_eq!(item["files"], json!(["a.rs", "docs/b.md"]));
+        assert!(item.get("images").is_none());
+
+        let plain = user_item(&json!("just words"));
+        assert_eq!(plain["text"], "just words");
+        assert!(plain.get("files").is_none());
+    }
+
     #[test]
     fn turn_input_accepts_both_shapes() {
-        let hello = TurnInput { text: "hello".into(), images: Vec::new() };
-        assert_eq!(turn_input(&json!({"text": "hello"})).unwrap(), hello);
-        assert_eq!(turn_input(&json!({"input": [{"type": "text", "text": "hello"}]})).unwrap(), hello);
-        assert!(turn_input(&json!({"text": "  "})).is_err());
-        assert!(turn_input(&json!({})).is_err());
+        let hello = TurnInput { text: "hello".into(), images: Vec::new(), files: Vec::new() };
+        assert_eq!(turn_input_in_tests(&json!({"text": "hello"})).unwrap(), hello);
+        assert_eq!(turn_input_in_tests(&json!({"input": [{"type": "text", "text": "hello"}]})).unwrap(), hello);
+        assert!(turn_input_in_tests(&json!({"text": "  "})).is_err());
+        assert!(turn_input_in_tests(&json!({})).is_err());
     }
 
     #[test]
@@ -1245,7 +1457,7 @@ mod tests {
         std::fs::write(&shot, b"png bytes").unwrap();
         let url = "data:image/png;base64,QUJD";
 
-        let input = turn_input(&json!({"input": [
+        let input = turn_input_in_tests(&json!({"input": [
             {"type": "text", "text": "what is this?"},
             {"type": "image", "url": url},
             {"type": "localImage", "path": shot},
@@ -1256,10 +1468,14 @@ mod tests {
         assert!(input.images[1].starts_with("data:image/png;base64,"));
 
         // An image alone is a prompt; a bad one is refused rather than dropped.
-        assert!(turn_input(&json!({"input": [{"type": "image", "url": url}]})).is_ok());
-        assert!(turn_input(&json!({"input": [{"type": "image", "url": "https://example.com/a.png"}]})).is_err());
-        assert!(turn_input(&json!({"input": [{"type": "localImage", "path": dir.path().join("x.txt")}]})).is_err());
-        assert!(turn_input(&json!({"input": [{"type": "audio"}]})).is_err());
+        assert!(turn_input_in_tests(&json!({"input": [{"type": "image", "url": url}]})).is_ok());
+        assert!(
+            turn_input_in_tests(&json!({"input": [{"type": "image", "url": "https://example.com/a.png"}]})).is_err()
+        );
+        assert!(
+            turn_input_in_tests(&json!({"input": [{"type": "localImage", "path": dir.path().join("x.txt")}]})).is_err()
+        );
+        assert!(turn_input_in_tests(&json!({"input": [{"type": "audio"}]})).is_err());
     }
 
     #[test]
