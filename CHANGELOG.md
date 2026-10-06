@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.6 — 2026-10-06
 
 - **`abacus sessions --all` and `--json`.** `--all` lists the sessions of every
   workspace on this machine, synced ones included, newest activity first.
