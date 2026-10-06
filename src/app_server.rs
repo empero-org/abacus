@@ -45,6 +45,7 @@ use crate::{
     provider::Provider,
     services::AgentServices,
     session::{Session, SessionState, SessionStore},
+    tools::ToolCall,
     usage::UsageReporter,
 };
 
@@ -219,11 +220,18 @@ pub async fn run(
     if crate::sync::is_configured(&credentials) {
         // Pull what changed on other devices and upload what an earlier exit
         // left behind, without holding up the first request. The open thread
-        // is protected from being written over; a session pulled in now shows
-        // up in the next `thread/list`.
+        // is protected from being written over. `sessions/synced` tells the
+        // front end to list again when anything arrived or went away.
         let paths = app.config.paths.clone();
         tokio::spawn(async move {
-            let _ = crate::sync::reconcile(&paths).await;
+            if let Ok(outcome) = crate::sync::reconcile(&paths).await
+                && outcome.pulled + outcome.deleted + outcome.forked > 0
+            {
+                notify(
+                    "sessions/synced",
+                    json!({"pulled": outcome.pulled, "deleted": outcome.deleted, "forked": outcome.forked}),
+                );
+            }
         });
     }
 
@@ -1095,6 +1103,21 @@ fn token_usage(usage: &crate::provider::TokenUsage) -> Value {
 /// Project a saved message history into the item shape the live stream uses, so
 /// a resumed thread and a running one render through exactly one code path.
 fn history_items(messages: &[Value]) -> Vec<Value> {
+    // The live stream names each call by its summary ("src/lib.rs", "cargo
+    // test"). History keeps the arguments on the assistant turn that made the
+    // call, so a resumed thread can name it the same way.
+    let summaries: HashMap<&str, String> = messages
+        .iter()
+        .flat_map(|message| message["tool_calls"].as_array().into_iter().flatten())
+        .filter_map(|call| {
+            let id = call["id"].as_str()?;
+            let name = call["function"]["name"].as_str()?;
+            let arguments = call["function"]["arguments"].as_str().unwrap_or_default();
+            let call = ToolCall { id: id.to_owned(), name: name.to_owned(), arguments: arguments.to_owned() };
+            Some((id, call.summary()))
+        })
+        .collect();
+
     let mut items = Vec::new();
     for (index, message) in messages.iter().enumerate() {
         let id = format!("history_{index}");
@@ -1106,18 +1129,28 @@ fn history_items(messages: &[Value]) -> Vec<Value> {
             "user" if !content.trim().is_empty() => {
                 items.push(json!({"id": id, "type": "userMessage", "text": content}));
             }
-            "assistant" if !content.trim().is_empty() => {
-                items.push(json!({"id": id, "type": "agentMessage", "text": content}));
+            "assistant" => {
+                let reasoning = message["reasoning_content"].as_str().unwrap_or_default();
+                if !reasoning.trim().is_empty() {
+                    items.push(json!({"id": format!("{id}_reasoning"), "type": "reasoning", "text": reasoning}));
+                }
+                if !content.trim().is_empty() {
+                    items.push(json!({"id": id, "type": "agentMessage", "text": content}));
+                }
             }
             "tool" => {
                 let name = message["name"].as_str().unwrap_or("tool");
-                items.push(json!({
+                let mut item = json!({
                     "id": id,
                     "type": item_type(name),
                     "name": name,
                     "status": "completed",
                     "output": content,
-                }));
+                });
+                if let Some(summary) = message["tool_call_id"].as_str().and_then(|call| summaries.get(call)) {
+                    item["command"] = json!(summary);
+                }
+                items.push(item);
             }
             _ => continue,
         }
@@ -1164,6 +1197,31 @@ mod tests {
         ]);
         let types: Vec<&str> = items.iter().map(|item| item["type"].as_str().unwrap()).collect();
         assert_eq!(types, ["userMessage", "agentMessage", "commandExecution"]);
+    }
+
+    #[test]
+    fn history_names_tool_calls_and_keeps_reasoning() {
+        let items = history_items(&[
+            json!({"role": "user", "content": "what does it print?"}),
+            json!({
+                "role": "assistant",
+                "content": null,
+                "reasoning_content": "Read the file first.",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{\"path\": \"fizzbuzz.py\"}"},
+                }],
+            }),
+            json!({"role": "tool", "name": "read_file", "tool_call_id": "call_1", "content": "def fizzbuzz(n): ..."}),
+            json!({"role": "tool", "name": "glob", "content": "orphaned result"}),
+        ]);
+        let types: Vec<&str> = items.iter().map(|item| item["type"].as_str().unwrap()).collect();
+        assert_eq!(types, ["userMessage", "reasoning", "functionCall", "functionCall"]);
+        assert_eq!(items[1]["text"], "Read the file first.");
+        assert_eq!(items[2]["command"], "fizzbuzz.py");
+        // A result whose call is gone still shows, just without a summary.
+        assert!(items[3].get("command").is_none());
     }
 
     #[test]

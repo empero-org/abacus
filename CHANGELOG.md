@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **`abacus sessions --all` and `--json`.** `--all` lists the sessions of every
+  workspace on this machine, synced ones included, newest activity first.
+  `--json` prints the list for a front end, with each workspace's path and
+  whether it exists here. The desktop app reads it to show every project's
+  sessions in its sidebar.
+
+- **The app server shows resumed threads the way it streamed them.** A resumed
+  thread's tool calls carry their summary again (`fizzbuzz.py`, `cargo test`)
+  instead of only the tool's name, and the reasoning saved with each reply comes
+  back as a reasoning item. When the startup sync pulls, forks or deletes
+  sessions, the server sends `sessions/synced` so the front end can list again.
+
 ## 0.6.5 — 2026-10-05
 
 - **Sync moves only what changed.** Abacus Sync used to download every session
