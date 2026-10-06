@@ -739,11 +739,7 @@ impl App {
             Ok(Some(image)) => {
                 match crate::clipboard::save_attachment(&self.config.paths.attachments_dir, &image) {
                     Ok((token, _)) => {
-                        let needs_space = !self.input.is_empty() && !self.input.text().ends_with(' ');
-                        if needs_space {
-                            self.input.insert(' ');
-                        }
-                        self.input.insert_str(&token);
+                        self.insert_token(&token);
                         self.status = format!("image attached ({}x{})", image.width, image.height);
                     }
                     Err(error) => self.status = format!("could not save image: {error:#}"),
@@ -756,7 +752,7 @@ impl App {
                 // before reporting, so plain text paste keeps working on
                 // setups arboard cannot reach.
                 if let Some(text) = clipboard_text() {
-                    self.input.insert_str(&text);
+                    self.paste_text(&text);
                 } else {
                     self.status = format!("{error:#}");
                 }
@@ -764,8 +760,40 @@ impl App {
             }
         }
         if let Some(text) = clipboard_text() {
-            self.input.insert_str(&text);
+            self.paste_text(&text);
         }
+    }
+
+    /// Paste into the prompt. A paste that only names image files (a file
+    /// dropped on the terminal, or copied in a file manager) attaches those
+    /// images; anything else is inserted as text.
+    pub(super) fn paste_text(&mut self, text: &str) {
+        let Some(paths) = crate::clipboard::pasted_image_paths(text) else {
+            self.input.insert_str(text);
+            return;
+        };
+        let mut attached = 0;
+        for path in &paths {
+            match crate::clipboard::attach_image_file(&self.config.paths.attachments_dir, path) {
+                Ok(token) => {
+                    self.insert_token(&token);
+                    attached += 1;
+                }
+                Err(error) => {
+                    self.status = format!("could not attach image: {error:#}");
+                    return;
+                }
+            }
+        }
+        self.status = if attached == 1 { "image attached".to_owned() } else { format!("{attached} images attached") };
+    }
+
+    fn insert_token(&mut self, token: &str) {
+        let needs_space = !self.input.is_empty() && !self.input.text().ends_with(' ');
+        if needs_space {
+            self.input.insert(' ');
+        }
+        self.input.insert_str(token);
     }
 
     /// Ctrl+C is contextual: the first press interrupts an active turn or clears

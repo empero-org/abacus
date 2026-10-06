@@ -115,8 +115,9 @@ pub fn compact_history(messages: &[Value]) -> String {
     for message in messages {
         match message.get("role").and_then(Value::as_str) {
             Some("user") => {
-                if let Some(text) = message.get("content").and_then(Value::as_str) {
-                    lines.push((true, format!("user: {}", excerpt(text, EXCERPT_CHARS))));
+                if let Some(content) = message.get("content") {
+                    let text = crate::text::content_text(content);
+                    lines.push((true, format!("user: {}", excerpt(&text, EXCERPT_CHARS))));
                 }
             }
             Some("assistant") => {

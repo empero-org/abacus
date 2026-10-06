@@ -158,6 +158,9 @@ pub enum Injection {
     /// new turn: it lands after the current tool call so the model can adjust
     /// course immediately.
     UserMessage(String),
+    /// Steering that carries images: the message as the person wrote it, and
+    /// its content in the text-and-images array form.
+    UserContent { text: String, content: Value },
     /// A background subagent finished and its report is ready.
     SubagentReport(String),
     /// A side note from the user — something they care about, delivered after
@@ -1007,9 +1010,8 @@ pub fn compaction_trace(messages: &[Value]) -> String {
                 parts.push(if preview.is_empty() { name.to_owned() } else { format!("{name}({preview})") });
             }
         }
-        if parts.is_empty()
-            && let Some(content) = message["content"].as_str()
-        {
+        if parts.is_empty() {
+            let content = crate::text::content_text(&message["content"]);
             let snippet = content.trim();
             if !snippet.is_empty() {
                 parts.push(crate::text::clip(&crate::text::squeeze(snippet), 100, "…"));
@@ -1521,24 +1523,28 @@ fn deliver_injections(options: &TurnOptions, messages: &mut Vec<Value>, events: 
         let content = match &injection {
             Injection::UserMessage(text) => {
                 let _ = events.send(AgentEvent::Notice(format!("steering — {text}")));
-                text.clone()
+                Value::String(text.clone())
+            }
+            Injection::UserContent { text, content } => {
+                let _ = events.send(AgentEvent::Notice(format!("steering — {text}")));
+                content.clone()
             }
             Injection::SideNote(note) => {
                 let _ = events.send(AgentEvent::Notice(format!("noted — {note}")));
-                format!(
+                Value::String(format!(
                     "[side note from the user — context, not an instruction] {note}\n\n\
                      Do not change course or act on this now, and do not answer it yet: \
                      finish the work already in progress. Let it inform how you proceed, \
                      and address it once the current task is done."
-                )
+                ))
             }
             Injection::SubagentReport(report) => {
                 let _ = events
                     .send(AgentEvent::Notice("a background subagent finished; its report was delivered".to_owned()));
-                format!(
+                Value::String(format!(
                     "[background subagent finished] {report}\n\nFold this into what you are \
                      doing; if it changes the plan, say so."
-                )
+                ))
             }
         };
         messages.push(json!({"role": "user", "content": content}));

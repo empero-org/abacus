@@ -45,8 +45,9 @@ automatically. `abacus setup --force` replaces the current default profile.
 
 Type a prompt and press `Enter`. Type `@` to pick a file from the workspace and
 attach it to the prompt. `Ctrl+V` pastes text, or an image if the clipboard holds
-one. If the workspace has an `AGENTS.md`, Abacus reads it at startup and follows
-it.
+one. Dropping an image file on the terminal, or pasting one copied in a file
+manager, attaches it too, from anywhere on disk. If the workspace has an
+`AGENTS.md`, Abacus reads it at startup and follows it.
 
 When the agent wants to change a file or run a command, it shows what it will do
 (a diff for file changes) and waits. Press `y` to allow it, `a` to allow it and every
@@ -126,7 +127,8 @@ lists them. `abacus sessions --all` lists every workspace that has sessions, and
 
 `-p` runs one prompt without the UI and prints the result. Headless runs reject
 every file change and command that needs approval unless you pass
-`--always-approve` (`-y`).
+`--always-approve` (`-y`). `--image <path>` (`-i`) attaches an image to the
+prompt, as does an `@shot.png` reference to an image in the workspace.
 
 ```sh
 abacus -p "Explain this repository"

@@ -152,9 +152,11 @@ impl Session {
             && let Some(prompt) = self
                 .messages
                 .iter()
-                .find_map(|message| (message["role"] == "user").then(|| message["content"].as_str()).flatten())
+                .filter(|message| message["role"] == "user")
+                .map(|message| crate::text::content_text(&message["content"]))
+                .find(|prompt| !prompt.trim().is_empty())
         {
-            self.title = title_from_prompt(prompt);
+            self.title = title_from_prompt(&prompt);
         }
     }
 }

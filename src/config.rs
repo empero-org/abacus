@@ -65,6 +65,10 @@ pub struct Cli {
     #[arg(short = 'p', long)]
     pub prompt: Option<String>,
 
+    /// Attach an image to the headless prompt (PNG, JPEG, GIF or WebP; repeatable)
+    #[arg(short = 'i', long = "image", value_name = "PATH", requires = "prompt")]
+    pub images: Vec<PathBuf>,
+
     /// Output format for headless mode
     #[arg(long, value_enum, default_value_t = OutputFormat::Plain)]
     pub output_format: OutputFormat,

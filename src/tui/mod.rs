@@ -970,7 +970,7 @@ async fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut
                         input.insert_str(&text);
                     } else if app.usage_panel.is_none() && app.mode == InputMode::Insert {
                         let before = app.input.text();
-                        app.input.insert_str(&text);
+                        app.paste_text(&text);
                         app.sync_completion(&before);
                     }
                     dirty = true;
@@ -1108,9 +1108,10 @@ fn entries_from_messages(messages: &[Value]) -> Vec<Entry> {
     let mut entries = Vec::new();
     for message in messages {
         let role = message["role"].as_str().unwrap_or_default();
-        let Some(content) = message["content"].as_str() else {
-            continue;
-        };
+        // An image prompt is an array of parts; its text (with the
+        // `[image #N]` markers) is what the transcript shows.
+        let content = crate::text::content_text(&message["content"]);
+        let content: &str = &content;
         if content.is_empty() {
             continue;
         }
@@ -1901,7 +1902,13 @@ impl App {
         if let Some(remote) = &mut self.remote {
             remote.user_prompt(entry, &prompt);
         }
-        self.state.injections.push(crate::agent::Injection::UserMessage(prompt));
+        // A pasted image steers too: its `[image:…]` token resolves the same
+        // way it would in a fresh prompt.
+        let content = crate::context::user_content(&self.config.workspace, &self.config.paths.attachments_dir, &prompt);
+        self.state.injections.push(match content {
+            Value::String(_) => crate::agent::Injection::UserMessage(prompt),
+            content => crate::agent::Injection::UserContent { text: prompt, content },
+        });
         self.follow = true;
         self.status = "steering · delivered after the current step".to_owned();
     }
@@ -2832,7 +2839,8 @@ impl App {
         {
             match injection {
                 // A steering message with no turn to steer is just a prompt.
-                Injection::UserMessage(text) => self.submit_prompt(text),
+                // Its `[image:…]` tokens resolve again, so images survive too.
+                Injection::UserMessage(text) | Injection::UserContent { text, .. } => self.submit_prompt(text),
                 // A side note whose turn ended before it landed has nothing
                 // to nudge; surface it rather than dropping it silently.
                 Injection::SideNote(note) => {

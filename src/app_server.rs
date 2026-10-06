@@ -373,6 +373,9 @@ impl App {
                     "diff": true,
                     "modelList": true,
                     "configWrite": true,
+                    // `turn/start` takes `image` (data URL) and `localImage`
+                    // (path) input parts alongside text.
+                    "imageInput": true,
                 },
                 "thread": self.thread_snapshot(),
             })),
@@ -427,20 +430,25 @@ impl App {
 
             // ---- turns ------------------------------------------------------
             "turn/start" | "turn/steer" => {
-                let text = turn_input(&params)?;
+                let TurnInput { text, images } = turn_input(&params)?;
                 // Mid-turn input steers rather than queueing a second turn —
                 // the same rule the TUI follows, so the model can change course
                 // at the next tool boundary instead of after everything it has
                 // already planned. `turn/steer` is the explicit spelling of it.
                 if self.turn_id.is_some() {
-                    self.thread.state.injections.push(crate::agent::Injection::UserMessage(text));
+                    let content = self.user_content(&text, images);
+                    self.thread.state.injections.push(match content {
+                        Value::String(_) => crate::agent::Injection::UserMessage(text),
+                        content => crate::agent::Injection::UserContent { text, content },
+                    });
                     return Ok(json!({"steered": true, "turnId": self.turn_id()}));
                 }
                 if method == "turn/steer" {
                     return Err(anyhow!("no turn is running to steer"));
                 }
                 let text = crate::context::expand_file_references(&self.config.workspace, &text).unwrap_or(text);
-                self.start_turn(text, events);
+                let content = self.user_content(&text, images);
+                self.start_turn(content, events);
                 Ok(json!({"turnId": self.turn_id(), "threadId": self.thread_id()}))
             }
             "turn/interrupt" => {
@@ -653,8 +661,16 @@ impl App {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    fn start_turn(&mut self, text: String, events: &mpsc::UnboundedSender<AgentEvent>) {
-        self.thread.messages.push(json!({"role": "user", "content": text.clone()}));
+    /// A prompt as the model receives it: `[image:…]` tokens and `@shot.png`
+    /// references resolved, and the images the client attached appended.
+    fn user_content(&self, text: &str, images: Vec<String>) -> Value {
+        let content = crate::context::user_content(&self.config.workspace, &self.config.paths.attachments_dir, text);
+        crate::context::with_images(content, images)
+    }
+
+    fn start_turn(&mut self, content: Value, events: &mpsc::UnboundedSender<AgentEvent>) {
+        let item = user_item(&content);
+        self.thread.messages.push(json!({"role": "user", "content": content}));
         let turn = self.next("turn");
         self.turn_id = Some(turn.clone());
         self.cancel = Arc::new(AtomicBool::new(false));
@@ -663,7 +679,7 @@ impl App {
         notify("turn/started", json!({"threadId": self.thread_id(), "turnId": turn}));
         // The user's own message is an item too, so a client that replays
         // `item/*` alone reconstructs the whole transcript.
-        self.item("completed", json!({"id": item_id, "type": "userMessage", "text": text}));
+        self.item("completed", json!({"id": item_id, "type": "userMessage", "text": item.0, "images": item.1}));
 
         let options = TurnOptions {
             mode: self.mode,
@@ -1068,21 +1084,52 @@ fn parse_numstat(line: &str) -> Option<Value> {
     }))
 }
 
-fn turn_input(params: &Value) -> Result<String> {
-    // Accept the structured `input: [{type:"text",text}]` form and a bare
-    // `text`, so a hand-written client is not forced through the array form.
-    if let Some(text) = params["text"].as_str() {
-        return non_empty(text);
-    }
-    if let Some(items) = params["input"].as_array() {
-        let text = items.iter().filter_map(|item| item["text"].as_str()).collect::<Vec<_>>().join("\n");
-        return non_empty(&text);
-    }
-    Err(anyhow!("turn input required"))
+/// What a client sent as a turn: its text, and its images as data URLs.
+#[derive(Debug, PartialEq)]
+struct TurnInput {
+    text: String,
+    images: Vec<String>,
 }
 
-fn non_empty(text: &str) -> Result<String> {
-    if text.trim().is_empty() { Err(anyhow!("turn input is empty")) } else { Ok(text.to_owned()) }
+fn turn_input(params: &Value) -> Result<TurnInput> {
+    // Accept the structured `input: [{type:"text",text}]` form and a bare
+    // `text`, so a hand-written client is not forced through the array form.
+    // Images come as `{type:"image", url}` (a data URL) or `{type:"localImage",
+    // path}` (a file the client's user picked; read here).
+    let mut input = TurnInput { text: String::new(), images: Vec::new() };
+    if let Some(text) = params["text"].as_str() {
+        input.text = text.to_owned();
+    } else if let Some(items) = params["input"].as_array() {
+        let mut texts = Vec::new();
+        for item in items {
+            match item["type"].as_str().unwrap_or("text") {
+                "text" => texts.extend(item["text"].as_str()),
+                "image" => {
+                    let url = item["url"].as_str().ok_or_else(|| anyhow!("an image input needs a url"))?;
+                    crate::context::check_image_url(url)?;
+                    input.images.push(url.to_owned());
+                }
+                "localImage" => {
+                    let path = item["path"].as_str().ok_or_else(|| anyhow!("a localImage input needs a path"))?;
+                    input.images.push(crate::context::image_data_url(std::path::Path::new(path))?);
+                }
+                other => return Err(anyhow!("unsupported input type `{other}`")),
+            }
+        }
+        input.text = texts.join("\n");
+    } else {
+        return Err(anyhow!("turn input required"));
+    }
+    if input.text.trim().is_empty() && input.images.is_empty() {
+        return Err(anyhow!("turn input is empty"));
+    }
+    Ok(input)
+}
+
+/// A user message as a client item: its text, and its images when it has any.
+fn user_item(content: &Value) -> (String, Option<Vec<&str>>) {
+    let images = crate::text::content_images(content);
+    (crate::text::content_text(content).into_owned(), (!images.is_empty()).then_some(images))
 }
 
 /// The token ledger as a client sees it. `cacheRate` is omitted rather than
@@ -1126,8 +1173,11 @@ fn history_items(messages: &[Value]) -> Vec<Value> {
         match role {
             // The system prompt is scaffolding, not conversation.
             "system" => continue,
-            "user" if !content.trim().is_empty() => {
-                items.push(json!({"id": id, "type": "userMessage", "text": content}));
+            "user" => {
+                let (text, images) = user_item(&message["content"]);
+                if !text.trim().is_empty() || images.is_some() {
+                    items.push(json!({"id": id, "type": "userMessage", "text": text, "images": images}));
+                }
             }
             "assistant" => {
                 let reasoning = message["reasoning_content"].as_str().unwrap_or_default();
@@ -1181,10 +1231,46 @@ mod tests {
 
     #[test]
     fn turn_input_accepts_both_shapes() {
-        assert_eq!(turn_input(&json!({"text": "hello"})).unwrap(), "hello");
-        assert_eq!(turn_input(&json!({"input": [{"type": "text", "text": "hello"}]})).unwrap(), "hello");
+        let hello = TurnInput { text: "hello".into(), images: Vec::new() };
+        assert_eq!(turn_input(&json!({"text": "hello"})).unwrap(), hello);
+        assert_eq!(turn_input(&json!({"input": [{"type": "text", "text": "hello"}]})).unwrap(), hello);
         assert!(turn_input(&json!({"text": "  "})).is_err());
         assert!(turn_input(&json!({})).is_err());
+    }
+
+    #[test]
+    fn turn_input_takes_images_by_url_and_by_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let shot = dir.path().join("shot.png");
+        std::fs::write(&shot, b"png bytes").unwrap();
+        let url = "data:image/png;base64,QUJD";
+
+        let input = turn_input(&json!({"input": [
+            {"type": "text", "text": "what is this?"},
+            {"type": "image", "url": url},
+            {"type": "localImage", "path": shot},
+        ]}))
+        .unwrap();
+        assert_eq!(input.text, "what is this?");
+        assert_eq!(input.images[0], url);
+        assert!(input.images[1].starts_with("data:image/png;base64,"));
+
+        // An image alone is a prompt; a bad one is refused rather than dropped.
+        assert!(turn_input(&json!({"input": [{"type": "image", "url": url}]})).is_ok());
+        assert!(turn_input(&json!({"input": [{"type": "image", "url": "https://example.com/a.png"}]})).is_err());
+        assert!(turn_input(&json!({"input": [{"type": "localImage", "path": dir.path().join("x.txt")}]})).is_err());
+        assert!(turn_input(&json!({"input": [{"type": "audio"}]})).is_err());
+    }
+
+    #[test]
+    fn history_shows_image_prompts_with_their_images() {
+        let items = history_items(&[json!({"role": "user", "content": [
+            {"type": "text", "text": "what is this?"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}},
+        ]})]);
+        assert_eq!(items[0]["type"], "userMessage");
+        assert_eq!(items[0]["text"], "what is this?");
+        assert_eq!(items[0]["images"], json!(["data:image/png;base64,QUJD"]));
     }
 
     #[test]

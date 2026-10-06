@@ -288,9 +288,8 @@ fn trajectory(messages: &[Value], budget: usize) -> String {
         let role = message["role"].as_str().unwrap_or_default();
         match role {
             "user" | "assistant" => {
-                if let Some(content) = message["content"].as_str()
-                    && !content.trim().is_empty()
-                {
+                let content = crate::text::content_text(&message["content"]);
+                if !content.trim().is_empty() {
                     lines.push(format!("{role}: {}", content.trim()));
                 }
                 if let Some(calls) = message["tool_calls"].as_array() {

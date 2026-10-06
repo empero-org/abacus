@@ -25,7 +25,11 @@ pub struct ClipboardImage {
 /// backend worked at all (headless session, missing tooling).
 pub fn read_image() -> Result<Option<ClipboardImage>> {
     match arboard_image() {
-        Ok(found) => Ok(found),
+        Ok(Some(found)) => Ok(Some(found)),
+        // arboard can come back empty-handed while the image is there: on a
+        // Wayland compositor without the data-control protocol it reads the
+        // X11 clipboard, which holds no image. wl-paste asks Wayland directly.
+        Ok(None) => Ok(command_image()),
         // arboard failing outright (no Wayland data-control, no X11) is not
         // the end: a clipboard utility may still be installed.
         Err(arboard_error) => match command_image() {
@@ -136,9 +140,174 @@ pub fn save_attachment(directory: &Path, image: &ClipboardImage) -> Result<(Stri
     Ok((format!("[image:{name}]"), path))
 }
 
+/// Copy an image file the person pasted or dropped into the attachments
+/// directory, and hand back the `[image:…]` token that references it. A copy,
+/// so the session still has the image after the original moves or is deleted.
+pub fn attach_image_file(directory: &Path, path: &Path) -> Result<String> {
+    // Validates the type and size before anything is copied.
+    crate::context::image_data_url(path)?;
+    std::fs::create_dir_all(directory).context("create attachments directory")?;
+    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("png").to_ascii_lowercase();
+    let name = format!("img-{}.{extension}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    std::fs::copy(path, directory.join(&name)).context("copy image into attachments")?;
+    Ok(format!("[image:{name}]"))
+}
+
+/// The image files a paste names, when that is all it names: a path dropped
+/// on the terminal, a file copied in a file manager (a `file://` URI), or
+/// several of either. The quoting and backslash escapes terminals add around
+/// dropped paths are undone. Only absolute, `~/` and `file://` paths count, so
+/// pasting the word `logo.png` stays text.
+pub fn pasted_image_paths(text: &str) -> Option<Vec<PathBuf>> {
+    let words = split_words(text.trim())?;
+    if words.is_empty() {
+        return None;
+    }
+    words
+        .iter()
+        .map(|word| {
+            let path = if let Some(uri) = word.strip_prefix("file://") {
+                file_uri_path(uri)?
+            } else if let Some(rest) = word.strip_prefix("~/") {
+                home_dir()?.join(rest)
+            } else {
+                PathBuf::from(word)
+            };
+            (path.is_absolute() && path.is_file() && crate::context::is_image_path(&path)).then_some(path)
+        })
+        .collect()
+}
+
+/// Split on whitespace, honouring single and double quotes and, outside
+/// Windows, backslash escapes. None for an unbalanced quote: that is text,
+/// not a list of paths.
+fn split_words(text: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some(open) if ch == open => quote = None,
+            Some(_) => word.push(ch),
+            None if ch == '\'' || ch == '"' => {
+                quote = Some(ch);
+                in_word = true;
+            }
+            None if ch == '\\' && !cfg!(windows) => {
+                word.push(chars.next()?);
+                in_word = true;
+            }
+            None if ch.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            None => {
+                word.push(ch);
+                in_word = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if in_word {
+        words.push(word);
+    }
+    Some(words)
+}
+
+/// The local path a `file://` URI names (the part after the scheme),
+/// percent-decoded.
+fn file_uri_path(uri: &str) -> Option<PathBuf> {
+    // `file:///home/me/a.png`, or with an explicit `localhost` host.
+    let path = uri.strip_prefix("localhost").unwrap_or(uri);
+    if !path.starts_with('/') {
+        return None;
+    }
+    let decoded = percent_decode(path)?;
+    // `file:///C:/Users/…` on Windows: the drive follows the slash.
+    if cfg!(windows) && decoded.as_bytes().get(2) == Some(&b':') {
+        return Some(PathBuf::from(&decoded[1..]));
+    }
+    Some(PathBuf::from(decoded))
+}
+
+fn percent_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(index + 1..index + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pasted_paths_to_images_are_recognised_in_every_terminal_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        let spaced = dir.path().join("Screenshot 1.png");
+        let plain = dir.path().join("plain.jpg");
+        let notes = dir.path().join("notes.txt");
+        for path in [&spaced, &plain, &notes] {
+            std::fs::write(path, b"x").unwrap();
+        }
+        let spaced_text = spaced.display().to_string();
+        let plain_text = plain.display().to_string();
+
+        // Quoted, as Konsole and GNOME Terminal drop a path with a space.
+        assert_eq!(pasted_image_paths(&format!("'{spaced_text}'")), Some(vec![spaced.clone()]));
+        // Two files dropped at once.
+        assert_eq!(
+            pasted_image_paths(&format!("'{spaced_text}' {plain_text}\n")),
+            Some(vec![spaced.clone(), plain.clone()])
+        );
+        if !cfg!(windows) {
+            // A file copied in a file manager arrives as a URI.
+            let uri = format!("file://{}", spaced_text.replace(' ', "%20"));
+            assert_eq!(pasted_image_paths(&uri), Some(vec![spaced.clone()]));
+            // Some terminals escape the space instead of quoting.
+            assert_eq!(pasted_image_paths(&spaced_text.replace(' ', "\\ ")), Some(vec![spaced.clone()]));
+        }
+
+        // Anything else stays text.
+        assert_eq!(pasted_image_paths(&notes.display().to_string()), None);
+        assert_eq!(pasted_image_paths(&format!("{plain_text} and more words")), None);
+        assert_eq!(pasted_image_paths("plain.jpg"), None);
+        assert_eq!(pasted_image_paths("it's broken"), None);
+        assert_eq!(pasted_image_paths("   "), None);
+    }
+
+    #[test]
+    fn an_attached_file_is_copied_under_a_fresh_token() {
+        let source = tempfile::tempdir().unwrap();
+        let attachments = tempfile::tempdir().unwrap();
+        let photo = source.path().join("photo.JPG");
+        std::fs::write(&photo, b"jpeg bytes").unwrap();
+        let token = attach_image_file(attachments.path(), &photo).unwrap();
+        let name = token.strip_prefix("[image:").and_then(|t| t.strip_suffix(']')).unwrap();
+        assert!(name.starts_with("img-") && name.ends_with(".jpg"), "{name}");
+        assert_eq!(std::fs::read(attachments.path().join(name)).unwrap(), b"jpeg bytes");
+        assert!(attach_image_file(attachments.path(), &source.path().join("missing.png")).is_err());
+    }
 
     #[test]
     fn png_round_trip_preserves_dimensions() {

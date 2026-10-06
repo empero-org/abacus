@@ -1,6 +1,6 @@
 use std::path::{Component, Path};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use serde_json::{Value, json};
 
@@ -93,7 +93,7 @@ pub fn user_content(workspace: &Path, attachments: &Path, prompt: &str) -> Value
         match bytes {
             Some(bytes) if total + bytes.len() as u64 <= MAX_IMAGE_BYTES => {
                 total += bytes.len() as u64;
-                images.push(data_url(&bytes));
+                images.push(data_url_for(&extension_of(&path), &bytes));
                 let marker = format!("[image #{}]", images.len());
                 text.replace_range(start..end, &marker);
                 cursor = start + marker.len();
@@ -146,8 +146,61 @@ pub fn user_content(workspace: &Path, attachments: &Path, prompt: &str) -> Value
     Value::Array(parts)
 }
 
-fn data_url(png: &[u8]) -> String {
-    data_url_for("png", png)
+/// Append images to a user message content, turning a plain string into the
+/// text-and-images array form when there are any.
+pub fn with_images(content: Value, images: Vec<String>) -> Value {
+    if images.is_empty() {
+        return content;
+    }
+    let mut parts = match content {
+        Value::Array(parts) => parts,
+        Value::String(text) => vec![json!({"type": "text", "text": text})],
+        other => vec![json!({"type": "text", "text": other.to_string()})],
+    };
+    parts.extend(images.into_iter().map(|url| json!({"type": "image_url", "image_url": {"url": url}})));
+    Value::Array(parts)
+}
+
+/// Whether `path` names a file type the model can be shown as an image.
+pub fn is_image_path(path: &Path) -> bool {
+    IMAGE_EXTENSIONS.contains(&extension_of(path).as_str())
+}
+
+/// An image file the person picked, read into a data URL. Unlike `@`
+/// references this takes any path: the person chose the file themselves, by
+/// pasting, dropping or naming it, so it need not live in the workspace.
+pub fn image_data_url(path: &Path) -> Result<String> {
+    if !is_image_path(path) {
+        bail!("{} is not a PNG, JPEG, GIF or WebP image", path.display());
+    }
+    let size = path.metadata().with_context(|| format!("cannot read {}", path.display()))?.len();
+    if size > MAX_IMAGE_BYTES {
+        bail!("{} is larger than {} MB", path.display(), MAX_IMAGE_BYTES / 1_000_000);
+    }
+    let bytes = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    Ok(data_url_for(&extension_of(path), &bytes))
+}
+
+/// Check an image a client sent as a data URL: an image type the providers
+/// take, base64-encoded, within the size cap.
+pub fn check_image_url(url: &str) -> Result<()> {
+    let Some(rest) = url.strip_prefix("data:") else {
+        bail!("an image must be a data: URL");
+    };
+    let Some((mime, data)) = rest.split_once(";base64,") else {
+        bail!("an image data URL must be base64-encoded");
+    };
+    if !["image/png", "image/jpeg", "image/gif", "image/webp"].contains(&mime) {
+        bail!("{mime} is not a PNG, JPEG, GIF or WebP image");
+    }
+    if (data.len() as u64) / 4 * 3 > MAX_IMAGE_BYTES {
+        bail!("the image is larger than {} MB", MAX_IMAGE_BYTES / 1_000_000);
+    }
+    Ok(())
+}
+
+fn extension_of(path: &Path) -> String {
+    path.extension().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase()
 }
 
 fn data_url_for(extension: &str, bytes: &[u8]) -> String {
@@ -163,6 +216,7 @@ fn data_url_for(extension: &str, bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use tempfile::tempdir;
 
     #[test]
@@ -215,6 +269,38 @@ mod tests {
             &format!("[image:../{}] and [image:{}]", secret.file_name().unwrap().to_str().unwrap(), secret.display()),
         );
         assert!(content.is_string(), "traversal must not attach: {content}");
+    }
+
+    #[test]
+    fn clipboard_tokens_keep_their_own_image_type() {
+        let attachments = tempdir().unwrap();
+        std::fs::write(attachments.path().join("img-cd34.jpg"), TINY_PNG).unwrap();
+        let content = user_content(attachments.path(), attachments.path(), "[image:img-cd34.jpg]");
+        let url = content[1]["image_url"]["url"].as_str().unwrap();
+        assert!(url.starts_with("data:image/jpeg;base64,"), "{url}");
+    }
+
+    #[test]
+    fn picked_images_attach_from_anywhere_and_others_are_refused() {
+        let dir = tempdir().unwrap();
+        let image = dir.path().join("Screenshot 1.png");
+        std::fs::write(&image, TINY_PNG).unwrap();
+        let notes = dir.path().join("notes.txt");
+        std::fs::write(&notes, "hi").unwrap();
+
+        let url = image_data_url(&image).unwrap();
+        assert!(url.starts_with("data:image/png;base64,"));
+        assert!(check_image_url(&url).is_ok());
+        assert!(image_data_url(&notes).is_err());
+        assert!(image_data_url(&dir.path().join("missing.png")).is_err());
+
+        assert!(check_image_url("https://example.com/cat.png").is_err());
+        assert!(check_image_url("data:text/plain;base64,aGk=").is_err());
+
+        let content = with_images(json!("look"), vec![url]);
+        assert_eq!(content[0]["text"], "look");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(with_images(json!("look"), Vec::new()), json!("look"));
     }
 
     #[test]

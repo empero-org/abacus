@@ -11,7 +11,7 @@ use abacus_agent::{
     config::{
         AbacusPaths, Cli, Command, Config, Credentials, PluginsCommand, Settings, SkillsCommand, workspace_from_cli,
     },
-    context::expand_file_references,
+    context::{self, expand_file_references},
     cron,
     extensions::PluginRegistry,
     headless, model_info,
@@ -131,6 +131,9 @@ async fn main() -> Result<()> {
     }
     let mut messages =
         session.as_ref().map(|value| value.messages.clone()).unwrap_or_else(|| initial_messages(&config.workspace));
+    if cli.loop_run && !cli.images.is_empty() {
+        anyhow::bail!("--image cannot be combined with --loop");
+    }
     // A loop replays its own prompt each iteration; a plain run sends it once.
     let loop_config = if cli.loop_run {
         let promise = cli
@@ -140,7 +143,14 @@ async fn main() -> Result<()> {
         Some(abacus_agent::ralph::RalphLoop::new(prompt, promise, cli.max_iterations)?)
     } else {
         let prompt = expand_file_references(&config.workspace, &prompt)?;
-        messages.push(json!({"role": "user", "content": prompt}));
+        // `@shot.png` in the prompt and `--image` files both reach the model as
+        // images; a prompt with neither stays a plain string.
+        let images = cli.images.iter().map(|path| context::image_data_url(path)).collect::<Result<Vec<_>>>()?;
+        let content = context::with_images(
+            context::user_content(&config.workspace, &config.paths.attachments_dir, &prompt),
+            images,
+        );
+        messages.push(json!({"role": "user", "content": content}));
         None
     };
     if let (Some(session), Some(store)) = (session.as_mut(), &store) {

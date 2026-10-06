@@ -14,6 +14,22 @@
   back as a reasoning item. When the startup sync pulls, forks or deletes
   sessions, the server sends `sessions/synced` so the front end can list again.
 
+- **Images reach the model everywhere, not only from the terminal UI.**
+  - On the OpenAI Responses API a prompt with an image used to be dropped
+    whole, text included, so the model answered as if nothing had been sent.
+    The images now go as `input_image` parts.
+  - Headless runs take `--image <path>` and `@shot.png` references.
+  - The app server takes `image` and `localImage` input parts, also when
+    steering a running turn, and reports `imageInput` in its capabilities.
+  - In the terminal UI, dropping image files on the terminal or pasting files
+    copied in a file manager attaches them. An image pasted while a turn runs
+    steers it instead of arriving as a bare `[image:…]` token.
+  - `Ctrl+V` falls back to `wl-paste` when the native clipboard comes up
+    empty on Wayland.
+  - Pasted JPEGs are labelled as JPEGs.
+  - A prompt that is mostly an image now names the session, steers the agent's
+    sense of intent, and shows up when the session is resumed.
+
 ## 0.6.5 — 2026-10-05
 
 - **Sync moves only what changed.** Abacus Sync used to download every session

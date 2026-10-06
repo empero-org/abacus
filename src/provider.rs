@@ -1491,9 +1491,7 @@ fn estimate_usage(messages: &[Value], reply: &Assembly) -> Usage {
     let completion = (chars / 4) as u64;
     let mut chars = 0usize;
     for message in messages {
-        if let Some(text) = message["content"].as_str() {
-            chars += text.chars().count();
-        }
+        chars += crate::text::content_text(&message["content"]).chars().count();
         if let Some(tool_calls) = message["tool_calls"].as_array() {
             for call in tool_calls {
                 if let Some(args) = call.pointer("/function/arguments").and_then(Value::as_str) {
@@ -1515,6 +1513,25 @@ fn responses_input(messages: &[Value]) -> Vec<Value> {
                     && !content.is_empty()
                 {
                     input.push(json!({"role": role, "content": content}));
+                } else if let Some(parts) = message["content"].as_array() {
+                    // A prompt with images: the Responses API spells the parts
+                    // `input_text` and `input_image`, not Chat Completions'
+                    // `text` and `image_url`. Skipping the array instead used
+                    // to drop the whole prompt, text and all.
+                    let parts: Vec<Value> = parts
+                        .iter()
+                        .filter_map(|part| match part["type"].as_str()? {
+                            "text" => Some(json!({"type": "input_text", "text": part["text"]})),
+                            "image_url" => Some(json!({
+                                "type": "input_image",
+                                "image_url": part.pointer("/image_url/url")?,
+                            })),
+                            _ => None,
+                        })
+                        .collect();
+                    if !parts.is_empty() {
+                        input.push(json!({"role": role, "content": parts}));
+                    }
                 }
                 if role == "assistant"
                     && let Some(tool_calls) = message["tool_calls"].as_array()
@@ -2218,6 +2235,24 @@ mod tests {
         assert_eq!(reply.content, "hello");
         assert_eq!(reply.calls[&1].id, "call_7");
         assert_eq!(reply.calls[&1].arguments, r#"{"query":"todo"}"#);
+    }
+
+    #[test]
+    fn responses_api_gets_image_prompts_as_input_parts() {
+        let input = responses_input(&[json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "what is this?"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}},
+            ],
+        })]);
+        assert_eq!(
+            input,
+            [json!({"role": "user", "content": [
+                {"type": "input_text", "text": "what is this?"},
+                {"type": "input_image", "image_url": "data:image/png;base64,QUJD"},
+            ]})]
+        );
     }
 
     #[test]
