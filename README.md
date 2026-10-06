@@ -119,7 +119,8 @@ selected block, `Y` copies the last reply, `i` returns to typing. Press `F1` or
 
 Sessions are saved per workspace. `abacus --continue` reopens the latest one,
 `abacus --resume <id>` opens one by ID or unique prefix, and `abacus sessions`
-lists them.
+lists them. `abacus sessions --all` lists every workspace that has sessions, and
+`--json` prints either list for a front end.
 
 ## Headless runs
 

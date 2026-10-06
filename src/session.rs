@@ -1,4 +1,7 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -241,19 +244,7 @@ impl SessionStore {
     }
 
     pub fn list(&self) -> Result<Vec<SessionSummary>> {
-        let mut sessions = self
-            .headers()?
-            .into_iter()
-            .map(|(header, _)| SessionSummary {
-                id: header.id,
-                title: header.title,
-                model: header.model,
-                updated_at: header.updated_at,
-                message_count: header.messages.len().saturating_sub(1),
-            })
-            .collect::<Vec<_>>();
-        sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
-        Ok(sessions)
+        Ok(summaries(self.headers()?))
     }
 
     /// Read every session in this workspace as a header only.
@@ -263,28 +254,7 @@ impl SessionStore {
     /// that megabytes of `Value` trees built and dropped each time `/sessions`
     /// or `/usage` opens. The messages are counted but never materialised.
     fn headers(&self) -> Result<Vec<(SessionHeader, u64)>> {
-        if !self.directory.exists() {
-            return Ok(Vec::new());
-        }
-        let mut headers = Vec::new();
-        for entry in fs::read_dir(&self.directory)? {
-            let entry = entry?;
-            if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
-                continue;
-            }
-            let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
-            let Ok(content) = fs::read(entry.path()) else {
-                continue;
-            };
-            let Ok(header) = serde_json::from_slice::<SessionHeader>(&content) else {
-                continue;
-            };
-            if header.workspace != self.workspace || header.version > SESSION_VERSION {
-                continue;
-            }
-            headers.push((header, size));
-        }
-        Ok(headers)
+        read_headers(&self.directory, Some(&self.workspace))
     }
 
     /// Read the lightweight fields used by the local `/usage` dashboard.
@@ -343,6 +313,83 @@ impl SessionStore {
     pub fn path(&self, id: Uuid) -> PathBuf {
         self.directory.join(format!("{id}.json"))
     }
+}
+
+/// One workspace's saved sessions, newest first.
+#[derive(Debug, Clone)]
+pub struct WorkspaceSessions {
+    pub workspace: PathBuf,
+    pub sessions: Vec<SessionSummary>,
+}
+
+/// Every workspace with saved sessions, the most recently active first. A
+/// front end lists these as projects without opening each one.
+pub fn list_all(paths: &AbacusPaths) -> Result<Vec<WorkspaceSessions>> {
+    if !paths.sessions_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut workspaces = Vec::new();
+    for entry in fs::read_dir(&paths.sessions_dir)? {
+        let entry = entry?;
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        // One unreadable directory must not hide every other workspace.
+        let Ok(headers) = read_headers(&entry.path(), None) else {
+            continue;
+        };
+        let Some(workspace) = headers.first().map(|(header, _)| header.workspace.clone()) else {
+            continue;
+        };
+        // The directory is keyed by workspace, so its sessions share one; a
+        // stray file from elsewhere is left to that workspace's own listing.
+        let headers = headers.into_iter().filter(|(header, _)| header.workspace == workspace).collect();
+        workspaces.push(WorkspaceSessions { workspace, sessions: summaries(headers) });
+    }
+    workspaces.sort_by_key(|entry| std::cmp::Reverse(entry.sessions.first().map(|session| session.updated_at)));
+    Ok(workspaces)
+}
+
+fn summaries(headers: Vec<(SessionHeader, u64)>) -> Vec<SessionSummary> {
+    let mut sessions = headers
+        .into_iter()
+        .map(|(header, _)| SessionSummary {
+            id: header.id,
+            title: header.title,
+            model: header.model,
+            updated_at: header.updated_at,
+            message_count: header.messages.len().saturating_sub(1),
+        })
+        .collect::<Vec<_>>();
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+    sessions
+}
+
+/// Session headers in one workspace directory; `workspace`, when given, skips
+/// files that belong to another (a hash collision, or a moved file).
+fn read_headers(directory: &Path, workspace: Option<&Path>) -> Result<Vec<(SessionHeader, u64)>> {
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+    let mut headers = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+        let Ok(content) = fs::read(entry.path()) else {
+            continue;
+        };
+        let Ok(header) = serde_json::from_slice::<SessionHeader>(&content) else {
+            continue;
+        };
+        if workspace.is_some_and(|workspace| header.workspace != workspace) || header.version > SESSION_VERSION {
+            continue;
+        }
+        headers.push((header, size));
+    }
+    Ok(headers)
 }
 
 fn title_from_prompt(prompt: &str) -> String {
@@ -513,6 +560,27 @@ mod tests {
         assert_eq!(usage.len(), 1);
         assert_eq!(usage[0].tokens_used, 12_345);
         assert!(!usage[0].tokens_estimated);
+    }
+
+    #[test]
+    fn list_all_groups_sessions_by_workspace_newest_first() {
+        let dir = tempdir().unwrap();
+        let paths = AbacusPaths::under(dir.path().join("home"));
+        assert!(list_all(&paths).unwrap().is_empty());
+
+        let older = dir.path().join("older");
+        let newer = dir.path().join("newer");
+        let system = vec![json!({"role":"system","content":"x"})];
+        let first = SessionStore::new(&paths, older.clone()).create("p".into(), "m".into(), system.clone()).unwrap();
+        let mut second = SessionStore::new(&paths, newer.clone()).create("p".into(), "m".into(), system).unwrap();
+        second.updated_at = first.updated_at + chrono::Duration::seconds(5);
+        SessionStore::new(&paths, newer.clone()).save(&second).unwrap();
+
+        let all = list_all(&paths).unwrap();
+        let workspaces: Vec<&Path> = all.iter().map(|entry| entry.workspace.as_path()).collect();
+        assert_eq!(workspaces, [newer.as_path(), older.as_path()]);
+        assert_eq!(all[0].sessions[0].id, second.id);
+        assert_eq!(all[1].sessions[0].id, first.id);
     }
 
     #[test]

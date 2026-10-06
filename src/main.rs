@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
 use serde_json::json;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use abacus_agent::{
@@ -16,7 +16,7 @@ use abacus_agent::{
     extensions::PluginRegistry,
     headless, model_info,
     services::AgentServices,
-    session::SessionStore,
+    session::{SessionStore, WorkspaceSessions},
     setup, tui,
 };
 
@@ -44,8 +44,8 @@ async fn main() -> Result<()> {
             let workspace = workspace_from_cli(&cli)?;
             return abacus_agent::sync::handle(action.clone(), &paths, workspace).await;
         }
-        Some(Command::Sessions) => {
-            return print_session_list(&SessionStore::new(&paths, workspace_from_cli(&cli)?));
+        Some(Command::Sessions { all, json }) => {
+            return print_sessions(&paths, workspace_from_cli(&cli)?, *all, *json);
         }
         Some(Command::Pull { destination, all }) => {
             // `abacus pull all` reads as a word, not a path. A directory
@@ -295,22 +295,66 @@ async fn list_providers(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn print_session_list(store: &SessionStore) -> Result<()> {
-    let sessions = store.list()?;
-    if sessions.is_empty() {
-        println!("No saved sessions for this workspace.");
+/// `abacus sessions`: this workspace's sessions, or with `--all` every
+/// workspace's. `--json` is the shape a front end reads; it is the same list.
+fn print_sessions(paths: &AbacusPaths, workspace: PathBuf, all: bool, json: bool) -> Result<()> {
+    let workspaces = if all {
+        abacus_agent::session::list_all(paths)?
+    } else {
+        let sessions = SessionStore::new(paths, workspace.clone()).list()?;
+        if sessions.is_empty() { Vec::new() } else { vec![WorkspaceSessions { workspace, sessions }] }
+    };
+    if json {
+        println!("{}", serde_json::to_string(&sessions_json(&workspaces))?);
         return Ok(());
     }
-    for session in sessions {
-        println!(
-            "{}  {}  {:>3} messages  {}",
-            &session.id.to_string()[..8],
-            session.updated_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M"),
-            session.message_count,
-            session.title
-        );
+    if workspaces.is_empty() {
+        println!("{}", if all { "No saved sessions." } else { "No saved sessions for this workspace." });
+        return Ok(());
+    }
+    for entry in &workspaces {
+        if all {
+            println!("{}", entry.workspace.display());
+        }
+        for session in &entry.sessions {
+            println!(
+                "{}{}  {}  {:>3} messages  {}",
+                if all { "  " } else { "" },
+                &session.id.to_string()[..8],
+                session.updated_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M"),
+                session.message_count,
+                session.title
+            );
+        }
     }
     Ok(())
+}
+
+fn sessions_json(workspaces: &[WorkspaceSessions]) -> serde_json::Value {
+    let workspaces: Vec<_> = workspaces
+        .iter()
+        .map(|entry| {
+            let sessions: Vec<_> = entry
+                .sessions
+                .iter()
+                .map(|session| {
+                    serde_json::json!({
+                        "id": session.id.to_string(),
+                        "title": session.title,
+                        "model": session.model,
+                        "updatedAt": session.updated_at.to_rfc3339(),
+                        "messageCount": session.message_count,
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "workspace": entry.workspace,
+                "exists": entry.workspace.is_dir(),
+                "sessions": sessions,
+            })
+        })
+        .collect();
+    serde_json::json!({ "workspaces": workspaces })
 }
 
 /// `abacus pull` — copy this machine's training traces into a directory.

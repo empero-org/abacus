@@ -144,7 +144,14 @@ pub enum Command {
     /// List the upstream providers that can serve the active model
     Providers,
     /// List saved sessions for this workspace
-    Sessions,
+    Sessions {
+        /// List every workspace that has saved sessions, not just this one
+        #[arg(long)]
+        all: bool,
+        /// Print JSON, for a front end
+        #[arg(long)]
+        json: bool,
+    },
     /// Sync accounts, sessions, and traces across devices
     Sync {
         #[command(subcommand)]
