@@ -656,6 +656,11 @@ async fn run_turn_inner(
         }
 
         let mut interrupted = false;
+        // Reads that only observe wait here instead of running at once. The
+        // checks above stay sequential; when a call that cannot join them
+        // arrives (or the batch ends), the whole group runs concurrently and
+        // lands in source order. Nothing deferred ever needed approval.
+        let mut pending_reads: Vec<ToolCall> = Vec::new();
         for call in completion.tool_calls {
             // Between tools rather than mid-tool: a running command is left to
             // finish so its result is recorded, and a second interrupt escalates
@@ -668,6 +673,8 @@ async fn run_turn_inner(
             // executor: it blocks the turn until the user answers, and does
             // not count under the repeat-call heuristic.
             if call.name == "ask_user" {
+                flush_pending_reads(&mut pending_reads, &options, &tools, &subagents, &aux, &mut messages, &events)
+                    .await;
                 let answer = request_user_question(&call, &events).await.map(|answer| answer.describe());
                 finish_tool(&call, crate::tools::reply(answer), false, &mut messages, &events);
                 continue;
@@ -714,6 +721,16 @@ async fn run_turn_inner(
             } else {
                 review_call(&call, &messages, &options, &judge, &tools, &events).await
             };
+            // A read that needs no approval and touches no moving state waits
+            // for company: consecutive reads run concurrently at the next
+            // flush, in source order. Client tools act on state that moves
+            // between calls, messaging coordinates sessions, spawning and
+            // handle recursion are their own schedulers — all stay sequential.
+            if defers_to_read_batch(&call, refusal.is_none(), &options.services) {
+                pending_reads.push(call);
+                continue;
+            }
+            flush_pending_reads(&mut pending_reads, &options, &tools, &subagents, &aux, &mut messages, &events).await;
             // A refused call is shown as an attempt that was stopped, so the
             // person sees what the agent tried and why it did not run.
             let _ = events.send(AgentEvent::ToolStarted { name: call.name.clone(), summary: call.summary() });
@@ -738,6 +755,9 @@ async fn run_turn_inner(
                 output = options.handles.bind(&source, output).summary();
             }
             finish_tool(&call, output, refused, &mut messages, &events);
+        }
+        if !interrupted && !pending_reads.is_empty() {
+            flush_pending_reads(&mut pending_reads, &options, &tools, &subagents, &aux, &mut messages, &events).await;
         }
         if interrupted {
             let _ = events.send(AgentEvent::Done { messages, reason: DoneReason::Interrupted });
@@ -773,6 +793,50 @@ fn finish_tool(
         "content": output
     }));
     let _ = events.send(AgentEvent::ToolFinished { name: call.name.clone(), output, refused });
+}
+
+/// Run deferred read-only calls concurrently, recording results in source
+/// order. All checks stayed sequential; only execution fans out, and only for
+/// calls that need no approval and touch no moving state (no client tools, no
+/// messaging, no subagent spawn, no handle recursion). Refused is always
+/// false here: a batchable call was cleared before it was deferred.
+async fn flush_pending_reads(
+    pending: &mut Vec<ToolCall>,
+    options: &TurnOptions,
+    tools: &ToolExecutor,
+    subagents: &SubagentRuntime,
+    aux: &Provider,
+    messages: &mut Vec<Value>,
+    events: &mpsc::UnboundedSender<AgentEvent>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    for call in pending.iter() {
+        let _ = events.send(AgentEvent::ToolStarted { name: call.name.clone(), summary: call.summary() });
+    }
+    let outputs =
+        futures_util::future::join_all(pending.iter().map(|call| run_tool(call, options, tools, subagents, aux))).await;
+    for (call, mut output) in pending.drain(..).zip(outputs) {
+        if output.chars().count() >= crate::handles::BIND_THRESHOLD_CHARS && !call.name.starts_with("handle_") {
+            let arguments: String = call.arguments.chars().take(120).collect();
+            let source = format!("{}: {arguments}", call.name);
+            output = options.handles.bind(&source, output).summary();
+        }
+        finish_tool(&call, output, false, messages, events);
+    }
+}
+
+/// Whether a cleared call waits for company instead of running at once: a
+/// read that needs no approval and touches no moving state. Client tools act
+/// on state that moves between calls, messaging coordinates sessions, and
+/// spawning plus handle recursion are their own schedulers — all stay
+/// sequential even when they read.
+fn defers_to_read_batch(call: &ToolCall, cleared: bool, services: &AgentServices) -> bool {
+    cleared
+        && is_read_only(call)
+        && !services.is_client_tool(&call.name)
+        && !matches!(call.name.as_str(), "send_message" | "spawn_subagents" | "handle_recurse")
 }
 
 /// One string argument of a tool call, if it has one by that name.
@@ -1241,6 +1305,7 @@ pub fn tool_reads_only(name: &str) -> bool {
             | "list_files"
             | "glob"
             | "grep"
+            | "outline"
             | "tool_search"
             | "git_status"
             | "git_diff"
@@ -2072,12 +2137,68 @@ mod tests {
         ToolCall { id: "1".into(), name: name.into(), arguments: "{}".into() }
     }
 
+    /// The concurrent batch is reads and only reads: anything refused, any
+    /// mutation, and the calls whose order is their meaning stay sequential.
+    #[test]
+    fn only_cleared_reads_defer_to_the_batch() {
+        let services = AgentServices::empty(std::path::PathBuf::from("."));
+        for name in ["read_file", "read_files", "list_files", "glob", "grep", "outline", "git_status", "git_log"] {
+            assert!(defers_to_read_batch(&call(name), true, &services), "{name} should batch");
+        }
+        // Refused calls never defer: the refusal is the result.
+        assert!(!defers_to_read_batch(&call("read_file"), false, &services));
+        // Mutations and coordination stay sequential even when cleared.
+        for name in ["edit_file", "write_file", "run_command", "send_message", "spawn_subagents", "ask_user"] {
+            assert!(!defers_to_read_batch(&call(name), true, &services), "{name} must stay sequential");
+        }
+    }
+
+    /// A flushed batch lands in source order: the model reads results against
+    /// the calls it made, positionally.
+    #[tokio::test]
+    async fn flushed_reads_record_results_in_source_order() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "beta\n").unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let tools = crate::tools::ToolExecutor::new(root.clone());
+        let services = Arc::new(AgentServices::empty(root.clone()));
+        let options = TurnOptions::bare(root.clone(), services);
+        let config = crate::config::Config {
+            no_session: true,
+            one_stream: true,
+            ..crate::config::Config::for_endpoint(
+                root.clone(),
+                "http://127.0.0.1:9".into(),
+                "test".into(),
+                crate::config::AbacusPaths::under(root.join("home")),
+            )
+        };
+        let aux = Provider::new(&config).unwrap();
+        let subagents = crate::subagent::SubagentRuntime::for_turn(aux.clone(), &options);
+        let events = tokio::sync::mpsc::unbounded_channel().0;
+        let mut messages = Vec::new();
+        let mut pending = vec![
+            ToolCall { id: "c1".into(), name: "read_file".into(), arguments: r#"{"path":"b.txt"}"#.into() },
+            ToolCall { id: "c2".into(), name: "read_file".into(), arguments: r#"{"path":"a.txt"}"#.into() },
+            ToolCall { id: "c3".into(), name: "glob".into(), arguments: r#"{"pattern":"*.txt"}"#.into() },
+        ];
+        flush_pending_reads(&mut pending, &options, &tools, &subagents, &aux, &mut messages, &events).await;
+        assert!(pending.is_empty());
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["tool_call_id"], "c1");
+        assert!(messages[0]["content"].as_str().unwrap_or("").contains("beta"), "{messages:?}");
+        assert_eq!(messages[1]["tool_call_id"], "c2");
+        assert!(messages[1]["content"].as_str().unwrap_or("").contains("alpha"), "{messages:?}");
+        assert_eq!(messages[2]["tool_call_id"], "c3");
+    }
+
     /// Inspection never waits on anyone, in any mode: a reviewer that has to
     /// clear every `read_file` would make AUTO slower than asking.
     #[test]
     fn inspection_is_read_only() {
         for name in [
-            "read_file", "read_files", "list_files", "glob", "grep", "git_status", "git_diff", "git_log",
+            "read_file", "read_files", "list_files", "glob", "grep", "outline", "git_status", "git_diff", "git_log",
             "tool_search", "web_search", "read_page", "skill_load", "skill_read",
         ] {
             assert!(is_read_only(&call(name)), "{name} should be read-only");

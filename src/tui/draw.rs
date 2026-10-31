@@ -1525,6 +1525,35 @@ impl App {
     /// re-wrapping only when the fingerprint moves.
     pub(super) fn wrapped_transcript(&mut self, width: u16, spinner: &str, phase: usize) -> &ui::Transcript {
         let key: TranscriptKey = (self.entries_rev, width, phase, self.cursor, self.settings.ui.show_thinking);
+        let phase_only = self.transcript_cache.as_ref().is_some_and(|(cached, _)| {
+            cached.0 == key.0 && cached.1 == key.1 && cached.2 != key.2 && cached.3 == key.3 && cached.4 == key.4
+        });
+        if phase_only
+            && let Some(index) = self
+                .entries
+                .iter()
+                .rposition(|entry| entry.tool.as_ref().is_some_and(|call| call.status == ToolStatus::Running))
+            && index + 1 == self.entries.len()
+        {
+            // Only the spinner frame moved: re-render the running tool's own
+            // block and splice it into the cached lines. The block is last,
+            // so no later span shifts; the cursor is part of the key, so a
+            // selection change takes the full re-wrap path below instead.
+            let block = ui::transcript(
+                &self.entries[index..],
+                width.max(1) as usize,
+                spinner,
+                self.cursor.filter(|&cursor| cursor == index).map(|_| 0),
+                self.settings.ui.show_thinking,
+            );
+            if let Some((cached, rendered)) = self.transcript_cache.as_mut() {
+                *cached = key;
+                let (start, len) = rendered.spans[index];
+                rendered.lines.splice(start..start + len, block.lines);
+                rendered.spans[index].1 = rendered.lines.len() - start;
+            }
+            return &self.transcript_cache.as_ref().expect("just populated").1;
+        }
         let stale = self.transcript_cache.as_ref().is_none_or(|(cached, _)| *cached != key);
         if stale {
             let rendered =

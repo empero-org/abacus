@@ -140,6 +140,14 @@ impl ToolCall {
             "grep" => {
                 format!("{} in {}", args["query"].as_str().unwrap_or("pattern"), args["path"].as_str().unwrap_or("."))
             }
+            "outline" => {
+                let what = args["query"].as_str().unwrap_or("");
+                if what.is_empty() {
+                    args["path"].as_str().unwrap_or(".").to_owned()
+                } else {
+                    format!("{} in {}", what, args["path"].as_str().unwrap_or("."))
+                }
+            }
             "list_files" => args["path"].as_str().unwrap_or(".").to_owned(),
             "glob" => args["pattern"].as_str().unwrap_or("*").to_owned(),
             "git_diff" => match (args["base"].as_str(), args["head"].as_str()) {
@@ -254,6 +262,7 @@ impl ToolExecutor {
             "list_files" => self.list_files(&call.arguments),
             "grep" => self.grep(&call.arguments),
             "glob" => self.glob(&call.arguments),
+            "outline" => self.outline(&call.arguments),
             "tool_search" => self.tool_search(&call.arguments),
             "web_search" => self.web_search(&call.arguments).await,
             "read_page" => self.read_page(&call.arguments).await,
@@ -407,8 +416,15 @@ impl ToolExecutor {
         let base = self.resolve_for_read(&args.path)?;
         let context = args.context.clamp(0, 10);
         let max_results = args.max_results.clamp(1, 2_000);
-        let mut matches = Vec::new();
-        let mut match_count = 0usize;
+        // Collect per-file hits first so the files with the most matches render
+        // first. Filesystem walk order is arbitrary for relevance, and an agent
+        // reading top-down otherwise opens low-hit files first.
+        struct FileHits {
+            relative: String,
+            hits: Vec<usize>,
+            lines: Vec<String>,
+        }
+        let mut files: Vec<FileHits> = Vec::new();
 
         for entry in walk(&base, None) {
             if !entry.file_type().is_some_and(|kind| kind.is_file()) {
@@ -430,43 +446,62 @@ impl ToolExecutor {
                 continue;
             };
             let lines: Vec<&str> = content.lines().collect();
-            let remaining = max_results - match_count;
-            let hits: Vec<usize> = lines
-                .iter()
-                .enumerate()
-                .filter(|(_, line)| regex.is_match(line))
-                .map(|(index, _)| index)
-                .take(remaining)
-                .collect();
+            let hits: Vec<usize> =
+                lines.iter().enumerate().filter(|(_, line)| regex.is_match(line)).map(|(index, _)| index).collect();
             if hits.is_empty() {
                 continue;
             }
+            files.push(FileHits {
+                relative: relative.display().to_string(),
+                hits,
+                lines: lines.into_iter().map(str::to_owned).collect(),
+            });
+        }
+
+        // Most hits first; path ascending breaks ties deterministically.
+        files.sort_by(|a, b| b.hits.len().cmp(&a.hits.len()).then_with(|| a.relative.cmp(&b.relative)));
+
+        let mut matches = Vec::new();
+        let mut match_count = 0usize;
+        for file in &files {
+            let remaining = max_results.saturating_sub(match_count);
+            if remaining == 0 {
+                break;
+            }
+            let take = file.hits.len().min(remaining);
+            let hits = &file.hits[..take];
+            matches.push(format!(
+                "{} ({} match{})",
+                file.relative,
+                file.hits.len(),
+                if file.hits.len() == 1 { "" } else { "es" }
+            ));
             if context == 0 {
-                for index in &hits {
-                    matches.push(format!("{}:{}: {}", relative.display(), index + 1, lines[*index]));
+                for index in hits {
+                    matches.push(format!("{}:{}: {}", file.relative, index + 1, file.lines[*index]));
                 }
             } else {
                 let mut windows: Vec<(usize, usize)> = Vec::new();
-                for index in &hits {
+                for index in hits {
                     let start = index.saturating_sub(context);
-                    let end = (*index + context).min(lines.len().saturating_sub(1));
+                    let end = (*index + context).min(file.lines.len().saturating_sub(1));
                     match windows.last_mut() {
                         Some((_, tail)) if *tail + 1 >= start => *tail = (*tail).max(end),
                         _ => windows.push((start, end)),
                     }
                 }
-                for (start, end) in windows {
-                    if !matches.is_empty() {
+                for (window_no, (start, end)) in windows.into_iter().enumerate() {
+                    if window_no > 0 {
                         matches.push("--".to_owned());
                     }
-                    for (offset, line) in lines[start..=end].iter().enumerate() {
+                    for (offset, line) in file.lines[start..=end].iter().enumerate() {
                         let index = start + offset;
                         let marker = if hits.contains(&index) { ':' } else { '-' };
-                        matches.push(format!("{}:{}{} {}", relative.display(), index + 1, marker, line));
+                        matches.push(format!("{}:{}{} {}", file.relative, index + 1, marker, line));
                     }
                 }
             }
-            match_count += hits.len();
+            match_count += take;
             if match_count >= max_results {
                 matches.push(format!("… output capped at {max_results} matches"));
                 return Ok(matches.join("\n"));
@@ -503,6 +538,89 @@ impl ToolExecutor {
             }
         }
         Ok(or_note(results.join("\n"), "No matching paths."))
+    }
+
+    fn outline(&self, arguments: &str) -> Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(default = "dot")]
+            path: String,
+            #[serde(default)]
+            query: String,
+            #[serde(default = "default_outline_limit")]
+            max_results: usize,
+        }
+
+        let args: Args = parse_args(arguments)?;
+        let base = self.resolve_for_read(&args.path)?;
+        let max_results = args.max_results.clamp(1, 1_000);
+        let filter = args.query.trim().to_ascii_lowercase();
+
+        // Brace-depth scan: a `name kind` pair per top-level item. Regex-only
+        // would split on `impl<T>` and on braces inside strings; this keeps the
+        // 90% case without pulling in a C dependency like tree-sitter.
+        let mut symbols: Vec<(String, String, usize)> = Vec::new();
+        let mut files_seen = 0usize;
+        let base_is_file = base.is_file();
+
+        // Single-file path still goes through the same parser below.
+        let candidates: Vec<std::path::PathBuf> = if base_is_file {
+            vec![base.clone()]
+        } else {
+            walk(&base, None)
+                .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+                .map(|entry| entry.path().to_path_buf())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+                .collect()
+        };
+        for path in candidates {
+            if !base_is_file && guard_secret(&path).is_err() {
+                continue;
+            }
+            let Ok(metadata) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if metadata.len() > 1_000_000 {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            files_seen += 1;
+            let relative = path.strip_prefix(&self.root).unwrap_or(&path).display().to_string();
+            for (name, kind, line) in outline_symbols(&content) {
+                if !filter.is_empty()
+                    && !name.to_ascii_lowercase().contains(&filter)
+                    && !kind.to_ascii_lowercase().contains(&filter)
+                {
+                    continue;
+                }
+                symbols.push((format!("{relative}:{line}: {kind} {name}"), relative.clone(), line));
+                if symbols.len() >= max_results {
+                    break;
+                }
+            }
+            if symbols.len() >= max_results {
+                break;
+            }
+        }
+
+        // Name hits first, then path order: the file the agent wants is usually
+        // the one whose symbol literally matches.
+        if !filter.is_empty() {
+            symbols.sort_by(|a, b| {
+                let a_hit = a.0.to_ascii_lowercase().contains(&filter);
+                let b_hit = b.0.to_ascii_lowercase().contains(&filter);
+                b_hit.cmp(&a_hit).then_with(|| a.0.cmp(&b.0))
+            });
+        }
+        let mut out: Vec<String> = symbols.into_iter().map(|(line, _, _)| line).collect();
+        if out.len() >= max_results {
+            out.push(format!("… output capped at {max_results} symbols in {files_seen} files"));
+        } else {
+            out.push(format!("({} symbols in {files_seen} files)", out.len()));
+        }
+        Ok(out.join("\n"))
     }
 
     fn tool_search(&self, arguments: &str) -> Result<String> {
@@ -1100,6 +1218,15 @@ pub fn tool_specs() -> Vec<Value> {
             ],
         ),
         tool(
+            "outline",
+            "First step when exploring unfamiliar code or hunting a definition: list the functions, structs, enums, traits and modules in a file or directory, optionally filtered by name, without reading file contents. Cheaper than read_file and more precise than grep for finding where a symbol is defined — reach for this before grep when you know a name but not its file.",
+            [
+                req("path", string("Workspace-relative file or directory; a directory scans Rust files recursively")),
+                opt("query", string("Optional case-insensitive substring to filter symbol names")),
+                opt("max_results", integer("Defaults to 300, maximum 1000")),
+            ],
+        ),
+        tool(
             "read_file",
             "Read a UTF-8 text file with line numbers.",
             [
@@ -1478,6 +1605,7 @@ fn tool_catalog() -> Vec<(&'static str, &'static str)> {
         ("list_files", "shallow directory overview"),
         ("glob", "find paths by wildcard pattern"),
         ("grep", "regex content search with optional file globs"),
+        ("outline", "map code structure or locate a symbol definition without reading files; try before grep"),
         ("read_file", "read a bounded line range with line numbers"),
         ("read_files", "read up to 20 files in one call with line numbers"),
         ("edit_file", "replace one exact occurrence in an existing file"),
@@ -1553,8 +1681,109 @@ fn default_glob_limit() -> usize {
 fn default_log_limit() -> usize {
     10
 }
+fn default_outline_limit() -> usize {
+    300
+}
 fn dot() -> String {
     ".".to_owned()
+}
+
+/// Top-level Rust symbols in one file: `(name, kind, line)`. Brace-depth scan
+/// keeps `impl<T>` and macros mostly intact where a line regex would split
+/// them; string literals with braces are the known blind spot, documented in
+/// the outline tool rather than papered over.
+fn outline_symbols(content: &str) -> Vec<(String, String, usize)> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut in_block_comment = false;
+    for (idx, raw) in content.lines().enumerate() {
+        let line_no = idx + 1;
+        let mut line = raw.trim_start();
+        // Strip block comments spanning lines; line comments end the scan.
+        if in_block_comment {
+            if let Some(end) = line.find("*/") {
+                line = line[end + 2..].trim_start();
+                in_block_comment = false;
+            } else {
+                continue;
+            }
+        }
+        while let Some(start) = line.find("/*") {
+            if let Some(end) = line[start + 2..].find("*/") {
+                let mut owned = String::with_capacity(line.len());
+                owned.push_str(&line[..start]);
+                owned.push_str(&line[start + 2 + end + 2..]);
+                line = Box::leak(owned.into_boxed_str());
+            } else {
+                line = line[..start].trim_end();
+                in_block_comment = true;
+                break;
+            }
+        }
+        let code = line.split("//").next().unwrap_or("").trim();
+        if depth == 0
+            && !code.is_empty()
+            && let Some((kind, name)) = outline_item(code)
+        {
+            out.push((name, kind, line_no));
+        }
+        depth = depth.saturating_add(raw.matches('{').count());
+        depth = depth.saturating_sub(raw.matches('}').count());
+    }
+    out
+}
+
+/// `fn name`, `struct Name`, … at depth zero; `None` for anything else.
+fn outline_item(code: &str) -> Option<(String, String)> {
+    let mut words = code
+        .trim_start_matches("pub")
+        .trim_start_matches(['(', ')', ' ', '\t'])
+        .trim_start_matches("pub")
+        .split_whitespace();
+    // Skip qualifiers: `pub(crate)`, `async`, `unsafe`, `extern`.
+    let mut kind = words.next()?;
+    for _ in 0..4 {
+        match kind {
+            "pub" | "pub(crate)" | "pub(super)" | "pub(self)" | "async" | "unsafe" | "const" | "extern" => {
+                kind = words.next()?;
+            }
+            _ => break,
+        }
+        if kind.starts_with("pub(") {
+            kind = words.next()?;
+        }
+    }
+    if !matches!(kind, "fn" | "struct" | "enum" | "trait" | "impl" | "mod" | "type" | "static" | "macro_rules!") {
+        // `macro_rules!` arrives as `macro_rules! name`.
+        if kind != "macro_rules!" {
+            return None;
+        }
+    }
+    let mut name = words.next()?.trim_end_matches(['(', '{', ';', ':']);
+    if kind == "macro_rules!" {
+        name = name.trim_end_matches('!');
+    } else if kind == "impl" {
+        // `impl Foo`, `impl<T> Foo`, `impl Foo for Bar`: keep the whole head.
+        let rest: Vec<&str> = std::iter::once(name).chain(words).collect();
+        let mut head: Vec<&str> = Vec::new();
+        for token in rest {
+            head.push(token.trim_end_matches('{'));
+            if token.contains('{') {
+                break;
+            }
+            if head.len() > 6 {
+                break;
+            }
+        }
+        name = Box::leak(head.join(" ").trim_end_matches(['{', ' ']).to_owned().into_boxed_str());
+    } else {
+        name = name.split('<').next().unwrap_or(name).split('(').next().unwrap_or(name);
+        name = name.trim_end_matches(['{', ';']);
+    }
+    if name.is_empty() || name == "{" {
+        return None;
+    }
+    Some((kind.to_owned(), name.to_owned()))
 }
 
 fn validate_ref(value: &str) -> Result<String> {
@@ -1770,6 +1999,48 @@ mod tests {
         let output = tools.execute(&call).await;
         assert!(output.contains("main.rs:1"));
         assert!(!output.contains("notes.txt"));
+    }
+
+    #[tokio::test]
+    async fn grep_ranks_files_with_most_matches_first() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("cold.rs"), "needle\n").unwrap();
+        fs::write(dir.path().join("hot.rs"), "needle one\nneedle two\nneedle three\n").unwrap();
+        let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
+        let call = tool_call("grep", r#"{"query":"needle"}"#);
+        let output = tools.execute(&call).await;
+        let hot = output.find("hot.rs").expect("hot file listed");
+        let cold = output.find("cold.rs").expect("cold file listed");
+        assert!(hot < cold, "most-hit file renders first: {output}");
+        assert!(output.contains("hot.rs (3 matches)"), "{output}");
+        assert!(output.contains("cold.rs (1 match)"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn outline_lists_symbols_without_reading_full_file() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("sample.rs"),
+            "pub struct Config {\n    pub name: String,\n}\n\npub fn run(config: &Config) {}\n\nfn helper() {}\n",
+        )
+        .unwrap();
+        let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
+        let call = tool_call("outline", r#"{"path":"sample.rs"}"#);
+        let output = tools.execute(&call).await;
+        assert!(output.contains("struct Config"), "{output}");
+        assert!(output.contains("fn run"), "{output}");
+        assert!(output.contains("fn helper"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn outline_filters_by_symbol_name() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "pub fn restore_terminal() {}\nstruct Other {}\n").unwrap();
+        let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
+        let call = tool_call("outline", r#"{"path":".","query":"restore"}"#);
+        let output = tools.execute(&call).await;
+        assert!(output.contains("restore_terminal"), "{output}");
+        assert!(!output.contains("Other"), "{output}");
     }
 
     #[tokio::test]

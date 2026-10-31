@@ -30,3 +30,16 @@ Keep ASCII tokens the reader types (`/config`, `abacus doctor`, flag names)
 untranslated, and keep `{}` holes in the same order as the English. Format
 arguments stay at the call site, so a translation never owns the arguments.
 
+## Verification gate
+
+A change is done when `cargo fmt`, `cargo clippy --all-targets -- -D warnings`
+and `cargo test --all-targets` all pass on a clean tree — PASS, HOLD (waiting
+on something outside the change, named explicitly), or BLOCK. State the verdict
+in the PR; "all tests complete" after running only the unit tests is not one.
+
+Every red check gets an origin: **introduced** (fails because of this change),
+**pre_existing** (fails identically at the merge-base in a clean worktree), or
+**unknown** (not yet bisected — the change does not land until it is). A
+pre-existing failure is only claimed from an observed rerun at the merge-base,
+never by inspection. Verification commands must be exact and runnable by anyone;
+a model grading its own output is not verification.
