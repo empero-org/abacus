@@ -580,7 +580,9 @@ mod tests {
         server.url().split("t=").nth(1).expect("token in the url").to_owned()
     }
 
-    #[tokio::test]
+    // A blocking client needs a runtime with its own workers: a current-thread
+    // runtime would stall the server that has to answer it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_page_answers_only_with_the_link_token() {
         let server = MobileServer::start(0).expect("start");
         let port = server.port();
@@ -599,7 +601,7 @@ mod tests {
         assert_eq!(status, 401);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_icon_and_manifest_need_no_token() {
         let server = MobileServer::start(0).expect("start");
         let port = server.port();
@@ -617,7 +619,7 @@ mod tests {
         assert!(body.contains("ok"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_websocket_url_carries_the_agent_role() {
         let server = MobileServer::start(0).expect("start");
         assert!(server.connector().url.contains("role=agent"), "the bridge is the agent end");
