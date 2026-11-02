@@ -183,7 +183,7 @@ async fn accept_loop(listener: TcpListener, hub: Arc<Mutex<Hub>>, mut stop: mpsc
 /// Read one request head, then answer it: a page, a health check, or a
 /// WebSocket that becomes a client or the agent.
 async fn serve_connection(mut stream: TcpStream, hub: Arc<Mutex<Hub>>) -> Result<()> {
-    let (head, leftover) = match read_head(&mut stream).await? {
+    let (head, raw) = match read_head(&mut stream).await? {
         Some(parts) => parts,
         None => return Ok(()),
     };
@@ -206,7 +206,7 @@ async fn serve_connection(mut stream: TcpStream, hub: Arc<Mutex<Hub>>) -> Result
                 return respond(&mut stream, 401, "text/plain", "that link is not valid").await;
             }
             let role = params.get("role").map(String::as_str).unwrap_or("client");
-            let rewind = Rewind { head: leftover, at: 0, inner: stream };
+            let rewind = Rewind { head: raw, at: 0, inner: stream };
             let socket = match tokio_tungstenite::accept_hdr_async(rewind, accept_all).await {
                 Ok(socket) => socket,
                 Err(_) => return Ok(()),
@@ -232,15 +232,15 @@ async fn serve_connection(mut stream: TcpStream, hub: Arc<Mutex<Hub>>) -> Result
     }
 }
 
-/// The request head as text, and whatever bytes followed it — which belong to
-/// the WebSocket handshake body, if any, and must be replayed.
+/// The request head as text, and every byte that was read — the whole request,
+/// which the WebSocket handshake has to read again from the start.
 async fn read_head(stream: &mut TcpStream) -> Result<Option<(String, Vec<u8>)>> {
     let mut buffer = Vec::with_capacity(1024);
     let mut chunk = [0_u8; 1024];
     loop {
         if let Some(end) = find_head_end(&buffer) {
             let head = String::from_utf8_lossy(&buffer[..end]).into_owned();
-            return Ok(Some((head, buffer[end..].to_vec())));
+            return Ok(Some((head, buffer)));
         }
         if buffer.len() > MAX_HEAD {
             return Ok(None);
