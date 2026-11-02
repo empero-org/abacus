@@ -18,6 +18,7 @@ pub mod headless;
 pub mod inbox;
 pub mod input;
 pub mod markdown;
+pub mod mobile;
 pub mod mcp;
 pub mod memories;
 pub mod model_hub;

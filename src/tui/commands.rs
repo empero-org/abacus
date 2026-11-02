@@ -45,6 +45,7 @@ impl App {
             "/theme" => self.theme_command(argument),
             "/feedback" => self.open_feedback(),
             "/remote" => self.remote_command(argument),
+            "/mobile" => self.mobile_command(argument),
             "/compact" => self.compact_command(),
             "/repair" => self.repair_command(),
             "/memory" | "/memories" => self.memory_command(argument),
@@ -104,6 +105,49 @@ impl App {
                 self.say(summary);
             }
             other => self.fail(format!("Unknown /remote option `{other}`. Usage: /remote [on|off|qr|url|status]")),
+        }
+    }
+
+    /// `/mobile [on|off|qr|url|PORT]`: the phone page this machine serves on
+    /// the LAN, no account and no relay in between.
+    pub(super) fn mobile_command(&mut self, argument: &str) {
+        match argument.trim().to_ascii_lowercase().as_str() {
+            "" | "on" => match &self.mobile {
+                Some(server) => {
+                    let url = server.url().to_owned();
+                    self.qr_overlay = Some(QrOverlay::Local { rows: crate::remote::qr::rows(&url), url });
+                }
+                None => self.mobile_on(8787),
+            },
+            "off" => self.stop_mobile(),
+            "qr" => {
+                let Some(server) = &self.mobile else {
+                    return self.fail("The phone link is off — /mobile starts it.");
+                };
+                let url = server.url().to_owned();
+                self.qr_overlay = Some(QrOverlay::Local { rows: crate::remote::qr::rows(&url), url });
+            }
+            "url" | "link" => match &self.mobile {
+                Some(server) => {
+                    let url = server.url().to_owned();
+                    self.say(format!(
+                        "Open this on a phone on the same network — it controls this session:\n{url}\n\
+                         The link carries the only credential, so keep it to yourself. /mobile off stops it."
+                    ));
+                }
+                None => self.fail("The phone link is off — /mobile starts it."),
+            },
+            other => match other.parse::<u16>() {
+                Ok(port) if port > 0 => self.mobile_on(port),
+                _ => self.fail(format!("Unknown /mobile option `{other}`. Usage: /mobile [on|off|qr|url|PORT]")),
+            },
+        }
+    }
+
+    fn mobile_on(&mut self, port: u16) {
+        match self.start_mobile(port) {
+            Ok(()) => {}
+            Err(reason) => self.fail(format!("Cannot serve the phone page: {reason}.")),
         }
     }
 

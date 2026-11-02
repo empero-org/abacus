@@ -414,6 +414,7 @@ fn inbound(ref_id: String, input: Input) -> Inbound {
         }
         Input::Interrupt => Inbound::Interrupt { ref_id },
         Input::RequestSnapshot => Inbound::SnapshotRequested,
+        Input::Command { name, args } => Inbound::Command { ref_id, name, args },
     }
 }
 

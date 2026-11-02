@@ -132,7 +132,7 @@ async fn main() -> Result<()> {
         return if matches!(cli.command, Some(Command::AppServer)) {
             app_server::run(config, settings, session, store, services).await
         } else {
-            tui::run(config, settings, credentials, session, store, services).await
+            tui::run(config, settings, credentials, session, store, services, cli.mobile).await
         };
     };
     for diagnostic in services.diagnostics() {

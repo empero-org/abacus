@@ -170,6 +170,10 @@ pub enum InputKind {
     Answer,
     Approve,
     Interrupt,
+    /// A session action a client asked for (`new`, `compact`, `mode`, …).
+    /// Only the local mobile transport carries these; the relay has no frame
+    /// for them, so a browser on the relay cannot change a session.
+    Command,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,6 +223,55 @@ pub struct Pending {
     pub question: Option<QuestionFrame>,
 }
 
+/// One subagent, as a front end shows it: the board's row without the parts
+/// (transcripts, ledgers) that only the terminal can use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerFrame {
+    pub id: u64,
+    pub name: String,
+    /// `general`, `explore`, or `resumed` for one continued by message.
+    pub role: String,
+    /// `running`, `done`, `failed` or `stopped`.
+    pub state: String,
+    /// The worker's latest visible activity, one line.
+    pub activity: String,
+    pub model: String,
+    pub tokens: u64,
+    /// RFC 3339 UTC.
+    pub started_at: String,
+    pub finished_at: Option<String>,
+}
+
+impl From<&crate::workers::WorkerStatus> for WorkerFrame {
+    fn from(worker: &crate::workers::WorkerStatus) -> Self {
+        Self {
+            id: worker.id,
+            name: worker.name.clone(),
+            role: worker.role.clone(),
+            state: worker.state.label().to_owned(),
+            activity: worker.activity.clone(),
+            model: worker.model.clone(),
+            tokens: worker.tokens_used(),
+            started_at: worker.started_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            finished_at: worker
+                .finished_at
+                .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        }
+    }
+}
+
+/// The session's whole board: every subagent, running or finished.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkersFrame {
+    pub workers: Vec<WorkerFrame>,
+}
+
+impl WorkersFrame {
+    pub fn from_board(board: &[crate::workers::WorkerStatus]) -> Self {
+        Self { workers: board.iter().map(WorkerFrame::from).collect() }
+    }
+}
+
 /// One page of a snapshot. The session, status, pending and usage fields ride
 /// on page 0 only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,6 +287,9 @@ pub struct SnapshotPage {
     pub pending: Option<Pending>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// The subagent board at snapshot time, on page 0 only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers: Option<WorkersFrame>,
     pub entries: Vec<Entry>,
 }
 
@@ -494,6 +550,8 @@ pub enum Outbound {
     Error(ErrorFrame),
     Done(DoneFrame),
     Accepted(Accepted),
+    /// The session's subagent board, whenever it changes.
+    Workers(WorkersFrame),
     /// Answer to a browser's `ping`.
     Pong(Ping),
     /// The agent's own heartbeat; the relay answers it.
@@ -543,6 +601,10 @@ pub enum Input {
     Approve { approval_id: String, decision: Decision },
     Interrupt,
     RequestSnapshot,
+    /// A session action, only ever carried by the local mobile transport:
+    /// `name` is one of the actions the terminal offers a phone, `args` its
+    /// argument. The terminal decides which names exist.
+    Command { name: String, args: String },
 }
 
 /// A parsed frame from the relay.
@@ -616,7 +678,7 @@ pub fn parse_incoming(text: &str) -> Incoming {
             code: string("code").unwrap_or_default(),
             message: string("message").unwrap_or_default(),
         },
-        "prompt" | "answer" | "approve" | "interrupt" | "request_snapshot" if !id.is_empty() => {
+        "prompt" | "answer" | "approve" | "interrupt" | "request_snapshot" | "command" if !id.is_empty() => {
             parse_input(&frame.kind, id, payload)
         }
         _ => Incoming::Ignored,
@@ -674,6 +736,19 @@ fn parse_input(kind: &str, id: String, payload: &Value) -> Incoming {
             Input::Approve { approval_id: approval_id.to_owned(), decision }
         }
         "interrupt" => Input::Interrupt,
+        "command" => {
+            let Some(name) = payload.get("name").and_then(Value::as_str) else {
+                return invalid(InputKind::Command, "command has no name");
+            };
+            if name.trim().is_empty() || name.len() > 64 {
+                return invalid(InputKind::Command, "command name is empty or too long");
+            }
+            let args = payload.get("args").and_then(Value::as_str).unwrap_or_default();
+            if args.len() > MAX_PROMPT {
+                return invalid(InputKind::Command, "command argument is too large (max 32 KiB)");
+            }
+            Input::Command { name: name.trim().to_owned(), args: args.to_owned() }
+        }
         _ => Input::RequestSnapshot,
     };
     Incoming::Input { id, input }
@@ -758,6 +833,9 @@ pub struct SnapshotHead {
     pub status: Status,
     pub pending: Pending,
     pub usage: Usage,
+    /// The subagent board, so a phone that connects mid-run sees the workers
+    /// it otherwise only hears about when one changes.
+    pub workers: WorkersFrame,
 }
 
 /// Pack `entries` into snapshot pages whose frames stay within `max_bytes`,
@@ -774,9 +852,10 @@ pub fn paginate(head: SnapshotHead, entries: Vec<Entry>, max_bytes: usize) -> Ve
         status: Some(head.status),
         pending: Some(head.pending),
         usage: Some(head.usage),
+        workers: Some(head.workers),
         entries: Vec::new(),
     };
-    let later = SnapshotPage { session: None, status: None, pending: None, usage: None, ..first.clone() };
+    let later = SnapshotPage { session: None, status: None, pending: None, usage: None, workers: None, ..first.clone() };
     let first_overhead = json_len(&Outbound::Snapshot(Box::new(first.clone()))) + ENVELOPE_BYTES;
     let later_overhead = json_len(&Outbound::Snapshot(Box::new(later.clone()))) + ENVELOPE_BYTES;
     // A fresh later page always has room for a fitted entry; page 0 may not
@@ -859,6 +938,7 @@ mod tests {
             status: Status { state: State::Thinking, label: "Checking the parser".into(), since: "t".into() },
             pending: Pending::default(),
             usage: Usage::default(),
+            workers: WorkersFrame::default(),
         }
     }
 

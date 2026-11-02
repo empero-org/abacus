@@ -422,6 +422,12 @@ enum PairingView {
 /// The `/remote qr` overlay.
 enum QrOverlay {
     Loading,
+    /// The LAN link `/mobile` serves: no expiry, nothing to sign in to.
+    Local {
+        url: String,
+        /// Half-block rows, or `None` when the link does not fit a code.
+        rows: Option<Vec<String>>,
+    },
     Ready {
         url: String,
         /// Half-block rows, or `None` when the link does not fit a code.
@@ -489,6 +495,9 @@ struct App {
     pointer: Option<(u16, u16)>,
     /// Live sharing of this session with the account's browsers, when on.
     remote: Option<Bridge>,
+    /// The phone front end served on the LAN, when `/mobile` or `--mobile` is
+    /// on. It talks to the same [`Bridge`] a shared session uses.
+    mobile: Option<crate::mobile::MobileServer>,
     /// Bumped for every bridge started; events carry it.
     remote_generation: u64,
     /// `/remote off` for this session: auto-share leaves it alone until the
@@ -622,6 +631,7 @@ pub async fn run(
     session: Option<Session>,
     session_store: Option<SessionStore>,
     services: Arc<AgentServices>,
+    mobile: Option<u16>,
 ) -> Result<()> {
     // Resolve dark/light (auto-detecting the terminal/OS appearance) before the
     // first frame so the palette matches the surrounding terminal. A named
@@ -695,6 +705,13 @@ pub async fn run(
     }
     // A resumed session has had its first prompt: share it from the start.
     app.maybe_auto_share();
+    // `--mobile` serves the phone front end from the first frame; `/mobile`
+    // starts it later.
+    if let Some(port) = mobile
+        && let Err(reason) = app.start_mobile(port)
+    {
+        app.fail(reason);
+    }
     if crate::sync::is_configured(&app.credentials) {
         // Pull what changed elsewhere, then upload what an earlier close could
         // not finish. The open session is never written over; a newer copy of
@@ -1306,6 +1323,7 @@ impl App {
             catalogs,
             pointer: None,
             remote: None,
+            mobile: None,
             remote_generation: 0,
             remote_muted: false,
             remote_announce: false,
@@ -1801,7 +1819,15 @@ impl App {
     /// the frame dirty, so background workers looked frozen between keystrokes.
     fn board_changed(&mut self) -> bool {
         let version = self.workers.board.version();
-        std::mem::replace(&mut self.last_board_version, version) != version
+        let changed = std::mem::replace(&mut self.last_board_version, version) != version;
+        if changed
+            && let Some(bridge) = &mut self.remote
+        {
+            // The phone shows the same rows the strip does; a snapshot alone
+            // would leave it frozen between reconnects.
+            bridge.workers_changed(&self.workers.board.snapshot());
+        }
+        changed
     }
 
     fn set_approval(&mut self, request: ApprovalRequest) {
@@ -2674,6 +2700,58 @@ impl App {
         Ok(())
     }
 
+    /// Serve this session to a phone on the LAN: `/mobile`, or `--mobile` at
+    /// start. The page is served by this process, so nothing leaves the
+    /// network; the link carries the only credential.
+    fn start_mobile(&mut self, port: u16) -> Result<(), String> {
+        if self.mobile.is_some() {
+            return Err("the phone link is already on — /mobile off stops it".into());
+        }
+        let server = crate::mobile::MobileServer::start(port).map_err(|error| format!("{error:#}"))?;
+        let url = server.url().to_owned();
+        let rows = crate::remote::qr::rows(&url);
+        // One bridge per session: following it from the phone and from the
+        // relay at once would send every frame twice.
+        self.stop_remote("The terminal switched to the phone link.");
+        self.remote_generation += 1;
+        let generation = self.remote_generation;
+        let events = self.background_tx.clone();
+        let notify: crate::remote::Notify = Arc::new(move |event| {
+            let _ = events.send(Background::Remote { generation, event });
+        });
+        let session_id = self.session.as_ref().map(|session| session.id.to_string()).unwrap_or_default();
+        let mut bridge =
+            Bridge::launch(session_id, server.connector(), notify, crate::remote::link::LinkConfig::default());
+        // Whatever is already under way becomes part of the first snapshot.
+        if self.running.is_some() {
+            bridge.turn_started();
+        }
+        if let Some(approval) = &mut self.approval {
+            approval.remote_id = Some(bridge.approval_opened(&approval.tool, &approval.summary, &approval.details));
+        }
+        if let Some(question) = &mut self.question {
+            question.remote_id = Some(
+                bridge.question_opened(&question.header, &question.question, &question.options, question.multi_select),
+            );
+        }
+        bridge.workers_changed(&self.workers.board.snapshot());
+        self.remote = Some(bridge);
+        self.mobile = Some(server);
+        self.qr_overlay = Some(QrOverlay::Local { url, rows });
+        self.status = "phone link ready — scan the code".to_owned();
+        Ok(())
+    }
+
+    /// Stop serving the phone page. The session stays open in the terminal.
+    fn stop_mobile(&mut self) {
+        if self.mobile.take().is_none() {
+            return;
+        }
+        self.stop_remote("The phone link was turned off in the terminal.");
+        self.qr_overlay = None;
+        self.status = "phone link off".to_owned();
+    }
+
     /// Whether the session is being shared (or trying to be).
     fn sharing(&self) -> bool {
         self.remote.as_ref().is_some_and(Bridge::is_active)
@@ -2779,6 +2857,7 @@ impl App {
             }
             Inbound::Approve { ref_id, approval_id, decision } => self.remote_approve(&ref_id, &approval_id, decision),
             Inbound::Interrupt { ref_id } => self.remote_interrupt(&ref_id),
+            Inbound::Command { ref_id, name, args } => self.remote_command_from_phone(&ref_id, &name, &args),
         }
     }
 
@@ -2797,6 +2876,57 @@ impl App {
             self.steer(text);
         } else {
             self.start_turn(text.clone(), text, true);
+        }
+    }
+
+    /// A session action the phone asked for. Only the actions the phone page
+    /// offers exist here — never a free slash command, because the terminal's
+    /// commands open dialogs a phone cannot see.
+    fn remote_command_from_phone(&mut self, ref_id: &str, name: &str, args: &str) {
+        let applied = |app: &mut Self| app.remote_accepted(ref_id, InputKind::Command, AcceptResult::Applied, None);
+        let rejected = |app: &mut Self, why: &str| {
+            app.remote_accepted(ref_id, InputKind::Command, AcceptResult::Rejected, Some(why))
+        };
+        match name {
+            "new" => {
+                self.new_session();
+                applied(self);
+            }
+            "compact" => {
+                self.compact_command();
+                applied(self);
+            }
+            "fork" => {
+                self.fork_session();
+                applied(self);
+            }
+            "mode" => match args.trim().to_ascii_lowercase().as_str() {
+                "auto" | "yolo" => {
+                    self.mode_command(args);
+                    applied(self);
+                }
+                _ => rejected(self, "mode must be auto or yolo"),
+            },
+            "model" => {
+                let profile = args.trim();
+                if profile.is_empty() {
+                    return rejected(self, "model needs the name of a configured profile");
+                }
+                if !self.settings.profiles.contains_key(profile) {
+                    return rejected(self, "no profile by that name");
+                }
+                self.profile_command(profile);
+                applied(self);
+            }
+            "rename" => {
+                let title = args.trim();
+                if title.is_empty() {
+                    return rejected(self, "rename needs a title");
+                }
+                self.rename_session(title);
+                applied(self);
+            }
+            other => rejected(self, &format!("`{other}` is not an action the phone can run")),
         }
     }
 

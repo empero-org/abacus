@@ -96,6 +96,10 @@ pub struct Cli {
     #[arg(long)]
     pub no_session: bool,
 
+    /// Serve this session to a phone on the local network (port, default 8787)
+    #[arg(long, value_name = "PORT", num_args = 0..=1, default_missing_value = "8787")]
+    pub mobile: Option<u16>,
+
     /// Override the maximum model/tool round trips per prompt
     #[arg(long)]
     pub max_steps: Option<usize>,

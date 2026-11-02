@@ -44,7 +44,7 @@ use link::{Connector, LinkConfig, LinkError, Stop};
 use protocol::{
     Accepted, ApprovalFrame, ApprovalResolved, DeltaFrame, DeltaKind, DoneFrame, DoneReason, Entry, EntryFrame,
     EntryKind, ErrorFrame, Level, ModeFrame, NoticeFrame, Outbound, Pending, Phase, QuestionFrame, QuestionResolved,
-    SnapshotHead, State, Status, ToolFrame, ToolInfo, ToolPhase, ToolState,
+    SnapshotHead, State, Status, ToolFrame, ToolInfo, ToolPhase, ToolState, WorkersFrame,
 };
 use std::{
     sync::Arc,
@@ -107,6 +107,14 @@ pub enum Inbound {
         ref_id: String,
     },
     SnapshotRequested,
+    /// A session action a client asked for. Only the local mobile transport
+    /// carries these; the relay refuses the frame type, so a browser cannot
+    /// reach a session's model, mode or history.
+    Command {
+        ref_id: String,
+        name: String,
+        args: String,
+    },
 }
 
 /// The connection as the footer badge shows it.
@@ -237,6 +245,8 @@ pub struct Bridge {
     /// A frame was dropped because the queue was full; the next tick sends a
     /// snapshot so the browsers repair the gap.
     resync: bool,
+    /// The board as last sent, so an unchanged one costs no frames.
+    workers_sent: Option<WorkersFrame>,
 }
 
 impl Bridge {
@@ -277,6 +287,7 @@ impl Bridge {
             connected_once: false,
             browsers: 0,
             resync: false,
+            workers_sent: None,
         }
     }
 
@@ -472,6 +483,19 @@ impl Bridge {
         self.emit(Outbound::Notice(NoticeFrame::new(text, level)));
     }
 
+    /// Send the subagent board if it differs from the last one sent, so a
+    /// phone sees workers start, work and finish. Returns whether a frame
+    /// went out.
+    pub fn workers_changed(&mut self, board: &[crate::workers::WorkerStatus]) -> bool {
+        let frame = WorkersFrame::from_board(board);
+        if self.workers_sent.as_ref() == Some(&frame) {
+            return false;
+        }
+        self.workers_sent = Some(frame.clone());
+        self.push(Outbound::Workers(frame));
+        true
+    }
+
     /// An approval dialog opened; returns its id for the terminal to keep.
     pub fn approval_opened(&mut self, tool: &str, summary: &str, details: &str) -> String {
         self.close_text();
@@ -606,6 +630,7 @@ impl Bridge {
             status: self.status.clone(),
             pending: Pending { approval: self.approval.clone(), question: self.question.clone() },
             usage: view.usage.into(),
+            workers: self.workers_sent.clone().unwrap_or_default(),
         };
         for page in protocol::paginate(head, entries, protocol::TARGET_FRAME_BYTES) {
             self.push(Outbound::Snapshot(Box::new(page)));
