@@ -42,6 +42,25 @@ use tokio_tungstenite::WebSocketStream;
 
 use crate::remote::link::{Connector, LinkError};
 
+/// The app icon: an abacus, mint on ink, at any size.
+const ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Abacus">
+<rect width="512" height="512" rx="112" fill="#0a0b0d"/>
+<rect x="96" y="108" width="320" height="296" rx="30" fill="none" stroke="#7dd3a0" stroke-width="18"/>
+<g stroke="#7dd3a0" stroke-width="13" stroke-linecap="round" opacity="0.85">
+<line x1="176" y1="146" x2="176" y2="366"/><line x1="256" y1="146" x2="256" y2="366"/>
+<line x1="336" y1="146" x2="336" y2="366"/>
+</g>
+<g fill="#7dd3a0">
+<circle cx="176" cy="194" r="21"/><circle cx="176" cy="252" r="21"/>
+<circle cx="256" cy="220" r="21"/><circle cx="256" cy="300" r="21"/>
+<circle cx="336" cy="176" r="21"/><circle cx="336" cy="262" r="21"/>
+</g>
+<line x1="146" y1="336" x2="366" y2="336" stroke="#7dd3a0" stroke-width="10" opacity="0.45"/>
+</svg>"##;
+
+/// What a phone needs to add the page to its home screen.
+const MANIFEST: &str = r##"{"name":"Abacus","short_name":"Abacus","description":"Drive an Abacus session from your phone.","start_url":"/","scope":"/","display":"standalone","orientation":"portrait","background_color":"#0a0b0d","theme_color":"#0a0b0d","icons":[{"src":"/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]}"##;
+
 /// The phone page, compiled in: one file, no assets, so the binary stays the
 /// only thing to ship.
 const PAGE: &str = include_str!("app.html");
@@ -201,6 +220,12 @@ async fn serve_connection(mut stream: TcpStream, hub: Arc<Mutex<Hub>>) -> Result
     match path {
         "/health" => return respond(&mut stream, 200, "text/plain", "ok").await,
         "/favicon.ico" => return respond(&mut stream, 204, "text/plain", "").await,
+        // The icon and the manifest hold nothing about the session, and the
+        // browser fetches them without the link's query string.
+        "/icon.svg" => return respond(&mut stream, 200, "image/svg+xml", ICON).await,
+        "/manifest.webmanifest" => {
+            return respond(&mut stream, 200, "application/manifest+json", MANIFEST).await;
+        }
         "/ws" => {
             if token != hub.lock().await.token {
                 return respond(&mut stream, 401, "text/plain", "that link is not valid").await;
@@ -528,4 +553,74 @@ fn lan_address() -> Option<IpAddr> {
 /// The address to listen on, for a caller that wants to say where it listens.
 pub fn address(port: u16) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// One plain HTTP request against the server, answered in full.
+    fn get(port: u16, target: &str) -> (u16, String) {
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        stream.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
+        let request = format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+        stream.write_all(request.as_bytes()).expect("write");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("read");
+        let status = response
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .expect("status line");
+        (status, response)
+    }
+
+    fn token_of(server: &MobileServer) -> String {
+        server.url().split("t=").nth(1).expect("token in the url").to_owned()
+    }
+
+    #[tokio::test]
+    async fn the_page_answers_only_with_the_link_token() {
+        let server = MobileServer::start(0).expect("start");
+        let port = server.port();
+        let token = token_of(&server);
+
+        let (status, body) = get(port, "/");
+        assert_eq!(status, 401, "a bare URL is not a link");
+        assert!(body.contains("Link expired"), "{body}");
+
+        let (status, body) = get(port, &format!("/?t={token}"));
+        assert_eq!(status, 200);
+        assert!(body.contains("<title>Abacus</title>"), "the page itself");
+        assert!(body.contains("app.html") || body.contains("Message Abacus"), "the phone page");
+
+        let (status, _) = get(port, "/?t=not-the-token");
+        assert_eq!(status, 401);
+    }
+
+    #[tokio::test]
+    async fn the_icon_and_manifest_need_no_token() {
+        let server = MobileServer::start(0).expect("start");
+        let port = server.port();
+
+        let (status, body) = get(port, "/icon.svg");
+        assert_eq!(status, 200);
+        assert!(body.contains("<svg") && body.contains("#7dd3a0"), "an abacus, not a placeholder");
+
+        let (status, body) = get(port, "/manifest.webmanifest");
+        assert_eq!(status, 200);
+        assert!(body.contains("\"short_name\":\"Abacus\""), "{body}");
+
+        let (status, body) = get(port, "/health");
+        assert_eq!(status, 200);
+        assert!(body.contains("ok"));
+    }
+
+    #[tokio::test]
+    async fn the_websocket_url_carries_the_agent_role() {
+        let server = MobileServer::start(0).expect("start");
+        assert!(server.connector().url.contains("role=agent"), "the bridge is the agent end");
+        assert!(server.url().starts_with("http://"), "the phone gets a page, not a socket");
+    }
 }

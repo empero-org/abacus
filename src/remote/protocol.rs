@@ -957,6 +957,58 @@ mod tests {
     }
 
     #[test]
+    fn a_command_frame_carries_a_name_and_an_argument() {
+        assert_eq!(
+            parse_incoming(r#"{"v":1,"type":"command","id":"b7","seq":7,"payload":{"name":"mode","args":"yolo"}}"#),
+            Incoming::Input {
+                id: "b7".into(),
+                input: Input::Command { name: "mode".into(), args: "yolo".into() },
+            }
+        );
+        // No argument is an empty one, not a refusal.
+        assert_eq!(
+            parse_incoming(r#"{"v":1,"type":"command","id":"b8","seq":8,"payload":{"name":"compact"}}"#),
+            Incoming::Input {
+                id: "b8".into(),
+                input: Input::Command { name: "compact".into(), args: String::new() },
+            }
+        );
+        assert_eq!(
+            parse_incoming(r#"{"v":1,"type":"command","id":"b9","seq":9,"payload":{}}"#),
+            Incoming::Invalid {
+                id: "b9".into(),
+                kind: InputKind::Command,
+                reason: "command has no name".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_workers_frame_lists_the_board() {
+        let frame = WorkersFrame {
+            workers: vec![WorkerFrame {
+                id: 1,
+                name: "scout".into(),
+                role: "explore".into(),
+                state: "running".into(),
+                activity: "reading src".into(),
+                model: "empero/model-x".into(),
+                tokens: 120,
+                started_at: "t".into(),
+                finished_at: None,
+            }],
+        };
+        roundtrip(
+            Outbound::Workers(frame),
+            json!({"type": "workers", "payload": {"workers": [{
+                "id": 1, "name": "scout", "role": "explore", "state": "running",
+                "activity": "reading src", "model": "empero/model-x", "tokens": 120,
+                "started_at": "t", "finished_at": null
+            }]}}),
+        );
+    }
+
+    #[test]
     fn outbound_frames_match_the_spec_shapes() {
         let tool = ToolInfo {
             call_id: "call_1".into(),
