@@ -413,11 +413,28 @@ const S = {
 
 /* ------------------------------------------------------------------ socket */
 
-function token() { return new URLSearchParams(location.search).get("t") || ""; }
+// In the Android app the link lives in SharedPreferences, not in a URL: the
+// page is loaded from the APK's assets and asks the bridge where to connect.
+const NATIVE = typeof window !== "undefined" && window.AbacusApp ? window.AbacusApp : null;
+
+function nativeTarget() {
+  try { return NATIVE ? JSON.parse(NATIVE.target() || "{}") : {}; } catch (error) { return {}; }
+}
+
+function token() {
+  const target = nativeTarget();
+  if (target.token) return target.token;
+  return new URLSearchParams(location.search).get("t") || "";
+}
+
+function socketHost() {
+  const target = nativeTarget();
+  return target.host ? target.host + ":" + target.port : location.host;
+}
 
 function connect() {
   const scheme = location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${scheme}://${location.host}/ws?t=${encodeURIComponent(token())}`);
+  const ws = new WebSocket(`${scheme}://${socketHost()}/ws?t=${encodeURIComponent(token())}`);
   S.ws = ws;
   setConn("wait");
   ws.onopen = () => {
@@ -719,6 +736,16 @@ function shortModel(model) {
 
 function renderStatus() {
   const bar = $("statusbar");
+  if (NATIVE) {
+    list.appendChild(groupTitle("App"));
+    const app = el("div", "rows");
+    app.appendChild(row(
+      { label: "Change link", note: "Point this app at another session", icon: "tag" },
+      { onClick: () => { closeSheet("actions-sheet"); NATIVE.changeLink(); } },
+    ));
+    list.appendChild(app);
+  }
+
   const busy = S.status.state && S.status.state !== "idle";
   bar.classList.toggle("busy", !!busy);
   const text = busy ? (S.status.label || S.status.state.replace(/_/g, " ")) : "ready";
@@ -727,6 +754,16 @@ function renderStatus() {
 }
 
 function renderComposer() {
+  if (NATIVE) {
+    list.appendChild(groupTitle("App"));
+    const app = el("div", "rows");
+    app.appendChild(row(
+      { label: "Change link", note: "Point this app at another session", icon: "tag" },
+      { onClick: () => { closeSheet("actions-sheet"); NATIVE.changeLink(); } },
+    ));
+    list.appendChild(app);
+  }
+
   const busy = S.status.state && S.status.state !== "idle";
   $("stop").classList.toggle("on", !!busy);
   $("send").disabled = !input.value.trim();
@@ -926,6 +963,16 @@ function openActions() {
     { onClick: () => { closeSheet("actions-sheet"); openSheet("delegate-sheet"); } },
   ));
   list.appendChild(workers);
+
+  if (NATIVE) {
+    list.appendChild(groupTitle("App"));
+    const app = el("div", "rows");
+    app.appendChild(row(
+      { label: "Change link", note: "Point this app at another session", icon: "tag" },
+      { onClick: () => { closeSheet("actions-sheet"); NATIVE.changeLink(); } },
+    ));
+    list.appendChild(app);
+  }
 
   const busy = S.status.state && S.status.state !== "idle";
   if (busy) {
