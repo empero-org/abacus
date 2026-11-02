@@ -21,7 +21,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     // The composer grows to its configured height, but never so far that the
     // transcript loses its last three rows.
     let most = (app.settings.ui.composer_rows.saturating_add(2))
-        .min(area.height.saturating_sub(2 + 3 + task_height + 1))
+        .min(area.height.saturating_sub(2 + 3 + task_height + 1 + CONTEXT_BAR_ROWS))
         .max(3);
     let input_height = (app.input.wrapped_line_count(composer_text_width) as u16 + 2).clamp(3, most);
     let chunks = Layout::default()
@@ -30,6 +30,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             Constraint::Length(2),
             Constraint::Min(3),
             Constraint::Length(task_height),
+            Constraint::Length(CONTEXT_BAR_ROWS),
             Constraint::Length(input_height),
             Constraint::Length(1),
         ])
@@ -41,9 +42,10 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if task_height > 0 {
         draw_task_bar(frame, ui::measure(chunks[2], columns), app);
     }
-    let input = ui::measure(chunks[3], columns);
+    draw_context_bar(frame, ui::measure(chunks[3], columns), app);
+    let input = ui::measure(chunks[4], columns);
     draw_input(frame, input, app);
-    draw_footer(frame, ui::measure(chunks[4], columns), app);
+    draw_footer(frame, ui::measure(chunks[5], columns), app);
     draw_completion_popup(frame, input, app);
     // The picker is checked first because it can be opened *from* the config
     // panel; behind it, the panel would be drawn over its own child and the
@@ -85,6 +87,67 @@ pub(super) fn mode_color(mode: Permission) -> Color {
 
 /// Two rows: identity and target on the left, model and mode on the right, over
 /// a hairline that separates the chrome from the conversation.
+/// The row the context bar takes above the composer.
+const CONTEXT_BAR_ROWS: u16 = 1;
+
+/// How full the context is, in tokens, and the window it fills. The
+/// provider's own prompt count is exact, so it wins; the character estimate is
+/// the fallback for endpoints that report no usage, and it also carries the
+/// live movement *within* a turn, before the next reply reports a new figure.
+fn context_fill(app: &App) -> (u64, u64) {
+    let estimated = (app.ctx_chars / 4).max(1) as u64;
+    let reported = app.provider.context_tokens();
+    let tokens = if reported > 0 { reported.max(estimated) } else { estimated };
+    (tokens, app.config.model_limits.context_window.max(1) as u64)
+}
+
+/// How full the context is, across the composer's width: how far the fill
+/// has come, a tick where compaction steps in (trimming old tool output, a
+/// summary when left idle, the summary under pressure), and the window's size
+/// at the end. The fill turns to the warning colour once a summary is due.
+pub(super) fn draw_context_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let (tokens, window) = context_fill(app);
+    let marks = app.config.compaction_marks();
+    let percent = ((tokens * 100) / window).min(100);
+    let label = format!(" {percent}% ");
+    let end = format!(" {} ", ui::format_count(window));
+    let cells = (area.width as usize).saturating_sub(label.len() + end.len() + 1);
+    if cells < 8 || area.height == 0 {
+        return;
+    }
+    let cell = |at: u64| ((u128::from(at) * cells as u128) / u128::from(window)) as usize;
+    let filled = cell(tokens).min(cells);
+    let ticks: Vec<usize> = [Some(marks.trim), marks.idle, Some(marks.summary)]
+        .into_iter()
+        .flatten()
+        .map(|at| cell(at as u64).min(cells - 1))
+        .collect();
+    let ascii = ui::glyphs().rule == "-";
+    let (fill, track, tick) = if ascii { ("=", "-", "|") } else { ("━", "─", "┊") };
+    let fill_color = if tokens >= marks.summary as u64 || percent >= 85 { warning() } else { primary() };
+
+    let mut spans = vec![fg(label, if fill_color == warning() { warning() } else { muted() })];
+    let mut run = String::new();
+    let mut run_color = rail();
+    for index in 0..cells {
+        let (glyph, color) = if ticks.contains(&index) {
+            (tick, if index < filled { fill_color } else { muted() })
+        } else if index < filled {
+            (fill, fill_color)
+        } else {
+            (track, rail())
+        };
+        if color != run_color && !run.is_empty() {
+            spans.push(fg(std::mem::take(&mut run), run_color));
+        }
+        run_color = color;
+        run.push_str(glyph);
+    }
+    spans.push(fg(run, run_color));
+    spans.push(fg(end, muted()));
+    frame.render_widget(Paragraph::new(Line::from(spans)), Rect { height: 1, ..area });
+}
+
 pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let mode = app.mode();
 
@@ -600,18 +663,6 @@ pub(super) fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         return;
     }
 
-    // How full the window is. The provider's own prompt count is exact, so it
-    // wins; the character estimate is the fallback for endpoints that report no
-    // usage, and it also carries the live movement *within* a turn, before the
-    // next reply reports a new figure.
-    let estimated = (app.ctx_chars / 4).max(1) as u64;
-    let reported = app.provider.context_tokens();
-    let ctx_tokens = if reported > 0 { reported.max(estimated) } else { estimated };
-    let ctx_window = app.config.model_limits.context_window.max(1) as u64;
-    let percent = ((ctx_tokens * 100) / ctx_window).min(100) as u16;
-    let compact_at = (app.config.model_limits.compaction_budget().compact_at_chars / 4).max(1);
-    let ctx_color = if ctx_tokens >= compact_at as u64 || percent >= 75 { warning() } else { muted() };
-
     // Two different quantities, so they are labelled as such. Side by side and
     // both called "tokens", the running session total reads as the size of the
     // context, and the two never agree.
@@ -630,11 +681,8 @@ pub(super) fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let badge_width = ui::spans_width(&right) as u16;
     right.extend([
         fg(format!("↑ {}", ui::format_count(usage.input)), if cached { rail() } else { muted() }),
-        fg(format!("  ↓ {}", ui::format_count(usage.output)), muted()),
-        ui::dot(),
-        fg(format!("ctx {}/{} ", ui::format_count(ctx_tokens), ui::format_count(ctx_window)), ctx_color),
+        fg(format!("  ↓ {} ", ui::format_count(usage.output)), muted()),
     ]);
-    right.extend(ui::meter(percent, 8, ctx_color));
     let right_width = ui::spans_width(&right) as u16;
     // The arrows' own cells, so the pointer resting on them can open the
     // breakdown. Measured from the right edge because the row is right-aligned.

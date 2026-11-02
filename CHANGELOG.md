@@ -30,6 +30,13 @@ Three console changes for issues #11, #10 and #3.
   English. The zh-CN table is community-review pending. The TUI is not
   translated yet; the catalog is the piece that work grows from.
 
+- **A context bar above the composer.** How full the context is, as a line
+  from empty to the window's size with a tick where compaction steps in:
+  where old tool output is trimmed, where a thread left idle is summarised,
+  and where the history is summarised before the next request. It replaces
+  the footer's small `ctx` gauge. Front ends get the same points as
+  `compaction` (`trim`, `idle`, `summary`, in tokens) next to `contextTokens`.
+
 ## 0.7.6 — 2026-10-29
 
 What Abacus Desktop 0.1.6 builds on: goals that keep going, chats, and

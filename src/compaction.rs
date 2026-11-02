@@ -335,8 +335,33 @@ const IDLE_MIN_TOKENS: usize = 100_000;
 /// on a small window, a context that far along is heading for a compaction
 /// anyway, and doing it now spares the person the wait.
 pub fn idle_worthwhile(messages: &[Value], state: &CompactionState, budget: &CompactionBudget) -> bool {
-    let bar = (IDLE_MIN_TOKENS * crate::model_info::CHARS_PER_TOKEN).min(budget.compact_at_chars / 2);
+    let bar = idle_bar(budget);
     bar > 0 && message_chars(messages) + state.weight() >= bar && idle_cut(messages, budget).is_some()
+}
+
+/// How much context, in characters, makes a quiet session worth compacting.
+fn idle_bar(budget: &CompactionBudget) -> usize {
+    (IDLE_MIN_TOKENS * crate::model_info::CHARS_PER_TOKEN).min(budget.compact_at_chars / 2)
+}
+
+/// Where compaction steps in, in tokens of context, for a meter to mark: past
+/// `trim` old tool output is trimmed, past `idle` a session left alone is
+/// summarised (none when idle compaction is off), and past `summary` the
+/// history is summarised before the next request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Marks {
+    pub trim: usize,
+    pub idle: Option<usize>,
+    pub summary: usize,
+}
+
+pub fn marks(budget: &CompactionBudget, idle: bool) -> Marks {
+    let tokens = |chars: usize| chars / crate::model_info::CHARS_PER_TOKEN;
+    Marks {
+        trim: tokens(budget.recent_budget_chars),
+        idle: idle.then(|| tokens(idle_bar(budget))).filter(|&at| at > 0),
+        summary: tokens(budget.compact_at_chars),
+    }
 }
 
 /// The range idle compaction folds into the summary: everything between the
@@ -1136,6 +1161,17 @@ mod tests {
         messages.push(json!({"role":"user","content":"and the tests?"}));
         messages.push(json!({"role":"assistant","content":"They pass."}));
         messages
+    }
+
+    #[test]
+    fn the_marks_fall_where_compaction_steps_in() {
+        let budget = CompactionBudget::default();
+        let marks = marks(&budget, true);
+        assert_eq!(marks.summary, budget.compact_at_chars / crate::model_info::CHARS_PER_TOKEN);
+        assert!(marks.trim < marks.summary, "{marks:?}");
+        let idle = marks.idle.expect("idle compaction is on");
+        assert!(idle <= marks.summary / 2 && idle <= IDLE_MIN_TOKENS, "{marks:?}");
+        assert_eq!(super::marks(&budget, false).idle, None, "nothing to mark when it is off");
     }
 
     #[test]

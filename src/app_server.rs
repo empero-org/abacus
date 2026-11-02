@@ -1121,6 +1121,7 @@ impl App {
             "autoApprove": self.yolo.load(Ordering::Relaxed),
             "reasoningEffort": self.config.reasoning_effort.map(|effort| effort.label()),
             "contextWindow": self.config.model_limits.context_window,
+            "compaction": self.config.compaction_marks(),
             "needsSetup": !self.config.is_configured(),
             "idleCompaction": self.config.idle_compaction,
             "maxSteps": self.config.max_steps,
@@ -1428,6 +1429,8 @@ impl App {
                 "tokensUsed": self.tokens.total(),
                 "contextTokens": self.context_tokens(),
                 "contextWindow": self.config.model_limits.context_window,
+                // Where compaction steps in, for the meter to mark.
+                "compaction": self.config.compaction_marks(),
                 // The split behind the total: input and output are priced
                 // differently, and cached input an order of magnitude below
                 // uncached, so a client that only renders `tokensUsed` cannot
@@ -1449,6 +1452,7 @@ impl App {
             "workspace": self.config.workspace,
             "contextWindow": self.config.model_limits.context_window,
             "contextTokens": self.context_tokens(),
+            "compaction": self.config.compaction_marks(),
             "tokensUsed": self.tokens.total(),
             "usage": token_usage(&self.tokens.snapshot()),
             "goal": goal_item(self.thread.state.goal.snapshot()),
@@ -2867,6 +2871,21 @@ mod tests {
         ]);
         let types: Vec<&str> = items.iter().map(|item| item["type"].as_str().unwrap()).collect();
         assert_eq!(types, ["userMessage", "functionCall"]);
+    }
+
+    #[test]
+    fn a_context_meter_learns_where_compaction_steps_in() {
+        let config = crate::config::Config::for_endpoint(
+            std::path::PathBuf::from("."),
+            "https://api.example.com/v1".into(),
+            "model".into(),
+            crate::config::AbacusPaths::under(std::path::PathBuf::from("/nonexistent")),
+        );
+        let marks = serde_json::to_value(config.compaction_marks()).unwrap();
+        let window = config.model_limits.context_window as u64;
+        let (trim, summary) = (marks["trim"].as_u64().unwrap(), marks["summary"].as_u64().unwrap());
+        assert!(0 < trim && trim < summary && summary < window, "{marks} of {window}");
+        assert!(marks["idle"].as_u64().is_some_and(|idle| idle < summary), "{marks}");
     }
 
     #[test]

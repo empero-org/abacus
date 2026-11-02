@@ -842,8 +842,27 @@ fn the_footer_separates_session_total_from_context_size() {
     // the first is a direction pair and the second carries a denominator.
     assert!(rendered.contains("↑ "), "session input should be marked up");
     assert!(rendered.contains("↓ "), "session output should be marked down");
-    assert!(rendered.contains("ctx "), "context should be labelled");
     assert!(!rendered.contains("tokens  ·  ctx"), "the two figures must not both read as token counts");
+}
+
+/// The context has a bar of its own above the composer: how full it is, a
+/// tick where compaction steps in, and the size of the window at the end.
+#[test]
+fn the_context_bar_marks_where_compaction_steps_in() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    let rendered = render(&mut app, 100, 20);
+    let window = ui::format_count(app.config.model_limits.context_window as u64);
+    let bar = rendered.lines().find(|row| row.contains("% ") && row.contains('┊')).expect(&rendered);
+    assert!(bar.trim_end().ends_with(&window), "{bar}");
+    // Trimming and the summary; a local endpoint is never compacted while idle.
+    assert_eq!(app.config.compaction_marks().idle, None);
+    assert_eq!(bar.matches('┊').count(), 2, "{bar}");
+
+    // A context past the summary point is shown in the warning colour's fill.
+    app.ctx_chars = app.config.compaction_marks().summary * 4 + 4_000;
+    let rendered = render(&mut app, 100, 20);
+    let bar = rendered.lines().find(|row| row.contains('┊')).expect(&rendered);
+    assert!(bar.contains('━'), "{bar}");
 }
 
 #[test]
@@ -2979,12 +2998,13 @@ fn content_width_and_composer_height_follow_the_settings() {
     let rendered = buffer_text(terminal.backend().buffer(), 200, 40);
     assert_eq!(rendered.lines().filter(|row| row.contains("zq")).count(), 19, "{rendered}");
 
-    // A composer taller than the terminal still leaves the transcript room.
+    // A composer taller than the terminal still leaves the transcript room
+    // (and the context bar its row).
     app.settings.ui.composer_rows = 100;
     let mut short = Terminal::new(TestBackend::new(80, 16)).unwrap();
     short.draw(|frame| draw(frame, &mut app)).unwrap();
     let rendered = buffer_text(short.backend().buffer(), 80, 16);
-    assert_eq!(rendered.lines().filter(|row| row.contains("zq")).count(), 7, "{rendered}");
+    assert_eq!(rendered.lines().filter(|row| row.contains("zq")).count(), 6, "{rendered}");
 }
 
 /// Ctrl+T steps the effort without typing /effort: up the ladder from auto,

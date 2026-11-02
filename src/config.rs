@@ -562,6 +562,12 @@ impl Config {
         self.idle_compaction && !crate::providers::is_local_network_url(&self.connection.base_url)
     }
 
+    /// Where compaction steps in on this model, for a context meter to mark.
+    pub fn compaction_marks(&self) -> crate::compaction::Marks {
+        let budget = crate::agent::compression_budget(self.model_limits.compaction_budget(), self.token_compression);
+        crate::compaction::marks(&budget, self.compacts_when_idle())
+    }
+
     /// Point this configuration at another profile, the way `/profile` and
     /// the desktop's profile picker switch mid-session. Limits come from the
     /// profile, then from the provider's cached model list.
