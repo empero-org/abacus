@@ -44,6 +44,7 @@ toml = "0.8"
 unicode-width = "0.2"
 uuid = { version = "1", features = ["v4", "serde"] }
 sha2 = "0.10.9"
+socket2 = "0.6"
 tokio-tungstenite = { version = "0.26.2", features = ["rustls-tls-webpki-roots"] }
 
 [dev-dependencies]

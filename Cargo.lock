@@ -30,6 +30,7 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "similar",
+ "socket2",
  "tempfile",
  "tokio",
  "tokio-tungstenite",

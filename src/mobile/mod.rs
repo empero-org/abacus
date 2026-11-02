@@ -86,9 +86,18 @@ impl MobileServer {
     /// the returned URLs is the only credential the page needs. Called on the
     /// terminal's thread, inside its runtime.
     pub fn start(port: u16) -> Result<Self> {
-        let listener = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))
+        // A listener without SO_REUSEADDR cannot come back on a port whose
+        // last connections are still in TIME_WAIT, which is every restart
+        // right after a phone closed the page.
+        let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, Some(socket2::Protocol::TCP))
+            .context("could not create a listening socket")?;
+        socket.set_reuse_address(true).context("could not set SO_REUSEADDR")?;
+        socket
+            .bind(&SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port).into())
             .with_context(|| format!("could not listen on port {port}"))?;
-        listener.set_nonblocking(true)?;
+        socket.listen(128).context("could not listen")?;
+        socket.set_nonblocking(true)?;
+        let listener: std::net::TcpListener = socket.into();
         let port = listener.local_addr()?.port();
         let listener = TcpListener::from_std(listener).context("no tokio runtime to serve from")?;
         let token = new_token();
