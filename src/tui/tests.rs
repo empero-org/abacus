@@ -865,6 +865,23 @@ fn the_context_bar_marks_where_compaction_steps_in() {
     assert!(bar.contains('━'), "{bar}");
 }
 
+/// Ctrl+T says what it chose, and leaves the extensions alone: reloading them
+/// restarted every MCP server and its "configuration active" covered the
+/// effort it had just set.
+#[tokio::test]
+async fn ctrl_t_keeps_its_status_and_does_not_reload_extensions() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    handle_key(&mut app, KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    assert_eq!(app.status, "effort low");
+    assert!(!app.reload_services, "an effort change needs no extension reload");
+    let header = render(&mut app, 100, 20);
+    assert!(header.lines().next().unwrap().contains("low"), "{header}");
+
+    app.settings.skills.paths.push(app.config.workspace.join("skills"));
+    app.save_and_apply_settings().unwrap();
+    assert!(app.reload_services, "a change to where skills come from does");
+}
+
 #[test]
 fn resting_the_pointer_on_the_arrows_opens_the_token_breakdown() {
     let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
@@ -1605,7 +1622,7 @@ fn config_changes_are_saved_and_live_immediately() {
     assert_eq!(app.config.model, "new-model");
     assert_eq!(app.config.max_steps, 64);
     assert_eq!(app.mode, InputMode::Insert);
-    assert!(app.reload_services);
+    assert!(!app.reload_services, "none of this is where extensions come from");
     let saved = Settings::load(&AbacusPaths::under(directory.path().join("home"))).unwrap();
     assert_eq!(saved.profiles["test"].model, "test/new-model");
     assert_eq!(saved.agent.max_steps, 64);

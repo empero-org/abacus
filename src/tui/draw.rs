@@ -162,7 +162,12 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         left.push(fg(ui::truncate(&app.config.profile, 24), muted()));
     }
 
-    let right = vec![fg(ui::truncate(&model, 40), muted()), Span::raw("  "), ui::badge(mode.label(), mode_color(mode))];
+    let mut right = vec![fg(ui::truncate(&model, 40), muted())];
+    // The effort Ctrl+T steps, so a press shows what it chose.
+    if let Some(effort) = app.config.reasoning_effort {
+        right.extend([ui::dot(), fg(effort.label(), muted())]);
+    }
+    right.extend([Span::raw("  "), ui::badge(mode.label(), mode_color(mode))]);
 
     // Give the left cluster its own clipped rect rather than letting the
     // right-aligned one paint over it. Overlapping them truncates the branch

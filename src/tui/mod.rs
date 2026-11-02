@@ -515,6 +515,8 @@ struct App {
     mailbox: crate::inbox::Mailbox,
     last_board_version: u64,
     reload_services: bool,
+    /// The settings the loaded extensions came from (see `services_inputs`).
+    services_inputs: String,
     services_reloading: bool,
     /// Safety verdicts, kept for the session rather than the turn.
     safety: crate::safety::SafetyCache,
@@ -1325,6 +1327,7 @@ impl App {
             ));
         }
         let mailbox = crate::inbox::Mailbox::new(config.paths.clone(), crate::presence::FrontEnd::Tui);
+        let services_inputs = services_inputs(&settings);
         Ok(Self {
             config,
             settings,
@@ -1376,6 +1379,7 @@ impl App {
             mailbox,
             last_board_version: 0,
             reload_services: false,
+            services_inputs,
             services_reloading: false,
             safety: crate::safety::SafetyCache::default(),
             yolo: Arc::new(AtomicBool::new(yolo)),

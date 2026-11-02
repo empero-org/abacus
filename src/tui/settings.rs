@@ -565,7 +565,14 @@ impl App {
             self.status = error;
         }
         self.persist_session();
-        self.reload_services = true;
+        // Extensions come from a few settings only. Reloading them for any
+        // other change (an effort, a theme) restarted every MCP server, and
+        // its "configuration active" covered what the change itself said.
+        let inputs = services_inputs(&self.settings);
+        if inputs != self.services_inputs {
+            self.services_inputs = inputs;
+            self.reload_services = true;
+        }
         Ok(())
     }
 
@@ -1339,4 +1346,11 @@ impl App {
 /// `n thing` / `n things`.
 fn console_count(count: usize, singular: &str) -> String {
     crate::console::count(count, singular)
+}
+
+/// What extension discovery reads from the settings (see
+/// `AgentServices::discover`): only a change to these needs the extensions
+/// loaded again.
+pub(super) fn services_inputs(settings: &Settings) -> String {
+    serde_json::to_string(&(&settings.trust, &settings.plugins, &settings.skills, &settings.mcp)).unwrap_or_default()
 }

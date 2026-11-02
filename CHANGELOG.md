@@ -30,6 +30,10 @@ Three console changes for issues #11, #10 and #3.
   English. The zh-CN table is community-review pending. The TUI is not
   translated yet; the catalog is the piece that work grows from.
 
+- **Ctrl+T shows what it chose.** The effort is in the header, and the
+  status says "effort low" rather than "configuration active". A settings
+  change used to reload every extension (restarting MCP servers) whatever it
+  was; now only a change to trust, plugins, skills or MCP servers does.
 - **A context bar above the composer.** How full the context is, as a line
   from empty to the window's size with a tick where compaction steps in:
   where old tool output is trimmed, where a thread left idle is summarised,
