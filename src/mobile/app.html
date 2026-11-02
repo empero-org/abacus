@@ -211,6 +211,27 @@
   .btn.off { opacity: .45; }
   .btn-row { display: flex; gap: 8px; }
   .btn-row .btn { margin-bottom: 0; }
+
+  /* action rows: icon, label, note, state tag */
+  .handle { width: 38px; height: 4px; border-radius: 2px; background: #2b303a; margin: 0 auto 12px; }
+  .group { margin: 2px 0 4px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); }
+  .rows { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+  .row {
+    display: flex; align-items: center; gap: 11px; width: 100%; text-align: left;
+    padding: 10px 12px; background: var(--raise-2); border: 1px solid var(--line);
+    border-radius: 12px;
+  }
+  .row:active { background: #1e222b; }
+  .row .ico { width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center;
+    background: #0e1014; border: 1px solid var(--line); color: var(--muted); flex: none; }
+  .row.on .ico { color: var(--mint); border-color: var(--mint-dim); }
+  .row .txt { flex: 1; min-width: 0; }
+  .row .txt b { font-weight: 550; font-size: 14.5px; }
+  .row .txt small { display: block; color: var(--muted); font-size: 12px; margin-top: 1px; }
+  .row .tag { font-size: 10.5px; color: var(--mint); border: 1px solid var(--mint-dim);
+    border-radius: 999px; padding: 1px 7px; flex: none; }
+  .row.danger .ico { color: var(--red); border-color: #56231f; }
+  .row.danger b { color: #ffd7d5; }
   .field {
     width: 100%; background: #0d0f13; color: var(--ink);
     border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px;
@@ -302,6 +323,7 @@
 <div class="sheet-wrap" id="approval-sheet">
   <div class="scrim" data-close></div>
   <div class="sheet">
+    <div class="handle"></div>
     <h2 id="ap-tool">Approval</h2>
     <div class="sub" id="ap-summary"></div>
     <div id="ap-body"></div>
@@ -315,6 +337,7 @@
 <div class="sheet-wrap" id="question-sheet">
   <div class="scrim" data-close></div>
   <div class="sheet">
+    <div class="handle"></div>
     <h2 id="q-header">Question</h2>
     <div class="sub" id="q-text"></div>
     <div class="opts" id="q-options"></div>
@@ -327,6 +350,7 @@
 <div class="sheet-wrap" id="actions-sheet">
   <div class="scrim" data-close></div>
   <div class="sheet">
+    <div class="handle"></div>
     <h2>Actions</h2>
     <div class="sub" id="actions-sub">What the terminal can do from here.</div>
     <div id="actions-list"></div>
@@ -337,6 +361,7 @@
 <div class="sheet-wrap" id="workers-sheet">
   <div class="scrim" data-close></div>
   <div class="sheet">
+    <div class="handle"></div>
     <h2>Subagents</h2>
     <div class="sub" id="workers-sub">Workers this session started.</div>
     <div id="workers-list"></div>
@@ -348,6 +373,7 @@
 <div class="sheet-wrap" id="delegate-sheet">
   <div class="scrim" data-close></div>
   <div class="sheet">
+    <div class="handle"></div>
     <h2>Delegate</h2>
     <div class="sub">The agent starts one subagent per line, in parallel.</div>
     <textarea class="field" id="delegate-text" rows="4" placeholder="e.g. Audit the auth module for missing checks"></textarea>
@@ -821,38 +847,95 @@ $("q-submit").addEventListener("click", () => {
 
 /* ----------------------------------------------------------------- actions */
 
+const ICONS = {
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  fork: '<path d="M7 4v5a4 4 0 0 0 4 4h5"/><circle cx="17" cy="13" r="3"/>',
+  compact: '<path d="M4 9h16M4 15h16M8 4 5 7l3 3M16 20l3-3-3-3"/>',
+  tag: '<path d="M4 4h8l8 8-8 8-8-8z"/><circle cx="8.5" cy="8.5" r="1.2"/>',
+  shield: '<path d="M12 3l7 3v5.5c0 4.2-2.9 7.1-7 8.5-4.1-1.4-7-4.3-7-8.5V6z"/>',
+  users: '<circle cx="9" cy="8" r="3"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17.5" cy="7.5" r="2.4"/><path d="M17 14c2.4.3 4 2.4 4 5"/>',
+  stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
+};
+
+function icon(name) {
+  return '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' + (ICONS[name] || "") + "</svg>";
+}
+
 const ACTIONS = [
-  { name: "new", label: "New session", note: "Start a fresh conversation", args: "" },
-  { name: "compact", label: "Compact", note: "Shrink the history in place", args: "" },
-  { name: "fork", label: "Fork", note: "Continue as a copy, keeping this one", args: "" },
-  { name: "mode", label: "Mode: auto", note: "Read and edit freely, review the rest", args: "auto" },
-  { name: "mode", label: "Mode: yolo", note: "Run everything without review", args: "yolo" },
-  { name: "model", label: "Switch model…", note: "Pick a configured profile", args: null },
-  { name: "rename", label: "Rename session…", note: "Give this session a title", args: null },
+  { group: "Session", name: "new", label: "New session", note: "Start a fresh conversation", icon: "plus", args: "" },
+  { group: "Session", name: "fork", label: "Fork", note: "Continue as a copy, keeping this one", icon: "fork", args: "" },
+  { group: "Session", name: "compact", label: "Compact", note: "Shrink the history in place", icon: "compact", args: "" },
+  { group: "Session", name: "rename", label: "Rename", note: "Give this session a title", icon: "tag", args: null },
+  { group: "Mode", name: "mode", label: "Auto", note: "Read and edit freely, review the rest", icon: "shield", args: "auto", mode: "auto" },
+  { group: "Mode", name: "mode", label: "YOLO", note: "Run everything without review", icon: "shield", args: "yolo", mode: "yolo" },
 ];
+
+function row(spec, { on = false, danger = false, tag = "", onClick }) {
+  const node = el("button", "row" + (on ? " on" : "") + (danger ? " danger" : ""));
+  node.innerHTML =
+    `<span class="ico">${icon(spec.icon)}</span>` +
+    `<span class="txt"><b>${esc(spec.label)}</b><small>${esc(spec.note)}</small></span>` +
+    (tag ? `<span class="tag">${esc(tag)}</span>` : "");
+  node.onclick = onClick;
+  return node;
+}
+
+function groupTitle(text) {
+  return el("div", "group", esc(text));
+}
 
 function openActions() {
   const list = $("actions-list");
   list.innerHTML = "";
-  $("actions-sub").textContent = S.session ? `${S.session.workspace}` : "What the terminal can do from here.";
+  const workspace = S.session && S.session.workspace ? S.session.workspace : "";
+  const name = workspace.split("/").filter(Boolean).pop() || "";
+  $("actions-sub").textContent = name ? `Workspace · ${name}` : "What the terminal can do from here.";
+
+  let group = "";
+  let box = null;
   for (const action of ACTIONS) {
-    const node = el("button", "btn");
-    node.innerHTML = `${esc(action.label)}<small>${esc(action.note)}</small>`;
-    node.onclick = () => {
-      if (action.args === null) { promptArg(action); return; }
-      send("command", { name: action.name, args: action.args });
-      closeSheet("actions-sheet");
-    };
-    list.appendChild(node);
+    if (action.group !== group) {
+      group = action.group;
+      list.appendChild(groupTitle(group));
+      box = el("div", "rows");
+      list.appendChild(box);
+    }
+    const current = action.mode && S.session && S.session.mode === action.mode;
+    box.appendChild(row(action, {
+      on: !!current,
+      tag: current ? "current" : "",
+      onClick: () => {
+        if (action.args === null) { promptArg(action); return; }
+        send("command", { name: action.name, args: action.args });
+        closeSheet("actions-sheet");
+      },
+    }));
   }
-  const stop = el("button", "btn danger");
-  stop.textContent = "Stop the turn";
-  stop.onclick = () => { send("interrupt", {}); closeSheet("actions-sheet"); };
-  list.appendChild(stop);
-  const workers = el("button", "btn ghost");
-  workers.textContent = "Subagents…";
-  workers.onclick = () => { closeSheet("actions-sheet"); openSheet("workers-sheet"); };
+
+  list.appendChild(groupTitle("Subagents"));
+  const workers = el("div", "rows");
+  const running = S.workers.filter((worker) => worker.state === "running").length;
+  workers.appendChild(row(
+    { label: "Subagents", note: "See what the workers are doing", icon: "users" },
+    { tag: running ? `${running} running` : "", onClick: () => { closeSheet("actions-sheet"); renderWorkers(); openSheet("workers-sheet"); } },
+  ));
+  workers.appendChild(row(
+    { label: "Delegate a task", note: "Start a subagent on something", icon: "plus" },
+    { onClick: () => { closeSheet("actions-sheet"); openSheet("delegate-sheet"); } },
+  ));
   list.appendChild(workers);
+
+  const busy = S.status.state && S.status.state !== "idle";
+  if (busy) {
+    list.appendChild(groupTitle("Turn"));
+    const stop = el("div", "rows");
+    stop.appendChild(row(
+      { label: "Stop the turn", note: "Interrupt what is running", icon: "stop" },
+      { danger: true, onClick: () => { send("interrupt", {}); closeSheet("actions-sheet"); } },
+    ));
+    list.appendChild(stop);
+  }
   openSheet("actions-sheet");
 }
 
@@ -866,6 +949,8 @@ function promptArg(action) {
 }
 
 $("slash").addEventListener("click", openActions);
+$("mode").addEventListener("click", openActions);
+$("model").addEventListener("click", openActions);
 $("workers-chip").addEventListener("click", () => { renderWorkers(); openSheet("workers-sheet"); });
 $("delegate").addEventListener("click", () => { closeSheet("workers-sheet"); openSheet("delegate-sheet"); });
 
