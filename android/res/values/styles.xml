@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="AbacusTheme" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0a0b0d</item>
+        <item name="android:statusBarColor">#0a0b0d</item>
+        <item name="android:navigationBarColor">#0a0b0d</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:colorAccent">#7dd3a0</item>
+    </style>
+</resources>
