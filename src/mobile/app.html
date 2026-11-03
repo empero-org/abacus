@@ -746,16 +746,6 @@ function shortModel(model) {
 
 function renderStatus() {
   const bar = $("statusbar");
-  if (NATIVE) {
-    list.appendChild(groupTitle("App"));
-    const app = el("div", "rows");
-    app.appendChild(row(
-      { label: "Change link", note: "Point this app at another session", icon: "tag" },
-      { onClick: () => { closeSheet("actions-sheet"); NATIVE.changeLink(); } },
-    ));
-    list.appendChild(app);
-  }
-
   const busy = S.status.state && S.status.state !== "idle";
   bar.classList.toggle("busy", !!busy);
   const text = busy ? (S.status.label || S.status.state.replace(/_/g, " ")) : "ready";
@@ -764,16 +754,6 @@ function renderStatus() {
 }
 
 function renderComposer() {
-  if (NATIVE) {
-    list.appendChild(groupTitle("App"));
-    const app = el("div", "rows");
-    app.appendChild(row(
-      { label: "Change link", note: "Point this app at another session", icon: "tag" },
-      { onClick: () => { closeSheet("actions-sheet"); NATIVE.changeLink(); } },
-    ));
-    list.appendChild(app);
-  }
-
   const busy = S.status.state && S.status.state !== "idle";
   $("stop").classList.toggle("on", !!busy);
   $("send").disabled = !input.value.trim();
