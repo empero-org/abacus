@@ -53,6 +53,7 @@ fn session_info() -> SessionInfo {
         title: "Fix parser".into(),
         workspace: "/w".into(),
         model: "m".into(),
+        profile: "main".into(),
         mode: "auto".into(),
         app_version: "0.6.4".into(),
         started_at: "2026-10-04T12:00:00Z".into(),
@@ -241,7 +242,7 @@ fn a_turn_that_ends_with_a_dialog_open_sends_no_decision_for_it() {
 
     // Nothing is pending afterwards, and no row claims a decision.
     bridge.send_snapshot(
-        SnapshotView { session: session_info(), entries: &[], usage: &usage() },
+        SnapshotView { session: session_info(), entries: &[], usage: &usage(), models: &[] },
         SnapshotReason::Requested,
     );
     let sent = drain(&mut frames);
@@ -317,7 +318,7 @@ fn numbered(entries: Vec<ui::Entry>) -> Vec<ui::Entry> {
 }
 
 fn view<'a>(entries: &'a [ui::Entry], usage: &'a TokenUsage) -> SnapshotView<'a> {
-    SnapshotView { session: session_info(), entries, usage }
+    SnapshotView { session: session_info(), entries, usage, models: &[] }
 }
 
 /// The entries of the snapshot just sent, across its pages.

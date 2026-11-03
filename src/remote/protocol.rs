@@ -212,6 +212,10 @@ pub struct SessionInfo {
     pub title: String,
     pub workspace: String,
     pub model: String,
+    /// The profile the session runs, so a phone can mark it in the list of
+    /// models it may switch to. Empty when the terminal did not say.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub profile: String,
     pub mode: String,
     pub app_version: String,
     pub started_at: String,
@@ -253,9 +257,7 @@ impl From<&crate::workers::WorkerStatus> for WorkerFrame {
             model: worker.model.clone(),
             tokens: worker.tokens_used(),
             started_at: worker.started_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            finished_at: worker
-                .finished_at
-                .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+            finished_at: worker.finished_at.map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
         }
     }
 }
@@ -290,6 +292,9 @@ pub struct SnapshotPage {
     /// The subagent board at snapshot time, on page 0 only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workers: Option<WorkersFrame>,
+    /// The model profiles this session can switch to, on page 0 only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
     pub entries: Vec<Entry>,
 }
 
@@ -596,15 +601,27 @@ impl Decision {
 /// configuration: there is no frame for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Input {
-    Prompt { text: String },
-    Answer { question_id: String, selected: Vec<String>, custom: Option<String> },
-    Approve { approval_id: String, decision: Decision },
+    Prompt {
+        text: String,
+    },
+    Answer {
+        question_id: String,
+        selected: Vec<String>,
+        custom: Option<String>,
+    },
+    Approve {
+        approval_id: String,
+        decision: Decision,
+    },
     Interrupt,
     RequestSnapshot,
     /// A session action, only ever carried by the local mobile transport:
     /// `name` is one of the actions the terminal offers a phone, `args` its
     /// argument. The terminal decides which names exist.
-    Command { name: String, args: String },
+    Command {
+        name: String,
+        args: String,
+    },
 }
 
 /// A parsed frame from the relay.
@@ -836,6 +853,9 @@ pub struct SnapshotHead {
     /// The subagent board, so a phone that connects mid-run sees the workers
     /// it otherwise only hears about when one changes.
     pub workers: WorkersFrame,
+    /// The profiles `/model` accepts, so the phone can offer them by name
+    /// instead of asking the person to remember one.
+    pub models: Vec<String>,
 }
 
 /// Pack `entries` into snapshot pages whose frames stay within `max_bytes`,
@@ -853,9 +873,18 @@ pub fn paginate(head: SnapshotHead, entries: Vec<Entry>, max_bytes: usize) -> Ve
         pending: Some(head.pending),
         usage: Some(head.usage),
         workers: Some(head.workers),
+        models: Some(head.models),
         entries: Vec::new(),
     };
-    let later = SnapshotPage { session: None, status: None, pending: None, usage: None, workers: None, ..first.clone() };
+    let later = SnapshotPage {
+        session: None,
+        status: None,
+        pending: None,
+        usage: None,
+        workers: None,
+        models: None,
+        ..first.clone()
+    };
     let first_overhead = json_len(&Outbound::Snapshot(Box::new(first.clone()))) + ENVELOPE_BYTES;
     let later_overhead = json_len(&Outbound::Snapshot(Box::new(later.clone()))) + ENVELOPE_BYTES;
     // A fresh later page always has room for a fitted entry; page 0 may not
@@ -931,6 +960,7 @@ mod tests {
                 title: "Fix parser".into(),
                 workspace: "/home/me/proj".into(),
                 model: "empero/model-x".into(),
+                profile: "main".into(),
                 mode: "auto".into(),
                 app_version: "0.6.4".into(),
                 started_at: "2026-10-04T12:00:00Z".into(),
@@ -939,6 +969,7 @@ mod tests {
             pending: Pending::default(),
             usage: Usage::default(),
             workers: WorkersFrame::default(),
+            models: vec!["main".into()],
         }
     }
 
@@ -960,26 +991,16 @@ mod tests {
     fn a_command_frame_carries_a_name_and_an_argument() {
         assert_eq!(
             parse_incoming(r#"{"v":1,"type":"command","id":"b7","seq":7,"payload":{"name":"mode","args":"yolo"}}"#),
-            Incoming::Input {
-                id: "b7".into(),
-                input: Input::Command { name: "mode".into(), args: "yolo".into() },
-            }
+            Incoming::Input { id: "b7".into(), input: Input::Command { name: "mode".into(), args: "yolo".into() } }
         );
         // No argument is an empty one, not a refusal.
         assert_eq!(
             parse_incoming(r#"{"v":1,"type":"command","id":"b8","seq":8,"payload":{"name":"compact"}}"#),
-            Incoming::Input {
-                id: "b8".into(),
-                input: Input::Command { name: "compact".into(), args: String::new() },
-            }
+            Incoming::Input { id: "b8".into(), input: Input::Command { name: "compact".into(), args: String::new() } }
         );
         assert_eq!(
             parse_incoming(r#"{"v":1,"type":"command","id":"b9","seq":9,"payload":{}}"#),
-            Incoming::Invalid {
-                id: "b9".into(),
-                kind: InputKind::Command,
-                reason: "command has no name".into(),
-            }
+            Incoming::Invalid { id: "b9".into(), kind: InputKind::Command, reason: "command has no name".into() }
         );
     }
 

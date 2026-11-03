@@ -178,7 +178,7 @@ impl Hub {
         self.clients.retain(|client| client.send(text.clone()).is_ok());
     }
 
-    fn to_agent(&mut self, text: String) {
+    fn send_to_agent(&mut self, text: String) {
         if let Some(agent) = &self.agent
             && agent.send(text).is_err()
         {
@@ -245,7 +245,7 @@ async fn serve_connection(mut stream: TcpStream, hub: Arc<Mutex<Hub>>) -> Result
                 Ok(socket) => socket,
                 Err(_) => return Ok(()),
             };
-            return if role == "agent" { agent_session(socket, hub).await } else { client_session(socket, hub).await };
+            if role == "agent" { agent_session(socket, hub).await } else { client_session(socket, hub).await }
         }
         "/" | "/index.html" => {
             if token != hub.lock().await.token {
@@ -326,11 +326,16 @@ fn decode(text: &str) -> String {
 }
 
 /// The WebSocket handshake accepts whatever the HTTP layer already routed:
-/// the token and the role were checked before this point.
+/// the token and the role were checked before this point. The error type is
+/// tungstenite's, and large; the signature is not ours to narrow.
+#[allow(clippy::result_large_err)]
 fn accept_all(
     _request: &tokio_tungstenite::tungstenite::handshake::server::Request,
     response: tokio_tungstenite::tungstenite::handshake::server::Response,
-) -> Result<tokio_tungstenite::tungstenite::handshake::server::Response, tokio_tungstenite::tungstenite::handshake::server::ErrorResponse> {
+) -> Result<
+    tokio_tungstenite::tungstenite::handshake::server::Response,
+    tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+> {
     Ok(response)
 }
 
@@ -425,7 +430,7 @@ async fn client_session(socket: Socket, hub: Arc<Mutex<Hub>>) -> Result<()> {
                         if kind_of(&text) == Some("ping") {
                             let _ = sink.send(tokio_tungstenite::tungstenite::Message::Text(pong(&text).into())).await;
                         } else if kind_of(&text) != Some("pong") {
-                            hub.lock().await.to_agent(text.to_string());
+                            hub.lock().await.send_to_agent(text.to_string());
                         }
                     }
                     Ok(tokio_tungstenite::tungstenite::Message::Close(_)) | Err(_) => break,
@@ -577,11 +582,7 @@ mod tests {
         stream.write_all(request.as_bytes()).expect("write");
         let mut response = String::new();
         stream.read_to_string(&mut response).expect("read");
-        let status = response
-            .split_whitespace()
-            .nth(1)
-            .and_then(|code| code.parse().ok())
-            .expect("status line");
+        let status = response.split_whitespace().nth(1).and_then(|code| code.parse().ok()).expect("status line");
         (status, response)
     }
 

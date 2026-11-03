@@ -594,7 +594,7 @@ directly:
 - everything the relay page does: live transcript, prompts, questions,
   approvals, interrupt;
 - the action sheet behind `/`: new session, fork, compact, rename, switch mode
-  (auto, YOLO) or model, and start a subagent with a task of its own;
+  (auto, YOLO), switch model profile, and start a subagent with a task of its own;
 - the subagent board: every worker, its state, its activity and its token
   count, live while they run;
 - an interrupt button that stops the turn without touching the session.
@@ -617,12 +617,18 @@ export ANDROID_HOME=/opt/android-sdk     # build-tools 34, platform 34, JDK 17+
 adb install -r android/build/abacus.apk
 ```
 
-Open it once, paste the link `/mobile` printed, and connect. Later launches go
-straight to the session, and the link can also be opened from anywhere:
+Open it once and connect. The connect screen offers the link from the clipboard,
+so `/mobile` followed by a copy on the terminal is usually enough; it keeps the
+link afterwards and opens straight into the session. The link can also be opened
+from anywhere:
 
 ```sh
 adb shell am start -d "http://192.168.1.10:8787/?t=…" -n ai.empero.abacus/.MainActivity
 ```
+
+`android/app.keystore` is a throwaway key committed on purpose: it keeps the
+signature stable across builds and machines, so `adb install -r` upgrades in
+place. It signs nothing you distribute.
 
 ### What leaves your machine
 

@@ -172,7 +172,17 @@ public class MainActivity extends Activity {
         }
         EditText field = connect.findViewWithTag("link");
         if (field != null) {
-            field.setText(prefs.getString("link", ""));
+            String saved = prefs.getString("link", "");
+            if (saved.isEmpty()) {
+                // First run: the link is almost certainly still on the
+                // clipboard, so offer it rather than making them hunt for it.
+                String clip = clipboard();
+                if (parse(clip)) {
+                    saved = clip;
+                }
+            }
+            field.setText(saved);
+            field.setSelection(field.getText().length());
             field.requestFocus();
         }
     }
@@ -243,13 +253,50 @@ public class MainActivity extends Activity {
         });
         box.addView(go, goParams);
 
+        Button paste = new Button(this);
+        paste.setText("Paste from clipboard");
+        paste.setAllCaps(false);
+        paste.setTextColor(Color.parseColor(TEXT));
+        paste.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        paste.setBackground(rounded(PANEL, LINE, 14));
+        LinearLayout.LayoutParams pasteParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(46));
+        pasteParams.topMargin = dp(10);
+        paste.setOnClickListener(view -> {
+            String clip = clipboard();
+            if (clip.isEmpty()) {
+                TextView problem = connect.findViewWithTag("note");
+                problem.setText("The clipboard is empty.");
+                problem.setVisibility(View.VISIBLE);
+                return;
+            }
+            field.setText(clip);
+            field.setSelection(field.getText().length());
+        });
+        box.addView(paste, pasteParams);
+
         TextView hint = new TextView(this);
-        hint.setText("The link is the only credential — it controls this session.");
+        hint.setText("The link is the only credential: it controls this session.");
         hint.setTextColor(Color.parseColor("#8a919c"));
         hint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         hint.setPadding(0, dp(18), 0, 0);
         box.addView(hint);
         return box;
+    }
+
+    /** The clipboard's text when it holds something link-shaped, else "". */
+    private String clipboard() {
+        try {
+            android.content.ClipboardManager manager =
+                    (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (manager == null || !manager.hasPrimaryClip()) {
+                return "";
+            }
+            CharSequence text = manager.getPrimaryClip().getItemAt(0).coerceToText(this);
+            return text == null ? "" : text.toString().trim();
+        } catch (RuntimeException error) {
+            return "";
+        }
     }
 
     private android.graphics.drawable.Drawable rounded(String fill, String stroke, int radius) {

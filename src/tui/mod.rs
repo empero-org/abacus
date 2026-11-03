@@ -1820,9 +1820,7 @@ impl App {
     fn board_changed(&mut self) -> bool {
         let version = self.workers.board.version();
         let changed = std::mem::replace(&mut self.last_board_version, version) != version;
-        if changed
-            && let Some(bridge) = &mut self.remote
-        {
+        if changed && let Some(bridge) = &mut self.remote {
             // The phone shows the same rows the strip does; a snapshot alone
             // would leave it frozen between reconnects.
             bridge.workers_changed(&self.workers.board.snapshot());
@@ -2796,12 +2794,16 @@ impl App {
             title: session.map(|session| session.title.clone()).unwrap_or_default(),
             workspace: self.config.workspace.display().to_string(),
             model: self.config.model_ref(),
+            profile: self.settings.default_profile.clone(),
             mode,
             app_version: env!("CARGO_PKG_VERSION").to_owned(),
             started_at: session.map(|session| session.created_at.to_rfc3339()).unwrap_or_default(),
         };
         let usage = self.provider.usage();
-        let view = crate::remote::SnapshotView { session: info, entries: &self.entries, usage: &usage };
+        let mut models: Vec<String> = self.settings.profiles.keys().cloned().collect();
+        models.sort();
+        let view =
+            crate::remote::SnapshotView { session: info, entries: &self.entries, usage: &usage, models: &models };
         bridge.send_snapshot(view, reason);
     }
 

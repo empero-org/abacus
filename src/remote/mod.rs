@@ -134,6 +134,7 @@ pub struct SnapshotView<'a> {
     pub session: SessionInfo,
     pub entries: &'a [ui::Entry],
     pub usage: &'a TokenUsage,
+    pub models: &'a [String],
 }
 
 /// Frames queued for the link before the bridge starts dropping them and asks
@@ -631,6 +632,7 @@ impl Bridge {
             pending: Pending { approval: self.approval.clone(), question: self.question.clone() },
             usage: view.usage.into(),
             workers: self.workers_sent.clone().unwrap_or_default(),
+            models: view.models.to_vec(),
         };
         for page in protocol::paginate(head, entries, protocol::TARGET_FRAME_BYTES) {
             self.push(Outbound::Snapshot(Box::new(page)));

@@ -407,6 +407,7 @@ const S = {
   chosen: new Set(),
   pages: new Map(),
   snapshotId: null,
+  models: [],
   follow: true,
   pendingRefs: new Set(),
 };
@@ -519,6 +520,7 @@ function onSnapshot(p) {
   if (head.usage) S.usage = head.usage;
   if (head.status) S.status = head.status;
   if (head.workers) S.workers = head.workers.workers || [];
+  if (head.models) S.models = head.models;
   S.approval = (head.pending && head.pending.approval) || null;
   S.question = (head.pending && head.pending.question) || null;
   S.entries.clear();
@@ -883,6 +885,7 @@ const ICONS = {
   shield: '<path d="M12 3l7 3v5.5c0 4.2-2.9 7.1-7 8.5-4.1-1.4-7-4.3-7-8.5V6z"/>',
   users: '<circle cx="9" cy="8" r="3"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17.5" cy="7.5" r="2.4"/><path d="M17 14c2.4.3 4 2.4 4 5"/>',
   stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
+  chip: '<rect x="6" y="6" width="12" height="12" rx="2.5"/><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/>',
 };
 
 function icon(name) {
@@ -939,6 +942,27 @@ function openActions() {
         closeSheet("actions-sheet");
       },
     }));
+  }
+
+  if (S.models.length) {
+    list.appendChild(groupTitle("Model"));
+    const models = el("div", "rows");
+    const active = (S.session && S.session.profile) || "";
+    for (const profile of S.models) {
+      const current = profile === active;
+      models.appendChild(row(
+        { label: profile, note: current ? "The profile this session runs" : "Switch to this profile", icon: "chip" },
+        {
+          on: current,
+          tag: current ? "current" : "",
+          onClick: () => {
+            send("command", { name: "model", args: profile });
+            closeSheet("actions-sheet");
+          },
+        },
+      ));
+    }
+    list.appendChild(models);
   }
 
   list.appendChild(groupTitle("Subagents"));
