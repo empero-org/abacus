@@ -437,7 +437,16 @@ function connect() {
   const ws = new WebSocket(`${scheme}://${socketHost()}/ws?t=${encodeURIComponent(token())}`);
   S.ws = ws;
   setConn("wait");
+  // A socket stuck in CONNECTING never fires close or error -- a phone that
+  // wakes up behind a dead route would sit on it forever. Give it a deadline
+  // and let the reconnect path take over.
+  const deadline = setTimeout(() => {
+    if (ws.readyState === 0) {
+      try { ws.close(); } catch (error) { /* already gone */ }
+    }
+  }, 6000);
   ws.onopen = () => {
+    clearTimeout(deadline);
     S.attempts = 0;
     setConn("live");
     send("request_snapshot", {});
@@ -448,6 +457,7 @@ function connect() {
     handle(frame);
   };
   ws.onclose = () => {
+    clearTimeout(deadline);
     setConn("dead");
     const wait = Math.min(8000, 500 * Math.pow(1.6, S.attempts++));
     $("status-text").textContent = "reconnecting…";
