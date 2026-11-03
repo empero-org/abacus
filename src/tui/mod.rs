@@ -2885,7 +2885,11 @@ impl App {
     /// offers exist here — never a free slash command, because the terminal's
     /// commands open dialogs a phone cannot see.
     fn remote_command_from_phone(&mut self, ref_id: &str, name: &str, args: &str) {
-        let applied = |app: &mut Self| app.remote_accepted(ref_id, InputKind::Command, AcceptResult::Applied, None);
+        let mut took = false;
+        let mut applied = |app: &mut Self| {
+            took = true;
+            app.remote_accepted(ref_id, InputKind::Command, AcceptResult::Applied, None)
+        };
         let rejected = |app: &mut Self, why: &str| {
             app.remote_accepted(ref_id, InputKind::Command, AcceptResult::Rejected, Some(why))
         };
@@ -2929,6 +2933,12 @@ impl App {
                 applied(self);
             }
             other => rejected(self, &format!("`{other}` is not an action the phone can run")),
+        }
+        // The session's mode, model and profile are only in a snapshot, and the
+        // phone just changed one: send it the new head so its own labels agree
+        // with what the terminal now runs.
+        if took {
+            self.send_remote_snapshot(SnapshotReason::Requested);
         }
     }
 
