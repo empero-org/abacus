@@ -49,6 +49,7 @@ public class MainActivity extends Activity {
     private FrameLayout root;
     private WebView web;
     private LinearLayout connect;
+    private String scheme = "http";
     private String host = "";
     private String port = "";
     private String token = "";
@@ -100,7 +101,8 @@ public class MainActivity extends Activity {
         try {
             URI uri = URI.create(text);
             String parsedHost = uri.getHost();
-            int parsedPort = uri.getPort() > 0 ? uri.getPort() : 8787;
+            String parsedScheme = "https".equalsIgnoreCase(uri.getScheme()) ? "https" : "http";
+            int parsedPort = uri.getPort() > 0 ? uri.getPort() : ("https".equals(parsedScheme) ? 443 : 8787);
             if (parsedHost == null) {
                 return false;
             }
@@ -117,6 +119,7 @@ public class MainActivity extends Activity {
             if (parsedToken.isEmpty()) {
                 return false;
             }
+            scheme = parsedScheme;
             host = parsedHost;
             port = String.valueOf(parsedPort);
             token = parsedToken;
@@ -148,7 +151,7 @@ public class MainActivity extends Activity {
         if (connect != null) {
             connect.setVisibility(View.GONE);
         }
-        web.loadUrl("http://" + host + ":" + port + "/?t=" + token);
+        web.loadUrl(base() + "/?t=" + token);
     }
 
     private void showConnect(String problem) {
@@ -299,6 +302,12 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** `scheme://host[:port]`, with the scheme's default port left out. */
+    private String base() {
+        boolean standard = ("https".equals(scheme) && "443".equals(port)) || ("http".equals(scheme) && "80".equals(port));
+        return scheme + "://" + host + (standard ? "" : ":" + port);
+    }
+
     private android.graphics.drawable.Drawable rounded(String fill, String stroke, int radius) {
         android.graphics.drawable.GradientDrawable shape = new android.graphics.drawable.GradientDrawable();
         shape.setColor(Color.parseColor(fill));
@@ -320,6 +329,7 @@ public class MainActivity extends Activity {
                 JSONObject object = new JSONObject();
                 object.put("host", host);
                 object.put("port", port);
+                object.put("scheme", scheme);
                 object.put("token", token);
                 return object.toString();
             } catch (Exception error) {
