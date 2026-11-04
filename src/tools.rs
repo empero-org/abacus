@@ -154,7 +154,8 @@ impl ToolCall {
                 let preview: String = message.chars().take(60).collect();
                 format!("commit: {preview}")
             }
-            "read_files" => {
+            // `present_files` is the desktop's: the files it shows the person.
+            "read_files" | "present_files" => {
                 format!("{} file(s)", args["paths"].as_array().map(Vec::len).unwrap_or(0))
             }
             "tool_search" => args["query"].as_str().unwrap_or("all tools").to_owned(),

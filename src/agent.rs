@@ -788,9 +788,10 @@ fn argument(call: &ToolCall, name: &str) -> Option<String> {
 
 /// What a chat offers the model: the web, Python, questions to the person, its
 /// memories, and the handles big outputs are bound to. Not the files, shell or
-/// git of the folder it runs in, nor delegation.
+/// git of the folder it runs in, nor delegation. `present_files` is the
+/// desktop's: it shows the person what a chat's Python made.
 pub const CHAT_TOOLS: &[&str] =
-    &["web_search", "read_page", "run_python", "ask_user", "memory_record", "memory_forget"];
+    &["web_search", "read_page", "run_python", "ask_user", "memory_record", "memory_forget", "present_files"];
 
 fn chat_allows(name: &str) -> bool {
     CHAT_TOOLS.contains(&name) || name.starts_with("handle_")
