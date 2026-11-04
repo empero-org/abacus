@@ -240,6 +240,8 @@ fn short(id: &Uuid) -> String {
 pub(crate) struct Engine<'a, R: Remote> {
     remote: &'a R,
     paths: &'a AbacusPaths,
+    /// The most trace one upload carries (see [`TRACE_UPLOAD_LIMIT`]).
+    trace_limit: usize,
     pub state: SyncState,
     pub outcome: SyncOutcome,
     /// `--force`: pulls replace local copies without forking, pushes replace
@@ -260,6 +262,7 @@ impl<'a, R: Remote> Engine<'a, R> {
         Self {
             remote,
             paths,
+            trace_limit: TRACE_UPLOAD_LIMIT,
             state,
             outcome: SyncOutcome::default(),
             force: false,
@@ -440,7 +443,14 @@ impl<'a, R: Remote> Engine<'a, R> {
             return Some(None);
         };
         match inspect_off(entry, record.clone()).await {
-            Ok(Local::Clean(_)) => Some(record.map(|record| record.local_trace_sha256)),
+            // The server's trace is still the one this copy last synced: keep
+            // the local one, which may be longer (see `trace_for_upload`).
+            Ok(Local::Clean(_)) => Some(record.map(|record| match &item.meta {
+                Some(meta) if !record.trace_sha256.is_empty() && meta.trace_sha256 == record.trace_sha256 => {
+                    meta.trace_sha256.clone()
+                }
+                _ => record.local_trace_sha256,
+            })),
             Ok(Local::Dirty(snapshot) | Local::Untracked(snapshot)) => {
                 // Byte-identical on both sides (an upload whose reply was
                 // lost, or a state file that was): adopt the revision.
@@ -557,10 +567,20 @@ impl<'a, R: Remote> Engine<'a, R> {
         trace: Option<Vec<u8>>,
         existing: Option<LocalEntry>,
     ) -> Result<LocalEntry> {
-        let (paths, revision) = (self.paths.clone(), meta.clone());
-        let written =
+        let (paths, revision, fetched) = (self.paths.clone(), meta.clone(), trace.is_some());
+        let mut written =
             off_runtime(move || write_revision(&paths, &revision, &document, trace.as_deref(), existing.as_ref()))
                 .await?;
+        // A trace not fetched is the one kept here. That is the server's,
+        // unless this device sent the server only the newest part of a longer
+        // one (see `trace_for_upload`): then it is the hash recorded for it.
+        if !fetched
+            && let Some(record) = self.state.record(&written.entry.id)
+            && record.trace_sha256 == meta.trace_sha256
+            && !record.local_trace_sha256.is_empty()
+        {
+            written.hashes.trace = record.local_trace_sha256.clone();
+        }
         self.state.mark_synced(&written.entry.id, meta, &written.hashes, Some(written.fingerprint));
         Ok(written.entry)
     }
@@ -710,7 +730,7 @@ impl<'a, R: Remote> Engine<'a, R> {
         uploads: Vec<(LocalEntry, UploadPlan)>,
         index: &mut HashMap<Uuid, LocalEntry>,
     ) -> Result<bool, SyncError> {
-        let (remote, force) = (self.remote, self.force);
+        let (remote, force, trace_limit) = (self.remote, self.force, self.trace_limit);
         let offline = AtomicBool::new(false);
         let offline = &offline;
         let mut results = stream::iter(uploads)
@@ -718,7 +738,7 @@ impl<'a, R: Remote> Engine<'a, R> {
                 if offline.load(Ordering::Relaxed) {
                     return Upload::skipped(entry);
                 }
-                let upload = upload(remote, entry, plan, force).await;
+                let upload = upload(remote, entry, plan, force, trace_limit).await;
                 if matches!(upload.result, Err(UploadError::Remote(SyncError::Transient(_)))) {
                     // Offline: stop starting uploads that would wait out the
                     // same timeout one after another.
@@ -775,6 +795,9 @@ impl<'a, R: Remote> Engine<'a, R> {
                 let refused = record.as_ref().and_then(|record| record.rejected.as_ref()).is_some_and(|rejected| {
                     rejected.local_sha256 == snapshot.hashes.content
                         && rejected.local_trace_sha256 == snapshot.hashes.trace
+                        // Too large before traces were cut to fit: worth one
+                        // more try now that they are.
+                        && (rejected.capped || !rejected.reason.starts_with("413"))
                 });
                 if refused && !self.force {
                     return None;
@@ -831,6 +854,7 @@ impl<'a, R: Remote> Engine<'a, R> {
                         local_sha256: hashes.content.clone(),
                         local_trace_sha256: hashes.trace.clone(),
                         reason: reason.clone(),
+                        capped: true,
                     });
                 });
                 self.outcome.errors.push(format!(
@@ -927,17 +951,51 @@ enum UploadError {
     Remote(SyncError),
 }
 
-/// Read a session and its trace as they are now and upload exactly that.
-async fn upload<R: Remote>(remote: &R, entry: LocalEntry, plan: UploadPlan, force: bool) -> Upload {
+/// The most of a trace one upload carries. The server takes a trace of up to
+/// 100 MiB in a request of up to 150 MB, a proxy in front of it may take
+/// less, and base64 makes the trace a third larger on the way. A longer trace
+/// goes up as its newest whole lines, and stays whole on this device: a
+/// session whose trace outgrew the limit used to be refused outright, so the
+/// session itself never reached the other devices.
+pub(crate) const TRACE_UPLOAD_LIMIT: usize = 64 * 1024 * 1024;
+
+/// What of `trace` an upload carries: all of it, or its newest whole lines
+/// that fit in `limit` bytes.
+fn trace_for_upload(trace: &[u8], limit: usize) -> &[u8] {
+    if trace.len() <= limit {
+        return trace;
+    }
+    let start = trace.len() - limit;
+    if start > 0 && trace[start - 1] == b'\n' {
+        return &trace[start..];
+    }
+    match trace[start..].iter().position(|&byte| byte == b'\n') {
+        Some(newline) => &trace[start + newline + 1..],
+        None => &[],
+    }
+}
+
+/// Read a session and its trace as they are now and upload exactly that, the
+/// trace cut to `trace_limit`. The result carries the local hashes, which are
+/// what "changed here" is measured against; the server is sent the hashes of
+/// what it was sent.
+async fn upload<R: Remote>(remote: &R, entry: LocalEntry, plan: UploadPlan, force: bool, trace_limit: usize) -> Upload {
     let source = entry.clone();
     let read = off_runtime(move || {
         let fingerprint = Fingerprint::take(&source.path, &source.trace);
-        let (document, trace) = read_for_upload(&source)?;
+        let (document, mut trace) = read_for_upload(&source)?;
         let hashes = Hashes::of(&document, sha256_hex(&trace));
-        Ok((fingerprint, document, trace, hashes))
+        let sent = trace_for_upload(&trace, trace_limit);
+        let sent_hashes = if sent.len() == trace.len() {
+            hashes.clone()
+        } else {
+            trace = sent.to_vec();
+            Hashes::of(&document, sha256_hex(&trace))
+        };
+        Ok((fingerprint, document, trace, hashes, sent_hashes))
     })
     .await;
-    let (fingerprint, document, trace, hashes) = match read {
+    let (fingerprint, document, trace, hashes, sent_hashes) = match read {
         Ok(read) => read,
         Err(error) => {
             let mut upload = Upload::skipped(entry);
@@ -950,7 +1008,7 @@ async fn upload<R: Remote>(remote: &R, entry: LocalEntry, plan: UploadPlan, forc
         return Upload { entry, title, hashes, fingerprint, result: Err(UploadError::Skipped) };
     }
     let id = entry.id.to_string();
-    let mut result = remote.put(&id, &document, &trace, &hashes, plan.precondition).await;
+    let mut result = remote.put(&id, &document, &trace, &sent_hashes, plan.precondition).await;
     match &result {
         // The server moved on without the content moving (a remote toggle, a
         // re-upload of the same revision): nothing of theirs would be lost.
@@ -960,14 +1018,14 @@ async fn upload<R: Remote>(remote: &R, entry: LocalEntry, plan: UploadPlan, forc
                 && current.session_sha256 == plan.known_session
                 && current.trace_sha256 == plan.known_trace =>
         {
-            result = remote.put(&id, &document, &trace, &hashes, Precondition::Revision(current.revision)).await;
+            result = remote.put(&id, &document, &trace, &sent_hashes, Precondition::Revision(current.revision)).await;
         }
         Err(SyncError::Conflict(Some(current))) if force => {
-            result = remote.put(&id, &document, &trace, &hashes, Precondition::Revision(current.revision)).await;
+            result = remote.put(&id, &document, &trace, &sent_hashes, Precondition::Revision(current.revision)).await;
         }
         // The record names a revision the server does not have at all.
         Err(SyncError::Conflict(None)) if plan.precondition != Precondition::Create => {
-            result = remote.put(&id, &document, &trace, &hashes, Precondition::Create).await;
+            result = remote.put(&id, &document, &trace, &sent_hashes, Precondition::Create).await;
         }
         _ => {}
     }
@@ -1154,6 +1212,10 @@ pub(crate) mod tests {
 
         fn stored(&self, id: &Uuid) -> Value {
             self.inner.lock().unwrap().rows[&id.to_string()].document.clone()
+        }
+
+        fn stored_trace(&self, id: &Uuid) -> Vec<u8> {
+            self.inner.lock().unwrap().rows[&id.to_string()].trace.clone()
         }
 
         /// A revision bump that leaves the content alone, like a remote toggle.
@@ -1357,6 +1419,14 @@ pub(crate) mod tests {
             let mut engine = Engine::new(server, &self.paths, self.state());
             engine.page_size = page_size;
             let result = engine.pull(false).await;
+            engine.finish(result).unwrap()
+        }
+
+        /// A push whose uploads carry at most `limit` bytes of trace.
+        async fn push_capped(&self, server: &FakeServer, limit: usize) -> SyncOutcome {
+            let mut engine = Engine::new(server, &self.paths, self.state()).manual(false);
+            engine.trace_limit = limit;
+            let result = engine.push(None).await;
             engine.finish(result).unwrap()
         }
 
@@ -1778,6 +1848,67 @@ pub(crate) mod tests {
         server.fail_once("changes", SyncError::Unauthorized);
         assert!(matches!(device.try_reconcile(&server).await, Err(SyncError::Unauthorized)));
         assert_eq!(server.calls("put"), 0);
+    }
+
+    #[test]
+    fn a_trace_too_large_to_send_is_cut_to_its_newest_whole_lines() {
+        let trace = b"{\"a\":1}\n{\"b\":22}\n{\"c\":333}\n";
+        assert_eq!(trace_for_upload(trace, 100), &trace[..]);
+        // A cut inside a line drops that line; one at a line's start keeps it.
+        assert_eq!(trace_for_upload(trace, 12), b"{\"c\":333}\n");
+        assert_eq!(trace_for_upload(trace, 19), b"{\"b\":22}\n{\"c\":333}\n");
+        assert_eq!(trace_for_upload(trace, 5), b"");
+    }
+
+    /// A session whose trace grew past what one upload carries used to be
+    /// refused whole (413), so the session itself never reached the other
+    /// devices. Now the server gets the newest whole lines of the trace, this
+    /// device keeps all of it, and neither side mistakes the difference for a
+    /// change.
+    #[tokio::test]
+    async fn a_session_with_a_trace_too_large_to_send_still_syncs() {
+        let server = FakeServer::default();
+        let (laptop, desktop) = (Device::new(), Device::new());
+        let session = laptop.session(&["one", "two", "three"]);
+        let full = std::fs::read(trace_path(&laptop.paths, &session.id)).unwrap();
+        let limit = full.len() - 5;
+        assert_eq!(laptop.push_capped(&server, limit).await.pushed, 1);
+        let sent = server.stored_trace(&session.id);
+        assert!(!sent.is_empty() && sent.len() <= limit && full.ends_with(&sent), "{}", String::from_utf8_lossy(&sent));
+        assert_eq!(laptop.push_capped(&server, limit).await.pushed, 0, "a cut trace is not a change");
+
+        assert_eq!(desktop.pull(&server, 10).await.pulled, 1);
+        assert_eq!(std::fs::read(trace_path(&desktop.paths, &session.id)).unwrap(), sent);
+
+        // Renamed on the desktop: the laptop takes the new revision and keeps
+        // the lines the server never had.
+        let mut there = desktop.load(&session.id).unwrap();
+        there.title = "Renamed elsewhere".into();
+        desktop.store().save(&there).unwrap();
+        assert_eq!(desktop.push(&server, false).await.pushed, 1);
+        assert_eq!(laptop.pull(&server, 10).await.pulled, 1);
+        assert_eq!(laptop.load(&session.id).unwrap().title, "Renamed elsewhere");
+        assert_eq!(std::fs::read(trace_path(&laptop.paths, &session.id)).unwrap(), full);
+        assert_eq!(laptop.push_capped(&server, limit).await.pushed, 0, "still nothing changed here");
+    }
+
+    /// A session refused as too large before traces were cut gets one more try.
+    #[tokio::test]
+    async fn a_size_refusal_from_before_traces_were_cut_is_tried_again() {
+        let server = FakeServer::default();
+        let device = Device::new();
+        let session = device.session(&["huge"]);
+        server.fail_once(
+            "put",
+            SyncError::Rejected { status: 413, detail: "request body exceeds 157286400 bytes".into() },
+        );
+        assert_eq!(device.reconcile(&server).await.errors.len(), 1);
+        // What an older abacus wrote for that refusal: no word of a cut trace.
+        let file = device.paths.sync_state_file();
+        let mut state: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        state["sessions"][session.id.to_string()]["rejected"].as_object_mut().unwrap().remove("capped");
+        std::fs::write(&file, serde_json::to_vec(&state).unwrap()).unwrap();
+        assert_eq!(device.reconcile(&server).await.pushed, 1);
     }
 
     #[tokio::test]

@@ -129,6 +129,11 @@ pub struct Rejected {
     pub local_sha256: String,
     pub local_trace_sha256: String,
     pub reason: String,
+    /// Whether the upload already carried no more trace than
+    /// `TRACE_UPLOAD_LIMIT`. A size refusal from before that limit is tried
+    /// once more, cut to it.
+    #[serde(default)]
+    pub capped: bool,
 }
 
 /// Size and mtime of a session file and its trace, so an untouched session is

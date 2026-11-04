@@ -48,6 +48,15 @@ Three console changes for issues #11, #10 and #3.
   Down past the newest prompt gives it back; a recalled prompt that was
   changed keeps the change while browsing past it and back.
 
+- **Sessions with a large trace sync again.** A session's training trace goes
+  up with it, and once a trace passed about 110 MB the server refused the
+  whole upload (413) — so the session itself, usually well under a megabyte,
+  never reached the other devices and was reported as refused on every sync.
+  An upload now carries at most the newest 64 MiB of the trace, in whole
+  lines; the full trace stays on the device it was written on, and a pull
+  never trades it for the server's shorter copy. Sessions refused for size
+  before this are tried once more.
+
 ## 0.7.6 — 2026-10-29
 
 What Abacus Desktop 0.1.6 builds on: goals that keep going, chats, and
