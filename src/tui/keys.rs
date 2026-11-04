@@ -58,7 +58,6 @@ pub(super) fn handle_key(app: &mut App, key: KeyEvent) {
             app.set_show_thinking(!app.settings.ui.show_thinking);
             return;
         }
-        KeyCode::F(2) => return app.toggle_mouse(),
         // Ctrl+O steps an open approval or question aside so the output behind
         // it can be read; pressing it again brings the dialog back. With no
         // dialog it opens the newest tool block instead — mid-turn too, so
@@ -269,6 +268,38 @@ pub(super) fn config_key(app: &mut App, key: KeyEvent) {
         KeyCode::Esc | KeyCode::Char('q') => app.config_panel = None,
         _ => {}
     }
+}
+
+/// The text under a drag selection, read from the frame that was drawn rather
+/// than from a re-render, so what is copied is exactly what was highlighted.
+///
+/// Rows outside the frame are ignored: a drag can end past the edge, and the
+/// anchor can start above it after a scroll between press and release.
+pub(super) fn selected_screen_text(buffer: &Buffer, selection: Selection) -> Option<String> {
+    let (start, end) = selection.ordered();
+    let area = *buffer.area();
+    let mut lines = Vec::new();
+    for row in start.1..=end.1.min(area.bottom().saturating_sub(1)) {
+        let from = if row == start.1 { start.0 } else { area.left() };
+        let to = if row == end.1 { end.0 } else { area.right().saturating_sub(1) };
+        let mut line = String::new();
+        for column in from..=to {
+            if let Some(cell) = buffer.cell((column, row)) {
+                line.push_str(cell.symbol());
+            }
+        }
+        lines.push(line.trim_end().to_owned());
+    }
+    // Blank rows at either end are margin, not content: a drag that starts a
+    // row above the text should not paste an empty line above it.
+    while lines.first().is_some_and(String::is_empty) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    let text = lines.join("\n");
+    (!text.trim().is_empty()).then_some(text)
 }
 
 /// Route a left click to whatever was drawn under it.
@@ -846,24 +877,42 @@ impl App {
         }
     }
 
-    /// F2: hand the mouse back to the terminal so click-drag selects text the
-    /// way it does anywhere else, and take it back for the wheel and clickable
-    /// rows. The mouse starts captured; this is the escape hatch on terminals
-    /// without a Shift-drag bypass, so a captured TUI never becomes a place
-    /// you cannot copy out of.
-    pub(super) fn toggle_mouse(&mut self) {
-        toggle(&mut self.mouse_captured);
-        let switched = if self.mouse_captured {
-            execute!(io::stdout(), EnableMouseCapture)
-        } else {
-            execute!(io::stdout(), DisableMouseCapture)
+    /// A press on the screen may become a drag-select or a click; which one it
+    /// was is only known on release, so the press is just remembered here.
+    pub(super) fn begin_selection(&mut self, column: u16, row: u16) {
+        self.press = Some((column, row));
+        self.selection = None;
+    }
+
+    /// Extend the selection to the pointer. Abacus holds the mouse for the
+    /// wheel and for clickable rows, so the terminal never draws its own
+    /// selection over a drag in here — the highlight and the copy are ours.
+    pub(super) fn extend_selection(&mut self, column: u16, row: u16) {
+        let Some(anchor) = self.press else {
+            return;
         };
-        self.status = match (switched, self.mouse_captured) {
-            (Err(_), _) => "could not switch mouse mode",
-            (_, true) => "mouse captured — wheel scrolls, rows click · F2 to select text again",
-            (_, false) => "mouse released — drag to select and copy · F2 for wheel scrolling",
+        // A hand rarely holds a click perfectly still. Until the pointer has
+        // left the row or gone two cells along it, the press is still a click.
+        let dragged = anchor.1 != row || anchor.0.abs_diff(column) >= 2;
+        self.selection = (dragged || self.selection.is_some()).then_some(Selection { anchor, cursor: (column, row) });
+    }
+
+    /// Release: a drag copies what it covered, a press that never moved is the
+    /// click it always was.
+    pub(super) fn finish_selection(&mut self) {
+        let Some((column, row)) = self.press.take() else {
+            return;
+        };
+        let screen = self.screen.take();
+        let Some(selection) = self.selection.take() else {
+            handle_click(self, column, row);
+            return;
+        };
+        let text = screen.and_then(|buffer| selected_screen_text(&buffer, selection));
+        match text {
+            Some(text) => self.copy_to_clipboard(&text, "selection"),
+            None => self.status = "nothing selected".to_owned(),
         }
-        .to_owned();
     }
 
     pub(super) fn clear_cursor(&mut self) {

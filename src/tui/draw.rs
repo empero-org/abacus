@@ -73,6 +73,34 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     } else if app.workers_overlay {
         draw_workers(frame, area, app);
     }
+    finish_frame(frame, app);
+}
+
+/// Paint the drag selection over the finished frame and keep the frame's text.
+///
+/// Abacus holds the mouse for the wheel and for clickable rows, so the terminal
+/// never draws its own selection over a drag — the highlight and the copy both
+/// come from here. The snapshot is taken only while a press or drag is live, so
+/// an idle screen pays nothing for it.
+pub(super) fn finish_frame(frame: &mut Frame<'_>, app: &mut App) {
+    if app.selection.is_none() && app.press.is_none() {
+        return;
+    }
+    let buffer = frame.buffer_mut();
+    if let Some(selection) = app.selection {
+        let (start, end) = selection.ordered();
+        let area = *buffer.area();
+        for row in start.1..=end.1.min(area.bottom().saturating_sub(1)) {
+            let from = if row == start.1 { start.0 } else { area.left() };
+            let to = if row == end.1 { end.0 } else { area.right().saturating_sub(1) };
+            for column in from..=to {
+                if let Some(cell) = buffer.cell_mut((column, row)) {
+                    cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+                }
+            }
+        }
+    }
+    app.screen = Some(buffer.clone());
 }
 
 /// The colour that stands for a mode, used consistently by the header badge
@@ -735,7 +763,7 @@ pub(super) fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
             ("@", "files"),
             ("PgUp/PgDn", "scroll"),
             ("⇧⇥", "mode"),
-            ("F2", "mouse wheel"),
+            ("drag", "select · copy"),
             ("F1", "help"),
         ]
     } else {
@@ -959,6 +987,7 @@ pub(super) fn draw_help(frame: &mut Frame<'_>, area: Rect) {
                 ("Ctrl+Shift+Enter", "fork the session"),
                 ("Tab", "accept the highlighted suggestion"),
                 ("↑ ↓", "browse prompt history, or the suggestion list"),
+                ("wheel · drag", "scroll the transcript, or drag across text to copy it"),
                 ("Ctrl+V", "paste text or an image from the clipboard"),
                 ("Ctrl+A", "select the whole draft"),
                 ("Ctrl+C", "copy the selection (or interrupt when nothing is selected)"),
@@ -972,7 +1001,6 @@ pub(super) fn draw_help(frame: &mut Frame<'_>, area: Rect) {
         (
             "TRANSCRIPT (normal mode)",
             &[
-                ("F2", "release the mouse for drag-select; F2 again for the wheel and clicks"),
                 ("j · k", "move between blocks"),
                 ("o · space · enter", "fold or unfold a tool result"),
                 ("h · l", "fold or unfold explicitly"),

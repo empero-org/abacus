@@ -30,6 +30,7 @@ use crossterm::{
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
+    buffer::Buffer,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
@@ -434,6 +435,26 @@ enum QrOverlay {
     Failed(String),
 }
 
+/// A drag selection over the screen, in cell coordinates: the anchor where the
+/// press landed and the cursor where the pointer is now. A copy runs from the
+/// earlier cell to the later one in reading order, so dragging upwards selects
+/// exactly the same text as the same drag downwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Selection {
+    anchor: (u16, u16),
+    cursor: (u16, u16),
+}
+
+impl Selection {
+    fn ordered(self) -> ((u16, u16), (u16, u16)) {
+        if (self.cursor.1, self.cursor.0) < (self.anchor.1, self.anchor.0) {
+            (self.cursor, self.anchor)
+        } else {
+            (self.anchor, self.cursor)
+        }
+    }
+}
+
 struct App {
     config: Config,
     settings: Settings,
@@ -449,11 +470,17 @@ struct App {
     /// What the conversation carries between turns.
     state: SessionState,
     workers: crate::workers::Workers,
-    /// Whether Abacus is holding the mouse. Holding it enables wheel scrolling
-    /// and clickable rows but takes click-drag away from the terminal on
-    /// terminals without a Shift-drag bypass, which is how you select and copy
-    /// text — so it is releasable with F2.
-    mouse_captured: bool,
+    /// The last press on the screen, so a release that never moved is a click
+    /// and a release that did is a copy.
+    press: Option<(u16, u16)>,
+    /// The drag selection drawn over the last frame, in screen cells. Abacus
+    /// holds the mouse for the wheel and for clickable rows, which means the
+    /// terminal's own selection never sees a drag — so the drag is tracked here
+    /// and the text taken from the frame that was drawn.
+    selection: Option<Selection>,
+    /// The last frame's text, kept so a released selection copies the glyphs
+    /// that were actually on screen rather than a re-render of the transcript.
+    screen: Option<Buffer>,
     /// Ctrl+P: the subagent detail overlay.
     workers_overlay: bool,
     workers_scroll: u16,
@@ -663,10 +690,10 @@ pub async fn run(
         EnterAlternateScreen,
         EnableBracketedPaste,
         // Capture the mouse from the first frame so the wheel scrolls the
-        // transcript and rows are clickable. Terminals that support Shift-drag
-        // bypass (iTerm2, kitty, WezTerm, Alacritty, Ghostty) still select text
-        // while captured; everywhere else F2 hands the mouse back for
-        // drag-select, and PgUp/PgDn scroll regardless.
+        // transcript and rows are clickable. There is no mode to switch out of:
+        // a drag inside the window is tracked here and copied on release (see
+        // `finish_frame`), and a terminal that wants its own selection back
+        // still has Shift-drag, which bypasses the capture.
         EnableMouseCapture,
         SetTitle(format!("Abacus — {}", config.workspace_name()))
     )?;
@@ -1012,9 +1039,14 @@ async fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut
                         }
                         MouseEventKind::Down(MouseButton::Left) => {
                             app.pointer = Some((mouse.column, mouse.row));
-                            handle_click(app, mouse.column, mouse.row)
+                            app.begin_selection(mouse.column, mouse.row);
                         }
-                        MouseEventKind::Moved | MouseEventKind::Drag(_) => {
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            app.pointer = Some((mouse.column, mouse.row));
+                            app.extend_selection(mouse.column, mouse.row);
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => app.finish_selection(),
+                        MouseEventKind::Moved => {
                             app.pointer = Some((mouse.column, mouse.row));
                         }
                         _ => {}
@@ -1340,7 +1372,9 @@ impl App {
             services,
             state,
             workers,
-            mouse_captured: true,
+            press: None,
+            selection: None,
+            screen: None,
             workers_overlay: false,
             workers_scroll: 0,
             entries,

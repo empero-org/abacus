@@ -2160,6 +2160,59 @@ fn clicking_a_suggestion_inserts_it() {
     assert_eq!(app.input.text(), format!("{} ", items[index].0));
 }
 
+/// A drag copies the text it covered, with no mode to switch into: the wheel
+/// keeps scrolling and rows keep clicking, because the highlight is Abacus's
+/// own rather than the terminal's.
+#[test]
+fn a_drag_over_the_transcript_copies_what_it_covered() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    app.entries = vec![Entry::new(EntryKind::User, "first line"), Entry::new(EntryKind::Assistant, "second line")];
+    // A live press is what makes the draw keep the frame's text for the copy.
+    app.begin_selection(0, 0);
+    let _ = render(&mut app, 60, 20);
+    let screen = app.screen.clone().expect("the frame's text is kept while a drag is live");
+    let row = (0..20)
+        .find(|row| (0..60).map(|column| screen[(column, *row)].symbol()).collect::<String>().contains("second line"))
+        .expect("the answer should be on screen");
+
+    app.begin_selection(0, row);
+    app.extend_selection(59, row);
+    let selection = app.selection.expect("a drag makes a selection");
+    let text = selected_screen_text(&app.screen.clone().expect("screen"), selection).expect("text under the drag");
+    assert!(text.contains("second line"), "{text}");
+    assert_eq!(text, text.trim_end(), "the margin to the right of the text is not copied");
+
+    let backend = TestBackend::new(60, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let painted = &terminal.backend().buffer()[(10, row)];
+    assert!(painted.modifier.contains(Modifier::REVERSED), "the drag is highlighted while it is being made");
+}
+
+/// The whole screen is one mode: the press that starts a drag is also the press
+/// that clicks a row, and only the release can tell them apart.
+#[test]
+fn a_press_that_never_moved_is_still_a_click() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    let long = (1..=30).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
+    app.entries = vec![Entry::new(EntryKind::User, "run it"), tool_entry(&long)];
+    let _ = render(&mut app, 80, 24);
+    let (rect, _) = app.hits.borrow().transcript.iter().copied().find(|(_, index)| *index == 1).expect("tool block");
+
+    app.begin_selection(rect.x + 2, rect.y);
+    app.finish_selection();
+    assert_eq!(app.cursor, Some(1), "a press that never dragged still selects the block");
+    assert!(app.selection.is_none(), "there is nothing to keep highlighted");
+
+    // A cell of jitter while clicking is still a click, not a two-letter copy.
+    app.cursor = None;
+    app.begin_selection(rect.x + 2, rect.y);
+    app.extend_selection(rect.x + 3, rect.y);
+    assert!(app.selection.is_none(), "{:?}", app.selection);
+    app.finish_selection();
+    assert_eq!(app.cursor, Some(1));
+}
+
 #[test]
 fn a_click_on_an_overlay_does_not_reach_the_transcript_beneath() {
     let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
