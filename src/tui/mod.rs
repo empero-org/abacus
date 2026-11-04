@@ -11,7 +11,7 @@ use crate::{
     provider::Provider,
     remote::{AcceptResult, Bridge, By, Inbound, InputKind, LinkState, SnapshotReason},
     services::AgentServices,
-    session::{Session, SessionState, SessionStore, SessionUsage},
+    session::{Opened, Session, SessionState, SessionStore, SessionUsage},
     theme::{ThemeMode, border, danger, inverse, muted, primary, rail, secondary, success, surface, text, warning},
     ui::{self, Entry, EntryKind, ToolCall, ToolStatus, bold, emphasis, fg},
 };
@@ -1326,7 +1326,12 @@ impl App {
         }
         let yolo = config.permission == Permission::Yolo;
         let branch = git_branch(&config.workspace);
-        let state = SessionState::open(&config, session.as_ref());
+        // A session given at startup (`--resume`, `-c`, a recovery) is one
+        // opened again.
+        let state = SessionState {
+            opened: Some(Opened::of(session.as_ref())),
+            ..SessionState::open(&config, session.as_ref())
+        };
         // The model lists on disk, so pickers open on something at once.
         let catalogs = settings
             .providers
@@ -2129,8 +2134,12 @@ impl App {
         let content =
             crate::context::user_content(&self.config.workspace, &self.config.paths.attachments_dir, &model_prompt);
         let message = json!({"role": "user", "content": content});
-        self.ctx_chars = self.ctx_chars.saturating_add(crate::agent::message_chars_one(&message));
-        self.messages.push(message);
+        // The first turn after a start or a resume says where the session
+        // runs, and after a resume how long it was left.
+        for message in self.state.take_opening_note(&self.config.workspace).into_iter().chain([message]) {
+            self.ctx_chars = self.ctx_chars.saturating_add(crate::agent::message_chars_one(&message));
+            self.messages.push(message);
+        }
         self.persist_session();
         // The session now exists (first prompt creates it), so recovery can
         // name it — the startup arm only knew the id for resumed sessions.
@@ -2397,7 +2406,8 @@ impl App {
         self.trace = None;
         let injections = self.state.injections.clone();
         let state = SessionState::open(&self.config, session.as_ref());
-        self.state = SessionState { injections, ..state };
+        let opened = Some(Opened::of(session.as_ref()));
+        self.state = SessionState { injections, opened, ..state };
         self.messages =
             session.as_ref().map_or_else(|| initial_messages(&self.config.workspace), |s| s.messages.clone());
         self.ctx_chars = message_chars(&self.messages);

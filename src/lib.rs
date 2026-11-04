@@ -12,6 +12,7 @@ pub mod context;
 pub mod context_use;
 pub mod cron;
 pub mod diff;
+pub mod environment;
 pub mod extensions;
 pub mod feedback;
 pub mod goal;

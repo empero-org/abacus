@@ -417,6 +417,49 @@ fn a_rebuilt_transcript_says_when_the_middle_was_dropped() {
     assert_eq!(entries.len(), 3, "the note is the model's, not the transcript's");
 }
 
+/// A session tells the model where it runs on its first turn, and again, with
+/// when it was left and that what it saw then may have changed, on the first
+/// turn after it is resumed — only those turns. The notes are the model's:
+/// the transcript does not show them.
+#[tokio::test]
+async fn the_first_turn_after_a_start_or_a_resume_says_where_and_how_long() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    let notes = |messages: &[Value]| {
+        messages
+            .iter()
+            .filter(|message| message["content"].as_str().is_some_and(crate::session::is_opening_note))
+            .count()
+    };
+    app.start_turn("start the dev server".into(), "start the dev server".into(), true);
+    let started = &app.messages[app.messages.len() - 2..];
+    let note = started[0]["content"].as_str().unwrap();
+    assert!(note.starts_with("<environment>") && !note.contains("<resume_info>"), "{note}");
+    assert_eq!(started[1]["content"], "start the dev server");
+    app.running.take().unwrap().abort();
+
+    let store = SessionStore::new(&app.config.paths, app.config.workspace.clone());
+    let mut session = store.create("test".into(), "test/test-model".into(), Vec::new()).unwrap();
+    session.update_messages(vec![
+        json!({"role": "user", "content": "start the dev server"}),
+        json!({"role": "assistant", "content": "It runs on port 3000."}),
+    ]);
+    session.updated_at -= chrono::Duration::days(2);
+    app.session_store = Some(store);
+    app.adopt(Some(session));
+
+    app.start_turn("is it still up?".into(), "is it still up?".into(), true);
+    let resumed = &app.messages[app.messages.len() - 2..];
+    let note = resumed[0]["content"].as_str().unwrap();
+    assert_eq!(resumed[0]["role"], "system");
+    assert!(note.contains("<time_away>2 days</time_away>") && note.contains("<environment>"), "{note}");
+    assert_eq!(resumed[1]["content"], "is it still up?");
+    assert!(!entries_from_messages(&app.messages).iter().any(|entry| entry.text.contains("resume_info")));
+
+    app.running.take().unwrap().abort();
+    app.start_turn("and now?".into(), "and now?".into(), true);
+    assert_eq!(notes(&app.messages), 1, "only the first turn after the resume");
+}
+
 /// Messages that were waiting when a session is opened do not start a turn
 /// on their own: the person opening it is in charge, and they ride along
 /// with what the person sends.
@@ -1414,9 +1457,9 @@ async fn repair_command_refuses_to_run_mid_turn() {
     app.start_turn("go".into(), "go".into(), false);
     assert!(app.slash_command("/repair"));
     assert_eq!(app.status, "cannot repair while a turn is running");
-    // The running turn's history is untouched (only the queued user
-    // message was added by start_turn).
-    assert_eq!(app.messages.len(), before.len() + 1);
+    // The running turn's history is untouched: only start_turn added to it,
+    // a new session's opening note and the queued user message.
+    assert_eq!(app.messages.len(), before.len() + 2);
 }
 
 #[test]

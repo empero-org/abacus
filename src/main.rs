@@ -16,7 +16,7 @@ use abacus_agent::{
     extensions::PluginRegistry,
     headless, model_info,
     services::AgentServices,
-    session::{SessionStore, WorkspaceSessions},
+    session::{Opened, SessionStore, WorkspaceSessions, opening_note},
     setup, tui,
 };
 
@@ -158,6 +158,8 @@ async fn main() -> Result<()> {
     let images = cli.images.iter().map(|path| context::image_data_url(path)).collect::<Result<Vec<_>>>()?;
     let content =
         context::with_images(context::user_content(&config.workspace, &config.paths.attachments_dir, &prompt), images);
+    // Where the run happens, and for a resumed session how long it was left.
+    messages.push(opening_note(Opened::of(session.as_ref()), &config.workspace));
     messages.push(json!({"role": "user", "content": content}));
     if let (Some(session), Some(store)) = (session.as_mut(), &store) {
         session.update_messages(messages.clone());

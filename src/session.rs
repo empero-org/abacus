@@ -30,6 +30,26 @@ pub struct SessionState {
     pub handles: crate::handles::HandleStore,
     /// Mid-turn arrivals: user steering and finished background subagents.
     pub injections: crate::agent::InjectionQueue,
+    /// How the session came to be open, until its next turn has told the
+    /// model so (see [`opening_note`]).
+    pub opened: Option<Opened>,
+}
+
+/// How a session came to be open, for the note its next turn starts with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Opened {
+    /// Started here, with nothing said yet.
+    New,
+    /// Opened again from disk, after being left at this time.
+    Resumed(DateTime<Utc>),
+}
+
+impl Opened {
+    /// How a front end comes to have `session` open: resumed when there is
+    /// one, new when there is not.
+    pub fn of(session: Option<&Session>) -> Self {
+        session.map_or(Self::New, |session| Self::Resumed(session.updated_at))
+    }
 }
 
 impl SessionState {
@@ -50,7 +70,16 @@ impl SessionState {
             memories,
             handles: Default::default(),
             injections: Default::default(),
+            // A session opened from disk says how only where it was resumed;
+            // a fork, say, goes on as if never left.
+            opened: session.is_none().then_some(Opened::New),
         }
+    }
+
+    /// The note the first turn after the session was started or resumed
+    /// opens with, for one working in `workspace`; None after that.
+    pub fn take_opening_note(&mut self, workspace: &Path) -> Option<Value> {
+        self.opened.take().map(|opened| opening_note(opened, workspace))
     }
 
     /// Write this state into `session`, ready to be saved.
@@ -530,6 +559,61 @@ fn workspace_key(workspace: &std::path::Path) -> String {
     format!("{name}-{hash:016x}")
 }
 
+/// How the part of an [`opening_note`] about a resume opens.
+const RESUME_TAG: &str = "<resume_info>";
+
+/// What the model is told on the first turn after a session was started or
+/// resumed: where it runs (see [`crate::environment`]), and for a resume,
+/// when it was left, when it goes on, and that what it saw before may no
+/// longer hold. It goes in the history as a system message, before the
+/// person's message, so later turns still know.
+pub fn opening_note(opened: Opened, workspace: &Path) -> Value {
+    let environment = crate::environment::block(workspace);
+    let content = match opened {
+        Opened::New => environment,
+        Opened::Resumed(exited) => format!("{}\n{environment}", resume_text(exited, Utc::now(), &chrono::Local)),
+    };
+    serde_json::json!({"role": "system", "content": content})
+}
+
+/// Whether `text` is an [`opening_note`]'s.
+pub fn is_opening_note(text: &str) -> bool {
+    text.starts_with(RESUME_TAG) || text.starts_with(crate::environment::TAG)
+}
+
+fn resume_text<Zone: chrono::TimeZone>(exited: DateTime<Utc>, now: DateTime<Utc>, zone: &Zone) -> String
+where
+    Zone::Offset: std::fmt::Display,
+{
+    let local = |at: DateTime<Utc>| at.with_timezone(zone).format("%d.%m.%Y %H:%M").to_string();
+    format!(
+        "{RESUME_TAG}\n  <session_exit>{}</session_exit>\n  <resume_now>{}</resume_now>\n  \
+         <time_away>{}</time_away>\n  <note>This session was closed and has now been resumed. Time has \
+         passed since the conversation above, and things may have changed in the meantime: files may have \
+         been edited, branches switched or commits made; processes and servers that were running may have \
+         stopped, restarted or been replaced; background tasks, services and anything else outside this \
+         conversation may be different. Do not assume the earlier state is still exact. Check what matters \
+         before relying on it.</note>\n</resume_info>",
+        local(exited),
+        local(now),
+        time_away((now - exited).num_seconds()),
+    )
+}
+
+/// `seconds` in words, to the two largest units: "5 days, 14 hours".
+fn time_away(seconds: i64) -> String {
+    let unit = |count: i64, name: &str| format!("{count} {name}{}", if count == 1 { "" } else { "s" });
+    let (days, hours, minutes) = (seconds / 86_400, seconds % 86_400 / 3_600, seconds % 3_600 / 60);
+    match (days, hours, minutes) {
+        _ if seconds < 60 => "less than a minute".to_owned(),
+        (0, 0, minutes) => unit(minutes, "minute"),
+        (0, hours, 0) => unit(hours, "hour"),
+        (0, hours, minutes) => format!("{}, {}", unit(hours, "hour"), unit(minutes, "minute")),
+        (days, 0, _) => unit(days, "day"),
+        (days, hours, _) => format!("{}, {}", unit(days, "day"), unit(hours, "hour")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -686,5 +770,63 @@ mod tests {
         assert_eq!(messages[1]["tool_call_id"], "good");
         // Second run is a no-op: repair is idempotent.
         assert!(repair_messages(&mut messages).is_empty());
+    }
+
+    #[test]
+    fn a_resumed_session_is_told_when_it_was_left_and_that_things_may_have_changed() {
+        let exited = "1972-04-01T13:28:00Z".parse::<DateTime<Utc>>().unwrap();
+        let now = "1972-04-07T04:01:30Z".parse::<DateTime<Utc>>().unwrap();
+        let text = resume_text(exited, now, &Utc);
+        assert!(is_opening_note(&text));
+        assert!(text.contains("<session_exit>01.04.1972 13:28</session_exit>"), "{text}");
+        assert!(text.contains("<resume_now>07.04.1972 04:01</resume_now>"), "{text}");
+        assert!(text.contains("<time_away>5 days, 14 hours</time_away>"), "{text}");
+        assert!(text.contains("processes and servers that were running"), "{text}");
+        assert!(text.contains("Do not assume the earlier state is still exact"), "{text}");
+        assert!(text.ends_with("</resume_info>"));
+    }
+
+    #[test]
+    fn time_away_reads_in_the_two_largest_units() {
+        let cases = [
+            (-30, "less than a minute"),
+            (59, "less than a minute"),
+            (60, "1 minute"),
+            (3_599, "59 minutes"),
+            (3_600, "1 hour"),
+            (2 * 3_600 + 60, "2 hours, 1 minute"),
+            (86_400 + 59, "1 day"),
+            (3 * 86_400 + 3_600, "3 days, 1 hour"),
+        ];
+        for (seconds, words) in cases {
+            assert_eq!(time_away(seconds), words, "{seconds}s");
+        }
+    }
+
+    #[test]
+    fn a_started_session_says_where_it_runs_and_a_resumed_one_also_when_it_was_left() {
+        let workspace = Path::new("/work/project");
+        let started = opening_note(Opened::New, workspace);
+        let started = started["content"].as_str().unwrap();
+        assert!(started.starts_with("<environment>") && !started.contains("<resume_info>"), "{started}");
+        assert!(is_opening_note(started));
+
+        let resumed = opening_note(Opened::Resumed(Utc::now() - chrono::Duration::hours(3)), workspace);
+        assert_eq!(resumed["role"], "system");
+        let resumed = resumed["content"].as_str().unwrap();
+        assert!(resumed.starts_with("<resume_info>"), "{resumed}");
+        assert!(resumed.contains("<time_away>3 hours</time_away>"), "{resumed}");
+        assert!(resumed.contains("</resume_info>\n<environment>"), "{resumed}");
+        assert!(resumed.contains("<cwd>/work/project</cwd>"), "{resumed}");
+    }
+
+    #[test]
+    fn only_the_first_turn_after_a_start_or_resume_carries_the_note() {
+        let workspace = Path::new("/work");
+        let mut state = SessionState { opened: Some(Opened::Resumed(Utc::now())), ..Default::default() };
+        let note = state.take_opening_note(workspace).expect("the first turn's note");
+        assert!(is_opening_note(note["content"].as_str().unwrap()));
+        assert!(state.take_opening_note(workspace).is_none());
+        assert_eq!(Opened::of(None), Opened::New);
     }
 }

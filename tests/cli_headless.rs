@@ -433,6 +433,113 @@ async fn headless_resume_continues_the_newest_copy_and_keeps_another_devices_tur
     assert_eq!(sessions, 1);
 }
 
+/// A run tells the model where it runs, and one that resumes a session also
+/// when it was left and that what it saw then may have changed, just before
+/// the new prompt.
+#[tokio::test]
+async fn headless_runs_say_where_they_run_and_a_resume_how_long_it_was_left() {
+    let sync = sync_server::SyncServer::start("secret-token").await;
+    let device = SignedIn::new(&sync, "secret-token");
+    let (model, requests) = recording_model_endpoint();
+    let output = device.command(&model, &["--prompt", "first", "--output-format", "json"]).output().await.unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let first: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let id = first["session_id"].as_str().unwrap().to_owned();
+    let output = device
+        .command(&model, &["--resume", &id, "--prompt", "second", "--output-format", "json"])
+        .output()
+        .await
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+    let sent = requests.lock().unwrap().clone();
+    assert!(!sent[0].contains("<resume_info>"), "a new session has nothing to resume");
+    assert_eq!(sent[0].matches("<environment>").count(), 1, "{}", sent[0]);
+    assert!(sent[0].find("<environment>") < sent[0].find("\"first\""), "the note comes before the prompt");
+    let second = sent.iter().find(|request| request.contains("\"second\"")).expect("the resumed run reached the model");
+    assert_eq!(second.matches("<resume_info>").count(), 1, "{second}");
+    assert!(second.contains("<session_exit>") && second.contains("Do not assume the earlier state is still exact"));
+    assert_eq!(second.matches("<environment>").count(), 2, "said again on resuming: {second}");
+    assert!(second.find("<resume_info>") < second.find("\"second\""), "the note comes before the prompt");
+}
+
+/// A thread tells the model where it runs on its first turn, and again with
+/// how long it was left on its first turn after being opened again; reading
+/// the thread that is already open again is no resume.
+#[tokio::test]
+async fn app_server_tells_a_thread_where_it_runs_and_a_resumed_one_how_long_it_was_left() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    type Lines = tokio::io::Lines<BufReader<tokio::process::ChildStdout>>;
+
+    /// Read until `done` matches a message, and return it.
+    async fn until(lines: &mut Lines, done: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let message: serde_json::Value = serde_json::from_str(&line).unwrap();
+                if done(&message) {
+                    return message;
+                }
+            }
+            panic!("the app server stopped");
+        })
+        .await
+        .expect("the app server answers in time")
+    }
+
+    let (model, requests) = recording_model_endpoint();
+    let sync = sync_server::SyncServer::start("secret-token").await;
+    let device = SignedIn::new(&sync, "secret-token");
+    let mut child = device
+        .command(&model, &["app-server"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut send = async |id: u64, method: &str, params: serde_json::Value| {
+        let frame = serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        input.write_all(format!("{frame}\n").as_bytes()).await.unwrap();
+    };
+    let completed = |message: &serde_json::Value| message["method"] == "turn/completed";
+    let answered = |id: u64| move |message: &serde_json::Value| message["id"] == id && message.get("method").is_none();
+
+    send(1, "initialize", serde_json::json!({})).await;
+    send(2, "turn/start", serde_json::json!({"text": "first question"})).await;
+    let thread = until(&mut lines, completed).await["params"]["threadId"].clone();
+    // Away to another thread, and back: the first one is read from disk.
+    send(3, "thread/start", serde_json::json!({})).await;
+    until(&mut lines, answered(3)).await;
+    send(4, "thread/resume", serde_json::json!({"threadId": thread})).await;
+    until(&mut lines, answered(4)).await;
+    send(5, "turn/start", serde_json::json!({"text": "after the break"})).await;
+    until(&mut lines, completed).await;
+    // Reading it again while it is open does not count.
+    send(6, "thread/read", serde_json::json!({"threadId": thread})).await;
+    let history = until(&mut lines, answered(6)).await;
+    send(7, "turn/start", serde_json::json!({"text": "and again"})).await;
+    until(&mut lines, completed).await;
+    drop(input);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait()).await;
+
+    let sent = requests.lock().unwrap().clone();
+    // The first request that carries `text`: the one its turn made.
+    let request = |text: &str| sent.iter().find(|request| request.contains(&format!("\"{text}\""))).cloned().unwrap();
+    let first = request("first question");
+    assert!(!first.contains("<resume_info>"), "a new thread has nothing to resume");
+    assert_eq!(first.matches("<environment>").count(), 1, "{first}");
+    let resumed = request("after the break");
+    assert_eq!(resumed.matches("<resume_info>").count(), 1, "{resumed}");
+    assert!(resumed.find("<resume_info>") < resumed.find("after the break"), "the note comes before the message");
+    assert_eq!(resumed.matches("<environment>").count(), 2, "said again on resuming: {resumed}");
+    let again = request("and again");
+    assert_eq!(again.matches("<resume_info>").count(), 1, "only the first turn after it has one");
+    assert_eq!(again.matches("<environment>").count(), 2);
+    let items = history["result"]["items"].as_array().cloned().unwrap_or_default();
+    assert!(!items.iter().any(|item| item.to_string().contains("resume_info")), "the note is the model's: {items:?}");
+}
+
 /// A model endpoint like [`model_endpoint`] that also keeps every request it
 /// was sent, so a test can see what the model was given.
 fn recording_model_endpoint() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {

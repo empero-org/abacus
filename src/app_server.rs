@@ -44,7 +44,7 @@ use crate::{
     config::{Config, Credentials, Permission, Settings},
     provider::Provider,
     services::AgentServices,
-    session::{Session, SessionState, SessionStore},
+    session::{Opened, Session, SessionState, SessionStore},
     tools::ToolCall,
     usage::UsageReporter,
 };
@@ -125,12 +125,23 @@ impl ThreadState {
                 if config.chat { crate::agent::chat_messages() } else { initial_messages(&config.workspace) },
             )
         });
-        let state = SessionState::open(config, Some(&session));
+        let mut state = SessionState::open(config, Some(&session));
+        // One made here, not read from disk, is a new session.
+        if !persisted {
+            state.opened = Some(Opened::New);
+        }
         let trace = config
             .trace_enabled
             .then(|| crate::sft::TraceWriter::open(&config.paths.traces_dir, &session.id.to_string()).ok())
             .flatten();
         Self { messages: session.messages.clone(), state, trace, persisted, session }
+    }
+
+    /// `session` opened again from disk: its next turn says how long it was left.
+    fn reopened(config: &Config, session: Session) -> Self {
+        let mut thread = Self::new(config, Some(session));
+        thread.state.opened = Some(Opened::Resumed(thread.session.updated_at));
+        thread
     }
 
     fn id(&self) -> String {
@@ -274,7 +285,10 @@ pub async fn run(
     let (idle_done, mut idle_rx) = mpsc::unbounded_channel::<IdleDone>();
     let mailbox = crate::inbox::Mailbox::new(config.paths.clone(), crate::presence::FrontEnd::Desktop);
     let mut app = App {
-        thread: ThreadState::new(&config, session),
+        thread: match session {
+            Some(session) => ThreadState::reopened(&config, session),
+            None => ThreadState::new(&config, None),
+        },
         config,
         settings,
         credentials: credentials.clone(),
@@ -619,7 +633,13 @@ impl App {
                 self.stop_idle_compaction();
                 self.thread_closed();
                 self.tokens.store_total(session.tokens_used);
-                self.thread = ThreadState::new(&self.config, Some(session));
+                // Reading the thread already open again is no resume: it was
+                // never left, and keeps whatever note it still owes.
+                let owed = (self.thread.persisted && self.thread.id() == id).then_some(self.thread.state.opened);
+                self.thread = ThreadState::reopened(&self.config, session);
+                if let Some(owed) = owed {
+                    self.thread.state.opened = owed;
+                }
                 self.thread_opened();
                 Ok(self.thread_snapshot())
             }
@@ -1608,6 +1628,9 @@ impl App {
     /// Start the agent on `content`, announcing `item` as the person's message.
     fn begin_turn(&mut self, content: Value, mut item: Value, events: &mpsc::UnboundedSender<AgentEvent>) {
         self.stop_idle_compaction();
+        // The first turn after a start or a resume says where the thread
+        // runs, and after a resume how long it was left.
+        self.thread.messages.extend(self.thread.state.take_opening_note(&self.config.workspace));
         self.thread.messages.push(json!({"role": "user", "content": content}));
         // A new thread is saved as its first turn starts, as the terminal
         // saves a session: other sessions can find it and message it while

@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- **A resumed session hears how long it was left.** The first turn after a
+  session is opened again from disk (`--resume`, `-c`, `/resume`, a
+  recovered session, the app server's `thread/resume` and `thread/read`)
+  starts with a `<resume_info>` note: when the session was left, the time
+  now, how long that is, and that files, branches, running processes and
+  services may have changed since, so the model checks before relying on
+  what it saw. Reading the thread that is already open again is no resume.
+- **Every session says where it runs.** The first turn of a new session, and
+  of every resumed one, carries an `<environment>` block: the operating
+  system and its release, the working directory, the user name, the locale,
+  and the time zone with its offset from UTC. A resumed session may be on
+  another device, so this is said again rather than assumed. Both notes are
+  the model's: the transcript does not show them.
+
 ## 0.7.7 — 2026-11-04
 
 Three console changes for issues #11, #10 and #3, and what Abacus Desktop

@@ -98,6 +98,9 @@ pub fn breakdown(
 
 /// Which kind a context layer Abacus appended is, by its name.
 fn layer_kind(text: &str) -> &'static str {
+    if crate::session::is_opening_note(text) {
+        return "session";
+    }
     let name = text
         .strip_prefix(crate::agent::SESSION_CONTEXT_TAG)
         .and_then(|rest| rest.strip_prefix(" layer=\""))
@@ -154,6 +157,16 @@ mod tests {
         assert_eq!(tokens("system"), 100);
         assert_eq!(tokens("instructions"), 200);
         assert!(tokens("tools") > tokens("mcp"));
+    }
+
+    #[test]
+    fn an_opening_note_is_session_state() {
+        use crate::session::{Opened, opening_note};
+        let workspace = std::path::Path::new("/work");
+        for opened in [Opened::New, Opened::Resumed(chrono::Utc::now())] {
+            let note = opening_note(opened, workspace);
+            assert_eq!(layer_kind(note["content"].as_str().unwrap()), "session");
+        }
     }
 
     #[test]
