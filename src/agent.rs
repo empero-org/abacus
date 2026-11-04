@@ -403,7 +403,7 @@ impl TurnOptions {
 /// The tools a turn over `options` offers the model. The agent that starts
 /// subagents can message them; a subagent can message the others and `main`,
 /// but starts none of its own.
-fn turn_tool_specs(options: &TurnOptions) -> Vec<Value> {
+pub(crate) fn turn_tool_specs(options: &TurnOptions) -> Vec<Value> {
     if options.chat {
         let mut specs = options.services.tool_specs();
         specs.extend(crate::memories::MemoryStore::tool_specs());

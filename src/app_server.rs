@@ -1009,6 +1009,17 @@ impl App {
                     "status": self.git(&["status", "--porcelain=v1", "-b"]).await?,
                 })),
             },
+            // The meter's figure, split by what fills it.
+            "thread/context/read" => {
+                let used = self.context_tokens();
+                Ok(json!({
+                    "used": used,
+                    "window": self.config.model_limits.context_window,
+                    "compactsAt": self.config.compaction_marks().summary,
+                    "estimated": self.provider.context_tokens() == 0,
+                    "parts": self.context_parts(used),
+                }))
+            }
             "turn/undo" => {
                 let checkpoint =
                     params["checkpoint"].as_str().ok_or_else(|| anyhow!("checkpoint required"))?.to_owned();
@@ -1462,9 +1473,28 @@ impl App {
     fn context_tokens(&self) -> u64 {
         let estimated = (crate::agent::message_chars(&self.thread.messages) / 4) as u64;
         match self.provider.context_tokens() {
-            0 => estimated,
+            // Nothing reported yet (a reopened thread): the tools offered
+            // are sent with every request too.
+            0 => {
+                estimated
+                    + self
+                        .context_parts(0)
+                        .iter()
+                        .filter(|part| part.count.is_some())
+                        .map(|part| part.tokens)
+                        .sum::<u64>()
+            }
             reported => reported.max(estimated),
         }
+    }
+
+    /// What fills the context, by kind, adding up to `total` (0: as estimated).
+    fn context_parts(&self, total: u64) -> Vec<crate::context_use::Part> {
+        let options = self.turn_options();
+        let tools = crate::agent::turn_tool_specs(&options);
+        let mcp = options.services.mcp.tools().map(|tool| tool.exposed_name.clone()).collect();
+        let app = options.services.client_tools.iter().flat_map(|client| client.names().cloned()).collect();
+        crate::context_use::breakdown(&self.thread.messages, &tools, &mcp, &app, total)
     }
 
     fn report_usage(&mut self) {
