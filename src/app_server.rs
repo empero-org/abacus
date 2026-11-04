@@ -569,6 +569,9 @@ impl App {
                     // feedback/submit sends a report where the terminal's
                     // /feedback sends it.
                     "feedback": true,
+                    // Profiles, providers and settings save while a turn
+                    // runs; the turn keeps what it started with.
+                    "settingsMidTurn": true,
                 },
                 "idleCompaction": self.config.idle_compaction,
                 "maxSteps": self.config.max_steps,
@@ -837,7 +840,6 @@ impl App {
             "providers/list" => Ok(json!({"providers": self.provider_rows()})),
             "provider/save" => self.save_provider(&params),
             "provider/remove" => {
-                self.require_idle()?;
                 let id = params["id"].as_str().ok_or_else(|| anyhow!("id required"))?;
                 if !self.settings.providers.contains_key(id) {
                     return Err(anyhow!("no provider named `{id}`"));
@@ -875,7 +877,6 @@ impl App {
             }
             "profile/save" => self.save_profile(&params),
             "profile/remove" => {
-                self.require_idle()?;
                 let name = params["name"].as_str().ok_or_else(|| anyhow!("name required"))?;
                 self.settings.remove_profile(name)?;
                 self.settings.save(&self.config.paths)?;
@@ -927,8 +928,9 @@ impl App {
                 let value = params.get("value").cloned().unwrap_or(Value::Null);
                 self.write_config_value(key, value)
             }
+            // Settings save mid-turn too: the running turn keeps what it
+            // started with, and the next one runs what they say.
             "config/write" => {
-                self.require_idle()?;
                 let settings: Settings = serde_json::from_value(params["settings"].clone())?;
                 settings.save(&self.config.paths)?;
                 self.settings = settings;
@@ -1039,7 +1041,6 @@ impl App {
             // A model for the active profile, as `provider/model` or an id on
             // its own provider. The profile picker is the newer way.
             "model" => {
-                self.require_idle()?;
                 let model = value.as_str().ok_or_else(|| anyhow!("model must be a string"))?;
                 let name = self.config.profile.clone();
                 let profile = self.settings.profiles.get(&name).ok_or_else(|| anyhow!("no active profile"))?;
@@ -1189,7 +1190,6 @@ impl App {
 
     /// Make `name` the active profile, for this session and as the default.
     fn select_profile(&mut self, name: &str) -> Result<()> {
-        self.require_idle()?;
         if !self.settings.profiles.contains_key(name) {
             return Err(anyhow!("no profile named `{name}`"));
         }
@@ -1282,7 +1282,6 @@ impl App {
     /// end can send a whole form or a single edit; `apiKey` goes to
     /// `credentials.toml`, never to the settings, and `""` removes it.
     fn save_provider(&mut self, params: &Value) -> Result<Value> {
-        self.require_idle()?;
         let preset = params["preset"].as_str().and_then(crate::providers::preset);
         let id = match params["id"].as_str().filter(|id| !id.is_empty()) {
             Some(id) => crate::providers::validate_provider_id(id)?.to_owned(),
@@ -1380,7 +1379,6 @@ impl App {
     /// Limits and effort take `null` for "detect / provider default". The
     /// first profile there is, or one saved with `select`, becomes active.
     fn save_profile(&mut self, params: &Value) -> Result<Value> {
-        self.require_idle()?;
         let previous = params["previousName"].as_str().filter(|name| self.settings.profiles.contains_key(*name));
         let mut profile = previous.and_then(|name| self.settings.profiles.get(name).cloned()).unwrap_or_default();
         if let Some(model) = params["model"].as_str().filter(|model| !model.trim().is_empty()) {

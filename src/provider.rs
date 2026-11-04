@@ -347,14 +347,18 @@ impl Provider {
         }
     }
 
-    /// Carry `previous`'s session id onto this freshly built provider.
+    /// Carry `previous`'s session id onto this freshly built provider, and
+    /// its count of the last prompt.
     ///
     /// The id is what hosts that route by conversation are told (see
     /// `opencode_session`, and `{session}` in a provider's headers), so
     /// a mid-session model or settings change — which rebuilds the provider —
-    /// must not make the same conversation look like a new one.
+    /// must not make the same conversation look like a new one. The count is
+    /// shared rather than copied: a turn still running on `previous` keeps it
+    /// up to date, and the meter reads it from this one.
     pub fn adopt_session(&mut self, previous: &Provider) {
         self.session_id.clone_from(&previous.session_id);
+        self.context_tokens = previous.context_tokens.clone();
     }
 
     /// Tokens in the last request's prompt, or 0 before the first reply or when
