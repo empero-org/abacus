@@ -2138,26 +2138,43 @@ fn clicking_the_transcript_selects_then_unfolds_a_tool_row() {
     assert!(app.entries[1].tool.as_ref().expect("tool").expanded, "clicking the selected row unfolds it");
 }
 
+/// Up recalls a prompt, Down walks back — and what was half-written comes back
+/// with it. Without the saved draft, one Up threw the composer away.
 #[test]
-fn clicking_a_suggestion_inserts_it() {
+fn browsing_history_gives_the_half_written_draft_back() {
     let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
-    app.input.insert_str("/pro");
-    app.sync_completion("");
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    app.record_history("first prompt");
+    app.record_history("second prompt");
+    app.input.insert_str("half-written draft");
 
-    let (items, _) = app.visible_completion().expect("completion");
-    let (rect, index) = app
-        .hits
-        .borrow()
-        .completion
-        .iter()
-        .copied()
-        .find(|(_, index)| *index == 1)
-        .expect("second suggestion should be clickable");
-    handle_click(&mut app, rect.x + 1, rect.y);
-    assert_eq!(app.input.text(), format!("{} ", items[index].0));
+    press(&mut app, KeyCode::Up);
+    assert_eq!(app.input.text(), "second prompt");
+    press(&mut app, KeyCode::Up);
+    assert_eq!(app.input.text(), "first prompt");
+    press(&mut app, KeyCode::Down);
+    assert_eq!(app.input.text(), "second prompt");
+    press(&mut app, KeyCode::Down);
+    assert_eq!(app.input.text(), "half-written draft", "the draft belongs to the live input, not to history");
+
+    // Down with nothing being browsed leaves the draft where it is.
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Down);
+    assert_eq!(app.input.text(), "half-written draft");
+
+    // A recalled prompt that was changed keeps the change while browsing goes
+    // past it and back; sending ends the browse and forgets it.
+    press(&mut app, KeyCode::Up);
+    app.input.insert_str(" with tests");
+    press(&mut app, KeyCode::Up);
+    assert_eq!(app.input.text(), "first prompt");
+    press(&mut app, KeyCode::Down);
+    assert_eq!(app.input.text(), "second prompt with tests");
+    press(&mut app, KeyCode::Down);
+    assert_eq!(app.input.text(), "half-written draft");
+    app.record_history("half-written draft");
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Up);
+    assert_eq!(app.input.text(), "second prompt", "an edit lasts one browse");
 }
 
 /// A drag copies the text it covered, with no mode to switch into: the wheel
@@ -2211,6 +2228,28 @@ fn a_press_that_never_moved_is_still_a_click() {
     assert!(app.selection.is_none(), "{:?}", app.selection);
     app.finish_selection();
     assert_eq!(app.cursor, Some(1));
+}
+
+#[test]
+fn clicking_a_suggestion_inserts_it() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    app.input.insert_str("/pro");
+    app.sync_completion("");
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let (items, _) = app.visible_completion().expect("completion");
+    let (rect, index) = app
+        .hits
+        .borrow()
+        .completion
+        .iter()
+        .copied()
+        .find(|(_, index)| *index == 1)
+        .expect("second suggestion should be clickable");
+    handle_click(&mut app, rect.x + 1, rect.y);
+    assert_eq!(app.input.text(), format!("{} ", items[index].0));
 }
 
 #[test]

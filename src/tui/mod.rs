@@ -633,6 +633,12 @@ struct App {
     /// cursor into it; `None` means "at the live input, not browsing history".
     input_history: Vec<String>,
     input_history_index: Option<usize>,
+    /// What was in the composer when the browse started, held so Down can give
+    /// it back — otherwise the first Up eats an unsent draft.
+    input_history_draft: Option<String>,
+    /// Recalled prompts changed during this browse, by history index, so
+    /// stepping past one and back does not throw the change away.
+    input_history_edits: HashMap<usize, String>,
     show_help: bool,
     normal_prefix: Option<char>,
     /// Shared session token ledger; reused when the provider is rebuilt on a
@@ -1449,6 +1455,8 @@ impl App {
             ctx_chars,
             input_history: Vec::new(),
             input_history_index: None,
+            input_history_draft: None,
+            input_history_edits: HashMap::new(),
             show_help: false,
             normal_prefix: None,
             tokens,

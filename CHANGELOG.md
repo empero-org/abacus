@@ -41,6 +41,13 @@ Three console changes for issues #11, #10 and #3.
   the footer's small `ctx` gauge. Front ends get the same points as
   `compaction` (`trim`, `idle`, `summary`, in tokens) next to `contextTokens`.
 
+- **Select and copy with the mouse, and keep the wheel.** There is no F2
+  mode any more: a drag in the terminal highlights what it covers and copies
+  it on release, while the wheel scrolls and rows click as before.
+- **The history keys never lose a draft.** Up keeps what was being typed and
+  Down past the newest prompt gives it back; a recalled prompt that was
+  changed keeps the change while browsing past it and back.
+
 ## 0.7.6 — 2026-10-29
 
 What Abacus Desktop 0.1.6 builds on: goals that keep going, chats, and

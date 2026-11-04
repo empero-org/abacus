@@ -955,11 +955,41 @@ impl App {
         if self.input_history.last().is_none_or(|last| last != prompt) {
             self.input_history.push(prompt.to_owned());
         }
-        self.input_history_index = None;
+        self.end_history_browse();
     }
 
-    /// Recall the previous prompt from history (arrow up). The first press saves
-    /// the current live input so Down can restore it.
+    /// Leave history browsing: the composer is live text again, and any draft
+    /// held for it has been dealt with.
+    fn end_history_browse(&mut self) {
+        self.input_history_index = None;
+        self.input_history_draft = None;
+        self.input_history_edits.clear();
+    }
+
+    /// Before leaving the recalled prompt on screen, keep what was changed in
+    /// it, so no arrow key ever throws typed text away.
+    fn keep_history_edit(&mut self) {
+        let Some(index) = self.input_history_index.filter(|&index| index < self.input_history.len()) else {
+            return;
+        };
+        let text = self.input.text();
+        if text == self.input_history[index] {
+            self.input_history_edits.remove(&index);
+        } else {
+            self.input_history_edits.insert(index, text);
+        }
+    }
+
+    /// Put a recalled prompt in the composer, as it was last left.
+    fn show_history_entry(&mut self, index: usize) {
+        let entry = self.input_history_edits.get(&index).unwrap_or(&self.input_history[index]).clone();
+        self.input_history_index = Some(index);
+        self.input.clear();
+        self.input.insert_str(&entry);
+    }
+
+    /// Recall the previous prompt from history (arrow up). The first press holds
+    /// on to what was already typed, so Down can give it back.
     pub(super) fn history_prev(&mut self) {
         if self.input_history.is_empty() {
             return;
@@ -972,17 +1002,16 @@ impl App {
             return;
         }
         if self.input_history_index.is_none() {
-            // Save current input and jump to the latest entry.
+            // Hold the unsent draft, then start from the newest entry. Replacing
+            // the composer without this is how a first Up used to eat a draft.
+            self.input_history_draft = Some(self.input.text());
             self.input_history_index = Some(self.input_history.len());
         }
         if let Some(index) = self.input_history_index
             && index > 0
         {
-            let target = index - 1;
-            self.input_history_index = Some(target);
-            let entry = self.input_history[target].clone();
-            self.input.clear();
-            self.input.insert_str(&entry);
+            self.keep_history_edit();
+            self.show_history_entry(index - 1);
         }
     }
 
@@ -997,17 +1026,20 @@ impl App {
             self.input.move_down();
             return;
         }
-        if let Some(index) = &mut self.input_history_index {
-            *index += 1;
-            if *index >= self.input_history.len() {
-                // Past the end — restore the live (now empty) input.
+        if let Some(index) = self.input_history_index {
+            self.keep_history_edit();
+            if index + 1 >= self.input_history.len() {
+                // Past the newest entry — back to the draft the browse started
+                // from, which is often the prompt that was half-written.
+                let draft = self.input_history_draft.take().unwrap_or_default();
                 self.input_history_index = None;
                 self.input.clear();
+                self.input.insert_str(&draft);
             } else {
-                self.input.clear();
-                self.input.insert_str(&self.input_history[*index]);
+                self.show_history_entry(index + 1);
             }
         } else {
+            // Not browsing: Down on the last line leaves the draft alone.
             self.input.move_down();
         }
     }
