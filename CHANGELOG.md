@@ -1,8 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.7.7 — 2026-11-04
 
-Three console changes for issues #11, #10 and #3.
+Three console changes for issues #11, #10 and #3, and what Abacus Desktop
+0.1.7 builds on: each turn's edits with a way to take them back, what fills
+the context, and settings that open while a turn runs.
 
 - **The setup wizard is readable on a console that is not UTF-8.** A Windows
   console decodes output with a codepage, and Rust writes UTF-8, so on a console
@@ -62,6 +64,28 @@ Three console changes for issues #11, #10 and #3.
   sends `server/idle`, saves and syncs as on shutdown, and exits. Abacus
   Desktop sets it to five minutes and starts the server again when the
   thread is needed.
+
+- **Each turn's edits, and a way to take them back.** Before the file tools
+  first change a path in a turn, Abacus keeps what it held (up to 16 MiB a
+  file and 128 MiB a turn, under `~/.abacus/checkpoints/`). When the turn
+  ends, front ends get a `fileEdits` item listing each file it added, changed
+  or deleted with the lines gained and lost; `thread/diff/read` with that
+  `checkpoint` gives the turn's own diff, and `turn/undo` puts the files back
+  — refusing any that changed since — and tells the model the edits were
+  undone. Changes made through `run_command` or `run_python` are not kept.
+- **Chats can show files.** A `--chat` server keeps `present_files`, the
+  tool Abacus Desktop offers for showing files as cards.
+- **What fills the context, kind by kind.** `thread/context/read` splits the
+  count the meter shows into the system prompt, project instructions,
+  built-in, MCP and app tools (with how many of each), skills and plugins,
+  memories, a compaction summary, session state and the conversation. Each
+  part is estimated from its length and scaled to the provider's count.
+- **Settings while a turn runs.** In the TUI, `/config` and the other panels
+  open mid-turn, and a change applies from the next turn. An approval or a
+  question that arrives while a panel is open now shows over it; before, the
+  panel hid a dialog that was taking the keys. Front ends can write settings,
+  switch profiles and add or remove providers mid-turn too (capability
+  `settingsMidTurn`); the running turn keeps the model it started with.
 
 ## 0.7.6 — 2026-10-29
 
