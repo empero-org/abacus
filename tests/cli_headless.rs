@@ -1028,3 +1028,130 @@ async fn front_end_tools_may_repeat_their_arguments() {
     drop(input);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait()).await;
 }
+
+/// What a turn's file tools changed is shown under it, with its own diff, and
+/// can be taken back; the model hears of it, and a reopened thread shows it.
+#[tokio::test]
+async fn app_server_shows_a_turns_edits_and_undoes_them() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    // The turn writes a file once; after that, and for everything else, the
+    // model just answers.
+    fn answer(request: &str) -> String {
+        if request.contains("write the notes") && !request.contains("Wrote notes.txt") {
+            let call = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"notes.txt\",\"content\":\"one\\ntwo\\n\"}"}}]}}]}"#;
+            let finish = r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
+            return format!("data: {call}\n\ndata: {finish}\n\ndata: {MODEL_USAGE}\n\ndata: [DONE]\n\n");
+        }
+        format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"content\":\"Done.\"}}}}]}}\n\ndata: {MODEL_USAGE}\n\ndata: [DONE]\n\n"
+        )
+    }
+    let (model, requests) = scripted_model_endpoint(answer);
+    let sync = sync_server::SyncServer::start("secret-token").await;
+    let device = SignedIn::new(&sync, "secret-token");
+    let notes = device.directory.path().join("work/notes.txt");
+    let mut child = device
+        .command(&model, &["app-server"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let frame = |value: serde_json::Value| format!("{value}\n");
+    for request in [
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "config/value/write", "params": {"key": "mode", "value": "yolo"}}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "turn/start", "params": {"text": "write the notes"}}),
+    ] {
+        input.write_all(frame(request).as_bytes()).await.unwrap();
+    }
+
+    let mut edits = serde_json::Value::Null;
+    let mut answers = std::collections::HashMap::new();
+    let mut undone = serde_json::Value::Null;
+    let mut asked_diff = false;
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let message: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if message["method"] == "item/completed" && message["params"]["item"]["type"] == "fileEdits" {
+                edits = message["params"]["item"].clone();
+            }
+            if message["method"] == "turn/undone" {
+                undone = message["params"].clone();
+            }
+            if let Some(id) = message["id"].as_i64().filter(|_| message.get("method").is_none()) {
+                answers.insert(id, message.clone());
+                if id == 6 {
+                    return true;
+                }
+            }
+            if message["method"] == "turn/completed" && !asked_diff {
+                asked_diff = true;
+                let checkpoint = edits["checkpoint"].clone();
+                for request in [
+                    serde_json::json!({"jsonrpc": "2.0", "id": 4, "method": "thread/diff/read", "params": {"checkpoint": checkpoint}}),
+                    serde_json::json!({"jsonrpc": "2.0", "id": 5, "method": "turn/undo", "params": {"checkpoint": checkpoint}}),
+                    // Reopened from what was saved.
+                    serde_json::json!({"jsonrpc": "2.0", "id": 6, "method": "thread/read", "params": {"threadId": message["params"]["threadId"]}}),
+                ] {
+                    input.write_all(frame(request).as_bytes()).await.unwrap();
+                }
+            }
+        }
+        false
+    })
+    .await;
+    assert_eq!(finished, Ok(true), "the turn should complete and the requests be answered");
+    assert_eq!(
+        edits["files"],
+        serde_json::json!([{"path": "notes.txt", "status": "added", "added": 2, "removed": 0}]),
+        "{edits}"
+    );
+    let diff = answers[&4]["result"]["diff"].as_str().unwrap_or_default().to_owned();
+    assert!(diff.contains("+++ b/notes.txt\n@@ -0,0 +1,2 @@\n+one\n+two\n"), "{diff}");
+    assert_eq!(answers[&5]["result"]["files"], serde_json::json!(["notes.txt"]), "{:?}", answers[&5]);
+    assert_eq!(undone["files"], serde_json::json!(["notes.txt"]));
+    assert!(!notes.exists(), "undo takes the new file away");
+    let items = answers[&6]["result"]["items"].as_array().cloned().unwrap_or_default();
+    let shown: Vec<_> = items.iter().filter(|item| item["type"] == "fileEdits").collect();
+    assert_eq!(shown.len(), 1, "{items:?}");
+    assert_eq!(shown[0]["undone"], true);
+    assert!(
+        !items.iter().any(|item| item["text"].as_str().is_some_and(|text| text.contains("undid"))),
+        "what the model is told of the undo is not shown as said"
+    );
+
+    // The next turn tells the model, and never sends it the marker.
+    input
+        .write_all(
+            frame(
+                serde_json::json!({"jsonrpc": "2.0", "id": 7, "method": "turn/start", "params": {"text": "and now?"}}),
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        while let Some(line) = lines.next_line().await.unwrap() {
+            if line.contains("\"turn/completed\"") {
+                return;
+            }
+        }
+    })
+    .await;
+    let sent = requests.lock().unwrap().clone();
+    let last = sent.iter().rev().find(|request| request.contains("and now?")).expect("the next turn reached the model");
+    assert!(last.contains("undid the edits you made"), "the model hears of the undo");
+    let checkpoint = edits["checkpoint"].as_str().unwrap();
+    assert!(!last.contains(checkpoint), "the marker stays out of requests");
+
+    input
+        .write_all(frame(serde_json::json!({"jsonrpc": "2.0", "id": 8, "method": "shutdown"})).as_bytes())
+        .await
+        .unwrap();
+    drop(input);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait()).await;
+}

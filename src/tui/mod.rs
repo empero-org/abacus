@@ -1239,6 +1239,10 @@ fn entries_from_messages(messages: &[Value]) -> Vec<Entry> {
         match role {
             // A screenshot a tool showed the model: nobody said it.
             "user" if crate::agent::is_tool_images(content) => {}
+            // What the model was told of edits undone in the desktop app.
+            "user" if crate::checkpoint::is_undo_note(content) => {
+                entries.push(Entry::new(EntryKind::System, crate::checkpoint::undo_shown(content)))
+            }
             // The turn an unfinished goal started by itself.
             "user" if crate::goal::is_carry_on(content) => entries.push(Entry::new(EntryKind::System, GOAL_CARRIES_ON)),
             "user" => entries.push(match crate::inbox::shown(content) {

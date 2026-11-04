@@ -191,10 +191,12 @@ impl Folded {
     }
 }
 
-/// Whether `message` is a marker compaction left rather than part of the
-/// conversation.
+/// Whether `message` is a marker for the transcript rather than part of the
+/// conversation: one compaction left, or a turn's edits (see
+/// [`crate::checkpoint::TurnEdits::marker`]).
 pub fn is_marker(message: &Value) -> bool {
-    message["role"] == "system" && message.get(MARKER_FIELD).is_some()
+    message["role"] == "system"
+        && (message.get(MARKER_FIELD).is_some() || message.get(crate::checkpoint::MARKER_FIELD).is_some())
 }
 
 /// The history as the model reads it: without the markers compaction leaves

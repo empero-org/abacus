@@ -214,6 +214,9 @@ pub struct ToolExecutor {
     /// Canonical paths outside the workspace that the safety layer has cleared
     /// for reading. Shared with the caller, which fills it in before dispatch.
     outside_reads: OutsideReads,
+    /// Told about each file before a tool first changes it, so the turn's
+    /// edits can be shown and undone.
+    journal: crate::checkpoint::Journal,
 }
 
 /// Shared set of approved out-of-workspace read paths.
@@ -230,7 +233,14 @@ impl ToolExecutor {
             output_limit: output_limit.clamp(2_000, 200_000),
             web: crate::web::WebConfig::default(),
             outside_reads: OutsideReads::default(),
+            journal: Default::default(),
         }
+    }
+
+    /// Record what the file tools change in `journal`.
+    pub fn with_journal(mut self, journal: crate::checkpoint::Journal) -> Self {
+        self.journal = journal;
+        self
     }
 
     /// Share the approved-read set with the caller, which decides what goes in
@@ -568,6 +578,7 @@ impl ToolExecutor {
         guard_secret(&path)?;
         let content = fs::read_to_string(&path).with_context(|| format!("could not read {raw_path} as UTF-8 text"))?;
         let content = apply_edits(content, &operations)?;
+        self.journal.before(&path);
         write_text_atomic(&path, &content).with_context(|| format!("could not write {raw_path}"))?;
         Ok(format!("Applied {} edit(s) to {raw_path}.", operations.len()))
     }
@@ -590,6 +601,7 @@ impl ToolExecutor {
     fn write_file(&self, arguments: &str) -> Result<String> {
         let args: PathContent = parse_args(arguments)?;
         let path = self.writable(&args.path)?;
+        self.journal.before(&path);
         write_text_atomic(&path, &args.content).with_context(|| format!("could not write {}", args.path))?;
         Ok(format!("Wrote {}.", args.path))
     }
@@ -597,6 +609,9 @@ impl ToolExecutor {
     async fn apply_patch(&self, arguments: &str) -> Result<String> {
         let patch = self.preview_patch(arguments)?;
         run_git_apply(&self.root, &patch, true).await?;
+        for path in patch_paths(&patch) {
+            self.journal.before(&self.root.join(path));
+        }
         run_git_apply(&self.root, &patch, false).await?;
         Ok("Applied patch successfully.".to_owned())
     }
@@ -610,6 +625,7 @@ impl ToolExecutor {
         if path.is_dir() && !fs::symlink_metadata(&path)?.is_symlink() && !args.recursive {
             bail!("directory deletion requires recursive=true");
         }
+        self.journal.before(&path);
         remove(&path)?;
         Ok(format!("Deleted {}.", args.path))
     }
@@ -628,10 +644,11 @@ impl ToolExecutor {
         if source == self.root {
             bail!("cannot move the workspace root");
         }
+        if destination.exists() && !args.overwrite {
+            bail!("destination already exists; set overwrite=true to replace it");
+        }
+        self.journal.before_move(&source, &destination);
         if destination.exists() {
-            if !args.overwrite {
-                bail!("destination already exists; set overwrite=true to replace it");
-            }
             remove(&destination)?;
         }
         if let Some(parent) = destination.parent() {
@@ -1397,17 +1414,10 @@ fn validate_patch(root: &Path, patch: &str) -> Result<()> {
     }
 
     let mut paths = 0;
-    for line in patch.lines() {
-        let raw = line.strip_prefix("--- ").or_else(|| line.strip_prefix("+++ "));
-        let Some(raw) = raw else { continue };
-        let raw = raw.split('\t').next().unwrap_or(raw).trim();
-        if raw == "/dev/null" {
-            continue;
-        }
-        if raw.starts_with('"') {
+    for relative in patch_paths(patch) {
+        if relative.starts_with('"') {
             bail!("quoted patch paths are not supported; use workspace-relative UTF-8 paths");
         }
-        let relative = raw.strip_prefix("a/").or_else(|| raw.strip_prefix("b/")).unwrap_or(raw);
         let joined = workspace_join(root, relative)?;
         guard_secret(&joined)?;
         if joined.exists() {
@@ -1433,6 +1443,17 @@ fn validate_patch(root: &Path, patch: &str) -> Result<()> {
         bail!("patch has no workspace file headers");
     }
     Ok(())
+}
+
+/// The workspace-relative paths a patch's file headers name.
+fn patch_paths(patch: &str) -> Vec<&str> {
+    patch
+        .lines()
+        .filter_map(|line| line.strip_prefix("--- ").or_else(|| line.strip_prefix("+++ ")))
+        .map(|raw| raw.split('\t').next().unwrap_or(raw).trim())
+        .filter(|raw| *raw != "/dev/null")
+        .map(|raw| raw.strip_prefix("a/").or_else(|| raw.strip_prefix("b/")).unwrap_or(raw))
+        .collect()
 }
 
 async fn run_git_apply(root: &Path, patch: &str, check: bool) -> Result<()> {

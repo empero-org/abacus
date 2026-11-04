@@ -195,6 +195,8 @@ struct App {
     yolo: Arc<AtomicBool>,
     /// Raised to ask the running turn to wind down. Replaced per turn.
     cancel: Arc<AtomicBool>,
+    /// What the running turn's file tools changed. Replaced per turn.
+    journal: crate::checkpoint::Journal,
     turn_id: Option<String>,
     /// Tool name -> the item its call opened.
     open_items: HashMap<String, OpenItem>,
@@ -287,6 +289,7 @@ pub async fn run(
         goal_turn: None,
         yolo,
         cancel: Arc::new(AtomicBool::new(false)),
+        journal: Default::default(),
         turn_id: None,
         open_items: HashMap::new(),
         descriptions: HashMap::new(),
@@ -998,10 +1001,19 @@ impl App {
             }
 
             // ---- workspace --------------------------------------------------
-            "thread/diff/read" => Ok(json!({
-                "diff": self.git(&["diff"]).await?,
-                "status": self.git(&["status", "--porcelain=v1", "-b"]).await?,
-            })),
+            // One turn's own edits, or the whole working tree's.
+            "thread/diff/read" => match params["checkpoint"].as_str() {
+                Some(checkpoint) => Ok(json!({"diff": crate::checkpoint::diff(&self.checkpoints(), checkpoint)?})),
+                None => Ok(json!({
+                    "diff": self.git(&["diff"]).await?,
+                    "status": self.git(&["status", "--porcelain=v1", "-b"]).await?,
+                })),
+            },
+            "turn/undo" => {
+                let checkpoint =
+                    params["checkpoint"].as_str().ok_or_else(|| anyhow!("checkpoint required"))?.to_owned();
+                self.undo_edits(&checkpoint)
+            }
 
             other => Err(anyhow!("unknown method `{other}`")),
         }
@@ -1581,6 +1593,7 @@ impl App {
         let turn = self.next("turn");
         self.turn_id = Some(turn.clone());
         self.cancel = Arc::new(AtomicBool::new(false));
+        self.journal = crate::checkpoint::Journal::recording(self.config.workspace.clone());
 
         notify("turn/started", json!({"threadId": self.thread_id(), "turnId": turn}));
         // The user's own message is an item too, so a client that replays
@@ -1600,6 +1613,7 @@ impl App {
             session_id: Some(self.thread_id()),
             trace: self.thread.trace.clone(),
             cancel: self.cancel.clone(),
+            journal: self.journal.clone(),
             workers: self.workers.clone(),
             peers: match &self.store {
                 Some(_) => crate::peers::Peers::new(
@@ -1912,6 +1926,7 @@ impl App {
         for (name, open) in std::mem::take(&mut self.open_items) {
             self.item("completed", open.tool(&name, "aborted"));
         }
+        self.report_edits();
         let turn = self.turn_id.take().unwrap_or_default();
         self.mailbox.set_working(false);
         // The provider has the conversation cached now; a failed turn may
@@ -2024,6 +2039,45 @@ impl App {
     /// `turn/start` answered with when it was sent.
     fn steer_delivered(&self, text: &str) {
         notify("turn/steer/delivered", json!({"threadId": self.thread_id(), "text": text}));
+    }
+
+    /// Where this thread's checkpoints are kept: what each turn's file tools
+    /// changed, both sides.
+    fn checkpoints(&self) -> std::path::PathBuf {
+        self.config.paths.root.join("checkpoints").join(self.thread_id())
+    }
+
+    /// Show what the turn changed through the file tools, under it, and keep
+    /// that with the conversation so a reopened thread shows it too.
+    fn report_edits(&mut self) {
+        match std::mem::take(&mut self.journal).finish(&self.checkpoints()) {
+            Ok(Some(edits)) => {
+                let id = self.next("item");
+                self.item("completed", edits.item(&id));
+                self.thread.messages.push(edits.marker());
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!("app-server: could not keep the turn's edits — {error:#}"),
+        }
+    }
+
+    /// Put back what the turn under `checkpoint` changed, and tell the model.
+    fn undo_edits(&mut self, checkpoint: &str) -> Result<Value> {
+        self.require_idle()?;
+        let files = crate::checkpoint::undo(&self.checkpoints(), checkpoint, &self.config.workspace)?;
+        for message in &mut self.thread.messages {
+            if let Some(mut edits) = crate::checkpoint::TurnEdits::marked_by(message)
+                && edits.checkpoint == checkpoint
+            {
+                edits.undone = true;
+                *message = edits.marker();
+            }
+        }
+        self.thread.messages.push(json!({"role": "user", "content": crate::checkpoint::undo_note(&files)}));
+        self.persist();
+        self.report_diff("");
+        notify("turn/undone", json!({"threadId": self.thread_id(), "checkpoint": checkpoint, "files": files}));
+        Ok(json!({"undone": true, "files": files}))
     }
 
     /// Publish what the working tree looks like now, per file. A client shows
@@ -2570,6 +2624,9 @@ fn history_items(messages: &[Value]) -> Vec<Value> {
             // longer holds. Every other system message is scaffolding, not
             // conversation.
             "system" => {
+                if let Some(edits) = crate::checkpoint::TurnEdits::marked_by(message) {
+                    items.push(edits.item(&id));
+                }
                 if let Some(folded) = crate::compaction::Folded::marked_by(message) {
                     items.push(json!({
                         "id": id,
@@ -2582,8 +2639,9 @@ fn history_items(messages: &[Value]) -> Vec<Value> {
             }
             "user" => {
                 let said = crate::text::content_text(&message["content"]);
-                // A screenshot a tool showed the model: nobody said it.
-                if crate::agent::is_tool_images(&said) {
+                // A screenshot a tool showed the model, or what it was told
+                // of an undo, which its turn's edits show: nobody said it.
+                if crate::agent::is_tool_images(&said) || crate::checkpoint::is_undo_note(&said) {
                     continue;
                 }
                 let mut item = if crate::goal::is_carry_on(&said) {

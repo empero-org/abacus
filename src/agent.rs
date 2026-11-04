@@ -323,6 +323,9 @@ pub struct TurnOptions {
     pub safety: crate::safety::SafetyCache,
     /// Appends one training record per model call, when enabled.
     pub trace: Option<crate::sft::TraceWriter>,
+    /// Where the file tools record what they change, for a front end that
+    /// shows the turn's edits and can undo them. Inert unless it set one.
+    pub journal: crate::checkpoint::Journal,
     /// Raised to ask the turn to stop. Checked between steps, after each tool,
     /// and per stream chunk, so the turn can finish reporting what it did
     /// rather than being killed and losing it.
@@ -360,6 +363,7 @@ impl TurnOptions {
             peers: Default::default(),
             safety: Default::default(),
             trace: None,
+            journal: Default::default(),
             cancel: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -502,7 +506,8 @@ async fn run_turn_inner(
     let tools = ToolExecutor::with_output_limit(options.workspace.clone(), options.tool_output_limit)
         // The auxiliary model reads fetched pages for the tools.
         .with_web(options.web_search.clone().with_extractor(aux.clone()))
-        .with_outside_reads(outside_reads.clone());
+        .with_outside_reads(outside_reads.clone())
+        .with_journal(options.journal.clone());
     let specs = turn_tool_specs(&options);
     let subagents = SubagentRuntime::for_turn(delegate, &options);
     let mut repeated_calls: HashMap<String, usize> = HashMap::new();
