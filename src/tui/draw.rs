@@ -47,10 +47,16 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     draw_input(frame, input, app);
     draw_footer(frame, ui::measure(chunks[5], columns), app);
     draw_completion_popup(frame, input, app);
-    // The picker is checked first because it can be opened *from* the config
+    // A decision the agent waits on comes first: it takes the keys whatever
+    // else is open (a panel opened while the turn ran), so it must be what is
+    // seen. The picker comes next because it can be opened *from* the config
     // panel; behind it, the panel would be drawn over its own child and the
     // selection would be invisible.
-    if app.qr_overlay.is_some() && app.approval.is_none() && app.question.is_none() {
+    if app.approval.is_some() && !app.overlay_hidden {
+        draw_approval(frame, area, app);
+    } else if app.question.is_some() && !app.overlay_hidden {
+        draw_user_question(frame, area, app);
+    } else if app.qr_overlay.is_some() && app.approval.is_none() && app.question.is_none() {
         draw_qr(frame, area, app);
     } else if app.picker.is_some() {
         draw_picker(frame, area, app);
@@ -66,10 +72,6 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         draw_usage(frame, area, app);
     } else if app.show_help {
         draw_help(frame, area);
-    } else if app.approval.is_some() && !app.overlay_hidden {
-        draw_approval(frame, area, app);
-    } else if app.question.is_some() && !app.overlay_hidden {
-        draw_user_question(frame, area, app);
     } else if app.workers_overlay {
         draw_workers(frame, area, app);
     }

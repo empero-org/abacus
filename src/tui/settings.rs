@@ -396,9 +396,10 @@ fn optional(value: &str) -> Option<String> {
 
 impl App {
     pub(super) fn open_config(&mut self, argument: &str) {
+        // The running turn keeps what it started with; what changes here
+        // applies from the next one, as a /profile switch mid-turn does.
         if self.running.is_some() {
-            self.status = "finish or interrupt the active turn before changing configuration".to_owned();
-            return;
+            self.status = "changes apply from the next turn".to_owned();
         }
         let argument = argument.trim().to_ascii_lowercase();
         if argument == "raw" {

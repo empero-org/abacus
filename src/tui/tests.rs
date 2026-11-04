@@ -3376,3 +3376,32 @@ fn every_exit_path_funnels_through_the_shutdown_helper() {
     assert!(backstop.contains("exit_after_restore(code)"), "backstop exits through the funnel");
     assert!(SOURCE.contains("exit_after_restore(PENDING_SIGNAL"), "graceful-signal exit goes through the funnel");
 }
+
+/// Settings and figures open while a turn runs; a decision the agent asks
+/// for meanwhile is drawn over them, since it is what takes the keys, and
+/// answering it leaves them as they were.
+#[tokio::test]
+async fn panels_open_mid_turn_and_a_decision_shows_over_them() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    app.running = Some(tokio::spawn(std::future::pending::<()>()));
+    assert!(app.slash_command("/config"));
+    assert!(app.config_panel.is_some(), "{}", app.status);
+    assert!(app.status.contains("apply from the next turn"), "{}", app.status);
+    assert!(render(&mut app, 100, 30).contains("CONFIGURATION"));
+
+    let (respond, mut receive) = tokio::sync::oneshot::channel();
+    app.set_approval(crate::agent::ApprovalRequest {
+        tool: "run_command".into(),
+        summary: "cargo test".into(),
+        reason: String::new(),
+        details: "$ cargo test".into(),
+        respond,
+    });
+    let screen = render(&mut app, 100, 30);
+    assert!(screen.contains("YOUR CALL"), "{screen}");
+    press(&mut app, KeyCode::Char('n'));
+    assert_eq!(receive.try_recv(), Ok(ApprovalDecision::Reject));
+    let after = render(&mut app, 100, 30);
+    assert!(after.contains("CONFIGURATION") && !after.contains("YOUR CALL"), "{after}");
+    app.running.take().unwrap().abort();
+}
