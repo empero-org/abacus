@@ -56,6 +56,12 @@ Three console changes for issues #11, #10 and #3.
   lines; the full trace stays on the device it was written on, and a pull
   never trades it for the server's shorter copy. Sessions refused for size
   before this are tried once more.
+- **App servers can stop themselves when idle.** With `ABACUS_IDLE_EXIT_SECS`
+  set, an app server with nothing going on for that long (no turn, no summary
+  due, no question or approval open, no background worker, nothing queued)
+  sends `server/idle`, saves and syncs as on shutdown, and exits. Abacus
+  Desktop sets it to five minutes and starts the server again when the
+  thread is needed.
 
 ## 0.7.6 — 2026-10-29
 

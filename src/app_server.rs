@@ -222,6 +222,11 @@ struct App {
     idle_compaction: Option<Arc<AtomicBool>>,
     /// Where idle compaction reports back to the serving loop.
     idle_done: mpsc::UnboundedSender<IdleDone>,
+    /// Stop once nothing has happened for this long (see [`IDLE_EXIT_ENV`]).
+    idle_exit: Option<std::time::Duration>,
+    /// When anything last happened: a request, an event of a turn, a summary
+    /// written.
+    last_activity: tokio::time::Instant,
     /// The open thread's presence and inbox: other sessions see it as open,
     /// and their messages reach it here.
     mailbox: crate::inbox::Mailbox,
@@ -236,6 +241,12 @@ struct IdleDone {
 }
 
 /// Wait for `deadline`, or forever when there is none.
+/// Seconds of nothing happening after which the server stops by itself, when
+/// set: a desktop that keeps one per thread sets it, and starts the thread's
+/// server again when the person comes back to it. An environment variable, so
+/// a front end can set it without knowing whether this abacus understands it.
+pub const IDLE_EXIT_ENV: &str = "ABACUS_IDLE_EXIT_SECS";
+
 async fn until(deadline: Option<tokio::time::Instant>) {
     match deadline {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
@@ -290,6 +301,12 @@ pub async fn run(
         idle_due: None,
         idle_compaction: None,
         idle_done,
+        idle_exit: std::env::var(IDLE_EXIT_ENV)
+            .ok()
+            .and_then(|seconds| seconds.trim().parse::<u64>().ok())
+            .filter(|&seconds| seconds > 0)
+            .map(std::time::Duration::from_secs),
+        last_activity: tokio::time::Instant::now(),
         mailbox,
     };
     app.thread_opened();
@@ -337,6 +354,7 @@ pub async fn run(
         }
     });
 
+    let mut went_idle = false;
     loop {
         tokio::select! {
             line = line_rx.recv() => {
@@ -344,6 +362,7 @@ pub async fn run(
                 if line.trim().is_empty() {
                     continue;
                 }
+                app.last_activity = tokio::time::Instant::now();
                 match parse(&line) {
                     Ok(Incoming::Request { id, method, params }) => {
                         let shutdown = method == "shutdown";
@@ -379,6 +398,7 @@ pub async fn run(
             }
             event = event_rx.recv() => {
                 let Some(event) = event else { continue };
+                app.last_activity = tokio::time::Instant::now();
                 app.handle_event(event);
                 app.start_pending_turn(&events);
             }
@@ -389,7 +409,17 @@ pub async fn run(
             () = until(app.idle_due) => app.start_idle_compaction(),
             done = idle_rx.recv() => {
                 let Some(done) = done else { continue };
+                app.last_activity = tokio::time::Instant::now();
                 app.idle_compacted(done);
+            }
+            // Nothing has happened for a while: stop, and give the machine its
+            // memory back. The front end starts it again when it is needed.
+            () = until(app.idle_exit_due()) => {
+                if app.quiet() {
+                    notify("server/idle", json!({"threadId": app.thread_id()}));
+                    went_idle = true;
+                    break;
+                }
             }
             // Another session can write, and a background subagent can
             // finish or message `main`, while no turn runs to pick it up.
@@ -404,6 +434,11 @@ pub async fn run(
     }
     tasks_task.abort();
     app.close().await;
+    if went_idle {
+        // The front end still holds stdin open, and the task reading it would
+        // keep the process waiting on it: leave now that everything is saved.
+        std::process::exit(0);
+    }
     Ok(())
 }
 
@@ -1597,6 +1632,25 @@ impl App {
             let result = crate::agent::compact_idle(&provider, &basis, &options).await;
             let _ = done.send(IdleDone { job, basis, result });
         });
+    }
+
+    /// Whether stopping now would cut nothing short: no turn, no summary being
+    /// written or due, no answer awaited, no background worker running, and
+    /// nothing waiting to be delivered.
+    fn quiet(&self) -> bool {
+        self.turn_id.is_none()
+            && self.idle_due.is_none()
+            && self.idle_compaction.is_none()
+            && self.pending_approvals.is_empty()
+            && self.pending_questions.is_empty()
+            && self.pending_client_calls.is_empty()
+            && self.thread.state.injections.is_empty()
+            && !self.workers.board.all().iter().any(|worker| worker.state == crate::workers::WorkerState::Running)
+    }
+
+    /// When the server stops by itself, if it is set to and nothing is going on.
+    fn idle_exit_due(&self) -> Option<tokio::time::Instant> {
+        self.idle_exit.filter(|_| self.quiet()).map(|after| self.last_activity + after)
     }
 
     /// Start the quiet spell idle compaction waits for over again: the person

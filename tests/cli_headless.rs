@@ -712,6 +712,46 @@ async fn app_server_sends_a_report_where_feedback_goes() {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait()).await;
 }
 
+/// Told to, an app server with nothing to do stops by itself, saying so first,
+/// so a desktop that keeps one per thread does not keep them all running.
+#[tokio::test]
+async fn app_server_stops_by_itself_once_nothing_happens() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let sync = sync_server::SyncServer::start("secret-token").await;
+    let device = SignedIn::new(&sync, "secret-token");
+    let (model, _) = recording_model_endpoint();
+    let mut child = device
+        .command(&model, &["app-server"])
+        .env("ABACUS_IDLE_EXIT_SECS", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let initialize = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}});
+    input.write_all(format!("{initialize}\n").as_bytes()).await.unwrap();
+
+    let started = std::time::Instant::now();
+    let said_idle = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if frame["method"] == "server/idle" {
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert_eq!(said_idle, Ok(true), "it says why it is going");
+    assert!(started.elapsed() >= std::time::Duration::from_millis(900), "not before the quiet spell is up");
+    let status = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait()).await;
+    assert!(status.is_ok_and(|status| status.unwrap().success()), "and exits cleanly, with stdin still open");
+    drop(input);
+}
+
 /// A model endpoint whose reply to each chat request `answer` picks from the
 /// request itself, and that keeps every request.
 fn scripted_model_endpoint(answer: fn(&str) -> String) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
