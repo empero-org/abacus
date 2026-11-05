@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.7.8 — 2026-11-05
+
+What Abacus Desktop 0.1.8 builds on: commands the person can run from the
+conversation, and going back to one of their messages. Sessions now say where
+they run, and a resumed one how long it was left. Ctrl+Enter and Shift+Enter
+start a new line in Konsole.
 
 - **A resumed session hears how long it was left.** The first turn after a
   session is opened again from disk (`--resume`, `-c`, `/resume`, a
