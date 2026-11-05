@@ -19,6 +19,15 @@
   asks for each command the person is to run in its own fenced block tagged
   with its shell, with no `$` prompt or output in it. Abacus Desktop shows
   such a block with a Run button that runs it in its terminal pane.
+- **Ctrl+Enter and Shift+Enter start a new line in Konsole.** Konsole sends
+  the same carriage return for Ctrl+Enter as for Enter, and ESC O M for
+  Shift+Enter, which went unread. While the terminal UI runs in a Konsole
+  tab whose profile uses the default key table, it switches the tab to a
+  table of its own (`~/.local/share/konsole/abacus.keytab`), which spells
+  modified Enter as the kitty keyboard protocol does inside full-screen
+  programs, and switches back as it exits. Not inside tmux or screen, nor
+  with `ABACUS_KEYBOARD=none`. `ABACUS_DEBUG_KEYS` logs whether the tab was
+  switched, and why not.
 
 ## 0.7.7 — 2026-11-04
 

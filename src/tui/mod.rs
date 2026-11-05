@@ -54,6 +54,7 @@ mod commands;
 mod draw;
 mod hub;
 mod keys;
+mod konsole;
 mod settings;
 #[cfg(test)]
 mod tests;
@@ -725,6 +726,8 @@ pub async fn run(
             )
         );
         KEYBOARD_ENHANCED.store(true, Ordering::SeqCst);
+        // Konsole speaks no such protocol, and sends Enter for Ctrl+Enter.
+        debug_log(&format!("konsole: {}", konsole::switch_keys(&mut stdout)));
     }
     let restore = TerminalRestore;
     install_terminal_guards();
@@ -887,6 +890,7 @@ fn restore_terminal() {
     if KEYBOARD_ENHANCED.swap(false, Ordering::SeqCst) {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     }
+    konsole::switch_back(&mut io::stdout());
     let _ = disable_raw_mode();
     let _ = execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste, LeaveAlternateScreen, Show);
 }
@@ -920,6 +924,12 @@ fn exit_after_restore(code: i32) -> ! {
 /// diagnosed from this file instead of guessed at. Off unless the variable is
 /// set; nothing else reads it.
 fn log_key(key: &KeyEvent) {
+    debug_log(&format!("{:?} modifiers={:?} kind={:?} state={:?}", key.code, key.modifiers, key.kind, key.state));
+}
+
+/// A line in the key log, when there is one: a key, or what was done to the
+/// terminal so its keys arrive as they do.
+fn debug_log(line: &str) {
     static LOG: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
     let Some(file) = LOG
         .get_or_init(|| {
@@ -930,9 +940,8 @@ fn log_key(key: &KeyEvent) {
     else {
         return;
     };
-    let line = format!("{:?} modifiers={:?} kind={:?} state={:?}\n", key.code, key.modifiers, key.kind, key.state);
     if let Ok(mut file) = file.lock() {
-        let _ = file.write_all(line.as_bytes());
+        let _ = writeln!(file, "{line}");
     }
 }
 

@@ -304,6 +304,19 @@ fn shift_enter_inserts_a_newline_instead_of_submitting() {
     assert!(app.running.is_none() && app.entries.is_empty(), "shift+enter must not send the prompt");
 }
 
+/// Ctrl+Enter and Alt+Enter are new lines too, however a terminal spells them:
+/// the kitty protocol, Konsole under Abacus's key table, or ESC before Enter.
+#[test]
+fn ctrl_and_alt_enter_insert_a_newline_too() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    app.input.insert_str("one");
+    handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+    app.input.insert_str("two");
+    handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+    assert_eq!(app.input.text(), "one\ntwo\n");
+    assert!(app.running.is_none() && app.entries.is_empty(), "neither may send the prompt");
+}
+
 #[test]
 fn ctrl_shift_enter_forks_the_session_keeping_the_draft() {
     let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");

@@ -1,0 +1,151 @@
+# Abacus's key table for Konsole.
+#
+# Konsole sends a carriage return for Ctrl+Enter, the same as for Enter, and
+# ESC O M for Shift+Enter, which terminal programs rarely read: neither can
+# start a new line in a full-screen program. While the Abacus terminal UI
+# runs, it switches its tab to this table and back to Konsole's default as it
+# exits (see konsole.rs).
+#
+# Every key sends what it sends under Konsole's default table, but Enter: in
+# a full-screen program (AppScreen), Shift, Ctrl and Alt with it are spelled
+# as the kitty keyboard protocol spells them, CSI 13 ; modifiers u. At a
+# prompt they stay as they were. Where an entry leaves Alt out, Konsole puts
+# ESC in front for it, so Alt+Enter alone is still ESC CR.
+#
+# `*` in a sequence is the xterm modifier number of the keys held.
+
+keyboard "Abacus"
+
+# Enter
+key Return -Shift-Ctrl-NewLine            : "\r"
+key Return -Shift-Ctrl+NewLine            : "\r\n"
+key Return -Shift+Ctrl-AppScreen-NewLine  : "\r"
+key Return -Shift+Ctrl-AppScreen+NewLine  : "\r\n"
+key Return +Shift-AppScreen               : "\EOM"
+key Return +Shift-Ctrl-Alt+AppScreen      : "\E[13;2u"
+key Return +Shift-Ctrl+Alt+AppScreen      : "\E[13;4u"
+key Return -Shift+Ctrl-Alt+AppScreen      : "\E[13;5u"
+key Return -Shift+Ctrl+Alt+AppScreen      : "\E[13;7u"
+key Return +Shift+Ctrl-Alt+AppScreen      : "\E[13;6u"
+key Return +Shift+Ctrl+Alt+AppScreen      : "\E[13;8u"
+key Enter -NewLine                        : "\r"
+key Enter +NewLine                        : "\r\n"
+
+# Escape, Tab, Backspace, Ctrl+Space
+key Escape                      : "\E"
+key Tab     -Shift              : "\t"
+key Tab     +Shift-Ansi         : "\t"
+key Tab     +Shift+Ansi         : "\E[Z"
+key Backtab -Ansi               : "\t"
+key Backtab +Ansi               : "\E[Z"
+key Tab     +Control-Ansi       : "\t"
+key Tab     +Control+Ansi       : "\E[27;5;9~"
+key Backtab +Control-Ansi       : "\t"
+key Backtab +Control+Ansi       : "\E[27;6;9~"
+key Backspace -Control          : "\x7f"
+key Backspace +Control          : "\b"
+key Space     +Control          : "\x00"
+
+# Arrows: VT52 without ANSI mode; SS3 in application cursor mode, CSI
+# otherwise; with modifiers, CSI 1 ; * and the letter.
+key Up    -Shift-Ansi                       : "\EA"
+key Down  -Shift-Ansi                       : "\EB"
+key Right -Shift-Ansi                       : "\EC"
+key Left  -Shift-Ansi                       : "\ED"
+key Up    -Shift-AnyMod+Ansi+AppCuKeys      : "\EOA"
+key Down  -Shift-AnyMod+Ansi+AppCuKeys      : "\EOB"
+key Right -Shift-AnyMod+Ansi+AppCuKeys      : "\EOC"
+key Left  -Shift-AnyMod+Ansi+AppCuKeys      : "\EOD"
+key Up    -Shift-AnyMod+Ansi-AppCuKeys      : "\E[A"
+key Down  -Shift-AnyMod+Ansi-AppCuKeys      : "\E[B"
+key Right -Shift-AnyMod+Ansi-AppCuKeys      : "\E[C"
+key Left  -Shift-AnyMod+Ansi-AppCuKeys      : "\E[D"
+key Up    -Shift+AnyMod+Ansi                : "\E[1;*A"
+key Down  -Shift+AnyMod+Ansi                : "\E[1;*B"
+key Right -Shift+AnyMod+Ansi                : "\E[1;*C"
+key Left  -Shift+AnyMod+Ansi                : "\E[1;*D"
+key Up    +Shift+AppScreen                  : "\E[1;*A"
+key Down  +Shift+AppScreen                  : "\E[1;*B"
+key Right +Shift+AppScreen                  : "\E[1;*C"
+key Left  +Shift+AppScreen                  : "\E[1;*D"
+key Up    +Shift+Alt-AppScreen              : "\E[1;*A"
+key Down  +Shift+Alt-AppScreen              : "\E[1;*B"
+key Right +Shift+Alt-AppScreen              : "\E[1;*C"
+key Left  +Shift+Alt-AppScreen              : "\E[1;*D"
+key Up    +Shift+Ctrl-AppScreen             : "\E[1;*A"
+key Down  +Shift+Ctrl-AppScreen             : "\E[1;*B"
+key Right +Shift+Ctrl-AppScreen             : "\E[1;*C"
+key Left  +Shift+Ctrl-AppScreen             : "\E[1;*D"
+
+# The keypad's arrows and editing keys
+key Up     -Shift+Ansi+AppCuKeys+KeyPad     : "\EOA"
+key Down   -Shift+Ansi+AppCuKeys+KeyPad     : "\EOB"
+key Right  -Shift+Ansi+AppCuKeys+KeyPad     : "\EOC"
+key Left   -Shift+Ansi+AppCuKeys+KeyPad     : "\EOD"
+key Up     -Shift+Ansi-AppCuKeys+KeyPad     : "\E[A"
+key Down   -Shift+Ansi-AppCuKeys+KeyPad     : "\E[B"
+key Right  -Shift+Ansi-AppCuKeys+KeyPad     : "\E[C"
+key Left   -Shift+Ansi-AppCuKeys+KeyPad     : "\E[D"
+key Home   +AppCuKeys+KeyPad                : "\EOH"
+key End    +AppCuKeys+KeyPad                : "\EOF"
+key Home   -AppCuKeys+KeyPad                : "\E[H"
+key End    -AppCuKeys+KeyPad                : "\E[F"
+key Insert +KeyPad                          : "\E[2~"
+key Delete +KeyPad                          : "\E[3~"
+key PgUp   -Shift+KeyPad                    : "\E[5~"
+key PgDown -Shift+KeyPad                    : "\E[6~"
+key Clear  +KeyPad                          : "\E[E"
+
+# Home, End, Insert, Delete, Page Up and Down
+key Home   -AnyMod-AppCuKeys                : "\E[H"
+key End    -AnyMod-AppCuKeys                : "\E[F"
+key Home   -AnyMod+AppCuKeys                : "\EOH"
+key End    -AnyMod+AppCuKeys                : "\EOF"
+key Home   +AnyMod                          : "\E[1;*H"
+key End    +AnyMod                          : "\E[1;*F"
+key Insert -AnyMod                          : "\E[2~"
+key Delete -AnyMod                          : "\E[3~"
+key Insert +AnyMod                          : "\E[2;*~"
+key Delete +AnyMod                          : "\E[3;*~"
+key PgUp   -Shift-AnyMod                    : "\E[5~"
+key PgDown -Shift-AnyMod                    : "\E[6~"
+key PgUp   -Shift+AnyMod                    : "\E[5;*~"
+key PgDown -Shift+AnyMod                    : "\E[6;*~"
+key PgUp   +Shift+AppScreen                 : "\E[5;*~"
+key PgDown +Shift+AppScreen                 : "\E[6;*~"
+
+# Function keys
+key F1  -AnyMod : "\EOP"
+key F2  -AnyMod : "\EOQ"
+key F3  -AnyMod : "\EOR"
+key F4  -AnyMod : "\EOS"
+key F5  -AnyMod : "\E[15~"
+key F6  -AnyMod : "\E[17~"
+key F7  -AnyMod : "\E[18~"
+key F8  -AnyMod : "\E[19~"
+key F9  -AnyMod : "\E[20~"
+key F10 -AnyMod : "\E[21~"
+key F11 -AnyMod : "\E[23~"
+key F12 -AnyMod : "\E[24~"
+key F1  +AnyMod : "\EO*P"
+key F2  +AnyMod : "\EO*Q"
+key F3  +AnyMod : "\EO*R"
+key F4  +AnyMod : "\EO*S"
+key F5  +AnyMod : "\E[15;*~"
+key F6  +AnyMod : "\E[17;*~"
+key F7  +AnyMod : "\E[18;*~"
+key F8  +AnyMod : "\E[19;*~"
+key F9  +AnyMod : "\E[20;*~"
+key F10 +AnyMod : "\E[21;*~"
+key F11 +AnyMod : "\E[23;*~"
+key F12 +AnyMod : "\E[24;*~"
+
+# Konsole's own scrolling, at a prompt
+key Up     -Alt-Ctrl+Shift-AppScreen        : scrollLineUp
+key Down   -Alt-Ctrl+Shift-AppScreen        : scrollLineDown
+key PgUp   -Ctrl+Shift-AppScreen            : scrollPageUp
+key PgDown -Ctrl+Shift-AppScreen            : scrollPageDown
+key PgUp   +Ctrl+Shift-AppScreen            : scrollPromptUp
+key PgDown +Ctrl+Shift-AppScreen            : scrollPromptDown
+key Home   +Shift-AppScreen                 : scrollUpToTop
+key End    +Shift-AppScreen                 : scrollDownToBottom
