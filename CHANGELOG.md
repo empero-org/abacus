@@ -15,6 +15,10 @@
   and the time zone with its offset from UTC. A resumed session may be on
   another device, so this is said again rather than assumed. Both notes are
   the model's: the transcript does not show them.
+- **Commands for the person come in blocks they can run.** The system prompt
+  asks for each command the person is to run in its own fenced block tagged
+  with its shell, with no `$` prompt or output in it. Abacus Desktop shows
+  such a block with a Run button that runs it in its terminal pane.
 
 ## 0.7.7 — 2026-11-04
 
