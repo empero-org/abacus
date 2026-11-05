@@ -540,6 +540,93 @@ async fn app_server_tells_a_thread_where_it_runs_and_a_resumed_one_how_long_it_w
     assert!(!items.iter().any(|item| item.to_string().contains("resume_info")), "the note is the model's: {items:?}");
 }
 
+/// The window can go back to one of the person's messages, or fork from it:
+/// the message comes back to edit, and the model no longer sees it or what
+/// followed. A window that has the message wrong changes nothing.
+#[tokio::test]
+async fn app_server_rewinds_to_a_message_and_forks_from_one() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    type Lines = tokio::io::Lines<BufReader<tokio::process::ChildStdout>>;
+
+    async fn until(lines: &mut Lines, done: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let message: serde_json::Value = serde_json::from_str(&line).unwrap();
+                if done(&message) {
+                    return message;
+                }
+            }
+            panic!("the app server stopped");
+        })
+        .await
+        .expect("the app server answers in time")
+    }
+    fn said(snapshot: &serde_json::Value) -> Vec<String> {
+        let items = snapshot["result"]["items"].as_array().cloned().unwrap_or_default();
+        items
+            .iter()
+            .filter(|item| item["type"] == "userMessage")
+            .map(|item| item["text"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    let (model, requests) = recording_model_endpoint();
+    let sync = sync_server::SyncServer::start("secret-token").await;
+    let device = SignedIn::new(&sync, "secret-token");
+    let mut child = device
+        .command(&model, &["app-server"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut send = async |id: u64, method: &str, params: serde_json::Value| {
+        let frame = serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        input.write_all(format!("{frame}\n").as_bytes()).await.unwrap();
+    };
+    let completed = |message: &serde_json::Value| message["method"] == "turn/completed";
+    let answered = |id: u64| move |message: &serde_json::Value| message["id"] == id && message.get("method").is_none();
+
+    send(1, "initialize", serde_json::json!({})).await;
+    let capabilities = until(&mut lines, answered(1)).await;
+    assert_eq!(capabilities["result"]["capabilities"]["rewind"], true, "{capabilities}");
+    send(2, "turn/start", serde_json::json!({"text": "first question"})).await;
+    let thread = until(&mut lines, completed).await["params"]["threadId"].clone();
+    send(3, "turn/start", serde_json::json!({"text": "second question"})).await;
+    until(&mut lines, completed).await;
+
+    send(4, "thread/rewind", serde_json::json!({"back": 1, "text": "first question"})).await;
+    let refused = until(&mut lines, answered(4)).await;
+    assert!(refused["error"]["message"].as_str().unwrap_or_default().contains("changed"), "{refused}");
+
+    send(5, "thread/rewind", serde_json::json!({"back": 1, "text": "second question"})).await;
+    let rewound = until(&mut lines, answered(5)).await;
+    assert_eq!(rewound["result"]["draft"]["text"], "second question", "{rewound}");
+    assert_eq!(rewound["result"]["threadId"], thread, "the same thread");
+    assert_eq!(said(&rewound), ["first question"]);
+    send(6, "turn/start", serde_json::json!({"text": "the second, put better"})).await;
+    until(&mut lines, completed).await;
+
+    send(7, "thread/fork", serde_json::json!({"back": 2, "text": "first question"})).await;
+    let fork = until(&mut lines, answered(7)).await;
+    assert_ne!(fork["result"]["threadId"], thread, "a thread of its own");
+    assert_eq!(fork["result"]["draft"]["text"], "first question");
+    assert!(said(&fork).is_empty(), "the fork starts before it: {fork}");
+    // The original is as it was.
+    send(8, "thread/read", serde_json::json!({"threadId": thread})).await;
+    let original = until(&mut lines, answered(8)).await;
+    assert_eq!(said(&original), ["first question", "the second, put better"]);
+    drop(input);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait()).await;
+
+    let sent = requests.lock().unwrap().clone();
+    let last = sent.iter().find(|request| request.contains("the second, put better")).unwrap();
+    assert!(last.contains("first question"), "{last}");
+    assert!(!last.contains("second question"), "rewound away: {last}");
+}
+
 /// A model endpoint like [`model_endpoint`] that also keeps every request it
 /// was sent, so a test can see what the model was given.
 fn recording_model_endpoint() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {

@@ -19,6 +19,16 @@
   asks for each command the person is to run in its own fenced block tagged
   with its shell, with no `$` prompt or output in it. Abacus Desktop shows
   such a block with a Run button that runs it in its terminal pane.
+- **A front end can go back to one of the person's messages.** The app
+  server's new `thread/rewind` takes the conversation back to before one of
+  the person's messages, counted back from the latest (`back`), as Esc Esc
+  does in the terminal, and answers with that message as a `draft` (its
+  text, images and attached files) to edit and send again. `thread/fork`
+  takes `back` too, for a new session up to that message that leaves the
+  original as it was. The window says which message it means by its text, so
+  one that has it wrong is refused instead of losing another. Files the agent
+  changed stay as they are. The `rewind` capability announces both; Abacus
+  Desktop offers them under each of the person's messages.
 - **Ctrl+Enter and Shift+Enter start a new line in Konsole.** Konsole sends
   the same carriage return for Ctrl+Enter as for Enter, and ESC O M for
   Shift+Enter, which went unread. While the terminal UI runs in a Konsole

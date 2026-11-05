@@ -560,6 +560,10 @@ impl App {
                     "idleCompaction": true,
                     // thread/fork, and `forkedFrom` on thread/list.
                     "fork": true,
+                    // thread/rewind, and thread/fork from one of the
+                    // person's messages (`back`); either answers with the
+                    // message as a `draft` for the composer.
+                    "rewind": true,
                     // Sessions message each other: `live` on thread/list, and
                     // a `from` on the userMessage items they send.
                     "sessionMessages": true,
@@ -645,7 +649,9 @@ impl App {
             }
             // Continue a thread as a new one that remembers where it came
             // from: the open thread, or the one `threadId` names. The window
-            // switches to the fork; the original is left as it was.
+            // switches to the fork; the original is left as it was. With
+            // `back`, the fork goes up to one of the person's messages (see
+            // `thread/rewind`), and that message comes back as its `draft`.
             "thread/fork" => {
                 self.require_idle()?;
                 let store = self.store.as_ref().ok_or_else(|| anyhow!("sessions off"))?;
@@ -657,20 +663,48 @@ impl App {
                         self.thread.session.clone()
                     }
                 };
+                let (messages, draft) = match params.get("back") {
+                    Some(back) => {
+                        let at = person_message(&original.messages, back, params["text"].as_str())?;
+                        (original.messages[..at].to_vec(), Some(draft_of(&original.messages[at]["content"])))
+                    }
+                    None => (original.messages.clone(), None),
+                };
                 let store = self.store.as_ref().ok_or_else(|| anyhow!("sessions off"))?;
-                let fork = store.fork(
-                    &original,
-                    self.config.profile.clone(),
-                    self.config.model_ref(),
-                    original.messages.clone(),
-                )?;
+                let fork = store.fork(&original, self.config.profile.clone(), self.config.model_ref(), messages)?;
                 self.stop_idle_compaction();
                 self.thread_closed();
                 self.tokens.store_total(0);
+                self.provider.clear_context_tokens();
                 self.thread = ThreadState::new(&self.config, Some(fork));
                 self.thread_opened();
                 notify("thread/started", json!({"threadId": self.thread_id(), "forkedFrom": original.id.to_string()}));
-                Ok(self.thread_snapshot())
+                let mut snapshot = self.thread_snapshot();
+                if let Some(draft) = draft {
+                    snapshot["draft"] = draft;
+                }
+                Ok(snapshot)
+            }
+            // Go back to before one of the person's messages, `back` from the
+            // end (1 for the latest), as Esc Esc does in the terminal: it and
+            // everything after it leave the conversation, and it comes back
+            // as the snapshot's `draft` to edit and send again. `text` is the
+            // message as the window shows it, so a window that has it wrong
+            // is told so instead of losing another one. Files the agent
+            // changed stay changed; a turn's edits card undoes those.
+            "thread/rewind" => {
+                self.require_idle()?;
+                let at = person_message(&self.thread.messages, &params["back"], params["text"].as_str())?;
+                let draft = draft_of(&self.thread.messages[at]["content"]);
+                self.stop_idle_compaction();
+                self.thread.messages.truncate(at);
+                self.provider.clear_context_tokens();
+                if self.thread.persisted {
+                    self.persist();
+                }
+                let mut snapshot = self.thread_snapshot();
+                snapshot["draft"] = draft;
+                Ok(snapshot)
             }
             "thread/name/set" => {
                 let name = params["name"].as_str().unwrap_or_default();
@@ -2547,18 +2581,85 @@ fn with_files(mut text: String, files: Vec<(String, String)>) -> String {
     text
 }
 
+/// Where an attached file's block starts, as `with_files` writes it.
+const ATTACHED: &str = "\n\n<attached_file path=\"";
+
+/// Whether a saved message is one the person wrote, as `history_items` shows
+/// it: not a tool's screenshot, the note an undo left, a goal carrying on, or
+/// what another session or an agent sent.
+fn from_the_person(message: &Value) -> bool {
+    if message["role"] != "user" {
+        return false;
+    }
+    let said = crate::text::content_text(&message["content"]);
+    if crate::agent::is_tool_images(&said)
+        || crate::checkpoint::is_undo_note(&said)
+        || crate::goal::is_carry_on(&said)
+        || crate::inbox::shown(&said).is_some()
+        || crate::agent::arrival(&said).is_some()
+    {
+        return false;
+    }
+    let item = user_item(&message["content"]);
+    item["text"].as_str().is_some_and(|text| !text.trim().is_empty())
+        || item.get("images").is_some()
+        || item.get("files").is_some()
+}
+
+/// Where the person's message `back` from the end (1 for the latest) is in
+/// `messages`. `shown` is its text as the window has it: when that is another
+/// message's, the window and the thread disagree, and nothing is touched. A
+/// slash command shows as typed, not as the prompt it became, so it is let be.
+fn person_message(messages: &[Value], back: &Value, shown: Option<&str>) -> Result<usize> {
+    let back = back
+        .as_u64()
+        .filter(|back| *back >= 1)
+        .ok_or_else(|| anyhow!("say which message: `back` counts from 1, the latest"))?;
+    let at = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| from_the_person(message))
+        .map(|(index, _)| index)
+        .rev()
+        .nth((back - 1) as usize)
+        .ok_or_else(|| anyhow!("that message is no longer in the conversation — it was summarised away"))?;
+    if let Some(shown) = shown.map(str::trim)
+        && !shown.starts_with('/')
+        && user_item(&messages[at]["content"])["text"].as_str().map(str::trim) != Some(shown)
+    {
+        return Err(anyhow!("the conversation has changed since the window showed it — reopen the session"));
+    }
+    Ok(at)
+}
+
+/// A message of the person's as the composer takes it back: the text, the
+/// images, and each attached file with what it held.
+fn draft_of(content: &Value) -> Value {
+    let item = user_item(content);
+    let text = crate::text::content_text(content);
+    let files: Vec<Value> = text
+        .split(ATTACHED)
+        .skip(1)
+        .filter_map(|block| {
+            let (name, rest) = block.split_once("\">\n")?;
+            let held = rest.rsplit_once("\n</attached_file>").map_or(rest, |(held, _)| held);
+            Some(json!({"name": name, "text": held}))
+        })
+        .collect();
+    json!({"text": item["text"], "images": crate::text::content_images(content), "files": files})
+}
+
 /// A user message as a client item: what the person wrote, with the files and
 /// images that went along listed apart instead of inlined.
 fn user_item(content: &Value) -> Value {
     let text = crate::text::content_text(content);
-    const MARK: &str = "\n\n<attached_file path=\"";
-    let (said, attached) = text.split_once(MARK).map_or((text.as_ref(), ""), |(said, rest)| (said, rest));
+    let (said, attached) = text.split_once(ATTACHED).map_or((text.as_ref(), ""), |(said, rest)| (said, rest));
     let files: Vec<&str> = if attached.is_empty() {
         Vec::new()
     } else {
         // The first block's path starts `attached`; each later one follows a mark.
         std::iter::once(attached)
-            .chain(attached.split(MARK).skip(1))
+            .chain(attached.split(ATTACHED).skip(1))
             .filter_map(|block| block.split_once('"').map(|(path, _)| path))
             .collect()
     };
@@ -2829,6 +2930,59 @@ mod tests {
         let plain = user_item(&json!("just words"));
         assert_eq!(plain["text"], "just words");
         assert!(plain.get("files").is_none());
+    }
+
+    /// Rewinding and forking count the person's messages back from the end,
+    /// as the window shows them: what an agent or a tool put in the history
+    /// does not count, and a window that has the message wrong is told so.
+    #[test]
+    fn the_persons_messages_are_counted_back_from_the_end() {
+        let messages = [
+            json!({"role": "system", "content": "prompt"}),
+            json!({"role": "user", "content": "first"}),
+            json!({"role": "assistant", "content": "done"}),
+            json!({"role": "user", "content": crate::agent::agent_message("perf", "tests pass")}),
+            json!({"role": "user", "content": "second"}),
+            json!({"role": "assistant", "content": "also done"}),
+        ];
+        assert_eq!(person_message(&messages, &json!(1), Some("second")).unwrap(), 4);
+        assert_eq!(person_message(&messages, &json!(2), Some(" first\n")).unwrap(), 1);
+        assert_eq!(person_message(&messages, &json!(2), None).unwrap(), 1);
+        let wrong = person_message(&messages, &json!(1), Some("first")).unwrap_err();
+        assert!(wrong.to_string().contains("changed"), "{wrong}");
+        // A command shows as typed; the history holds the prompt it became.
+        assert_eq!(person_message(&messages, &json!(1), Some("/review")).unwrap(), 4);
+        assert!(person_message(&messages, &json!(3), None).is_err(), "only two are the person's");
+        assert!(person_message(&messages, &json!(0), None).is_err());
+        assert!(person_message(&messages, &json!("1"), None).is_err());
+
+        // The same two the reopened thread shows as the person's.
+        let shown = history_items(&messages)
+            .into_iter()
+            .filter(|item| item["type"] == "userMessage" && item.get("from").is_none())
+            .count();
+        assert_eq!(shown, messages.iter().filter(|message| from_the_person(message)).count());
+    }
+
+    /// A message rewound or forked from comes back whole for the composer.
+    #[test]
+    fn a_draft_gives_back_the_text_images_and_files() {
+        let text = with_files(
+            "compare these".to_owned(),
+            vec![("a.rs".to_owned(), "fn a() {}\n".to_owned()), ("docs/b.md".to_owned(), "# b".to_owned())],
+        );
+        let content = json!([
+            {"type": "text", "text": text},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ]);
+        let draft = draft_of(&content);
+        assert_eq!(draft["text"], "compare these");
+        assert_eq!(draft["images"], json!(["data:image/png;base64,AAAA"]));
+        assert_eq!(
+            draft["files"],
+            json!([{"name": "a.rs", "text": "fn a() {}\n"}, {"name": "docs/b.md", "text": "# b"}])
+        );
+        assert_eq!(draft_of(&json!("plain")), json!({"text": "plain", "images": [], "files": []}));
     }
 
     #[test]
