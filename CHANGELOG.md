@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **abacus.exe starts on any 64-bit Windows.** The Windows build links the C
+  runtime in, so it no longer needs `VCRUNTIME140.dll`. Without the Visual
+  C++ Redistributable, the installer used to report success and then
+  `abacus` would not start. A release now fails if the Windows build needs
+  that runtime again.
+
 ## 0.7.8 — 2026-11-05
 
 What Abacus Desktop 0.1.8 builds on: commands the person can run from the

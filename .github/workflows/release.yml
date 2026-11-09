@@ -72,6 +72,23 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Check the DLLs it needs (Windows)
+        # A VCRUNTIME or MSVCP import means the C runtime is linked dynamically
+        # (see .cargo/config.toml): abacus.exe would not start on a Windows
+        # without the Visual C++ Redistributable.
+        working-directory: dist
+        run: |
+          exe=abacus-x86_64-pc-windows-msvc.exe
+          dlls=$(objdump -p "$exe" | awk '/DLL Name:/ { print $3 }')
+          echo "$exe needs:" $dlls
+          if [ -z "$dlls" ]; then
+            echo "::error::could not read the DLLs $exe needs"
+            exit 1
+          fi
+          if echo "$dlls" | grep -iE '^(vcruntime|msvcp)'; then
+            echo "::error::$exe needs the Visual C++ runtime; a release must start without it"
+            exit 1
+          fi
       - name: Generate checksums
         working-directory: dist
         run: sha256sum abacus-* > SHA256SUMS

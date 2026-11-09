@@ -1,0 +1,8 @@
+# Link the C runtime into abacus.exe. Linked dynamically, it needs
+# VCRUNTIME140.dll, which a Windows without the Visual C++ Redistributable
+# does not have: the installer then reports success and abacus will not start.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
