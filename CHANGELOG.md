@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.7.9 — 2026-11-12
+
+The agent wakes itself with timers instead of sleeping through a wait, so
+the person can talk to it while a build or a run finishes. abacus.exe starts
+on a Windows without the Visual C++ Redistributable.
 
 - **The agent sets timers instead of sleeping.** `timer(seconds, note)`
   answers at once; when the time is up, the note comes back to the model, as
