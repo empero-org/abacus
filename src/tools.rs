@@ -418,8 +418,18 @@ impl ToolExecutor {
         let base = self.resolve_for_read(&args.path)?;
         let context = args.context.clamp(0, 10);
         let max_results = args.max_results.clamp(1, 2_000);
-        let mut matches = Vec::new();
-        let mut match_count = 0usize;
+        // Collect per-file hits first so the files with the most matches render
+        // first, while bounding both walk work (stop once we have 4x max_results
+        // hits) and memory (store only matched lines plus context, never whole files).
+        let collect_limit = max_results.saturating_mul(4).min(4_000);
+        struct FileHits {
+            relative: String,
+            total_hits: usize,
+            hits: Vec<usize>,
+            lines: Vec<(usize, String)>,
+        }
+        let mut files: Vec<FileHits> = Vec::new();
+        let mut collected_hits = 0usize;
 
         for entry in walk(&base, None) {
             if !entry.file_type().is_some_and(|kind| kind.is_file()) {
@@ -441,43 +451,75 @@ impl ToolExecutor {
                 continue;
             };
             let lines: Vec<&str> = content.lines().collect();
-            let remaining = max_results - match_count;
-            let hits: Vec<usize> = lines
-                .iter()
-                .enumerate()
-                .filter(|(_, line)| regex.is_match(line))
-                .map(|(index, _)| index)
-                .take(remaining)
-                .collect();
-            if hits.is_empty() {
+            let all_hits: Vec<usize> =
+                lines.iter().enumerate().filter(|(_, line)| regex.is_match(line)).map(|(index, _)| index).collect();
+            if all_hits.is_empty() {
                 continue;
             }
+            let total_hits = all_hits.len();
+            let kept_hits: Vec<usize> = all_hits.into_iter().take(max_results).collect();
+            let snippets = if context == 0 {
+                kept_hits.iter().map(|&index| (index, lines[index].to_owned())).collect()
+            } else {
+                let mut collected = Vec::new();
+                for (start, end) in merge_windows(&kept_hits, context, lines.len()) {
+                    for (offset, line) in lines[start..=end].iter().enumerate() {
+                        collected.push((start + offset, (*line).to_owned()));
+                    }
+                }
+                collected
+            };
+            files.push(FileHits {
+                relative: relative.display().to_string(),
+                total_hits,
+                hits: kept_hits,
+                lines: snippets,
+            });
+            collected_hits += total_hits;
+            if collected_hits >= collect_limit {
+                break;
+            }
+        }
+
+        // Most hits first; path ascending breaks ties deterministically.
+        files.sort_by(|a, b| b.total_hits.cmp(&a.total_hits).then_with(|| a.relative.cmp(&b.relative)));
+
+        let mut matches = Vec::new();
+        let mut match_count = 0usize;
+        for file in &files {
+            let remaining = max_results.saturating_sub(match_count);
+            if remaining == 0 {
+                break;
+            }
+            let take = file.hits.len().min(remaining);
+            let hits = &file.hits[..take];
+            let max_line = file.lines.last().map_or(0, |(idx, _)| *idx + 1);
+            matches.push(format!(
+                "{} ({} match{})",
+                file.relative,
+                file.total_hits,
+                if file.total_hits == 1 { "" } else { "es" }
+            ));
             if context == 0 {
-                for index in &hits {
-                    matches.push(format!("{}:{}: {}", relative.display(), index + 1, lines[*index]));
+                for &index in hits {
+                    if let Some(text) = lookup_snippet(&file.lines, index) {
+                        matches.push(format!("{}:{}: {text}", file.relative, index + 1));
+                    }
                 }
             } else {
-                let mut windows: Vec<(usize, usize)> = Vec::new();
-                for index in &hits {
-                    let start = index.saturating_sub(context);
-                    let end = (*index + context).min(lines.len().saturating_sub(1));
-                    match windows.last_mut() {
-                        Some((_, tail)) if *tail + 1 >= start => *tail = (*tail).max(end),
-                        _ => windows.push((start, end)),
-                    }
-                }
-                for (start, end) in windows {
-                    if !matches.is_empty() {
+                for (window_no, (start, end)) in merge_windows(hits, context, max_line).into_iter().enumerate() {
+                    if window_no > 0 {
                         matches.push("--".to_owned());
                     }
-                    for (offset, line) in lines[start..=end].iter().enumerate() {
-                        let index = start + offset;
-                        let marker = if hits.contains(&index) { ':' } else { '-' };
-                        matches.push(format!("{}:{}{} {}", relative.display(), index + 1, marker, line));
+                    for index in start..=end {
+                        if let Some(text) = lookup_snippet(&file.lines, index) {
+                            let marker = if hits.contains(&index) { ':' } else { '-' };
+                            matches.push(format!("{}:{}{} {text}", file.relative, index + 1, marker));
+                        }
                     }
                 }
             }
-            match_count += hits.len();
+            match_count += take;
             if match_count >= max_results {
                 matches.push(format!("… output capped at {max_results} matches"));
                 return Ok(matches.join("\n"));
@@ -1579,6 +1621,23 @@ fn dot() -> String {
     ".".to_owned()
 }
 
+fn merge_windows(hits: &[usize], context: usize, line_count: usize) -> Vec<(usize, usize)> {
+    let mut windows: Vec<(usize, usize)> = Vec::new();
+    for &index in hits {
+        let start = index.saturating_sub(context);
+        let end = (index + context).min(line_count.saturating_sub(1));
+        match windows.last_mut() {
+            Some((_, tail)) if *tail + 1 >= start => *tail = (*tail).max(end),
+            _ => windows.push((start, end)),
+        }
+    }
+    windows
+}
+
+fn lookup_snippet(lines: &[(usize, String)], index: usize) -> Option<&str> {
+    lines.binary_search_by_key(&index, |(idx, _)| *idx).ok().map(|pos| lines[pos].1.as_str())
+}
+
 fn validate_ref(value: &str) -> Result<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -1810,6 +1869,55 @@ mod tests {
         assert!(output.contains("main.rs:10- ten"));
         // Disjoint groups are separated by "--"; adjacent windows would have merged.
         assert!(output.contains("--"));
+    }
+
+    #[tokio::test]
+    async fn grep_ranks_files_with_most_matches_first() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("cold.rs"), "needle\n").unwrap();
+        fs::write(dir.path().join("hot.rs"), "needle one\nneedle two\nneedle three\n").unwrap();
+        let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
+        let call = tool_call("grep", r#"{"query":"needle"}"#);
+        let output = tools.execute(&call).await;
+        let hot = output.find("hot.rs").expect("hot file listed");
+        let cold = output.find("cold.rs").expect("cold file listed");
+        assert!(hot < cold, "most-hit file renders first: {output}");
+        assert!(output.contains("hot.rs (3 matches)"), "{output}");
+        assert!(output.contains("cold.rs (1 match)"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn grep_caps_output_and_preserves_truncated_context() {
+        let dir = tempdir().unwrap();
+        let mut lines = Vec::new();
+        for i in 1..=20 {
+            lines.push(format!("before_{i}"));
+            lines.push(format!("needle_{i}"));
+            lines.push(format!("after_{i}"));
+        }
+        fs::write(dir.path().join("many.rs"), lines.join("\n")).unwrap();
+        let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
+        let call = tool_call("grep", r#"{"query":"needle_","max_results":2,"context":1}"#);
+        let output = tools.execute(&call).await;
+        assert!(output.contains("many.rs (20 matches)"), "{output}");
+        assert!(output.contains("needle_1"), "{output}");
+        assert!(output.contains("needle_2"), "{output}");
+        assert!(!output.contains("needle_3"), "{output}");
+        assert!(output.contains("… output capped at 2 matches"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn grep_stops_walk_once_collection_budget_is_reached() {
+        let dir = tempdir().unwrap();
+        for i in 0..15 {
+            fs::write(dir.path().join(format!("f{i:02}.rs")), "needle a\nneedle b\n").unwrap();
+        }
+        let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
+        let call = tool_call("grep", r#"{"query":"needle","max_results":2}"#);
+        let output = tools.execute(&call).await;
+        assert!(output.contains("… output capped at 2 matches"), "{output}");
+        // Only 2 match lines emitted (1 file header + 2 match lines + 1 cap footer).
+        assert_eq!(output.lines().filter(|l| l.contains(": needle ")).count(), 2, "{output}");
     }
 
     #[test]
