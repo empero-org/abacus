@@ -326,6 +326,8 @@ pub struct TurnOptions {
     /// Where the file tools record what they change, for a front end that
     /// shows the turn's edits and can undo them. Inert unless it set one.
     pub journal: crate::checkpoint::Journal,
+    /// Checkpoint manager for automatic pre-turn Git shadow checkpoints and rollback.
+    pub checkpoint_mgr: Option<Arc<tokio::sync::Mutex<crate::git_checkpoint::CheckpointManager>>>,
     /// Raised to ask the turn to stop. Checked between steps, after each tool,
     /// and per stream chunk, so the turn can finish reporting what it did
     /// rather than being killed and losing it.
@@ -364,6 +366,7 @@ impl TurnOptions {
             safety: Default::default(),
             trace: None,
             journal: Default::default(),
+            checkpoint_mgr: None,
             cancel: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -482,12 +485,30 @@ pub fn run_turn(
     Box::pin(run_turn_inner(provider, messages, options, events))
 }
 
+async fn save_metadata_if_needed(options: &TurnOptions, session_id: &str, checkpoint_created: bool) {
+    if checkpoint_created && let Some(ref mgr_lock) = options.checkpoint_mgr {
+        let mgr = mgr_lock.lock().await;
+        let _ = mgr.save_metadata(session_id);
+    }
+}
+
 async fn run_turn_inner(
     provider: Provider,
     mut messages: Vec<Value>,
     options: TurnOptions,
     events: mpsc::UnboundedSender<AgentEvent>,
 ) {
+    let session_id = options.session_id.as_deref().unwrap_or("default");
+    let turn_index = messages.iter().filter(|m| m.get("role").and_then(Value::as_str) == Some("user")).count().max(1);
+    let prompt = messages
+        .iter()
+        .rev()
+        .find(|m| m.get("role").and_then(Value::as_str) == Some("user"))
+        .and_then(|m| m.get("content"))
+        .map(|c| if let Some(s) = c.as_str() { s.to_string() } else { crate::text::content_text(c).into_owned() })
+        .unwrap_or_default();
+    let mut turn_checkpoint_created = false;
+    let mut tool_step_counter: usize = 0;
     // The auxiliary model, on whichever provider it is: secondary calls (page
     // extraction) so a big main model does not pay for them. Compaction stays
     // on the main model unless its own role says otherwise — the rolling
@@ -574,6 +595,7 @@ async fn run_turn_inner(
                         // The forwarder only exits once every sender is gone;
                         // without this drop the await below deadlocks and the
                         // turn hangs on "connecting" instead of reporting.
+                        save_metadata_if_needed(&options, session_id, turn_checkpoint_created).await;
                         drop(delta_tx);
                         let _ = forward.await;
                         let _ = events.send(AgentEvent::Failed { error: format!("{error:#}"), messages });
@@ -590,6 +612,7 @@ async fn run_turn_inner(
                 if empty_retries > EMPTY_COMPLETION_RETRY_LIMIT {
                     // Persistent empty stream — end the turn cleanly without
                     // pushing a meaningless empty assistant message into history.
+                    save_metadata_if_needed(&options, session_id, turn_checkpoint_created).await;
                     drop(delta_tx);
                     let _ = forward.await;
                     let _ = events.send(AgentEvent::Done { messages, reason: DoneReason::Complete });
@@ -644,6 +667,7 @@ async fn run_turn_inner(
         // A cancelled stream still produced (and was billed for) whatever it
         // got through, so it is kept in history before the turn reports back.
         if completion.cancelled || options.cancel.load(Ordering::Relaxed) {
+            save_metadata_if_needed(&options, session_id, turn_checkpoint_created).await;
             let _ = events.send(AgentEvent::Done { messages, reason: DoneReason::Interrupted });
             return;
         }
@@ -656,6 +680,7 @@ async fn run_turn_inner(
                 deliver_injections(&options, &mut messages, &events);
                 continue;
             }
+            save_metadata_if_needed(&options, session_id, turn_checkpoint_created).await;
             let _ = events.send(AgentEvent::Done { messages, reason: DoneReason::Complete });
             return;
         }
@@ -730,7 +755,36 @@ async fn run_turn_inner(
             let refused = refusal.is_some();
             let mut output = match refusal {
                 Some(refusal) => refusal,
-                None => run_tool(&call, &options, &tools, &subagents, &aux).await,
+                None => {
+                    if crate::tools::is_file_mutating_tool(&call.name)
+                        && let Some(ref mgr_lock) = options.checkpoint_mgr
+                    {
+                        let affected = crate::tools::extract_mutating_paths(&call, &options.workspace);
+                        let mut mgr = mgr_lock.lock().await;
+                        let base_id = format!("chk_{}_{}", session_id, turn_index);
+                        if !turn_checkpoint_created {
+                            let _ = mgr.prepare_tool_checkpoint(session_id, turn_index, 0, &call.name, &prompt);
+                            turn_checkpoint_created = true;
+                            for (path, is_creation) in affected {
+                                mgr.record_checkpoint_touch(session_id, &base_id, &path, is_creation);
+                            }
+                        } else {
+                            tool_step_counter += 1;
+                            if let Ok(step_chk) = mgr
+                                .prepare_tool_checkpoint(session_id, turn_index, tool_step_counter, &call.name, &prompt)
+                            {
+                                for (path, is_creation) in &affected {
+                                    mgr.record_checkpoint_touch(session_id, &step_chk.id, path, *is_creation);
+                                }
+                            }
+                            for (path, is_creation) in affected {
+                                mgr.record_checkpoint_touch(session_id, &base_id, &path, is_creation);
+                            }
+                        }
+                        let _ = mgr.save_metadata(session_id);
+                    }
+                    run_tool(&call, &options, &tools, &subagents, &aux).await
+                }
             };
 
             // Bind an oversized result instead of spending the window on it:
@@ -745,6 +799,7 @@ async fn run_turn_inner(
             finish_tool(&call, output, refused, &mut messages, &events);
         }
         if interrupted {
+            save_metadata_if_needed(&options, session_id, turn_checkpoint_created).await;
             let _ = events.send(AgentEvent::Done { messages, reason: DoneReason::Interrupted });
             return;
         }
@@ -760,6 +815,7 @@ async fn run_turn_inner(
     // gracefully, the caller can flush a queued message, and the context survives
     // for the next turn. This keeps long-running goals alive across turns instead
     // of presenting a mid-work stop as a failure.
+    save_metadata_if_needed(&options, session_id, turn_checkpoint_created).await;
     let _ = events.send(AgentEvent::Done { messages, reason: DoneReason::StepLimit });
 }
 

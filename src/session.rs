@@ -107,7 +107,7 @@ impl SessionState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Session {
     pub version: u32,
     pub id: Uuid,

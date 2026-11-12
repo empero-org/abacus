@@ -949,3 +949,33 @@ fn refusals_from_the_server_stop_or_retry_the_link_with_the_right_words() {
     assert!(matches!(classify(SyncError::Transient("timed out".into())), LinkError::Retry(_)));
     assert!(matches!(classify(SyncError::Unauthorized), LinkError::Fatal(reason) if reason.contains("signed out")));
 }
+
+#[tokio::test]
+async fn test_checkpoint_protocol() {
+    let chk = crate::git_checkpoint::Checkpoint {
+        id: "chk_sess1_1".into(),
+        session_id: "sess1".into(),
+        turn_index: 1,
+        step_index: 0,
+        tool_name: String::new(),
+        timestamp: 1700000000,
+        prompt_summary: "Update config".into(),
+        commit_sha: Some("abcdef123456".into()),
+        touched_files: vec!["src/main.rs".into()],
+        created_files: vec!["src/new.rs".into()],
+        is_fallback: false,
+    };
+    let summary = CheckpointSummary::from(&chk);
+    assert_eq!(summary.id, "chk_sess1_1");
+    assert_eq!(summary.turn_index, 1);
+    assert_eq!(summary.prompt_preview, "Update config");
+    assert_eq!(summary.touched_files, vec!["src/main.rs"]);
+    assert_eq!(summary.created_files, vec!["src/new.rs"]);
+
+    let frame = Outbound::CheckpointUpdated(CheckpointUpdated { checkpoints: vec![summary.clone()], files: vec![] });
+    let encoded = protocol::encode(&frame, "f1", 42);
+    let parsed: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(parsed["type"], "checkpoint_updated");
+    assert_eq!(parsed["payload"]["checkpoints"][0]["id"], "chk_sess1_1");
+    assert_eq!(parsed["payload"]["checkpoints"][0]["prompt_preview"], "Update config");
+}

@@ -46,6 +46,7 @@ use protocol::{
     EntryKind, ErrorFrame, Level, ModeFrame, NoticeFrame, Outbound, Pending, Phase, QuestionFrame, QuestionResolved,
     SnapshotHead, State, Status, ToolFrame, ToolInfo, ToolPhase, ToolState,
 };
+pub use protocol::{CheckpointSummary, CheckpointUpdated};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -470,6 +471,18 @@ impl Bridge {
     pub fn notice(&mut self, text: &str, level: Level) {
         self.close_text();
         self.emit(Outbound::Notice(NoticeFrame::new(text, level)));
+    }
+
+    pub fn checkpoints_updated(&mut self, checkpoints: Vec<protocol::CheckpointSummary>) {
+        self.checkpoints_and_files_updated(checkpoints, Vec::new());
+    }
+
+    pub fn checkpoints_and_files_updated(
+        &mut self,
+        checkpoints: Vec<protocol::CheckpointSummary>,
+        files: Vec<crate::git_checkpoint::FileHistory>,
+    ) {
+        self.emit(Outbound::CheckpointUpdated(protocol::CheckpointUpdated { checkpoints, files }));
     }
 
     /// An approval dialog opened; returns its id for the terminal to keep.
