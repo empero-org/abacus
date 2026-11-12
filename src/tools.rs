@@ -140,6 +140,14 @@ impl ToolCall {
             "grep" => {
                 format!("{} in {}", args["query"].as_str().unwrap_or("pattern"), args["path"].as_str().unwrap_or("."))
             }
+            "outline" => {
+                let what = args["query"].as_str().unwrap_or("");
+                if what.is_empty() {
+                    args["path"].as_str().unwrap_or(".").to_owned()
+                } else {
+                    format!("{} in {}", what, args["path"].as_str().unwrap_or("."))
+                }
+            }
             "list_files" => args["path"].as_str().unwrap_or(".").to_owned(),
             "glob" => args["pattern"].as_str().unwrap_or("*").to_owned(),
             "git_diff" => match (args["base"].as_str(), args["head"].as_str()) {
@@ -274,6 +282,7 @@ impl ToolExecutor {
             "list_files" => self.list_files(&call.arguments),
             "grep" => self.grep(&call.arguments),
             "glob" => self.glob(&call.arguments),
+            "outline" => self.outline(&call.arguments),
             "tool_search" => self.tool_search(&call.arguments),
             "web_search" => self.web_search(&call.arguments).await,
             "read_page" => self.read_page(&call.arguments).await,
@@ -523,6 +532,93 @@ impl ToolExecutor {
             }
         }
         Ok(or_note(results.join("\n"), "No matching paths."))
+    }
+
+    fn outline(&self, arguments: &str) -> Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(default = "dot")]
+            path: String,
+            #[serde(default)]
+            query: String,
+            #[serde(default = "default_outline_limit")]
+            max_results: usize,
+        }
+
+        let args: Args = parse_args(arguments)?;
+        let base = self.resolve_for_read(&args.path)?;
+        let max_results = args.max_results.clamp(1, 1_000);
+        let filter = args.query.trim().to_ascii_lowercase();
+
+        let base_is_file = base.is_file();
+        if base_is_file {
+            guard_secret(&base)?;
+        }
+
+        // Brace-depth scan: a `name kind` pair per top-level item. Regex-only
+        // would split on `impl<T>` and on braces inside strings; this keeps the
+        // 90% case without pulling in a C dependency like tree-sitter.
+        let mut symbols: Vec<(String, String, usize)> = Vec::new();
+        let mut files_seen = 0usize;
+
+        // Single-file path still goes through the same parser below.
+        let candidates: Vec<std::path::PathBuf> = if base_is_file {
+            vec![base.clone()]
+        } else {
+            walk(&base, None)
+                .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+                .map(|entry| entry.path().to_path_buf())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+                .collect()
+        };
+        for path in candidates {
+            if guard_secret(&path).is_err() {
+                continue;
+            }
+            let Ok(metadata) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if metadata.len() > 1_000_000 {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            files_seen += 1;
+            let relative = path.strip_prefix(&self.root).unwrap_or(&path).display().to_string();
+            for (name, kind, line) in outline_symbols(&content) {
+                if !filter.is_empty()
+                    && !name.to_ascii_lowercase().contains(&filter)
+                    && !kind.to_ascii_lowercase().contains(&filter)
+                {
+                    continue;
+                }
+                symbols.push((format!("{relative}:{line}: {kind} {name}"), relative.clone(), line));
+                if symbols.len() >= max_results {
+                    break;
+                }
+            }
+            if symbols.len() >= max_results {
+                break;
+            }
+        }
+
+        // Name hits first, then path order: the file the agent wants is usually
+        // the one whose symbol literally matches.
+        if !filter.is_empty() {
+            symbols.sort_by(|a, b| {
+                let a_hit = a.0.to_ascii_lowercase().contains(&filter);
+                let b_hit = b.0.to_ascii_lowercase().contains(&filter);
+                b_hit.cmp(&a_hit).then_with(|| a.0.cmp(&b.0))
+            });
+        }
+        let mut out: Vec<String> = symbols.into_iter().map(|(line, _, _)| line).collect();
+        if out.len() >= max_results {
+            out.push(format!("… output capped at {max_results} symbols in {files_seen} files"));
+        } else {
+            out.push(format!("({} symbols in {files_seen} files)", out.len()));
+        }
+        Ok(out.join("\n"))
     }
 
     fn tool_search(&self, arguments: &str) -> Result<String> {
@@ -1112,6 +1208,18 @@ pub fn tool_specs() -> Vec<Value> {
             ],
         ),
         tool(
+            "outline",
+            "List top-level symbols (functions, structs, enums, traits, type aliases, and modules) in a Rust file (.rs) or directory of Rust files, optionally filtered by symbol name, without reading full file contents. Useful for locating where a symbol is defined in Rust code without loading the whole file.",
+            [
+                req(
+                    "path",
+                    string("Workspace-relative Rust file or directory; a directory scans .rs files recursively"),
+                ),
+                opt("query", string("Optional case-insensitive substring to filter symbol names")),
+                opt("max_results", integer("Defaults to 300, maximum 1000")),
+            ],
+        ),
+        tool(
             "glob",
             "Find files and directories by gitignore-aware glob pattern.",
             [
@@ -1509,6 +1617,7 @@ fn tool_catalog() -> Vec<(&'static str, &'static str)> {
         ("list_files", "shallow directory overview"),
         ("glob", "find paths by wildcard pattern"),
         ("grep", "regex content search with optional file globs"),
+        ("outline", "map top-level Rust symbols without reading full files"),
         ("read_file", "read a bounded line range with line numbers"),
         ("read_files", "read up to 20 files in one call with line numbers"),
         ("edit_file", "replace one exact occurrence in an existing file"),
@@ -1584,8 +1693,120 @@ fn default_glob_limit() -> usize {
 fn default_log_limit() -> usize {
     10
 }
+fn default_outline_limit() -> usize {
+    300
+}
 fn dot() -> String {
     ".".to_owned()
+}
+
+/// Top-level Rust symbols in one file: `(name, kind, line)`. Brace-depth scan
+/// keeps `impl<T>` and macros mostly intact where a line regex would split
+/// them; string literals with braces are the known blind spot, documented in
+/// the outline tool rather than papered over.
+fn outline_symbols(content: &str) -> Vec<(String, String, usize)> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut in_block_comment = false;
+    for (idx, raw) in content.lines().enumerate() {
+        let line_no = idx + 1;
+        let Some(stripped) = strip_inline_block_comments(raw.trim_start(), &mut in_block_comment) else {
+            continue;
+        };
+        let code = stripped.split("//").next().unwrap_or("").trim();
+        if depth == 0
+            && !code.is_empty()
+            && let Some((kind, name)) = outline_item(code)
+        {
+            out.push((name, kind, line_no));
+        }
+        depth = depth.saturating_add(raw.matches('{').count());
+        depth = depth.saturating_sub(raw.matches('}').count());
+    }
+    out
+}
+
+/// Strip block comments from a line, updating comment state across lines
+/// without heap leaks or self-referential lifetime borrows.
+fn strip_inline_block_comments(mut line: &str, in_comment: &mut bool) -> Option<String> {
+    if *in_comment {
+        let end = line.find("*/")?;
+        line = line[end + 2..].trim_start();
+        *in_comment = false;
+    }
+    let mut out = String::new();
+    while let Some(start) = line.find("/*") {
+        out.push_str(&line[..start]);
+        if let Some(end) = line[start + 2..].find("*/") {
+            line = &line[start + 2 + end + 2..];
+        } else {
+            *in_comment = true;
+            return Some(out.trim_end().to_owned());
+        }
+    }
+    out.push_str(line);
+    Some(out)
+}
+
+/// `fn name`, `struct Name`, … at depth zero; `None` for anything else.
+fn outline_item(code: &str) -> Option<(String, String)> {
+    let mut words = code
+        .trim_start_matches("pub")
+        .trim_start_matches(['(', ')', ' ', '\t'])
+        .trim_start_matches("pub")
+        .split_whitespace();
+    // Skip qualifiers: `pub(crate)`, `async`, `unsafe`, `extern`.
+    let mut kind = words.next()?;
+    for _ in 0..4 {
+        match kind {
+            "pub" | "pub(crate)" | "pub(super)" | "pub(self)" | "async" | "unsafe" | "const" | "extern" => {
+                kind = words.next()?;
+            }
+            _ => break,
+        }
+        if kind.starts_with("pub(") {
+            kind = words.next()?;
+        }
+    }
+    if !matches!(kind, "fn" | "struct" | "enum" | "trait" | "impl" | "mod" | "type" | "static" | "macro_rules!")
+        && !kind.starts_with("impl<")
+    {
+        // `macro_rules!` arrives as `macro_rules! name`.
+        if kind != "macro_rules!" {
+            return None;
+        }
+    }
+    let (kind, rest_head) = if kind.starts_with("impl<") { ("impl", Some(&kind[4..])) } else { (kind, None) };
+    let mut name = if let Some(head_token) = rest_head {
+        head_token.trim_end_matches(['(', '{', ';', ':'])
+    } else {
+        words.next()?.trim_end_matches(['(', '{', ';', ':'])
+    };
+    let item_name = if kind == "macro_rules!" {
+        name.trim_end_matches('!').to_owned()
+    } else if kind == "impl" {
+        // `impl Foo`, `impl<T> Foo`, `impl Foo for Bar`: keep the whole head.
+        let rest: Vec<&str> = std::iter::once(name).chain(words).collect();
+        let mut head: Vec<&str> = Vec::new();
+        for token in rest {
+            head.push(token.trim_end_matches('{'));
+            if token.contains('{') {
+                break;
+            }
+            if head.len() > 6 {
+                break;
+            }
+        }
+        head.join(" ").trim_end_matches(['{', ' ']).to_owned()
+    } else {
+        name = name.split('<').next().unwrap_or(name).split('(').next().unwrap_or(name);
+        name = name.trim_end_matches(['{', ';']);
+        name.to_owned()
+    };
+    if item_name.is_empty() || item_name == "{" {
+        return None;
+    }
+    Some((kind.to_owned(), item_name))
 }
 
 fn validate_ref(value: &str) -> Result<String> {
@@ -1819,6 +2040,61 @@ mod tests {
         assert!(output.contains("main.rs:10- ten"));
         // Disjoint groups are separated by "--"; adjacent windows would have merged.
         assert!(output.contains("--"));
+    }
+
+    #[tokio::test]
+    async fn outline_lists_symbols_without_reading_full_file() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("sample.rs"),
+            "pub struct Config {\n    pub name: String,\n}\n\npub fn run(config: &Config) {}\n\nfn helper() {}\n",
+        )
+        .unwrap();
+        let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
+        let call = tool_call("outline", r#"{"path":"sample.rs"}"#);
+        let output = tools.execute(&call).await;
+        assert!(output.contains("struct Config"), "{output}");
+        assert!(output.contains("fn run"), "{output}");
+        assert!(output.contains("fn helper"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn outline_filters_by_symbol_name() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "pub fn restore_terminal() {}\nstruct Other {}\n").unwrap();
+        let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
+        let call = tool_call("outline", r#"{"path":".","query":"restore"}"#);
+        let output = tools.execute(&call).await;
+        assert!(output.contains("restore_terminal"), "{output}");
+        assert!(!output.contains("Other"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn outline_single_file_guards_secret_files() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join(".env.production"), "pub fn should_not_run() {}\n").unwrap();
+        let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
+        let call = tool_call("outline", r#"{"path":".env.production"}"#);
+        let output = tools.execute(&call).await;
+        assert!(output.contains("blocked"), "{output}");
+    }
+
+    #[test]
+    fn outline_symbols_handles_inline_comments_and_impls_without_leaks() {
+        let code = r#"
+            /* multi
+               line comment */
+            pub struct Foo;
+            /* inline */ pub fn bar/* comment */() {}
+            impl<T: Clone> Foo for Vec<T> {
+                fn inside() {}
+            }
+        "#;
+        let symbols = outline_symbols(code);
+        let names: Vec<(&str, &str)> = symbols.iter().map(|(n, k, _)| (n.as_str(), k.as_str())).collect();
+        assert!(names.contains(&("Foo", "struct")));
+        assert!(names.contains(&("bar", "fn")));
+        assert!(names.contains(&("<T Clone> Foo for Vec<T>", "impl")));
     }
 
     #[test]
