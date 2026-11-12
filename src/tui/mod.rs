@@ -425,6 +425,12 @@ enum PairingView {
 /// The `/remote qr` overlay.
 enum QrOverlay {
     Loading,
+    /// The LAN link `/mobile` serves: no expiry, nothing to sign in to.
+    Local {
+        url: String,
+        /// Half-block rows, or `None` when the link does not fit a code.
+        rows: Option<Vec<String>>,
+    },
     Ready {
         url: String,
         /// Half-block rows, or `None` when the link does not fit a code.
@@ -517,6 +523,14 @@ struct App {
     pointer: Option<(u16, u16)>,
     /// Live sharing of this session with the account's browsers, when on.
     remote: Option<Bridge>,
+    /// The phone front end served on the LAN, when `/mobile` or `--mobile` is
+    /// on. It talks to the same [`Bridge`] a shared session uses.
+    mobile: Option<crate::mobile::MobileServer>,
+    mobile_lan: bool,
+    /// Publish the phone link through cloudflared when it starts.
+    mobile_tunnel: bool,
+    /// The public link, once the tunnel has printed it.
+    mobile_public: Option<String>,
     /// Bumped for every bridge started; events carry it.
     remote_generation: u64,
     /// `/remote off` for this session: auto-share leaves it alone until the
@@ -658,6 +672,9 @@ pub async fn run(
     session: Option<Session>,
     session_store: Option<SessionStore>,
     services: Arc<AgentServices>,
+    // The phone link: its port, whether phones on the network may reach it,
+    // and whether it is published outside the network.
+    mobile: Option<(u16, bool, bool)>,
 ) -> Result<()> {
     // Resolve dark/light (auto-detecting the terminal/OS appearance) before the
     // first frame so the palette matches the surrounding terminal. A named
@@ -735,7 +752,8 @@ pub async fn run(
     let mut terminal = Terminal::new(backend)?;
 
     let workspace = config.workspace.clone();
-    let mut app = App::new(config, settings, credentials, session, session_store, services.clone())?;
+    let mobile_port = mobile.map(|(port, _, _)| port);
+    let mut app = App::new(config, settings, credentials, session, session_store, services.clone(), mobile)?;
     if let Some(error) = theme_error {
         app.fail(format!("{error}\nFalling back to the built-in theme."));
     }
@@ -744,6 +762,13 @@ pub async fn run(
     }
     // A resumed session has had its first prompt: share it from the start.
     app.maybe_auto_share();
+    // `--mobile` serves the phone front end from the first frame; `/mobile`
+    // starts it later.
+    if let Some(port) = mobile_port
+        && let Err(reason) = app.start_mobile(port)
+    {
+        app.fail(reason);
+    }
     if crate::sync::is_configured(&app.credentials) {
         // Pull what changed elsewhere, then upload what an earlier close could
         // not finish. The open session is never written over; a newer copy of
@@ -1005,6 +1030,7 @@ async fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut
         dirty |= app.drain_agent_events();
         dirty |= app.drain_background();
         app.tick_remote();
+        app.tick_mobile();
         app.maybe_idle_sync();
         app.maybe_idle_compact();
         // A worker that finished after its turn ended delivers here.
@@ -1228,7 +1254,7 @@ fn folded_rule(folded: &crate::compaction::Folded) -> String {
     format!("{what} · {} message{plural}, about {} tokens", folded.messages, ui::format_count(folded.tokens as u64))
 }
 
-fn entries_from_messages(messages: &[Value]) -> Vec<Entry> {
+pub(crate) fn entries_from_messages(messages: &[Value]) -> Vec<Entry> {
     let mut entries = Vec::new();
     for message in messages {
         // The history keeps only what the model sees, so this is all that
@@ -1238,6 +1264,12 @@ fn entries_from_messages(messages: &[Value]) -> Vec<Entry> {
             continue;
         }
         let role = message["role"].as_str().unwrap_or_default();
+        if role == "assistant" {
+            let reasoning = message["reasoning_content"].as_str().unwrap_or_default();
+            if !reasoning.trim().is_empty() {
+                entries.push(Entry::new(EntryKind::Thinking, reasoning.to_owned()));
+            }
+        }
         // An image prompt is an array of parts; its text (with the
         // `[image #N]` markers) is what the transcript shows.
         let content = crate::text::content_text(&message["content"]);
@@ -1289,7 +1321,10 @@ impl App {
         session: Option<Session>,
         session_store: Option<SessionStore>,
         services: Arc<AgentServices>,
+        mobile: Option<(u16, bool, bool)>,
     ) -> Result<Self> {
+        let mobile_lan = mobile.is_some_and(|(_, lan, _)| lan);
+        let mobile_tunnel = mobile.is_some_and(|(_, _, tunnel)| tunnel);
         // `--profile` picks the session's profile; a switch in /profile also
         // makes the one switched to the default.
         let follows_profile = settings.profiles.contains_key(&config.profile);
@@ -1424,6 +1459,10 @@ impl App {
             catalogs,
             pointer: None,
             remote: None,
+            mobile: None,
+            mobile_lan,
+            mobile_tunnel,
+            mobile_public: None,
             remote_generation: 0,
             remote_muted: false,
             remote_announce: false,
@@ -1913,7 +1952,13 @@ impl App {
     /// the frame dirty, so background workers looked frozen between keystrokes.
     fn board_changed(&mut self) -> bool {
         let version = self.workers.board.version();
-        std::mem::replace(&mut self.last_board_version, version) != version
+        let changed = std::mem::replace(&mut self.last_board_version, version) != version;
+        if changed && let Some(bridge) = &mut self.remote {
+            // The phone shows the same rows the strip does; a snapshot alone
+            // would leave it frozen between reconnects.
+            bridge.workers_changed(&self.workers.board.snapshot());
+        }
+        changed
     }
 
     fn set_approval(&mut self, request: ApprovalRequest) {
@@ -2548,8 +2593,20 @@ impl App {
     }
 
     fn rename_session(&mut self, title: &str) {
-        let (Some(store), Some(session)) = (&self.session_store, &mut self.session) else {
+        let Some(store) = &self.session_store else {
             self.status = "sessions are disabled".to_owned();
+            return;
+        };
+        if self.session.is_none() {
+            self.session = store
+                .create(self.config.profile.clone(), self.config.model_ref(), self.messages.clone())
+                .map_err(|error| self.status = format!("session create failed: {error}"))
+                .ok();
+            if let Some(created) = &self.session {
+                crate::sync::session_opened(created.id);
+            }
+        }
+        let Some(session) = &mut self.session else {
             return;
         };
         match store.rename(session, title) {
@@ -2762,8 +2819,15 @@ impl App {
         if !crate::sync::is_configured(&self.credentials) {
             return Err("this device is not signed in to Abacus Sync — run `abacus sync login`".into());
         }
-        // A placeholder is not a session yet; there is nothing to share.
-        let Some(session) = self.session.clone().filter(|session| !crate::sync::is_placeholder(session)) else {
+        if self.session.is_none()
+            && let Some(store) = &self.session_store
+            && let Ok(created) =
+                store.create(self.config.profile.clone(), self.config.model_ref(), self.messages.clone())
+        {
+            crate::sync::session_opened(created.id);
+            self.session = Some(created);
+        }
+        let Some(session) = self.session.clone() else {
             return Err("send a message first — an empty session has nothing to share".into());
         };
         let client = crate::sync::configured_client(&self.config.paths).map_err(|error| format!("{error:#}"))?;
@@ -2786,8 +2850,102 @@ impl App {
                 bridge.question_opened(&question.header, &question.question, &question.options, question.multi_select),
             );
         }
+        bridge.workers_changed(&self.workers.board.snapshot());
         self.remote = Some(bridge);
         Ok(())
+    }
+
+    /// Serve this session to a phone on the LAN: `/mobile`, or `--mobile` at
+    /// start. The page is served by this process, so nothing leaves the
+    /// network; the link carries the only credential.
+    fn start_mobile(&mut self, port: u16) -> Result<(), String> {
+        if self.mobile.is_some() {
+            return Err("the phone link is already on — /mobile off stops it".into());
+        }
+        let server = crate::mobile::MobileServer::start(port, self.mobile_lan, self.mobile_tunnel)
+            .map_err(|error| format!("{error:#}"))?;
+        let url = server.url().to_owned();
+        let rows = crate::remote::qr::rows(&url);
+        // One bridge per session: following it from the phone and from the
+        // relay at once would send every frame twice.
+        self.stop_remote("The terminal switched to the phone link.");
+        self.attach_bridge(server.connector());
+        let tunnel = server.tunnel_pending();
+        self.mobile = Some(server);
+        self.qr_overlay = Some(QrOverlay::Local { url, rows });
+        self.status =
+            if tunnel { "phone link ready — opening a public link" } else { "phone link ready — scan the code" }
+                .to_owned();
+        Ok(())
+    }
+
+    /// Put a bridge on `connector`: the frames for whoever is watching, and
+    /// whatever the session already has under way in its first snapshot.
+    fn attach_bridge<C: crate::remote::link::Connector>(&mut self, connector: C) {
+        self.remote_generation += 1;
+        let generation = self.remote_generation;
+        let events = self.background_tx.clone();
+        let notify: crate::remote::Notify = Arc::new(move |event| {
+            let _ = events.send(Background::Remote { generation, event });
+        });
+        let session_id = self.session.as_ref().map(|session| session.id.to_string()).unwrap_or_default();
+        let mut bridge = Bridge::launch(session_id, connector, notify, crate::remote::link::LinkConfig::default());
+        // Whatever is already under way becomes part of the first snapshot.
+        if self.running.is_some() {
+            bridge.turn_started();
+        }
+        if let Some(approval) = &mut self.approval {
+            approval.remote_id = Some(bridge.approval_opened(&approval.tool, &approval.summary, &approval.details));
+        }
+        if let Some(question) = &mut self.question {
+            question.remote_id = Some(
+                bridge.question_opened(&question.header, &question.question, &question.options, question.multi_select),
+            );
+        }
+        bridge.workers_changed(&self.workers.board.snapshot());
+        self.remote = Some(bridge);
+    }
+
+    /// The phone link outlives a session switch: it is served by this process,
+    /// so only its bridge has to be pointed at the new session.
+    fn rebind_mobile(&mut self) {
+        let Some(connector) = self.mobile.as_ref().map(|server| server.connector()) else {
+            return;
+        };
+        self.stop_remote("The terminal switched to another session.");
+        self.attach_bridge(connector);
+        self.send_remote_snapshot(SnapshotReason::Requested);
+    }
+
+    /// Stop serving the phone page. The session stays open in the terminal.
+    fn stop_mobile(&mut self) {
+        if self.mobile.take().is_none() {
+            return;
+        }
+        self.stop_remote("The phone link was turned off in the terminal.");
+        self.qr_overlay = None;
+        self.mobile_public = None;
+        self.status = "phone link off".to_owned();
+    }
+
+    /// The tunnel prints its address a few seconds after it starts; pick it
+    /// up on a tick so the command that opened it does not block.
+    fn tick_mobile(&mut self) {
+        let link = self.mobile.as_ref().and_then(|server| server.public_url());
+        let Some(link) = link else {
+            return;
+        };
+        if self.mobile_public.as_deref() == Some(link.as_str()) {
+            return;
+        }
+        self.mobile_public = Some(link.clone());
+        self.qr_overlay = Some(QrOverlay::Local { rows: crate::remote::qr::rows(&link), url: link.clone() });
+        self.say(format!(
+            "Public link ready (cloudflared):\n{link}\n\
+             It reaches this terminal from any network. The link is the only\
+             credential — anyone who has it can drive this session. /mobile off closes\
+             both links."
+        ));
     }
 
     /// Whether the session is being shared (or trying to be).
@@ -2808,13 +2966,31 @@ impl App {
     /// device). Sharing follows the user to the new session; the old one stops
     /// being controllable. The same session just gets a fresh snapshot.
     fn rebind_remote(&mut self) {
-        let current = self.session.as_ref().map(|session| session.id.to_string());
-        if self.sharing() && self.remote.as_ref().map(Bridge::session_id) == current.as_deref() {
-            self.send_remote_snapshot(SnapshotReason::Requested);
+        if self.mobile.is_some() {
+            self.rebind_mobile();
             return;
         }
         let followed = self.sharing();
-        self.stop_remote("The terminal switched to another session.");
+        if (followed || (self.settings.remote.auto_share && !self.remote_muted))
+            && crate::sync::is_configured(&self.credentials)
+            && self.session.is_none()
+            && let Some(store) = &self.session_store
+            && let Ok(created) =
+                store.create(self.config.profile.clone(), self.config.model_ref(), self.messages.clone())
+        {
+            crate::sync::session_opened(created.id);
+            self.session = Some(created);
+        }
+        let current = self.session.as_ref().map(|session| session.id.to_string());
+        if followed && self.remote.as_ref().map(Bridge::session_id) == current.as_deref() {
+            self.send_remote_snapshot(SnapshotReason::Requested);
+            return;
+        }
+        let notice = match &current {
+            Some(id) => format!("Switched to session {id}"),
+            None => "The terminal switched to another session.".to_owned(),
+        };
+        self.stop_remote(&notice);
         self.remote_muted = false;
         if followed {
             let _ = self.start_remote();
@@ -2829,17 +3005,28 @@ impl App {
             return;
         };
         let session = self.session.as_ref();
+        // The relay names the session itself; on the local phone link there is no
+        // relay, and an empty id leaves the phone unable to tell which session
+        // it is looking at.
+        let id = match bridge.session_id() {
+            "" => session.map(|session| session.id.to_string()).unwrap_or_default(),
+            relay => relay.to_owned(),
+        };
         let info = crate::remote::SessionInfo {
-            id: bridge.session_id().to_owned(),
+            id,
             title: session.map(|session| session.title.clone()).unwrap_or_default(),
             workspace: self.config.workspace.display().to_string(),
             model: self.config.model_ref(),
+            profile: self.settings.default_profile.clone(),
             mode,
             app_version: env!("CARGO_PKG_VERSION").to_owned(),
             started_at: session.map(|session| session.created_at.to_rfc3339()).unwrap_or_default(),
         };
         let usage = self.provider.usage();
-        let view = crate::remote::SnapshotView { session: info, entries: &self.entries, usage: &usage };
+        let mut models: Vec<String> = self.settings.profiles.keys().cloned().collect();
+        models.sort();
+        let view =
+            crate::remote::SnapshotView { session: info, entries: &self.entries, usage: &usage, models: &models };
         bridge.send_snapshot(view, reason);
     }
 
@@ -2895,6 +3082,7 @@ impl App {
             }
             Inbound::Approve { ref_id, approval_id, decision } => self.remote_approve(&ref_id, &approval_id, decision),
             Inbound::Interrupt { ref_id } => self.remote_interrupt(&ref_id),
+            Inbound::Command { ref_id, name, args } => self.remote_command_from_phone(&ref_id, &name, &args),
         }
     }
 
@@ -2913,6 +3101,101 @@ impl App {
             self.steer(text);
         } else {
             self.start_turn(text.clone(), text, true);
+        }
+    }
+
+    /// A session action the phone asked for. Only the actions the phone page
+    /// offers exist here — never a free slash command, because the terminal's
+    /// commands open dialogs a phone cannot see.
+    fn remote_command_from_phone(&mut self, ref_id: &str, name: &str, args: &str) {
+        let mut took = false;
+        let mut applied = |app: &mut Self| {
+            took = true;
+            app.remote_accepted(ref_id, InputKind::Command, AcceptResult::Applied, None)
+        };
+        let rejected = |app: &mut Self, why: &str| {
+            app.remote_accepted(ref_id, InputKind::Command, AcceptResult::Rejected, Some(why))
+        };
+        match name {
+            "new" => {
+                self.new_session();
+                applied(self);
+            }
+            "compact" => {
+                self.compact_command();
+                applied(self);
+            }
+            "fork" => {
+                self.fork_session();
+                applied(self);
+            }
+            "mode" => match args.trim().to_ascii_lowercase().as_str() {
+                "auto" | "yolo" => {
+                    self.mode_command(args);
+                    applied(self);
+                }
+                _ => rejected(self, "mode must be auto or yolo"),
+            },
+            "model" => {
+                let profile = args.trim();
+                if profile.is_empty() {
+                    return rejected(self, "model needs the name of a configured profile");
+                }
+                if !self.settings.profiles.contains_key(profile) {
+                    return rejected(self, "no profile by that name");
+                }
+                self.profile_command(profile);
+                applied(self);
+            }
+            "rename" => {
+                let title = args.trim();
+                if title.is_empty() {
+                    return rejected(self, "rename needs a title");
+                }
+                self.rename_session(title);
+                applied(self);
+            }
+            "sessions" => {
+                self.send_sessions_to_phone();
+                applied(self);
+            }
+            "resume" => {
+                let id = args.trim();
+                if id.is_empty() {
+                    return rejected(self, "resume needs a session id");
+                }
+                self.resume_session(id);
+                applied(self);
+            }
+            other => rejected(self, &format!("`{other}` is not an action the phone can run")),
+        }
+        // The session's mode, model and profile are only in a snapshot, and the
+        // phone just changed one: send it the new head so its own labels agree
+        // with what the terminal now runs.
+        if took {
+            self.send_remote_snapshot(SnapshotReason::Requested);
+        }
+    }
+
+    /// The workspace's saved sessions, for the phone's session list.
+    fn send_sessions_to_phone(&mut self) {
+        let Some(store) = &self.session_store else {
+            return;
+        };
+        let rows = match store.list() {
+            Ok(sessions) => sessions
+                .into_iter()
+                .take(50)
+                .map(|session| crate::remote::SessionRow {
+                    id: session.id.to_string(),
+                    title: session.title,
+                    updated: session.updated_at.with_timezone(&Local).format("%m-%d %H:%M").to_string(),
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        if let Some(bridge) = &mut self.remote {
+            bridge.sessions(rows);
         }
     }
 

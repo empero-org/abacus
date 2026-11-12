@@ -170,6 +170,10 @@ pub enum InputKind {
     Answer,
     Approve,
     Interrupt,
+    /// A session action a client asked for (`new`, `compact`, `mode`, …).
+    /// Only the local mobile transport carries these; the relay has no frame
+    /// for them, so a browser on the relay cannot change a session.
+    Command,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,6 +212,10 @@ pub struct SessionInfo {
     pub title: String,
     pub workspace: String,
     pub model: String,
+    /// The profile the session runs, so a phone can mark it in the list of
+    /// models it may switch to. Empty when the terminal did not say.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub profile: String,
     pub mode: String,
     pub app_version: String,
     pub started_at: String,
@@ -217,6 +225,53 @@ pub struct SessionInfo {
 pub struct Pending {
     pub approval: Option<ApprovalFrame>,
     pub question: Option<QuestionFrame>,
+}
+
+/// One subagent, as a front end shows it: the board's row without the parts
+/// (transcripts, ledgers) that only the terminal can use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerFrame {
+    pub id: u64,
+    pub name: String,
+    /// `general`, `explore`, or `resumed` for one continued by message.
+    pub role: String,
+    /// `running`, `done`, `failed` or `stopped`.
+    pub state: String,
+    /// The worker's latest visible activity, one line.
+    pub activity: String,
+    pub model: String,
+    pub tokens: u64,
+    /// RFC 3339 UTC.
+    pub started_at: String,
+    pub finished_at: Option<String>,
+}
+
+impl From<&crate::workers::WorkerStatus> for WorkerFrame {
+    fn from(worker: &crate::workers::WorkerStatus) -> Self {
+        Self {
+            id: worker.id,
+            name: worker.name.clone(),
+            role: worker.role.clone(),
+            state: worker.state.label().to_owned(),
+            activity: worker.activity.clone(),
+            model: worker.model.clone(),
+            tokens: worker.tokens_used(),
+            started_at: worker.started_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            finished_at: worker.finished_at.map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        }
+    }
+}
+
+/// The session's whole board: every subagent, running or finished.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkersFrame {
+    pub workers: Vec<WorkerFrame>,
+}
+
+impl WorkersFrame {
+    pub fn from_board(board: &[crate::workers::WorkerStatus]) -> Self {
+        Self { workers: board.iter().map(WorkerFrame::from).collect() }
+    }
 }
 
 /// One page of a snapshot. The session, status, pending and usage fields ride
@@ -234,6 +289,12 @@ pub struct SnapshotPage {
     pub pending: Option<Pending>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// The subagent board at snapshot time, on page 0 only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers: Option<WorkersFrame>,
+    /// The model profiles this session can switch to, on page 0 only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
     pub entries: Vec<Entry>,
 }
 
@@ -473,6 +534,21 @@ pub struct Ping {
     pub ts: Value,
 }
 
+/// One saved session, as the phone's session list shows it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRow {
+    pub id: String,
+    pub title: String,
+    /// `2026-11-03 09:12`, already local to the terminal.
+    pub updated: String,
+}
+
+/// The saved sessions of the terminal's workspace, newest first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionsFrame {
+    pub sessions: Vec<SessionRow>,
+}
+
 /// Every frame the agent sends. Serialises as `{"type":…,"payload":…}`; the
 /// link adds `v`, `id` and `seq` when it puts the frame on the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -494,6 +570,10 @@ pub enum Outbound {
     Error(ErrorFrame),
     Done(DoneFrame),
     Accepted(Accepted),
+    /// The session's subagent board, whenever it changes.
+    Workers(WorkersFrame),
+    /// The saved sessions, in answer to a phone's `sessions` command.
+    Sessions(SessionsFrame),
     /// Answer to a browser's `ping`.
     Pong(Ping),
     /// The agent's own heartbeat; the relay answers it.
@@ -538,11 +618,27 @@ impl Decision {
 /// configuration: there is no frame for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Input {
-    Prompt { text: String },
-    Answer { question_id: String, selected: Vec<String>, custom: Option<String> },
-    Approve { approval_id: String, decision: Decision },
+    Prompt {
+        text: String,
+    },
+    Answer {
+        question_id: String,
+        selected: Vec<String>,
+        custom: Option<String>,
+    },
+    Approve {
+        approval_id: String,
+        decision: Decision,
+    },
     Interrupt,
     RequestSnapshot,
+    /// A session action, only ever carried by the local mobile transport:
+    /// `name` is one of the actions the terminal offers a phone, `args` its
+    /// argument. The terminal decides which names exist.
+    Command {
+        name: String,
+        args: String,
+    },
 }
 
 /// A parsed frame from the relay.
@@ -616,7 +712,7 @@ pub fn parse_incoming(text: &str) -> Incoming {
             code: string("code").unwrap_or_default(),
             message: string("message").unwrap_or_default(),
         },
-        "prompt" | "answer" | "approve" | "interrupt" | "request_snapshot" if !id.is_empty() => {
+        "prompt" | "answer" | "approve" | "interrupt" | "request_snapshot" | "command" if !id.is_empty() => {
             parse_input(&frame.kind, id, payload)
         }
         _ => Incoming::Ignored,
@@ -636,7 +732,17 @@ fn parse_input(kind: &str, id: String, payload: &Value) -> Incoming {
             if text.len() > MAX_PROMPT {
                 return invalid(InputKind::Prompt, "prompt is too large (max 32 KiB)");
             }
-            Input::Prompt { text: text.to_owned() }
+            if let Some(rest) = text.trim().strip_prefix("/__cmd__") {
+                let rest = rest.trim_start();
+                let (name, args) = rest.split_once(' ').unwrap_or((rest, ""));
+                let name = name.trim();
+                if name.is_empty() || name.len() > 64 {
+                    return invalid(InputKind::Prompt, "command name is empty or too long");
+                }
+                Input::Command { name: name.to_owned(), args: args.to_owned() }
+            } else {
+                Input::Prompt { text: text.to_owned() }
+            }
         }
         "answer" => {
             let Some(question_id) = payload.get("question_id").and_then(Value::as_str) else {
@@ -674,6 +780,19 @@ fn parse_input(kind: &str, id: String, payload: &Value) -> Incoming {
             Input::Approve { approval_id: approval_id.to_owned(), decision }
         }
         "interrupt" => Input::Interrupt,
+        "command" => {
+            let Some(name) = payload.get("name").and_then(Value::as_str) else {
+                return invalid(InputKind::Command, "command has no name");
+            };
+            if name.trim().is_empty() || name.len() > 64 {
+                return invalid(InputKind::Command, "command name is empty or too long");
+            }
+            let args = payload.get("args").and_then(Value::as_str).unwrap_or_default();
+            if args.len() > MAX_PROMPT {
+                return invalid(InputKind::Command, "command argument is too large (max 32 KiB)");
+            }
+            Input::Command { name: name.trim().to_owned(), args: args.to_owned() }
+        }
         _ => Input::RequestSnapshot,
     };
     Incoming::Input { id, input }
@@ -758,6 +877,12 @@ pub struct SnapshotHead {
     pub status: Status,
     pub pending: Pending,
     pub usage: Usage,
+    /// The subagent board, so a phone that connects mid-run sees the workers
+    /// it otherwise only hears about when one changes.
+    pub workers: WorkersFrame,
+    /// The profiles `/model` accepts, so the phone can offer them by name
+    /// instead of asking the person to remember one.
+    pub models: Vec<String>,
 }
 
 /// Pack `entries` into snapshot pages whose frames stay within `max_bytes`,
@@ -774,9 +899,19 @@ pub fn paginate(head: SnapshotHead, entries: Vec<Entry>, max_bytes: usize) -> Ve
         status: Some(head.status),
         pending: Some(head.pending),
         usage: Some(head.usage),
+        workers: Some(head.workers),
+        models: Some(head.models),
         entries: Vec::new(),
     };
-    let later = SnapshotPage { session: None, status: None, pending: None, usage: None, ..first.clone() };
+    let later = SnapshotPage {
+        session: None,
+        status: None,
+        pending: None,
+        usage: None,
+        workers: None,
+        models: None,
+        ..first.clone()
+    };
     let first_overhead = json_len(&Outbound::Snapshot(Box::new(first.clone()))) + ENVELOPE_BYTES;
     let later_overhead = json_len(&Outbound::Snapshot(Box::new(later.clone()))) + ENVELOPE_BYTES;
     // A fresh later page always has room for a fitted entry; page 0 may not
@@ -852,6 +987,7 @@ mod tests {
                 title: "Fix parser".into(),
                 workspace: "/home/me/proj".into(),
                 model: "empero/model-x".into(),
+                profile: "main".into(),
                 mode: "auto".into(),
                 app_version: "0.6.4".into(),
                 started_at: "2026-10-04T12:00:00Z".into(),
@@ -859,6 +995,8 @@ mod tests {
             status: Status { state: State::Thinking, label: "Checking the parser".into(), since: "t".into() },
             pending: Pending::default(),
             usage: Usage::default(),
+            workers: WorkersFrame::default(),
+            models: vec!["main".into()],
         }
     }
 
@@ -874,6 +1012,48 @@ mod tests {
         assert_eq!(shape, expected, "{frame:?}");
         let back: Outbound = serde_json::from_value(shape).unwrap();
         assert_eq!(back, frame);
+    }
+
+    #[test]
+    fn a_command_frame_carries_a_name_and_an_argument() {
+        assert_eq!(
+            parse_incoming(r#"{"v":1,"type":"command","id":"b7","seq":7,"payload":{"name":"mode","args":"yolo"}}"#),
+            Incoming::Input { id: "b7".into(), input: Input::Command { name: "mode".into(), args: "yolo".into() } }
+        );
+        // No argument is an empty one, not a refusal.
+        assert_eq!(
+            parse_incoming(r#"{"v":1,"type":"command","id":"b8","seq":8,"payload":{"name":"compact"}}"#),
+            Incoming::Input { id: "b8".into(), input: Input::Command { name: "compact".into(), args: String::new() } }
+        );
+        assert_eq!(
+            parse_incoming(r#"{"v":1,"type":"command","id":"b9","seq":9,"payload":{}}"#),
+            Incoming::Invalid { id: "b9".into(), kind: InputKind::Command, reason: "command has no name".into() }
+        );
+    }
+
+    #[test]
+    fn a_workers_frame_lists_the_board() {
+        let frame = WorkersFrame {
+            workers: vec![WorkerFrame {
+                id: 1,
+                name: "scout".into(),
+                role: "explore".into(),
+                state: "running".into(),
+                activity: "reading src".into(),
+                model: "empero/model-x".into(),
+                tokens: 120,
+                started_at: "t".into(),
+                finished_at: None,
+            }],
+        };
+        roundtrip(
+            Outbound::Workers(frame),
+            json!({"type": "workers", "payload": {"workers": [{
+                "id": 1, "name": "scout", "role": "explore", "state": "running",
+                "activity": "reading src", "model": "empero/model-x", "tokens": 120,
+                "started_at": "t", "finished_at": null
+            }]}}),
+        );
     }
 
     #[test]

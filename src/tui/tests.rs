@@ -430,6 +430,20 @@ fn a_rebuilt_transcript_says_when_the_middle_was_dropped() {
     assert_eq!(entries.len(), 3, "the note is the model's, not the transcript's");
 }
 
+#[test]
+fn entries_from_messages_preserves_reasoning() {
+    let entries = entries_from_messages(&[
+        json!({"role": "user", "content": "hi"}),
+        json!({"role": "assistant", "content": "hello", "reasoning_content": "let me think"}),
+    ]);
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0].kind, EntryKind::User);
+    assert_eq!(entries[1].kind, EntryKind::Thinking);
+    assert_eq!(entries[1].text, "let me think");
+    assert_eq!(entries[2].kind, EntryKind::Assistant);
+    assert_eq!(entries[2].text, "hello");
+}
+
 /// A session tells the model where it runs on its first turn, and again, with
 /// when it was left and that what it saw then may have changed, on the first
 /// turn after it is resumed — only those turns. The notes are the model's:
@@ -3066,8 +3080,9 @@ fn test_app(base_url: &str) -> (TempDir, App) {
         connection: crate::providers::Connection::resolve("test", &provider, &Credentials::default()),
         ..Config::for_endpoint(workspace.clone(), base_url.into(), "test-model".into(), paths)
     };
-    let app = App::new(config, settings, Credentials::default(), None, None, Arc::new(AgentServices::empty(workspace)))
-        .unwrap();
+    let app =
+        App::new(config, settings, Credentials::default(), None, None, Arc::new(AgentServices::empty(workspace)), None)
+            .unwrap();
     (directory, app)
 }
 

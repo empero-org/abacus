@@ -5,3 +5,6 @@
 .claude/settings.local.json
 .omh/
 /src_server/
+*.jar
+android/build/
+ios/build/

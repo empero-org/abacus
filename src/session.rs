@@ -328,6 +328,14 @@ impl SessionStore {
         self.save(session)
     }
 
+    pub fn delete(&self, id: Uuid) -> Result<()> {
+        let path = self.path(id);
+        if path.exists() {
+            fs::remove_file(&path).with_context(|| format!("could not remove session file {}", path.display()))?;
+        }
+        Ok(())
+    }
+
     fn load_exact(&self, id: Uuid) -> Result<Session> {
         let path = self.path(id);
         let content = fs::read(&path).with_context(|| format!("could not read session {}", path.display()))?;
@@ -749,6 +757,20 @@ mod tests {
         assert!(messages[1]["content"].as_str().unwrap().contains("interrupted"));
         // The ghost result is gone.
         assert!(!messages.iter().any(|m| m["tool_call_id"] == "ghost"));
+    }
+
+    #[test]
+    fn session_store_delete_removes_file() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("project");
+        fs::create_dir(&workspace).unwrap();
+        let paths = AbacusPaths::under(dir.path().join("home"));
+        let store = SessionStore::new(&paths, workspace.canonicalize().unwrap());
+        let session =
+            store.create("local".into(), "model".into(), vec![json!({"role":"user","content":"hi"})]).unwrap();
+        assert!(store.load(&session.id.to_string()).is_ok());
+        store.delete(session.id).unwrap();
+        assert!(store.load(&session.id.to_string()).is_err());
     }
 
     #[test]

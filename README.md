@@ -553,6 +553,74 @@ The phone cannot run slash commands, because a message that starts with `/` is
 sent as plain text. It cannot change the model, mode, workspace or any setting,
 and the agent's tools still ask for approval the way they always do.
 
+### The phone on your own network
+
+The relay needs an account and passes your transcript through a server. If the
+phone and the terminal share a network, Abacus can serve the same page itself:
+one HTTP and WebSocket server inside the terminal process, and the token in the
+link is the only credential.
+
+```sh
+abacus --mobile          # port 8787
+abacus --mobile 9000     # any port
+```
+
+Or from the terminal UI:
+
+| Command | Effect |
+| --- | --- |
+| `/mobile` | Start the server, or stop it |
+| `/mobile on`, `/mobile off` | Start or stop explicitly |
+| `/mobile qr` | Show the QR code again |
+| `/mobile url` | Print the link as text |
+| `/mobile status` | Whether the server is running, and the address |
+
+The footer then reads `· phone link ready` next to the usual sync badge. Open
+the link, or scan the QR code, on a phone on the same network. Nothing leaves
+your machine: the page, the frames and the agent all stay on the LAN.
+
+This page can do more than the relay one, because it talks to the terminal
+directly:
+
+- everything the relay page does: live transcript, prompts, questions,
+  approvals, interrupt;
+- the action sheet behind `/`: new session, fork, compact, rename, switch mode
+  (auto, YOLO), switch model profile, switch sessions, and start a subagent
+  with a task of its own;
+- VS Code-style appearance themes, custom fonts, and background wallpapers;
+- the subagent board: every worker, its state, its activity and its token
+  count, live while they run;
+- an interrupt button that stops the turn without touching the session.
+
+The token is the only thing standing between the link and the session, so
+treat it like a password: anyone who has it can drive the agent. `/mobile off`
+closes the server and invalidates the link.
+
+### The Android app
+
+`android/` wraps both the **Abacus Cloud** relay (`https://abacus.empero.org`)
+and local/tunnel `/mobile` links in a native Android WebView app with clipboard
+link detection, deep-link handling, a JavaScript bridge, an adaptive icon, and
+no Gradle dependency. `android/build.sh` drives `aapt2`, `javac`, `d8`,
+`zipalign` and `apksigner` straight from the SDK.
+
+```sh
+export ANDROID_HOME=/opt/android-sdk     # build-tools 34, platform 34, JDK 17+
+./android/build.sh                       # android/build/abacus.apk
+adb install -r android/build/abacus.apk
+```
+
+`android/app.keystore` is a throwaway debug key committed on purpose so
+`adb install -r` upgrades in place across builds.
+
+### The iOS app
+
+`ios/` provides a native WKWebView wrapper (`Abacus.xcodeproj`) sharing the same
+web frontend (`ios/Abacus/app.html`, synced from `src/mobile/app.html`) along
+with `ios/build.sh` to produce an unsigned `.ipa` archive (`xcodebuild`) and
+`ios/Abacus.mobileconfig` for Home Screen web-clip installation. See
+[`ios/README.md`](ios/README.md) for build and sideloading instructions.
+
 ### What leaves your machine
 
 - Sync uploads whole sessions and their training traces to the server: your

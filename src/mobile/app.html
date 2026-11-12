@@ -1,0 +1,3186 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<meta name="theme-color" content="#0e0b14">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="manifest" href="/manifest.webmanifest">
+<title>Abacus</title>
+<style>
+  :root {
+    --bg: #0e0b14;
+    --font-size: 14px;
+    --line-height: 1.6;
+    --backdrop-blur: 0px;
+    --sidebar: #09070d;
+    --surface: #151020;
+    --card: #151020;
+    --card-selected: #1f1730;
+    --raise: #1b1529;
+    --popover: #1b1529;
+    --code: #09070d;
+    --line: rgba(233, 228, 240, 0.08);
+    --border: rgba(233, 228, 240, 0.12);
+    --ink: #e9e4f0;
+    --subtle: #bcb5c9;
+    --muted: #8f88a0;
+    --dim: #6f6879;
+    --primary: #b66bff;
+    --primary-ink: #0e0b14;
+    --secondary: #d29eff;
+    --success: #7ee2a8;
+    --warning: #f2c46b;
+    --danger: #ff8f9b;
+    --user: #1f1730;
+    --hover: rgba(233, 228, 240, 0.06);
+    --selection: rgba(182, 107, 255, 0.18);
+    --abacus-glow: radial-gradient(50rem 26rem at 85% -8%, rgba(182, 107, 255, 0.16), transparent 70%);
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+    --safe-t: env(safe-area-inset-top, 0px);
+    --safe-b: env(safe-area-inset-bottom, 0px);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%;
+    background-color: var(--bg);
+    background-image: var(--abacus-glow);
+    background-attachment: fixed;
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    font: var(--font-size, 14px)/var(--line-height, 1.6) var(--sans);
+    display: flex; flex-direction: column;
+    overscroll-behavior-y: none;
+    position: relative;
+  }
+  button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+  ::-webkit-scrollbar { width: 0; height: 0; }
+  ::selection { background: var(--selection); color: var(--ink); }
+
+  /* ---------------------------------------------------------------- backdrop */
+  #backdrop {
+    position: fixed; inset: 0; z-index: -2;
+    background-size: cover; background-position: center; background-repeat: no-repeat;
+    pointer-events: none;
+    filter: blur(var(--backdrop-blur, 0px));
+    -webkit-filter: blur(var(--backdrop-blur, 0px));
+    transform: scale(1.05);
+    display: none;
+    transition: filter .2s ease;
+  }
+  #backdrop-veil {
+    position: fixed; inset: 0; z-index: -1;
+    background-color: var(--bg);
+    opacity: var(--veil, 0.34);
+    pointer-events: none;
+    display: none;
+    transition: opacity .2s ease, background-color .2s ease;
+  }
+  body.has-custom-bg #backdrop,
+  body.has-custom-bg #backdrop-veil {
+    display: block;
+  }
+  body.has-custom-bg {
+    background-color: transparent !important;
+    background-image: none !important;
+  }
+  body.has-custom-bg header {
+    background: var(--header-bg, rgba(14, 11, 20, 0.65)) !important;
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+  }
+  body.has-custom-bg .sheet {
+    background: var(--sheet-bg, rgba(21, 16, 32, 0.88)) !important;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+  }
+  body.has-custom-bg .composer-card {
+    background: var(--card-bg, rgba(21, 16, 32, 0.72)) !important;
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+  }
+
+  /* ---------------------------------------------------------------- header */
+  header {
+    position: sticky; top: 0; z-index: 20;
+    padding: calc(var(--safe-t) + 8px) 14px 8px;
+    background: var(--header-bg, rgba(14, 11, 20, 0.9));
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--line);
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .topbar-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 28px; width: 100%;
+  }
+  .brand {
+    display: inline-flex; align-items: center; gap: 6px;
+    flex-shrink: 0; min-width: max-content;
+  }
+  .brand-mark {
+    width: 18px; height: 18px; color: var(--primary); flex: 0 0 auto;
+  }
+  .wordmark {
+    font: 600 13px/1 var(--sans); letter-spacing: -0.01em;
+    color: var(--ink); white-space: nowrap;
+  }
+  .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--dim); flex: 0 0 auto;
+    transition: background .2s, box-shadow .2s;
+  }
+  .dot.live { background: var(--success); box-shadow: 0 0 8px rgba(126, 226, 168, 0.55); }
+  .dot.wait { background: var(--warning); }
+  .dot.dead { background: var(--danger); }
+  .link-badge {
+    font: 500 10px/1 var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--primary); border: 1px solid rgba(182, 107, 255, 0.35);
+    border-radius: 999px; padding: 3px 7px;
+    background: rgba(182, 107, 255, 0.1);
+    white-space: nowrap; flex-shrink: 0;
+  }
+  .topbar-actions {
+    margin-left: auto; display: flex; align-items: center; gap: 5px;
+    flex-shrink: 0;
+  }
+  @media (max-width: 440px) {
+    .workers-chip { padding: 4px 7px; gap: 4px; }
+    .workers-chip .workers-label { display: none; }
+    .brand { gap: 5px; }
+    .link-badge { padding: 2px 6px; font-size: 9px; }
+    .topbar-actions { gap: 4px; }
+    .chip { padding: 4px 7px; font-size: 11px; }
+  }
+  @media (max-width: 350px) {
+    .wordmark { display: none; }
+  }
+  .title-row {
+    display: flex; align-items: center; gap: 8px; min-width: 0;
+  }
+  #title {
+    font: 500 13.5px/1.3 var(--sans);
+    color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    cursor: pointer; padding: 2px 6px; margin-left: -6px; border-radius: 6px;
+    transition: background .15s;
+    max-width: 100%;
+  }
+  #title:active { background: var(--hover); }
+  #workspace-pill {
+    font: 11px/1 var(--mono); color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    margin-left: auto; max-width: 45%;
+  }
+  .chip {
+    font: 500 11.5px/1 var(--sans);
+    color: var(--subtle); background: rgba(233, 228, 240, 0.04);
+    border: 1px solid var(--line); border-radius: 999px;
+    padding: 5px 10px; display: inline-flex; align-items: center; gap: 5px;
+    white-space: nowrap; transition: background .15s, border-color .15s, color .15s;
+  }
+  .chip b { color: var(--ink); font-weight: 500; }
+  .chip.tap { cursor: pointer; }
+  .chip.tap:active { background: var(--selection); border-color: rgba(182, 107, 255, 0.4); color: var(--ink); }
+  .chip.yolo {
+    color: var(--warning);
+    background: rgba(242, 196, 107, 0.12);
+    border-color: rgba(242, 196, 107, 0.35);
+  }
+  .workers-chip {
+    color: var(--subtle);
+  }
+  .workers-chip.on {
+    color: var(--primary);
+    border-color: rgba(182, 107, 255, 0.35);
+    background: rgba(182, 107, 255, 0.12);
+  }
+  .workers-chip .count-pill {
+    background: rgba(182, 107, 255, 0.22);
+    color: var(--ink);
+    font: 600 10.5px/1 var(--mono);
+    padding: 2px 5px; border-radius: 999px;
+  }
+
+  /* ---------------------------------------------------------------- transcript */
+  main#log {
+    flex: 1; overflow-y: auto; padding: 14px 0 18px;
+    scroll-behavior: smooth; background: transparent;
+    display: flex; flex-direction: column;
+  }
+  #log.bulk .entry { animation: none; }
+
+  /* Empty state matching Desktop Conversation.tsx EmptyThread */
+  #empty-state {
+    margin: auto 16px; padding: 28px 20px;
+    display: flex; flex-direction: column; align-items: center; text-align: center;
+    border-radius: 18px;
+    background: rgba(21, 16, 32, 0.55);
+    border: 1px solid var(--line);
+  }
+  #empty-state.hidden { display: none; }
+  .empty-mark {
+    width: 44px; height: 44px; border-radius: 12px;
+    background: rgba(182, 107, 255, 0.1);
+    border: 1px solid rgba(182, 107, 255, 0.25);
+    display: grid; place-items: center;
+    color: var(--primary); margin-bottom: 14px;
+  }
+  .empty-title {
+    font: 600 17px/1.3 var(--sans); letter-spacing: -0.015em;
+    color: var(--ink); margin: 0 0 8px;
+  }
+  .empty-title .accent { color: var(--primary); }
+  .empty-sub {
+    font: 13px/1.55 var(--sans); color: var(--muted);
+    max-width: 320px; margin: 0 0 16px;
+  }
+  .empty-pills {
+    display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;
+  }
+
+  .entry {
+    padding: 8px 16px; font: 14px/1.65 var(--sans);
+    animation: fadein .14s ease;
+  }
+  @keyframes fadein { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
+
+  /* User message bubble — matches Desktop UserMessage.tsx */
+  .entry.user {
+    align-self: flex-end;
+    max-width: 85%;
+    background: var(--card-selected);
+    border: 1px solid rgba(182, 107, 255, 0.22);
+    margin: 6px 14px 6px auto;
+    padding: 10px 14px;
+    border-radius: 16px 16px 4px 16px;
+    color: var(--ink);
+    font: 14px/1.55 var(--sans);
+    white-space: pre-wrap;
+    word-break: break-word;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+  }
+
+  /* Assistant prose — matches Desktop Items.tsx AssistantMessage */
+  .entry.assistant {
+    color: var(--ink);
+    padding: 6px 16px;
+    word-break: break-word;
+  }
+  .entry.assistant p { margin: 0 0 10px; }
+  .entry.assistant p:last-child { margin-bottom: 0; }
+  .entry.assistant h1, .entry.assistant h2, .entry.assistant h3 {
+    color: var(--ink); font-weight: 600; letter-spacing: -0.01em;
+    margin: 14px 0 6px; line-height: 1.3;
+  }
+  .entry.assistant h1 { font-size: 17px; }
+  .entry.assistant h2 { font-size: 15.5px; }
+  .entry.assistant h3 { font-size: 14.5px; }
+  .entry.assistant ul { margin: 6px 0 10px; padding-left: 20px; }
+  .entry.assistant li { margin: 3px 0; }
+  .entry.assistant a { color: var(--primary); text-decoration: underline; text-underline-offset: 2px; }
+  .entry.assistant code {
+    font: 12.5px/1.45 var(--mono);
+    background: rgba(182, 107, 255, 0.1);
+    color: var(--secondary);
+    padding: 1.5px 5px; border-radius: 5px;
+    border: 1px solid rgba(182, 107, 255, 0.18);
+  }
+  .entry.assistant pre {
+    font: 12.5px/1.5 var(--mono);
+    background: var(--code); color: var(--ink);
+    padding: 12px 14px; border-radius: 10px;
+    border: 1px solid var(--line);
+    overflow-x: auto; margin: 8px 0;
+  }
+  .entry.assistant pre code {
+    background: none; border: 0; padding: 0; color: inherit; font-size: inherit;
+  }
+
+  /* Tool call card — matches Desktop Items.tsx ToolCallRow */
+  .entry.tool {
+    margin: 4px 14px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--card);
+    padding: 0;
+    overflow: hidden;
+  }
+  .tool-head {
+    width: 100%;
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px;
+    font: 12px/1.2 var(--sans); color: var(--subtle);
+    text-align: left;
+  }
+  .tool-head:active { background: var(--hover); }
+  .tool-ico {
+    width: 14px; height: 14px; color: var(--muted); flex: 0 0 auto;
+  }
+  .tool-name {
+    color: var(--ink); font-weight: 500; flex: 0 0 auto;
+  }
+  .tool-sum {
+    color: var(--muted); font: 11.5px/1.2 var(--mono);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    flex: 1; min-width: 0;
+  }
+  .tool-state {
+    margin-left: auto; flex: 0 0 auto;
+    color: var(--muted); font: 500 11px/1 var(--mono);
+  }
+  .tool-state.running { color: var(--primary); }
+  .tool-state.failed { color: var(--danger); }
+  .tool-out {
+    margin: 0;
+    border-top: 1px solid var(--line);
+    font: 12px/1.5 var(--mono); color: var(--subtle);
+    padding: 10px 12px; white-space: pre-wrap; word-break: break-word;
+    max-height: 240px; overflow: auto;
+    background: var(--code);
+  }
+
+  /* Error & system notices */
+  .entry.error {
+    margin: 6px 14px; padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 143, 155, 0.3);
+    background: rgba(255, 143, 155, 0.08);
+    color: var(--danger); font-size: 13px;
+  }
+  .entry.system {
+    font: 12px/1.4 var(--mono); color: var(--muted);
+    padding: 4px 16px; display: flex; align-items: center; gap: 8px;
+  }
+  .entry.system::before {
+    content: ""; width: 4px; height: 4px; border-radius: 50%;
+    background: var(--primary); opacity: 0.7; flex: 0 0 auto;
+  }
+
+  /* Reasoning / Thinking — matches Desktop Items.tsx ReasoningRow */
+  .entry.reasoning {
+    margin: 4px 16px; padding: 0;
+  }
+  .entry.reasoning summary {
+    font: 500 12.5px/1.3 var(--sans);
+    color: var(--muted); cursor: pointer; list-style: none;
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 4px 0;
+  }
+  .entry.reasoning summary::-webkit-details-marker { display: none; }
+  .entry.reasoning summary::after {
+    content: "▸"; color: var(--dim); font-size: 11px; transition: transform .15s;
+  }
+  .entry.reasoning[open] summary::after { transform: rotate(90deg); }
+  .entry.reasoning .body {
+    margin-top: 6px;
+    padding-left: 12px;
+    border-left: 2px solid rgba(182, 107, 255, 0.35);
+    color: var(--subtle);
+    font: 13px/1.55 var(--sans);
+    white-space: pre-wrap;
+  }
+
+  .rule {
+    border: 0; border-top: 1px solid var(--line);
+    margin: 14px 16px;
+  }
+  .empty {
+    padding: 32px 14px; text-align: center;
+    color: var(--muted); font: 13px/1.5 var(--sans);
+  }
+
+  /* ---------------------------------------------------------------- status */
+  #statusbar {
+    padding: 4px 16px;
+    font: 500 11.5px/1.2 var(--mono);
+    color: var(--muted);
+    display: flex; align-items: center; gap: 8px;
+    min-height: 22px;
+  }
+  #statusbar::before {
+    content: ""; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--dim); flex: 0 0 auto;
+  }
+  #statusbar.busy {
+    color: var(--primary);
+  }
+  #statusbar.busy::before {
+    background: var(--primary);
+    box-shadow: 0 0 8px var(--primary);
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+
+  /* ---------------------------------------------------------------- footer / composer */
+  footer {
+    padding: 4px 12px calc(var(--safe-b) + 10px);
+    background: transparent;
+  }
+  .composer-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: 10px 12px 8px;
+    box-shadow: 0 8px 30px -12px rgba(0, 0, 0, 0.5);
+    transition: border-color .15s;
+  }
+  .composer-card:focus-within {
+    border-color: rgba(182, 107, 255, 0.42);
+  }
+  textarea#input {
+    width: 100%; resize: none; min-height: 26px; max-height: 120px;
+    background: transparent; color: var(--ink);
+    border: 0; padding: 2px 2px 8px;
+    font: 14.5px/1.45 var(--sans);
+    outline: none; display: block;
+  }
+  textarea#input::placeholder { color: var(--muted); }
+  .composer {
+    display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+    padding-top: 6px;
+    border-top: 1px solid var(--line);
+  }
+  .composer-right {
+    margin-left: auto; display: flex; align-items: center; gap: 6px;
+  }
+  .round {
+    width: 32px; height: 32px; flex: 0 0 auto; border-radius: 999px;
+    border: 1px solid var(--border); background: var(--raise);
+    display: grid; place-items: center; color: var(--subtle);
+    font: 600 13px/1 var(--mono);
+    transition: background .15s, color .15s, border-color .15s, opacity .15s;
+  }
+  .round:active { background: var(--selection); color: var(--ink); }
+  #slash {
+    width: 28px; height: 28px;
+    background: rgba(233, 228, 240, 0.05);
+    color: var(--primary);
+    border-color: var(--line);
+  }
+  #send {
+    background: var(--primary); color: var(--primary-ink);
+    border-color: var(--primary); font-weight: 700;
+  }
+  #send:disabled {
+    background: rgba(233, 228, 240, 0.12);
+    border-color: transparent;
+    color: var(--muted);
+    cursor: default;
+  }
+  #send:not(:disabled):active { filter: brightness(.88); }
+  #stop {
+    display: none;
+    background: rgba(255, 143, 155, 0.14);
+    color: var(--danger);
+    border-color: rgba(255, 143, 155, 0.4);
+    font-size: 11px;
+  }
+  #stop.on {
+    display: grid;
+  }
+  input.veil { width: 100%; accent-color: var(--primary); }
+  .hint { display: none; }
+
+  /* ---------------------------------------------------------------- toast */
+  #toast {
+    position: fixed; left: 50%; bottom: calc(var(--safe-b) + 92px);
+    transform: translateX(-50%) translateY(10px); opacity: 0;
+    background: var(--popover); color: var(--ink);
+    border: 1px solid var(--border);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+    padding: 9px 14px; border-radius: 999px;
+    font: 500 12.5px/1.3 var(--sans);
+    pointer-events: none; transition: opacity .18s, transform .18s; z-index: 60;
+    max-width: 88vw; text-align: center;
+  }
+  #toast.bad {
+    border-color: rgba(255, 143, 155, 0.45);
+    color: var(--danger);
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* ---------------------------------------------------------------- sheets */
+  .sheet-wrap { position: fixed; inset: 0; z-index: 40; display: none; }
+  .sheet-wrap.open { display: block; }
+  .scrim {
+    position: absolute; inset: 0;
+    background: rgba(6, 4, 10, 0.68);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+  }
+  .sheet {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    background: var(--popover);
+    border-top: 1px solid var(--border);
+    border-radius: 20px 20px 0 0;
+    padding: 10px 16px calc(var(--safe-b) + 20px);
+    max-height: 86vh; overflow-y: auto;
+    box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.55);
+    animation: sheetup .2s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  @keyframes sheetup { from { transform: translateY(100%); } to { transform: none; } }
+  .handle {
+    width: 36px; height: 4px; border-radius: 999px;
+    background: rgba(233, 228, 240, 0.2); margin: 0 auto 14px;
+  }
+  .sheet h2 {
+    font: 600 15px/1.25 var(--sans); letter-spacing: -0.01em;
+    color: var(--ink); margin: 0 0 4px;
+  }
+  .sheet .sub {
+    font: 12.5px/1.45 var(--sans); color: var(--muted); margin-bottom: 14px;
+  }
+  .group {
+    font: 600 10.5px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--muted); margin: 16px 2px 8px;
+  }
+  .rows { display: flex; flex-direction: column; gap: 6px; }
+  .row {
+    width: 100%;
+    display: flex; align-items: center; gap: 11px;
+    padding: 11px 13px;
+    border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); text-align: left;
+    transition: background .15s, border-color .15s;
+  }
+  .row:active { background: var(--selection); }
+  .row.on {
+    border-color: rgba(182, 107, 255, 0.5);
+    background: var(--card-selected);
+  }
+  .row.danger {
+    border-color: rgba(255, 143, 155, 0.35);
+    color: var(--danger);
+  }
+  .row .ico {
+    width: 16px; height: 16px; color: var(--primary); flex: 0 0 auto;
+    display: grid; place-items: center;
+  }
+  .row.danger .ico { color: var(--danger); }
+  .row .txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .row .txt b { font: 500 13.5px/1.25 var(--sans); color: var(--ink); }
+  .row.danger .txt b { color: var(--danger); }
+  .row .txt small { font: 11.5px/1.35 var(--sans); color: var(--muted); }
+  .row .tag {
+    font: 500 10px/1 var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--primary);
+    background: rgba(182, 107, 255, 0.12);
+    border: 1px solid rgba(182, 107, 255, 0.35);
+    border-radius: 999px; padding: 3px 7px;
+  }
+
+  .btn-row {
+    display: flex; gap: 8px; margin-top: 10px;
+  }
+  .btn {
+    width: 100%; padding: 11px 14px; margin-top: 8px;
+    border: 1px solid var(--border); border-radius: 12px;
+    background: var(--card);
+    font: 500 13.5px/1.2 var(--sans);
+    color: var(--ink); text-align: center;
+    transition: filter .15s, background .15s;
+  }
+  .btn-row .btn { margin-top: 0; }
+  .btn small {
+    display: block; margin-top: 3px;
+    font: 400 11px/1.25 var(--sans); color: var(--muted);
+  }
+  .btn.primary {
+    background: var(--primary); color: var(--primary-ink);
+    border-color: var(--primary); font-weight: 600;
+  }
+  .btn.primary small { color: rgba(14, 11, 20, 0.75); }
+  .btn.danger {
+    border-color: rgba(255, 143, 155, 0.4);
+    background: rgba(255, 143, 155, 0.08);
+    color: var(--danger);
+  }
+  .btn:active { filter: brightness(.88); }
+
+  .field {
+    width: 100%; background: var(--code); color: var(--ink);
+    border: 1px solid var(--border); border-radius: 12px;
+    padding: 10px 12px; font: 13.5px/1.45 var(--sans); outline: none;
+  }
+  .field:focus { border-color: var(--primary); }
+
+  .opts {
+    display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px;
+  }
+  .opt {
+    width: 100%;
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 11px 13px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); text-align: left;
+  }
+  .opt.sel {
+    border-color: rgba(182, 107, 255, 0.55);
+    background: var(--card-selected);
+  }
+  .opt .mark {
+    width: 18px; height: 18px; border-radius: 999px;
+    border: 1.5px solid var(--border);
+    display: grid; place-items: center;
+    color: var(--primary-ink); font: 700 11px/1 var(--mono);
+    flex: 0 0 auto; margin-top: 1px;
+  }
+  .opt.sel .mark {
+    background: var(--primary); border-color: var(--primary);
+  }
+  .opt .label { font: 500 13.5px/1.25 var(--sans); color: var(--ink); }
+  .opt .desc { font: 12px/1.35 var(--sans); color: var(--muted); margin-top: 2px; }
+
+  /* ---------------------------------------------------------------- workers & sessions */
+  #workers-list, #sessions-list {
+    display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px;
+  }
+  .worker {
+    width: 100%; text-align: left;
+    padding: 11px 13px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); display: flex; flex-direction: column; gap: 4px;
+  }
+  button.worker:active {
+    background: var(--card-selected);
+    border-color: rgba(182, 107, 255, 0.45);
+  }
+  .worker .whead { display: flex; align-items: center; gap: 8px; }
+  .worker .name { font: 500 13.5px/1.25 var(--sans); color: var(--ink); }
+  .worker .state {
+    margin-left: auto;
+    font: 500 10.5px/1 var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--muted);
+  }
+  .worker .state.running { color: var(--warning); }
+  .worker .state.done, .worker .state.completed { color: var(--success); }
+  .worker .state.failed { color: var(--danger); }
+  .worker .desc, .worker .act { font: 12px/1.4 var(--sans); color: var(--subtle); margin-top: 2px; }
+  .worker .tok { font: 11px/1.3 var(--mono); color: var(--muted); margin-top: 2px; }
+  .spinner {
+    display: inline-block; width: 11px; height: 11px;
+    border: 1.5px solid rgba(182, 107, 255, 0.25);
+    border-top-color: var(--primary); border-radius: 50%;
+    animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ---------------------------------------------------------------- diff & command preview */
+  pre.cmd, pre.diff {
+    font: 12px/1.5 var(--mono);
+    background: var(--code); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 12px; margin: 0 0 10px;
+    max-height: 240px; overflow: auto;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  pre.diff .add { color: var(--success); }
+  pre.diff .del { color: var(--danger); }
+  pre.diff .hunk { color: var(--secondary); }
+  pre.diff .meta { color: var(--muted); }
+
+  /* ---------------------------------------------------------------- GFM Tables */
+  .table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    margin: 12px 0;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+  }
+  .md-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    line-height: 1.5;
+    text-align: left;
+  }
+  .md-table th {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--ink);
+    font-weight: 600;
+    padding: 9px 13px;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+    letter-spacing: 0.01em;
+  }
+  .md-table td {
+    padding: 8px 13px;
+    border-bottom: 1px solid var(--line);
+    color: var(--subtle);
+  }
+  .md-table tbody tr:last-child td {
+    border-bottom: none;
+  }
+  .md-table tbody tr:nth-child(even) {
+    background: rgba(255, 255, 255, 0.02);
+  }
+
+  /* ---------------------------------------------------------------- Context Meter */
+  .context-meter {
+    padding: 2px 4px 6px;
+    display: flex; flex-direction: column; gap: 3px;
+    font-family: var(--mono);
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 4px;
+  }
+  .ctx-labels {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 11px;
+  }
+  .ctx-pct {
+    font-weight: 600; color: var(--subtle);
+  }
+  .ctx-pct.warning { color: var(--warning); }
+  .ctx-detail {
+    font-size: 10px; color: var(--muted);
+  }
+  .ctx-track {
+    height: 3px; background: rgba(233, 228, 240, 0.08);
+    border-radius: 2px; overflow: hidden; position: relative;
+  }
+  .ctx-bar {
+    height: 100%; width: 0%;
+    background: var(--primary);
+    border-radius: 2px;
+    transition: width 0.35s ease, background-color 0.35s ease;
+  }
+  .ctx-bar.warning { background: var(--warning); }
+
+  /* ---------------------------------------------------------------- Model & Effort Sheet */
+  .effort-grid {
+    display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px;
+    margin: 8px 0 14px;
+  }
+  .effort-btn {
+    padding: 8px 0; text-align: center; border-radius: 6px;
+    background: var(--card); border: 1px solid var(--border);
+    color: var(--subtle); font: 500 12px/1 var(--sans);
+    cursor: pointer; transition: all .15s ease;
+  }
+  .effort-btn.active {
+    background: var(--primary); color: var(--primary-ink);
+    border-color: var(--primary); font-weight: 600;
+  }
+
+  /* ---------------------------------------------------------------- VS Code Theme Sheet */
+  .theme-section {
+    margin-top: 14px;
+  }
+  .theme-presets {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+    margin: 8px 0;
+  }
+  .preset-card {
+    padding: 10px 8px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--card); text-align: center; cursor: pointer;
+    transition: all .15s ease;
+  }
+  .preset-card.active {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 1px var(--primary);
+  }
+  .preset-title {
+    font: 600 12px/1.2 var(--sans); color: var(--ink);
+  }
+  .preset-colors {
+    display: flex; justify-content: center; gap: 4px; margin-top: 6px;
+  }
+  .color-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+  }
+
+  .font-btn-row {
+    display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0;
+  }
+  .font-pill {
+    padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--card); font: 500 12px/1 var(--sans); color: var(--subtle);
+    cursor: pointer;
+  }
+  .font-pill.active {
+    background: var(--primary); color: var(--primary-ink);
+    border-color: var(--primary); font-weight: 600;
+  }
+
+  .color-picker-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 0; border-bottom: 1px solid var(--line);
+    font-size: 13px; color: var(--ink);
+  }
+  .color-input-box {
+    display: flex; align-items: center; gap: 8px;
+  }
+  .color-input-box input[type="color"] {
+    -webkit-appearance: none; border: none; width: 28px; height: 28px;
+    border-radius: 6px; cursor: pointer; background: none;
+  }
+  .color-input-box input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+  .color-input-box input[type="color"]::-webkit-color-swatch {
+    border: 1px solid var(--border); border-radius: 6px;
+  }
+
+</style>
+</head>
+<body>
+
+<div id="backdrop" aria-hidden="true"></div>
+<div id="backdrop-veil" aria-hidden="true"></div>
+
+<header>
+  <div class="topbar-row">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="1.5" y="1.5" width="29" height="29" fill="none" stroke="currentColor" stroke-width="2"/>
+        <path d="M7 9.5h18M7 16h18M7 22.5h18M11.5 5.5v21M20.5 5.5v21" fill="none" stroke="currentColor" stroke-width="2"/>
+      </svg>
+      <span class="wordmark">abacus</span>
+      <span id="dot" class="dot"></span>
+      <span id="link-badge" class="link-badge">sync</span>
+    </div>
+    <div class="topbar-actions">
+      <button id="workers-chip" class="chip tap workers-chip" aria-label="Subagents">
+        <span id="workers-count" class="count-pill">0</span>
+        <span class="workers-label">subagents</span>
+      </button>
+      <button id="theme-top" class="chip tap" aria-label="Appearance" title="Appearance and Themes"><svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-palette"><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg></button>
+      <button id="sessions-top" class="chip tap" aria-label="Sessions">sessions</button>
+    </div>
+  </div>
+  <div class="title-row">
+    <div id="title" title="Tap to rename session">Abacus</div>
+    <span id="workspace-pill"></span>
+  </div>
+</header>
+
+<main id="log">
+  <div id="empty-state">
+    <div class="empty-mark">
+      <svg width="24" height="24" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="1.5" y="1.5" width="29" height="29" fill="none" stroke="currentColor" stroke-width="2"/>
+        <path d="M7 9.5h18M7 16h18M7 22.5h18M11.5 5.5v21M20.5 5.5v21" fill="none" stroke="currentColor" stroke-width="2"/>
+      </svg>
+    </div>
+    <h1 class="empty-title" id="empty-title">What should we build in <span class="accent">abacus</span>?</h1>
+    <p class="empty-sub">Describe a change, ask about the code, or paste an error. In Auto, anything beyond edits in this project is reviewed before it runs.</p>
+    <div class="empty-pills">
+      <button class="chip tap" id="empty-sessions">Open sessions</button>
+      <button class="chip tap" id="empty-delegate">Delegate subagents</button>
+      <button class="chip tap" id="empty-actions">All actions (/)</button>
+    </div>
+  </div>
+</main>
+
+<div id="statusbar"><span id="status-text">connecting…</span></div>
+
+<footer>
+  <div class="composer-card">
+        <div id="context-meter" class="context-meter" title="Context usage">
+      <div class="ctx-labels">
+        <span id="ctx-percent" class="ctx-pct">0% context</span>
+        <span id="ctx-detail" class="ctx-detail">0 / 128k</span>
+      </div>
+      <div class="ctx-track">
+        <div id="ctx-bar" class="ctx-bar"></div>
+      </div>
+    </div>
+    <textarea id="input" rows="1" placeholder="Message Abacus… (/ for actions)" enterkeyhint="send"></textarea>
+    <div class="composer">
+      <button id="slash" class="round" aria-label="Actions">/</button>
+      <button id="mode" class="chip tap">auto</button>
+      <button id="model" class="chip tap"><b>model</b></button>
+      <span id="usage" class="chip">0 tok</span>
+      <div class="composer-right">
+        <button id="stop" class="round" aria-label="Stop">■</button>
+        <button id="send" class="round" aria-label="Send" disabled>↑</button>
+      </div>
+    </div>
+  </div>
+  <div class="hint" id="hint">tap / for actions · stop ends the turn</div>
+</footer>
+
+<div id="toast"></div>
+
+<!-- rename -->
+<div class="sheet-wrap" id="rename-sheet">
+  <div class="scrim" data-close></div>
+  <div class="sheet">
+    <div class="handle"></div>
+    <h2>Rename session</h2>
+    <div class="sub">Give this conversation a clear title.</div>
+    <input type="text" class="field" id="rename-input" placeholder="Session title…" autocomplete="off">
+    <div class="btn-row">
+      <button class="btn" id="rename-cancel">Cancel</button>
+      <button class="btn primary" id="rename-save">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- model & reasoning effort -->
+<div class="sheet-wrap" id="model-sheet">
+  <div class="scrim" data-close></div>
+  <div class="sheet">
+    <div class="handle"></div>
+    <h2>Model & Reasoning</h2>
+    <div class="sub">Switch model profile and configure reasoning effort.</div>
+    <div class="group">Model Profile</div>
+    <div id="model-list" class="rows"></div>
+    <div class="group">Reasoning Effort</div>
+    <div class="effort-grid" id="effort-grid">
+      <button class="effort-btn" data-effort="off">Off</button>
+      <button class="effort-btn" data-effort="low">Low</button>
+      <button class="effort-btn" data-effort="medium">Medium</button>
+      <button class="effort-btn" data-effort="high">High</button>
+      <button class="effort-btn" data-effort="max">Max</button>
+    </div>
+  </div>
+</div>
+
+<!-- appearance / theme (VS Code style) -->
+<div class="sheet-wrap" id="theme-sheet">
+  <div class="scrim" data-close></div>
+  <div class="sheet">
+    <div class="handle"></div>
+    <h2>Appearance & Themes</h2>
+    <div class="sub">Custom background, fonts, and colors styled to your preference.</div>
+
+    <div class="theme-section">
+      <div class="group">Theme Presets</div>
+      <div class="theme-presets">
+        <div class="preset-card" data-preset="vscode">
+          <div class="preset-title">VS Code Dark+</div>
+          <div class="preset-colors">
+            <span class="color-dot" style="background:#1e1e1e"></span>
+            <span class="color-dot" style="background:#007acc"></span>
+            <span class="color-dot" style="background:#d4d4d4"></span>
+          </div>
+        </div>
+        <div class="preset-card" data-preset="abacus">
+          <div class="preset-title">Abacus Dark</div>
+          <div class="preset-colors">
+            <span class="color-dot" style="background:#0e0b14"></span>
+            <span class="color-dot" style="background:#b66bff"></span>
+            <span class="color-dot" style="background:#e9e4f0"></span>
+          </div>
+        </div>
+        <div class="preset-card" data-preset="monokai">
+          <div class="preset-title">Monokai Pro</div>
+          <div class="preset-colors">
+            <span class="color-dot" style="background:#2d2a2e"></span>
+            <span class="color-dot" style="background:#ffd866"></span>
+            <span class="color-dot" style="background:#fcfcfa"></span>
+          </div>
+        </div>
+        <div class="preset-card" data-preset="tokyo">
+          <div class="preset-title">Tokyo Night</div>
+          <div class="preset-colors">
+            <span class="color-dot" style="background:#1a1b26"></span>
+            <span class="color-dot" style="background:#7aa2f7"></span>
+            <span class="color-dot" style="background:#c0caf5"></span>
+          </div>
+        </div>
+        <div class="preset-card" data-preset="github">
+          <div class="preset-title">GitHub Dark</div>
+          <div class="preset-colors">
+            <span class="color-dot" style="background:#0d1117"></span>
+            <span class="color-dot" style="background:#58a6ff"></span>
+            <span class="color-dot" style="background:#c9d1d9"></span>
+          </div>
+        </div>
+        <div class="preset-card" data-preset="amoled">
+          <div class="preset-title">AMOLED Black</div>
+          <div class="preset-colors">
+            <span class="color-dot" style="background:#000000"></span>
+            <span class="color-dot" style="background:#a78bfa"></span>
+            <span class="color-dot" style="background:#ffffff"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="theme-section">
+      <div class="group">Background Image</div>
+      <div class="rows">
+        <button class="btn" id="bg-pick">Choose background image</button>
+        <button class="btn" id="bg-clear">Remove image</button>
+      </div>
+      <div style="display:flex; justify-content:space-between; margin-top:8px;">
+        <span class="sub">Dim Overlay</span>
+        <span id="bg-veil-val" class="sub">34%</span>
+      </div>
+      <input id="bg-veil" class="veil" type="range" min="8" max="85" step="2" value="34">
+      <div style="display:flex; justify-content:space-between; margin-top:8px;">
+        <span class="sub">Background Blur</span>
+        <span id="bg-blur-val" class="sub">0px</span>
+      </div>
+      <input id="bg-blur" class="veil" type="range" min="0" max="20" step="1" value="0">
+      <input type="file" id="bg-file" accept="image/*" hidden>
+    </div>
+
+    <div class="theme-section">
+      <div class="group">Font Family</div>
+      <div class="font-btn-row" id="font-family-row">
+        <button class="font-pill active" data-font="sans">Inter (Sans)</button>
+        <button class="font-pill" data-font="mono">JetBrains Mono</button>
+        <button class="font-pill" data-font="consolas">Consolas</button>
+        <button class="font-pill" data-font="firacode">Fira Code</button>
+        <button class="font-pill" data-font="system">System UI</button>
+        <button class="font-pill" data-font="serif">Serif</button>
+      </div>
+      <div class="group">Font Size</div>
+      <div class="font-btn-row" id="font-size-row">
+        <button class="font-pill" data-size="12px">12px</button>
+        <button class="font-pill" data-size="13px">13px</button>
+        <button class="font-pill active" data-size="14px">14px</button>
+        <button class="font-pill" data-size="15px">15px</button>
+        <button class="font-pill" data-size="16px">16px</button>
+      </div>
+    </div>
+
+    <div class="theme-section">
+      <div class="group">Color Customization</div>
+      <div class="color-picker-row">
+        <span>Accent / Highlight Color</span>
+        <div class="color-input-box">
+          <input type="color" id="pick-primary" value="#b66bff">
+        </div>
+      </div>
+      <div class="color-picker-row">
+        <span>Text Color</span>
+        <div class="color-input-box">
+          <input type="color" id="pick-ink" value="#e9e4f0">
+        </div>
+      </div>
+      <div class="color-picker-row">
+        <span>Background Color</span>
+        <div class="color-input-box">
+          <input type="color" id="pick-bg" value="#0e0b14">
+        </div>
+      </div>
+    </div>
+
+    <button class="btn" id="theme-reset" style="margin-top:14px">Reset to Defaults</button>
+  </div>
+</div>
+
+
+<!-- approval -->
+<div class="sheet-wrap" id="approval-sheet">
+  <div class="scrim" data-close></div>
+  <div class="sheet">
+    <div class="handle"></div>
+    <h2 id="ap-tool">Approval</h2>
+    <div class="sub" id="ap-summary"></div>
+    <div id="ap-body"></div>
+    <button class="btn primary" data-decide="allow">Allow once</button>
+    <button class="btn" data-decide="always">Allow for the rest of the session</button>
+    <button class="btn danger" data-decide="deny">Reject</button>
+  </div>
+</div>
+
+<!-- question -->
+<div class="sheet-wrap" id="question-sheet">
+  <div class="scrim" data-close></div>
+  <div class="sheet">
+    <div class="handle"></div>
+    <h2 id="q-header">Question</h2>
+    <div class="sub" id="q-text"></div>
+    <div class="opts" id="q-options"></div>
+    <textarea class="field" id="q-custom" rows="2" placeholder="Or type an answer…"></textarea>
+    <button class="btn primary" id="q-submit">Answer</button>
+  </div>
+</div>
+
+<!-- actions -->
+<div class="sheet-wrap" id="actions-sheet">
+  <div class="scrim" data-close></div>
+  <div class="sheet">
+    <div class="handle"></div>
+    <h2>Actions</h2>
+    <div class="sub" id="actions-sub">What the terminal can do from here.</div>
+    <div id="actions-list"></div>
+  </div>
+</div>
+
+<!-- sessions -->
+<div class="sheet-wrap" id="sessions-sheet">
+  <div class="scrim" data-close></div>
+  <div class="sheet">
+    <div class="handle"></div>
+    <h2>Sessions</h2>
+    <div class="sub" id="sessions-sub">Saved in this workspace. Tap one to open it.</div>
+    <div id="sessions-list"></div>
+  </div>
+</div>
+
+<!-- workers -->
+<div class="sheet-wrap" id="workers-sheet">
+  <div class="scrim" data-close></div>
+  <div class="sheet">
+    <div class="handle"></div>
+    <h2>Subagents</h2>
+    <div class="sub" id="workers-sub">Workers this session started.</div>
+    <div id="workers-list"></div>
+    <button class="btn primary" id="delegate" style="text-align:center">Delegate a task</button>
+  </div>
+</div>
+
+<!-- delegate -->
+<div class="sheet-wrap" id="delegate-sheet">
+  <div class="scrim" data-close></div>
+  <div class="sheet">
+    <div class="handle"></div>
+    <h2>Delegate</h2>
+    <div class="sub">The agent starts one subagent per line, in parallel.</div>
+    <textarea class="field" id="delegate-text" rows="4" placeholder="e.g. Audit the auth module for missing checks"></textarea>
+    <div class="btn-row" style="margin-bottom:10px">
+      <button class="btn primary" data-role="general" style="flex:1">General<small>may edit and test</small></button>
+      <button class="btn" data-role="explore" style="flex:1">Explore<small>read-only research</small></button>
+    </div>
+    <div class="sub" style="margin:0">Tap a role to start.</div>
+  </div>
+</div>
+
+<!-- abacus sync auth -->
+<div class="sheet-wrap" id="sync-auth-sheet">
+  <div class="scrim" data-close></div>
+  <div class="sheet">
+    <div class="handle"></div>
+    <h2>Abacus Sync</h2>
+    <div class="sub">Sign in with your <b>Empero account</b> or paste a pairing link from your laptop terminal.</div>
+    <div class="group" style="margin-top:4px">Empero Account</div>
+    <button class="btn primary" id="sync-empero-btn">Continue with Empero →</button>
+    <button class="btn" id="sync-signup-btn">Create an Empero account</button>
+    <div class="group">Approve laptop code or pair link</div>
+    <input type="text" class="field" id="sync-pair-input" placeholder="Laptop code (XXXX-XXXX) or pair link" autocomplete="off">
+    <button class="btn primary" id="sync-pair-btn">Approve / Connect</button>
+    <div id="sync-auth-error" class="sub" style="color:var(--danger);margin-top:10px;display:none"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const log = $("log");
+const input = $("input");
+const emptyState = $("empty-state");
+
+const S = {
+  ws: null,
+  attempts: 0,
+  seq: 0,
+  entries: new Map(),
+  order: [],
+  status: { state: "idle", label: "" },
+  session: null,
+  usage: { total: 0 },
+  workers: [],
+  approval: null,
+  question: null,
+  chosen: new Set(),
+  pages: new Map(),
+  snapshotId: null,
+  models: [],
+  sessions: [],
+  scrollQueued: false,
+  lastFrame: 0,
+  follow: true,
+  pendingRefs: new Set(),
+  syncMode: false,
+  syncCsrf: null,
+  syncUser: null,
+  syncSessionId: null,
+  agentOnline: true,
+  switchingSession: false,
+};
+
+/* ------------------------------------------------------------------ socket */
+
+const NATIVE = typeof window !== "undefined" && window.AbacusApp ? window.AbacusApp : null;
+
+function nativeTarget() {
+  try { return NATIVE ? JSON.parse(NATIVE.target() || "{}") : {}; } catch (error) { return {}; }
+}
+
+function isSyncMode() {
+  const target = nativeTarget();
+  if (target.mode === "sync") return true;
+  return location.hostname === "abacus.empero.org" || location.pathname.startsWith("/__abacus_mobile__");
+}
+
+function extractPairToken(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return "";
+  const hashMatch = text.match(/[#?&]t=([^&#\s]+)/i);
+  if (hashMatch && text.includes("/pair")) return decodeURIComponent(hashMatch[1]);
+  if (/^[A-Za-z0-9_-]{20,}$/.test(text)) return text;
+  return "";
+}
+
+function extractRemoteSessionId(raw) {
+  const text = String(raw || "").trim();
+  const m = text.match(/\/(?:remote|sessions)\/([0-9a-f-]{36})/i);
+  return m ? m[1] : "";
+}
+
+function token() {
+  const target = nativeTarget();
+  if (target.token) return target.token;
+  return new URLSearchParams(location.search).get("t") || "";
+}
+
+function socketHost() {
+  const target = nativeTarget();
+  return target.host ? target.host + ":" + target.port : location.host;
+}
+
+async function syncFetch(method, path, body, retryCsrf = true) {
+  const apiPath = path.startsWith("/web/") ? "/v1" + path : path;
+  const headers = { "Accept": "application/json" };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (method !== "GET" && S.syncCsrf) headers["X-CSRF-Token"] = S.syncCsrf;
+  const res = await fetch(apiPath, {
+    method,
+    credentials: "same-origin",
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (res.status === 403 && retryCsrf && method !== "GET") {
+    await refreshSyncAuthSession();
+    return syncFetch(method, apiPath, body, false);
+  }
+  let data = null;
+  try { data = await res.json(); } catch { /* empty */ }
+  return { ok: res.ok, status: res.status, data };
+}
+
+async function refreshSyncAuthSession() {
+  try {
+    const res = await fetch("/v1/web/auth/session", {
+      method: "GET",
+      credentials: "same-origin",
+      headers: { "Accept": "application/json" },
+    });
+    const data = await res.json();
+    S.syncCsrf = (data && data.csrf) || null;
+    S.syncUser = (data && data.authenticated && data.user) ? data.user : null;
+    return !!(data && data.authenticated);
+  } catch (error) {
+    return false;
+  }
+}
+
+async function bootSync() {
+  S.syncMode = true;
+  $("link-badge").textContent = "sync";
+  setConn("wait");
+  $("status-text").textContent = "connecting to abacus.empero.org…";
+
+  const target = nativeTarget();
+  let pairTok = target.pairToken || extractPairToken(location.hash) || "";
+  let preferredSession = target.sessionId || extractRemoteSessionId(location.href) || "";
+
+  let authed = await refreshSyncAuthSession();
+
+  if (pairTok) {
+    $("status-text").textContent = "redeeming pairing token…";
+    const redeem = await syncFetch("POST", "/web/auth/pairing/redeem", { token: pairTok });
+    if (NATIVE && typeof NATIVE.clearPairToken === "function") {
+      try { NATIVE.clearPairToken(); } catch { /* ignore */ }
+    }
+    if (location.hash) {
+      try { history.replaceState(null, "", location.pathname + location.search); } catch { /* ignore */ }
+    }
+    if (redeem.ok) {
+      if (redeem.data && redeem.data.next) {
+        const nextId = extractRemoteSessionId(redeem.data.next);
+        if (nextId) preferredSession = nextId;
+      }
+      authed = await refreshSyncAuthSession();
+      toast("Paired with Abacus Sync");
+    } else {
+      const msg = (redeem.data && (redeem.data.message || redeem.data.error)) || "Pairing link expired or invalid";
+      toast(msg, true);
+    }
+  }
+
+  if (!authed) {
+    setConn("dead");
+    $("status-text").textContent = "sign in to abacus.empero.org";
+    openSheet("sync-auth-sheet");
+    return;
+  }
+
+  closeSheet("sync-auth-sheet");
+  await loadSyncSessions(preferredSession, true);
+}
+
+function formatSyncTime(iso) {
+  if (!iso) return "saved";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  const diffSec = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+  if (diffSec < 60) return "just now";
+  if (diffSec < 3600) return Math.floor(diffSec / 60) + "m ago";
+  if (diffSec < 86400) return Math.floor(diffSec / 3600) + "h ago";
+  return Math.floor(diffSec / 86400) + "d ago";
+}
+
+async function fetchSyncSessionList() {
+  const [remRes, savRes] = await Promise.all([
+    syncFetch("GET", "/web/remote/sessions"),
+    syncFetch("GET", "/web/sessions?limit=50"),
+  ]);
+  if (remRes.status === 401 || savRes.status === 401) {
+    S.syncUser = null;
+    openSheet("sync-auth-sheet");
+    return [];
+  }
+  const remItems = (remRes.ok && remRes.data && remRes.data.items) || [];
+  const savItems = (savRes.ok && savRes.data && savRes.data.items) || [];
+  const byId = new Map();
+
+  for (const item of remItems) {
+    const live = !!(item.agent_online ?? item.remote_online);
+    byId.set(item.id, {
+      id: item.id,
+      title: item.title || "Untitled",
+      workspace: item.workspace || "",
+      model: item.model || "",
+      updated_at: item.updated_at || "",
+      updated: formatSyncTime(item.updated_at),
+      live,
+      remote_enabled: item.remote_enabled !== false,
+      device: (item.device && item.device.name) || "",
+    });
+  }
+  for (const item of savItems) {
+    const existing = byId.get(item.id);
+    const live = !!(item.agent_online ?? item.remote_online ?? (existing && existing.live));
+    byId.set(item.id, {
+      id: item.id,
+      title: item.title || (existing && existing.title) || "Untitled",
+      workspace: item.workspace || (existing && existing.workspace) || "",
+      model: item.model || (existing && existing.model) || "",
+      updated_at: item.updated_at || (existing && existing.updated_at) || "",
+      updated: formatSyncTime(item.updated_at || (existing && existing.updated_at)),
+      live,
+      remote_enabled: !!(item.remote_enabled || (existing && existing.remote_enabled)),
+      device: (item.device && item.device.name) || (existing && existing.device) || "",
+    });
+  }
+  const merged = [...byId.values()].sort((a, b) => {
+    if (a.live !== b.live) return a.live ? -1 : 1;
+    return String(b.updated_at).localeCompare(String(a.updated_at));
+  });
+  S.sessions = merged;
+  return merged;
+}
+
+async function loadSyncSessions(preferredId, autoConnect = false) {
+  const rows = await fetchSyncSessionList();
+  renderSessions(rows);
+  if (!autoConnect) return rows;
+
+  let pick = null;
+  if (preferredId) pick = rows.find((r) => r.id === preferredId) || { id: preferredId, live: true, remote_enabled: true };
+  if (!pick) pick = rows.find((r) => r.live);
+  if (!pick && S.syncSessionId) pick = rows.find((r) => r.id === S.syncSessionId);
+  if (!pick) pick = rows.find((r) => r.remote_enabled);
+  if (!pick && rows.length) pick = rows[0];
+
+  if (pick) {
+    await openSyncSession(pick.id, pick.live || pick.remote_enabled);
+  } else {
+    setConn("dead");
+    $("status-text").textContent = "no active session on abacus.empero.org — start abacus on your laptop";
+  }
+  return rows;
+}
+
+async function openSyncSession(sessionId, preferLive = true, retryCount = 0) {
+  if (!sessionId) return;
+  S.syncSessionId = sessionId;
+  S.switchingSession = false;
+  if (S.ws) {
+    const old = S.ws;
+    S.ws = null;
+    try { old.close(); } catch { /* ignore */ }
+  }
+
+  const metaRow = S.sessions.find((r) => r.id === sessionId);
+  if (metaRow) {
+    S.session = Object.assign({}, S.session || {}, {
+      id: metaRow.id,
+      title: metaRow.title || "Abacus",
+      workspace: metaRow.workspace || "",
+      model: metaRow.model || (S.session && S.session.model) || "",
+    });
+    renderMeta();
+  }
+
+  if (preferLive) {
+    setConn("wait");
+    $("status-text").textContent = "connecting to live session…";
+    const ticketRes = await syncFetch("POST", "/web/remote/tickets", { session_id: sessionId });
+    if (ticketRes.ok && ticketRes.data && ticketRes.data.ticket) {
+      connectSyncWs(sessionId, ticketRes.data.ws_url || `/v1/remote/browser/${sessionId}`, ticketRes.data.ticket);
+      return;
+    }
+    if (retryCount < 6) {
+      setTimeout(() => openSyncSession(sessionId, true, retryCount + 1), 450);
+      return;
+    }
+  }
+
+  await loadSavedSyncTranscript(sessionId);
+}
+
+function connectSyncWs(sessionId, wsPath, ticket) {
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  const sep = wsPath.includes("?") ? "&" : "?";
+  const url = `${scheme}://${location.host}${wsPath}${sep}ticket=${encodeURIComponent(ticket)}`;
+  const ws = new WebSocket(url);
+  S.ws = ws;
+  setConn("wait");
+  const deadline = setTimeout(() => {
+    if (ws.readyState === 0) {
+      try { ws.close(); } catch { /* ignore */ }
+    }
+  }, 8000);
+  ws.onopen = () => {
+    clearTimeout(deadline);
+    S.attempts = 0;
+    setConn("live");
+    $("link-badge").textContent = "sync";
+  };
+  ws.onmessage = (event) => {
+    S.lastFrame = Date.now();
+    let frame;
+    try { frame = JSON.parse(event.data); } catch { return; }
+    handle(frame);
+  };
+  ws.onclose = () => {
+    clearTimeout(deadline);
+    if (S.ws !== ws) return;
+    S.ws = null;
+    setConn("dead");
+    if (S.switchingSession) return;
+    const wait = Math.min(8000, 600 * Math.pow(1.6, S.attempts++));
+    $("status-text").textContent = "reconnecting to abacus.empero.org…";
+    setTimeout(() => {
+      if (S.syncSessionId === sessionId && !S.ws) {
+        openSyncSession(sessionId, true);
+      }
+    }, wait);
+  };
+  ws.onerror = () => {};
+}
+
+async function loadSavedSyncTranscript(sessionId) {
+  $("status-text").textContent = "loading saved transcript…";
+  const res = await syncFetch("GET", `/web/sessions/${encodeURIComponent(sessionId)}`);
+  if (!res.ok || !res.data) {
+    setConn("dead");
+    $("status-text").textContent = "could not load session from abacus.empero.org";
+    return;
+  }
+  const meta = res.data.meta || {};
+  const entries = (res.data.transcript && res.data.transcript.entries) || [];
+  S.agentOnline = false;
+  onSnapshot({
+    snapshot_id: "saved-" + sessionId,
+    page: { index: 0, count: 1 },
+    session: {
+      id: meta.id || sessionId,
+      title: meta.title || "Untitled",
+      workspace: meta.workspace || "",
+      model: meta.model || "",
+      mode: meta.mode || "auto",
+    },
+    status: { state: "idle", label: "" },
+    entries,
+  });
+  setConn("dead");
+  $("link-badge").textContent = "saved";
+  $("status-text").textContent = "saved session (laptop offline)";
+}
+
+async function pollNewSyncSession(previousId, attempt = 0) {
+  if (!S.syncMode) return;
+  const rows = await fetchSyncSessionList();
+  const nextLive = rows.find((r) => r.live && r.id !== previousId);
+  if (nextLive) {
+    toast("Switched to " + (nextLive.title || "new session"));
+    await openSyncSession(nextLive.id, true);
+    return;
+  }
+  if (attempt < 8 && S.syncSessionId === previousId) {
+    setTimeout(() => pollNewSyncSession(previousId, attempt + 1), 500);
+  }
+}
+
+function sendCommand(name, args = "") {
+  if (!S.syncMode) {
+    send("command", { name, args });
+    return;
+  }
+  if (name === "sessions") {
+    fetchSyncSessionList().then((rows) => renderSessions(rows));
+    return;
+  }
+  if (name === "resume") {
+    const target = S.sessions.find((r) => r.id === args);
+    if (target && target.live) {
+      openSyncSession(args, true);
+      return;
+    }
+    if (S.ws && S.ws.readyState === 1 && S.agentOnline) {
+      S.switchingSession = true;
+      $("status-text").textContent = "switching session on laptop…";
+      send("prompt", { text: `/__cmd__ resume ${args}` });
+      setTimeout(() => openSyncSession(args, true), 350);
+      return;
+    }
+    openSyncSession(args, false);
+    return;
+  }
+  if (name === "new" || name === "fork") {
+    if (!S.ws || S.ws.readyState !== 1) {
+      toast("Laptop terminal is not connected — start `abacus` on your laptop first", true);
+      return;
+    }
+    const prevId = S.syncSessionId;
+    S.switchingSession = true;
+    $("status-text").textContent = name === "new" ? "starting new session on laptop…" : "forking session on laptop…";
+    send("prompt", { text: `/__cmd__ ${name}${args ? " " + args : ""}` });
+    setTimeout(() => pollNewSyncSession(prevId), 600);
+    return;
+  }
+  send("prompt", { text: `/__cmd__ ${name}${args ? " " + args : ""}` });
+}
+
+function connect() {
+  if (isSyncMode()) {
+    bootSync();
+    return;
+  }
+  if (S.ws && (S.ws.readyState === 0 || S.ws.readyState === 1)) return;
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${scheme}://${socketHost()}/ws?t=${encodeURIComponent(token())}`);
+  S.ws = ws;
+  setConn("wait");
+  const deadline = setTimeout(() => {
+    if (ws.readyState === 0) {
+      try { ws.close(); } catch (error) { /* already gone */ }
+    }
+  }, 6000);
+  ws.onopen = () => {
+    clearTimeout(deadline);
+    S.attempts = 0;
+    setConn("live");
+  };
+  ws.onmessage = (event) => {
+    S.lastFrame = Date.now();
+    let frame;
+    try { frame = JSON.parse(event.data); } catch { return; }
+    handle(frame);
+  };
+  ws.onclose = () => {
+    clearTimeout(deadline);
+    if (S.ws !== ws) return;
+    setConn("dead");
+    const wait = Math.min(8000, 500 * Math.pow(1.6, S.attempts++));
+    $("status-text").textContent = "reconnecting…";
+    setTimeout(connect, wait);
+  };
+  ws.onerror = () => {};
+}
+
+function send(type, payload) {
+  if (!S.ws || S.ws.readyState !== 1) { toast("Not connected", true); return null; }
+  const id = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
+  S.ws.send(JSON.stringify({ v: 1, type, id, seq: ++S.seq, payload }));
+  return id;
+}
+
+function setConn(kind) {
+  const dot = $("dot");
+  dot.className = "dot " + (kind === "live" ? "live" : kind === "wait" ? "wait" : "dead");
+}
+
+/* ------------------------------------------------------------------ frames */
+
+function handle(frame) {
+  const p = frame.payload || {};
+  switch (frame.type) {
+    case "hello":
+      if (p.peers) S.agentOnline = p.peers.agent !== false;
+      if (S.syncMode) {
+        send("request_snapshot", {});
+        if (p.peers && p.peers.agent === false) {
+          $("status-text").textContent = "laptop terminal is not attached — showing last synced state";
+          if (S.syncSessionId && S.order.length === 0) {
+            syncFetch("GET", `/web/sessions/${encodeURIComponent(S.syncSessionId)}`).then((res) => {
+              if (res.ok && res.data && S.order.length === 0) {
+                const meta = res.data.meta || {};
+                const entries = (res.data.transcript && res.data.transcript.entries) || [];
+                onSnapshot({
+                  snapshot_id: "fallback-" + S.syncSessionId,
+                  page: { index: 0, count: 1 },
+                  session: {
+                    id: meta.id || S.syncSessionId,
+                    title: meta.title || "Untitled",
+                    workspace: meta.workspace || "",
+                    model: meta.model || "",
+                    mode: meta.mode || "auto",
+                  },
+                  status: { state: "idle", label: "" },
+                  entries,
+                });
+                $("status-text").textContent = "laptop terminal is not attached";
+              }
+            });
+          }
+        }
+      } else if (p.peers && p.peers.agent === false) {
+        $("status-text").textContent = "the terminal is not attached";
+      }
+      break;
+    case "ping": send("pong", { ts: p.ts }); break;
+    case "snapshot": onSnapshot(p); break;
+    case "sessions":
+      S.sessions = (p && p.sessions) || [];
+      renderSessions(S.sessions);
+      break;
+    case "entry": onEntry(p); break;
+    case "delta": onDelta(p); break;
+    case "tool": onTool(p); break;
+    case "status": onStatus(p); break;
+    case "usage": S.usage = p; renderMeta(); break;
+    case "approval": onApproval(p); break;
+    case "approval_resolved": onApprovalResolved(p); break;
+    case "question": onQuestion(p); break;
+    case "question_resolved": onQuestionResolved(p); break;
+    case "mode": if (S.session) { S.session.mode = p.mode; renderMeta(); } break;
+    case "notice": {
+      const txt = String(p.text || "");
+      if (txt.startsWith("__abacus_meta__:")) {
+        try {
+          const meta = JSON.parse(txt.slice("__abacus_meta__:".length));
+          if (Array.isArray(meta.models)) S.models = meta.models;
+          if (meta.profile && S.session) { S.session.profile = meta.profile; renderMeta(); }
+          if (Array.isArray(meta.workers)) onWorkers({ workers: meta.workers });
+          if (Array.isArray(meta.sessions) && !S.syncMode) {
+            S.sessions = meta.sessions;
+            renderSessions(S.sessions);
+          }
+        } catch { /* ignore */ }
+        break;
+      }
+      const sw = txt.match(/^Switched to session ([0-9a-f-]{36})/i);
+      if (sw && S.syncMode) {
+        const nextId = sw[1];
+        S.switchingSession = true;
+        toast("Switched session");
+        setTimeout(() => openSyncSession(nextId, true), 250);
+        break;
+      }
+      push({ id: "n" + Math.random(), kind: "system", text: txt }, true);
+      break;
+    }
+    case "error": push({ id: "err" + Math.random(), kind: "error", text: p.message }, true); break;
+    case "done": onDone(p); break;
+    case "accepted": onAccepted(p); break;
+    case "workers": onWorkers(p); break;
+    case "peer_state":
+      if (p.role === "agent") {
+        S.agentOnline = !!p.online;
+        if (p.online) {
+          $("status-text").textContent = "ready";
+          if (S.syncMode) send("request_snapshot", {});
+        } else {
+          $("status-text").textContent = "laptop terminal disconnected";
+        }
+      }
+      break;
+    case "pong": break;
+  }
+}
+
+function onSnapshot(p) {
+  const sid = p.snapshot_id || "default";
+  if (S.snapshotId !== sid) {
+    S.snapshotId = sid;
+    S.pages = new Map();
+  }
+  const pageIndex = p.page && typeof p.page.index === "number" ? p.page.index : 0;
+  S.pages.set(pageIndex, p);
+  const total = p.page && p.page.count ? p.page.count : 1;
+  if (S.pages.size < total) return;
+  const pages = [...S.pages.entries()].sort((a, b) => a[0] - b[0]).map((pair) => pair[1]);
+  const head = pages[0];
+  S.pages = new Map();
+  S.snapshotId = null;
+  if (head.session) S.session = head.session;
+  if (head.usage) S.usage = head.usage;
+  if (head.status) S.status = head.status;
+  if (head.workers) S.workers = head.workers.workers || [];
+  if (head.models) S.models = head.models;
+  S.approval = (head.pending && head.pending.approval) || null;
+  S.question = (head.pending && head.pending.question) || null;
+  S.entries.clear();
+  S.order = [];
+  const fragment = document.createDocumentFragment();
+  fragment.appendChild(emptyState);
+  log.classList.add("bulk");
+  for (const page of pages) for (const entry of page.entries || []) push(entry, false, fragment);
+  log.replaceChildren(fragment);
+  log.classList.remove("bulk");
+  syncEmptyState();
+  renderMeta();
+  renderStatus();
+  renderWorkers();
+  if (S.approval) openApproval(S.approval); else closeSheet("approval-sheet");
+  if (S.question) openQuestion(S.question); else closeSheet("question-sheet");
+  scrollBottom();
+}
+
+function syncEmptyState() {
+  if (emptyState) {
+    const hasConversation = S.order.some((id) => {
+      const e = S.entries.get(id);
+      return e && e.kind !== "system";
+    });
+    emptyState.classList.toggle("hidden", hasConversation);
+  }
+}
+
+function onEntry(p) {
+  if (!p.entry) return;
+  if (p.phase === "start") {
+    push(p.entry, true);
+  } else {
+    const known = S.entries.get(p.entry.id);
+    if (known) { known.streaming = false; Object.assign(known, p.entry); paint(p.entry.id); }
+    else push(p.entry, true);
+  }
+}
+
+function onDelta(p) {
+  const known = S.entries.get(p.entry_id);
+  if (!known) {
+    push({ id: p.entry_id, kind: p.kind === "reasoning" ? "reasoning" : "assistant", text: p.text }, true);
+    return;
+  }
+  known.text = (known.text || "") + p.text;
+  known.streaming = true;
+  paint(p.entry_id);
+}
+
+function onTool(p) {
+  const known = S.entries.get(p.entry_id);
+  const tool = {
+    call_id: p.call_id, name: p.name, summary: p.summary,
+    status: p.status, output: p.output || "", output_clipped: p.output_clipped,
+    duration_ms: p.duration_ms,
+  };
+  if (!known) {
+    push({ id: p.entry_id, kind: "tool", text: "", tool }, true);
+    return;
+  }
+  known.tool = Object.assign(known.tool || {}, tool);
+  paint(p.entry_id);
+}
+
+function onStatus(p) {
+  S.status = p;
+  renderStatus();
+}
+
+function onDone(p) {
+  S.status = { state: "idle", label: "" };
+  if (p.usage) S.usage = p.usage;
+  log.querySelectorAll("details.entry.reasoning[open]").forEach(d => {
+    d.removeAttribute("open");
+    const l = d.querySelector(".label");
+    if (l) l.textContent = "Thought";
+    const ic = d.querySelector(".icon");
+    if (ic) ic.innerHTML = "💭";
+  });
+  renderStatus();
+  renderMeta();
+  renderComposer();
+  renderContextMeter();
+}
+
+function onAccepted(p) {
+  if (p.result === "rejected") toast(p.reason || "rejected", true);
+}
+
+function onWorkers(p) {
+  S.workers = p.workers || [];
+  renderWorkers();
+}
+
+function onApproval(p) {
+  S.approval = p;
+  openApproval(p);
+  renderStatus();
+}
+
+function onApprovalResolved(p) {
+  S.approval = null;
+  closeSheet("approval-sheet");
+  const label = p.decision === "reject" ? "rejected" : p.decision === "always" ? "allowed for the session" : "allowed";
+  push({ id: "resolved-" + p.approval_id, kind: "system", text: label + " · " + (p.by || "phone") }, true);
+}
+
+function onQuestion(p) {
+  S.question = p;
+  S.chosen = new Set();
+  openQuestion(p);
+  renderStatus();
+}
+
+function onQuestionResolved(p) {
+  S.question = null;
+  closeSheet("question-sheet");
+  const answer = [...(p.selected || []), p.custom].filter(Boolean).join(", ");
+  if (answer) push({ id: "answered-" + p.question_id, kind: "system", text: "answered: " + answer }, true);
+}
+
+/* ------------------------------------------------------------------- render */
+
+const ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" };
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ESC[c]);
+
+
+function parseMarkdownTables(text, blocks) {
+  const lines = text.split('\n');
+  const result = [];
+  let i = 0;
+  const fmt = (s) => esc(s)
+    .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^\*\n]+)\*\*/g, '<b>$1</b>')
+    .replace(/(^|[\s(])\*([^\*\n]+)\*/g, '$1<i>$2</i>');
+  while (i < lines.length) {
+    const line = lines[i].trim();
+    if (line.startsWith('|') && line.endsWith('|') && i + 1 < lines.length) {
+      const nextLine = lines[i + 1].trim();
+      if (/^\|(\s*:?-+:?\s*\|)+$/.test(nextLine)) {
+        const headerCells = line.slice(1, -1).split('|').map(c => c.trim());
+        const delimCells = nextLine.slice(1, -1).split('|').map(c => c.trim());
+        const aligns = delimCells.map(d => {
+          if (d.startsWith(':') && d.endsWith(':')) return 'center';
+          if (d.endsWith(':')) return 'right';
+          return 'left';
+        });
+        let tableHtml = '<div class="table-wrap"><table class="md-table"><thead><tr>';
+        headerCells.forEach((c, idx) => {
+          const a = aligns[idx] || 'left';
+          tableHtml += `<th style="text-align:${a}">${fmt(c)}</th>`;
+        });
+        tableHtml += '</tr></thead><tbody>';
+        i += 2;
+        while (i < lines.length && lines[i].trim().startsWith('|') && lines[i].trim().endsWith('|')) {
+          const rowCells = lines[i].trim().slice(1, -1).split('|').map(c => c.trim());
+          tableHtml += '<tr>';
+          rowCells.forEach((c, idx) => {
+            const a = aligns[idx] || 'left';
+            tableHtml += `<td style="text-align:${a}">${fmt(c)}</td>`;
+          });
+          tableHtml += '</tr>';
+          i++;
+        }
+        tableHtml += '</tbody></table></div>';
+        blocks.push(tableHtml);
+        result.push(`\u0000${blocks.length - 1}\u0000`);
+        continue;
+      }
+    }
+    result.push(lines[i]);
+    i++;
+  }
+  return result.join('\n');
+}
+
+function markdown(text) {
+  const blocks = [];
+  let rest = String(text || "").replace(/```([\w+-]*)\n?([\s\S]*?)(?:```|$)/g, (_, lang, code) => {
+    blocks.push(`<pre><code>${esc(code.replace(/\n$/, ""))}</code></pre>`);
+    return `\u0000${blocks.length - 1}\u0000`;
+  });
+  rest = parseMarkdownTables(rest, blocks);
+  rest = esc(rest);
+
+  rest = rest
+    .replace(/`([^`\n]+)`/g, (_, code) => `<code>${code}</code>`)
+    .replace(/^### (.*)$/gm, "<h3>$1</h3>")
+    .replace(/^## (.*)$/gm, "<h2>$1</h2>")
+    .replace(/^# (.*)$/gm, "<h1>$1</h1>")
+    .replace(/^\s*[-*] (.*)$/gm, "<li>$1</li>")
+    .replace(/(<li>[\s\S]*?<\/li>)(?!\s*<li>)/g, "<ul>$1</ul>")
+    .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
+    .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<i>$2</i>")
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>')
+    .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noreferrer">$2</a>');
+  const paras = rest.split(/\n{2,}/).map((chunk) => {
+    const trimmed = chunk.trim();
+    if (!trimmed) return "";
+    if (/^<(h\d|ul|pre|blockquote)/.test(trimmed) || /^\u0000\d+\u0000$/.test(trimmed)) return trimmed;
+    return "<p>" + trimmed.replace(/\n/g, "<br>") + "</p>";
+  });
+  return paras.join("").replace(/\u0000(\d+)\u0000/g, (_, at) => blocks[Number(at)]);
+}
+
+function el(tag, cls, html) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (html != null) node.innerHTML = html;
+  return node;
+}
+
+function entryNode(entry) {
+  const kind = entry.kind;
+  if (kind === "user") return el("div", "entry user", esc(entry.text));
+  if (kind === "assistant") return el("div", "entry assistant", markdown(entry.text));
+  if (kind === "reasoning") {
+    const details = el("details", "entry reasoning");
+    const isLive = !!entry.streaming;
+    if (isLive) details.open = true;
+    const summary = el("summary", null, `<span class="icon">${isLive ? '<span class="spinner"></span>' : '💭'}</span><span class="label">${isLive ? 'Thinking' : 'Thought'}</span>`);
+    details.appendChild(summary);
+    details.appendChild(el("div", "body", esc(entry.text)));
+    return details;
+  }
+  if (kind === "tool") {
+    const card = el("div", "entry tool");
+    const head = el("button", "tool-head");
+    const tool = entry.tool || {};
+    head.innerHTML =
+      `<span class="tool-name">${esc(tool.name || "tool")}</span>` +
+      `<span class="tool-sum">${esc(tool.summary || "")}</span>` +
+      `<span class="tool-state ${esc(tool.status || "")}">${statusWord(tool)}</span>`;
+    const out = el("pre", "tool-out");
+    out.hidden = true;
+    out.textContent = tool.output || "";
+    head.onclick = () => { out.hidden = !out.hidden; };
+    card.append(head, out);
+    return card;
+  }
+  if (kind === "error") return el("div", "entry error", esc(entry.text));
+  if (kind === "rule") return el("hr", "rule");
+  return el("div", "entry system", esc(entry.text));
+}
+
+function statusWord(tool) {
+  if (tool.status === "running") return "running";
+  if (tool.status === "failed") return "failed";
+  const ms = tool.duration_ms;
+  return ms != null ? `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s` : "done";
+}
+
+const KEEP = 300;
+
+function push(entry, autoscroll, target) {
+  if (S.entries.has(entry.id)) { Object.assign(S.entries.get(entry.id), entry); paint(entry.id); return; }
+  S.entries.set(entry.id, entry);
+  S.order.push(entry.id);
+  const node = entryNode(entry);
+  node.dataset.id = entry.id;
+  entry._node = node;
+  (target || log).appendChild(node);
+  while (S.order.length > KEEP) {
+    const gone = S.order.shift();
+    const old = S.entries.get(gone);
+    if (old && old._node && old._node.parentNode) old._node.parentNode.removeChild(old._node);
+    S.entries.delete(gone);
+  }
+  syncEmptyState();
+  if (autoscroll && S.follow) scrollBottom();
+}
+
+function paint(id) {
+  const entry = S.entries.get(id);
+  const node = (entry && entry._node) || log.querySelector(`[data-id="${CSS.escape(id)}"]`);
+  if (!entry || !node) return;
+  if (entry.kind === "tool") {
+    const tool = entry.tool || {};
+    const sum = node.querySelector(".tool-sum");
+    const state = node.querySelector(".tool-state");
+    const out = node.querySelector(".tool-out");
+    if (sum) sum.textContent = tool.summary || "";
+    if (state) { state.textContent = statusWord(tool); state.className = "tool-state " + (tool.status || ""); }
+    if (out) out.textContent = tool.output || "";
+    return;
+  }
+  if (entry.kind === "reasoning") {
+    const isLive = !!entry.streaming;
+    const label = node.querySelector(".label");
+    const icon = node.querySelector(".icon");
+    if (label) label.textContent = isLive ? "Thinking" : "Thought";
+    if (icon) icon.innerHTML = isLive ? '<span class="spinner"></span>' : '💭';
+    if (!isLive && entry._wasStreaming) {
+      node.removeAttribute("open");
+      entry._wasStreaming = false;
+    }
+    const body = node.querySelector(".body");
+    if (body) body.textContent = entry.text || "";
+    return;
+  }
+  if (entry.kind === "assistant") {
+    const text = entry.text || "";
+    const painted = entry._painted || 0;
+    if (entry.streaming && node.firstChild && node.firstChild.nodeName === "#text" && text.length > painted) {
+      node.firstChild.appendData(text.slice(painted));
+      entry._painted = text.length;
+      if (S.follow) scrollBottom();
+      return;
+    }
+    if (entry.streaming) {
+      node.textContent = text;
+      entry._painted = text.length;
+      if (S.follow) scrollBottom();
+      return;
+    }
+    node.innerHTML = markdown(text);
+    entry._painted = text.length;
+    return;
+  }
+  node.textContent = entry.text || "";
+  if (S.follow) scrollBottom();
+}
+
+function renderMeta() {
+  const session = S.session || {};
+  $("title").textContent = session.title || "Abacus";
+  $("model").innerHTML = `<b>${esc(shortModel(session.model))}</b>`;
+  const mode = session.mode || "mode";
+  const modeNode = $("mode");
+  modeNode.textContent = mode;
+  modeNode.classList.toggle("yolo", mode === "yolo");
+  const total = (S.usage && S.usage.total) || 0;
+  $("usage").textContent = total >= 1000 ? (total / 1000).toFixed(1) + "k tok" : total + " tok";
+
+  const workspace = session.workspace || "";
+  const wsName = workspace.split(/[\\/]/).filter(Boolean).pop() || "abacus";
+  const wsPill = $("workspace-pill");
+  if (wsPill) wsPill.textContent = workspace ? wsName : "";
+  const emptyTitle = $("empty-title");
+  if (emptyTitle) {
+    emptyTitle.innerHTML = `What should we build in <span class="accent">${esc(wsName)}</span>?`;
+  }
+}
+
+function shortModel(model) {
+  if (!model) return "model";
+  const parts = String(model).split("/");
+  return parts[parts.length - 1].replace(/^.*:/, "");
+}
+
+function renderStatus() {
+  const bar = $("statusbar");
+  const busy = S.status.state && S.status.state !== "idle";
+  bar.classList.toggle("busy", !!busy);
+  const text = busy ? (S.status.label || S.status.state.replace(/_/g, " ")) : "ready";
+  $("status-text").textContent = text;
+  renderComposer();
+}
+
+function renderComposer() {
+  const busy = S.status.state && S.status.state !== "idle";
+  $("stop").classList.toggle("on", !!busy);
+  $("send").disabled = !input.value.trim();
+}
+
+function requestSessions() {
+  $("sessions-list").innerHTML = "";
+  $("sessions-list").appendChild(el("div", "empty", "Loading…"));
+  $("sessions-sub").textContent = S.syncMode
+    ? "Synced on abacus.empero.org. Tap a live or saved session to open it."
+    : "Saved in this workspace. Tap one to open it.";
+  openSheet("sessions-sheet");
+  sendCommand("sessions", "");
+}
+
+function renderSessions(rows) {
+  const list = $("sessions-list");
+  list.innerHTML = "";
+  if (S.syncMode && S.ws && S.ws.readyState === 1 && S.agentOnline) {
+    const createBtn = el("button", "btn primary", "＋ New session on laptop");
+    createBtn.style.marginBottom = "8px";
+    createBtn.onclick = () => {
+      closeSheet("sessions-sheet");
+      sendCommand("new", "");
+    };
+    list.appendChild(createBtn);
+  }
+  if (!rows.length) {
+    list.appendChild(el(
+      "div",
+      "empty",
+      S.syncMode
+        ? "No sessions found on abacus.empero.org yet. Start `abacus` on your laptop to sync."
+        : "No saved sessions in this workspace yet.",
+    ));
+    return;
+  }
+  for (const session of rows) {
+    const node = el("button", "worker");
+    const isCurrent = (S.session && S.session.id === session.id) || (S.syncSessionId === session.id);
+    if (isCurrent) {
+      node.style.borderColor = "rgba(182, 107, 255, 0.55)";
+      node.style.background = "var(--card-selected)";
+    }
+    const wsShort = session.workspace ? session.workspace.split(/[\\/]/).filter(Boolean).pop() : "";
+    const badgeHtml = S.syncMode
+      ? `<span class="state ${session.live ? "done" : ""}">${session.live ? "● live" : "saved"}</span>`
+      : (isCurrent ? `<span class="state done">current</span>` : "");
+    const metaParts = [
+      wsShort,
+      session.device,
+      session.updated,
+      session.id ? session.id.slice(0, 8) : "",
+    ].filter(Boolean);
+    node.innerHTML =
+      `<div style="flex:1;min-width:0;width:100%">` +
+      `<div class="whead"><span class="name">${esc(session.title || "Untitled")}</span>${badgeHtml}</div>` +
+      `<div class="tok">${esc(metaParts.join(" · "))}</div>` +
+      `</div>`;
+    node.onclick = () => {
+      closeSheet("sessions-sheet");
+      sendCommand("resume", session.id);
+    };
+    list.appendChild(node);
+  }
+}
+
+function renderWorkers() {
+  const running = S.workers.filter((w) => w.state === "running").length;
+  const chip = $("workers-chip");
+  chip.classList.toggle("on", S.workers.length > 0);
+  $("workers-count").textContent = running || S.workers.length;
+  const list = $("workers-list");
+  list.innerHTML = "";
+  if (!S.workers.length) {
+    list.appendChild(el("div", "empty", "No subagents yet. Tap Delegate to start one."));
+    return;
+  }
+  for (const worker of S.workers) {
+    const row = el("div", "worker");
+    row.innerHTML =
+      `<div style="flex:1;min-width:0;width:100%">` +
+      `<div class="whead"><span class="name">${esc(worker.name)}</span>` +
+      `<span class="state ${esc(worker.state)}">${esc(worker.state)}</span></div>` +
+      `<div class="act">${esc(worker.activity || worker.role)}</div>` +
+      `<div class="tok">${esc(worker.role)} · ${esc(worker.model || "default")} · ${worker.tokens || 0} tok</div>` +
+      `</div>`;
+    list.appendChild(row);
+  }
+}
+
+function scrollBottom() {
+  if (S.scrollQueued) return;
+  S.scrollQueued = true;
+  requestAnimationFrame(() => {
+    S.scrollQueued = false;
+    log.scrollTop = log.scrollHeight;
+  });
+}
+
+log.addEventListener("scroll", () => {
+  S.follow = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
+});
+
+/* ------------------------------------------------------------------ sheets */
+
+function openSheet(id) { $(id).classList.add("open"); }
+function closeSheet(id) {
+  const sheet = $(id);
+  if (!sheet) return;
+  if (document.activeElement && sheet.contains(document.activeElement)) {
+    document.activeElement.blur();
+  }
+  sheet.classList.remove("open");
+}
+
+document.querySelectorAll("[data-close]").forEach((node) => {
+  node.addEventListener("click", () => {
+    const wrap = node.parentElement;
+    if (document.activeElement && wrap.contains(document.activeElement)) {
+      document.activeElement.blur();
+    }
+    wrap.classList.remove("open");
+  });
+});
+
+function openApproval(approval) {
+  $("ap-tool").textContent = approval.tool || "Approval";
+  $("ap-summary").textContent = approval.summary || "";
+  const body = $("ap-body");
+  body.innerHTML = "";
+  if (approval.kind === "diff") {
+    const pre = el("pre", "diff");
+    pre.innerHTML = (approval.details || "").split("\n").map((line) => {
+      const cls = line.startsWith("+++") || line.startsWith("---") ? "meta"
+        : line.startsWith("+") ? "add" : line.startsWith("-") ? "del"
+        : line.startsWith("@@") ? "hunk" : "";
+      return `<span class="${cls}">${esc(line)}</span>`;
+    }).join("\n");
+    body.appendChild(pre);
+  } else if (approval.kind === "command") {
+    body.appendChild(el("pre", "cmd", esc(approval.details)));
+  } else {
+    body.appendChild(el("pre", "cmd", esc(approval.details)));
+  }
+  if (approval.details_clipped) body.appendChild(el("div", "sub", "… preview clipped"));
+  openSheet("approval-sheet");
+}
+
+document.querySelectorAll("[data-decide]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const approval = S.approval;
+    if (!approval) { closeSheet("approval-sheet"); return; }
+    send("approve", { approval_id: approval.approval_id, decision: button.dataset.decide });
+    S.approval = null;
+    closeSheet("approval-sheet");
+  });
+});
+
+function openQuestion(question) {
+  $("q-header").textContent = question.header || "Question";
+  $("q-text").textContent = question.text || "";
+  $("q-custom").value = "";
+  const box = $("q-options");
+  box.innerHTML = "";
+  for (const option of question.options || []) {
+    const node = el("button", "opt");
+    node.innerHTML =
+      `<span class="mark"></span><span style="flex:1;min-width:0">` +
+      `<div class="label">${esc(option.label)}</div>` +
+      (option.description ? `<div class="desc">${esc(option.description)}</div>` : "") +
+      `</span>`;
+    node.onclick = () => {
+      if (question.multi) {
+        if (S.chosen.has(option.label)) S.chosen.delete(option.label); else S.chosen.add(option.label);
+      } else {
+        S.chosen = new Set([option.label]);
+      }
+      box.querySelectorAll(".opt").forEach((other) => {
+        const label = other.querySelector(".label").textContent;
+        const on = S.chosen.has(label);
+        other.classList.toggle("sel", on);
+        other.querySelector(".mark").textContent = on ? "✓" : "";
+      });
+    };
+    box.appendChild(node);
+  }
+  openSheet("question-sheet");
+}
+
+$("q-submit").addEventListener("click", () => {
+  const question = S.question;
+  if (!question) { closeSheet("question-sheet"); return; }
+  const custom = $("q-custom").value.trim();
+  send("answer", { question_id: question.question_id, selected: [...S.chosen], custom: custom || null });
+  S.question = null;
+  closeSheet("question-sheet");
+});
+
+/* ----------------------------------------------------------------- actions */
+
+const ICONS = {
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  fork: '<path d="M7 4v5a4 4 0 0 0 4 4h5"/><circle cx="17" cy="13" r="3"/>',
+  compact: '<path d="M4 9h16M4 15h16M8 4 5 7l3 3M16 20l3-3-3-3"/>',
+  tag: '<path d="M4 4h8l8 8-8 8-8-8z"/><circle cx="8.5" cy="8.5" r="1.2"/>',
+  shield: '<path d="M12 3l7 3v5.5c0 4.2-2.9 7.1-7 8.5-4.1-1.4-7-4.3-7-8.5V6z"/>',
+  users: '<circle cx="9" cy="8" r="3"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17.5" cy="7.5" r="2.4"/><path d="M17 14c2.4.3 4 2.4 4 5"/>',
+  stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
+  chip: '<rect x="6" y="6" width="12" height="12" rx="2.5"/><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/>',
+  photo: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="M21 16l-5-5-8 8"/>',
+};
+
+function icon(name) {
+  return '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' + (ICONS[name] || "") + "</svg>";
+}
+
+const ACTIONS = [
+  { group: "Session", name: "new", label: "New session", note: "Start a fresh conversation", icon: "plus", args: "" },
+  { group: "Session", name: "fork", label: "Fork", note: "Continue as a copy, keeping this one", icon: "fork", args: "" },
+  { group: "Session", name: "compact", label: "Compact", note: "Shrink the history in place", icon: "compact", args: "" },
+  { group: "Session", name: "rename", label: "Rename", note: "Give this session a title", icon: "tag", args: null },
+  { group: "Mode", name: "mode", label: "Auto", note: "Read and edit freely, review the rest", icon: "shield", args: "auto", mode: "auto" },
+  { group: "Mode", name: "mode", label: "YOLO", note: "Run everything without review", icon: "shield", args: "yolo", mode: "yolo" },
+];
+
+function row(spec, { on = false, danger = false, tag = "", onClick }) {
+  const node = el("button", "row" + (on ? " on" : "") + (danger ? " danger" : ""));
+  node.innerHTML =
+    `<span class="ico">${icon(spec.icon)}</span>` +
+    `<span class="txt"><b>${esc(spec.label)}</b><small>${esc(spec.note)}</small></span>` +
+    (tag ? `<span class="tag">${esc(tag)}</span>` : "");
+  node.onclick = onClick;
+  return node;
+}
+
+function groupTitle(text) {
+  return el("div", "group", esc(text));
+}
+
+function openActions() {
+  const list = $("actions-list");
+  list.innerHTML = "";
+  const workspace = S.session && S.session.workspace ? S.session.workspace : "";
+  const name = workspace.split(/[\\/]/).filter(Boolean).pop() || "";
+  const syncLabel = S.syncMode ? (S.syncUser && S.syncUser.email ? `Abacus Sync · ${S.syncUser.email}` : "Abacus Sync · abacus.empero.org") : "";
+  $("actions-sub").textContent = [name ? `Workspace · ${name}` : "", syncLabel].filter(Boolean).join(" · ")
+    || "What the terminal can do from here.";
+
+  let group = "";
+  let box = null;
+  for (const action of ACTIONS) {
+    if (action.group !== group) {
+      group = action.group;
+      list.appendChild(groupTitle(group));
+      box = el("div", "rows");
+      list.appendChild(box);
+    }
+    const current = action.mode && S.session && S.session.mode === action.mode;
+    box.appendChild(row(action, {
+      on: !!current,
+      tag: current ? "current" : "",
+      onClick: () => {
+        if (action.args === null) { promptArg(action); return; }
+        sendCommand(action.name, action.args);
+        closeSheet("actions-sheet");
+      },
+    }));
+  }
+
+  if (S.models.length) {
+    list.appendChild(groupTitle("Model"));
+    const models = el("div", "rows");
+    const active = (S.session && S.session.profile) || "";
+    for (const profile of S.models) {
+      const current = profile === active;
+      models.appendChild(row(
+        { label: profile, note: current ? "The profile this session runs" : "Switch to this profile", icon: "chip" },
+        {
+          on: current,
+          tag: current ? "current" : "",
+          onClick: () => {
+            sendCommand("model", profile);
+            closeSheet("actions-sheet");
+          },
+        },
+      ));
+    }
+    list.appendChild(models);
+  }
+
+  const open = el("div", "rows");
+  open.style.marginTop = "8px";
+  open.appendChild(row(
+    { label: "Sessions", note: S.syncMode ? "Open or resume any synced session" : "Open another conversation", icon: "compact" },
+    { onClick: () => { closeSheet("actions-sheet"); requestSessions(); } },
+  ));
+  list.appendChild(open);
+
+  list.appendChild(groupTitle("Subagents"));
+  const workers = el("div", "rows");
+  const running = S.workers.filter((worker) => worker.state === "running").length;
+  workers.appendChild(row(
+    { label: "Subagents", note: "See what the workers are doing", icon: "users" },
+    { tag: running ? `${running} running` : "", onClick: () => { closeSheet("actions-sheet"); renderWorkers(); openSheet("workers-sheet"); } },
+  ));
+  workers.appendChild(row(
+    { label: "Delegate a task", note: "Start a subagent on something", icon: "plus" },
+    { onClick: () => { closeSheet("actions-sheet"); openSheet("delegate-sheet"); } },
+  ));
+  list.appendChild(workers);
+
+  if (S.syncMode) {
+    list.appendChild(groupTitle("Abacus Sync"));
+    const syncRows = el("div", "rows");
+    syncRows.appendChild(row(
+      {
+        label: S.syncUser && S.syncUser.email ? S.syncUser.email : "Pair or sign in",
+        note: S.syncUser ? "Signed in to abacus.empero.org — tap to pair or switch account" : "Sign in or redeem a pairing token",
+        icon: "shield",
+      },
+      {
+        tag: S.syncUser ? "synced" : "auth",
+        onClick: () => { closeSheet("actions-sheet"); openSheet("sync-auth-sheet"); },
+      },
+    ));
+    if (S.syncUser) {
+      syncRows.appendChild(row(
+        { label: "Sign out of Abacus Sync", note: "Clear session on this phone", icon: "stop" },
+        {
+          danger: true,
+          onClick: async () => {
+            closeSheet("actions-sheet");
+            await syncFetch("POST", "/v1/web/auth/logout", {});
+            S.syncUser = null;
+            S.syncCsrf = null;
+            if (S.ws) { try { S.ws.close(); } catch { /* ignore */ } S.ws = null; }
+            setConn("dead");
+            toast("Signed out");
+            openSheet("sync-auth-sheet");
+          },
+        },
+      ));
+    }
+    list.appendChild(syncRows);
+  }
+
+  list.appendChild(groupTitle("This phone"));
+  const look = el("div", "rows");
+  look.appendChild(row(
+    {
+      label: "Background",
+      note: localStorage.getItem(BG_KEY) ? "A picture of yours is set" : "Use a picture of your own",
+      icon: "photo",
+    },
+    { onClick: () => { closeSheet("actions-sheet"); openThemeSheet(); } },
+  ));
+  list.appendChild(look);
+
+  if (NATIVE) {
+    list.appendChild(groupTitle("App"));
+    const app = el("div", "rows");
+    app.appendChild(row(
+      { label: "Connection & server", note: "Switch between Abacus Sync and direct LAN/tunnel link", icon: "tag" },
+      { onClick: () => { closeSheet("actions-sheet"); NATIVE.changeLink(); } },
+    ));
+    list.appendChild(app);
+  }
+
+  const busy = S.status.state && S.status.state !== "idle";
+  if (busy) {
+    list.appendChild(groupTitle("Turn"));
+    const stop = el("div", "rows");
+    stop.appendChild(row(
+      { label: "Stop the turn", note: "Interrupt what is running", icon: "stop" },
+      { danger: true, onClick: () => { send("interrupt", {}); closeSheet("actions-sheet"); } },
+    ));
+    list.appendChild(stop);
+  }
+  openSheet("actions-sheet");
+}
+
+function openRenameSheet() {
+  closeSheet("actions-sheet");
+  const current = (S.session && S.session.title) || "";
+  const field = $("rename-input");
+  field.value = current === "Abacus" ? "" : current;
+  openSheet("rename-sheet");
+}
+
+function submitRename() {
+  const args = $("rename-input").value.trim();
+  if (!args) { toast("Enter a title first", true); return; }
+  sendCommand("rename", args);
+  if (S.session) {
+    S.session.title = args;
+    renderMeta();
+  }
+  closeSheet("rename-sheet");
+}
+
+function promptArg(action) {
+  if (action.name === "rename") {
+    openRenameSheet();
+    return;
+  }
+  const value = window.prompt(action.label, "");
+  if (value == null) return;
+  const args = value.trim();
+  if (!args) { toast("Nothing entered", true); return; }
+  sendCommand(action.name, args);
+  closeSheet("actions-sheet");
+}
+
+$("title").addEventListener("click", openRenameSheet);
+$("rename-save").addEventListener("click", submitRename);
+$("rename-cancel").addEventListener("click", () => closeSheet("rename-sheet"));
+$("rename-input").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    submitRename();
+  }
+});
+
+/* --------------------------------------------------------------- sync auth */
+
+function showSyncAuthError(msg) {
+  const node = $("sync-auth-error");
+  if (!node) return;
+  node.textContent = msg || "";
+  node.style.display = msg ? "block" : "none";
+}
+
+function normalizeDeviceCode(raw) {
+  const clean = String(raw || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return clean.length === 8 ? `${clean.slice(0, 4)}-${clean.slice(4)}` : "";
+}
+
+async function approveLaptopCode(code) {
+  await refreshSyncAuthSession();
+  if (!S.syncUser) {
+    showSyncAuthError("Please sign in with Empero first before approving a laptop code.");
+    return false;
+  }
+  const res = await syncFetch("POST", "/v1/web/auth/device/approve", { user_code: code });
+  if (!res.ok) {
+    const errObj = res.data && res.data.error;
+    const msg = (errObj && errObj.message) || (res.data && res.data.message) || "Could not approve laptop code.";
+    showSyncAuthError(msg);
+    toast(msg, true);
+    return false;
+  }
+  closeSheet("sync-auth-sheet");
+  toast("Laptop approved! Connecting…");
+  setTimeout(() => loadSyncSessions(S.syncSessionId, true), 1500);
+  return true;
+}
+
+window.__abacusApproveDevice = async function(rawCode) {
+  const code = normalizeDeviceCode(rawCode);
+  if (!code) return false;
+  return await approveLaptopCode(code);
+};
+
+$("sync-pair-btn").addEventListener("click", async () => {
+  showSyncAuthError("");
+  const raw = $("sync-pair-input").value.trim();
+  if (!raw) {
+    showSyncAuthError("Enter a laptop code (XXXX-XXXX) or paste a pairing link.");
+    return;
+  }
+  const devCode = normalizeDeviceCode(raw);
+  if (devCode && !raw.includes("/pair")) {
+    const ok = await approveLaptopCode(devCode);
+    if (ok) $("sync-pair-input").value = "";
+    return;
+  }
+  const tok = extractPairToken(raw) || raw;
+  await refreshSyncAuthSession();
+  const res = await syncFetch("POST", "/v1/web/auth/pairing/redeem", { token: tok });
+  if (!res.ok) {
+    const errObj = res.data && res.data.error;
+    const msg = (errObj && errObj.message) || (res.data && res.data.message) || "Could not redeem pairing token.";
+    showSyncAuthError(msg);
+    return;
+  }
+  $("sync-pair-input").value = "";
+  const nextId = res.data && res.data.next ? extractRemoteSessionId(res.data.next) : "";
+  await refreshSyncAuthSession();
+  closeSheet("sync-auth-sheet");
+  toast("Paired with Abacus Sync");
+  await loadSyncSessions(nextId, true);
+});
+
+$("sync-empero-btn").addEventListener("click", () => {
+  location.href = "https://abacus.empero.org/v1/web/auth/accounts/login?next=/sessions";
+});
+
+$("sync-signup-btn").addEventListener("click", () => {
+  location.href = "https://abacus.empero.org/v1/web/auth/accounts/login?next=/sessions&signup=true";
+});
+
+$("slash").addEventListener("click", openActions);
+$("mode").addEventListener("click", openActions);
+$("model").addEventListener("click", openModelSheet);
+$("workers-chip").addEventListener("click", () => { renderWorkers(); openSheet("workers-sheet"); });
+$("theme-top").addEventListener("click", openThemeSheet);
+$("sessions-top").addEventListener("click", requestSessions);
+$("empty-sessions").addEventListener("click", requestSessions);
+$("empty-delegate").addEventListener("click", () => openSheet("delegate-sheet"));
+$("empty-actions").addEventListener("click", openActions);
+$("delegate").addEventListener("click", () => { closeSheet("workers-sheet"); openSheet("delegate-sheet"); });
+
+document.querySelectorAll("[data-role]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const text = $("delegate-text").value.trim();
+    if (!text) { toast("Describe the task first", true); return; }
+    const role = button.dataset.role;
+    const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+    const prompt =
+      `Use spawn_subagents with ${lines.length} ${role === "explore" ? "explore" : "general"} worker` +
+      `${lines.length === 1 ? "" : "s"} to handle these tasks in parallel, then report what came back:\n` +
+      lines.map((line, index) => `${index + 1}. ${line}`).join("\n");
+    send("prompt", { text: prompt });
+    $("delegate-text").value = "";
+    closeSheet("delegate-sheet");
+    toast("Delegating…");
+  });
+});
+
+/* ----------------------------------------------------------------- composer */
+
+function autoGrow() {
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, Math.round(window.innerHeight * 0.34)) + "px";
+  $("send").disabled = !input.value.trim();
+}
+
+input.addEventListener("input", autoGrow);
+input.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    submit();
+  }
+});
+
+function submit() {
+  const text = input.value.trim();
+  if (!text) return;
+  send("prompt", { text });
+  input.value = "";
+  autoGrow();
+  S.follow = true;
+}
+
+$("send").addEventListener("click", submit);
+$("stop").addEventListener("click", () => send("interrupt", {}));
+
+/* -------------------------------------------------------------------- toast */
+
+let toastTimer = null;
+function toast(text, bad) {
+  const node = $("toast");
+  node.textContent = text;
+  node.classList.toggle("bad", !!bad);
+  node.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => node.classList.remove("show"), 2600);
+}
+
+/* --------------------------------------------------------------- background */
+
+const BG_KEY = "abacus.background";
+const BG_VEIL = "abacus.background.veil";
+
+function applyBackground(data, veil) {
+  $("backdrop").style.backgroundImage = data ? `url(${JSON.stringify(data)})` : "none";
+  document.documentElement.style.setProperty("--veil", String((veil ?? 34) / 100));
+  $("bg-veil").value = String(veil ?? 34);
+}
+
+function rememberBackground(data, veil) {
+  try {
+    if (data) localStorage.setItem(BG_KEY, data);
+    else localStorage.removeItem(BG_KEY);
+    localStorage.setItem(BG_VEIL, String(veil ?? 34));
+    $("bg-note").textContent = "Saved on this phone only — nothing is uploaded.";
+    toast(data ? "Background set" : "Plain theme back");
+  } catch (error) {
+    toast("That image is too large to keep — pick a smaller one", true);
+  }
+}
+
+function readBackground(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    const picture = new Image();
+    picture.onload = () => {
+      const scale = Math.min(1, 1600 / Math.max(picture.width, picture.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(picture.width * scale);
+      canvas.height = Math.round(picture.height * scale);
+      canvas.getContext("2d").drawImage(picture, 0, 0, canvas.width, canvas.height);
+      const data = canvas.toDataURL("image/jpeg", 0.82);
+      const veil = Number($("bg-veil").value);
+      applyBackground(data, veil);
+      rememberBackground(data, veil);
+    };
+    picture.onerror = () => toast("That file is not an image this phone can read", true);
+    picture.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+$("bg-pick").addEventListener("click", () => $("bg-file").click());
+$("bg-file").addEventListener("change", (event) => {
+  const file = event.target.files && event.target.files[0];
+  if (file) readBackground(file);
+  event.target.value = "";
+});
+$("bg-clear").addEventListener("click", () => {
+  applyBackground(null, Number($("bg-veil").value));
+  rememberBackground(null, Number($("bg-veil").value));
+});
+$("bg-veil").addEventListener("input", (event) => {
+  const veil = Number(event.target.value);
+  document.documentElement.style.setProperty("--veil", String(veil / 100));
+  localStorage.setItem(BG_VEIL, String(veil));
+});
+
+/* --------------------------------------------------------------------- boot */
+
+if (typeof navigator !== "undefined" && navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+  navigator.serviceWorker.getRegistrations().then((regs) => regs.forEach((r) => r.unregister())).catch(() => {});
+}
+loadSavedTheme(); renderContextMeter();
+$("link-badge").textContent = isSyncMode()
+  ? "sync"
+  : /^(127\.|localhost$)/.test(location.hostname) ? "local" : "lan";
+renderMeta();
+renderStatus();
+renderWorkers();
+connect();
+setInterval(() => {
+  if (!S.ws || S.ws.readyState !== 1) return;
+  if (S.lastFrame && Date.now() - S.lastFrame > 60000) {
+    try { S.ws.close(); } catch (error) { /* already gone */ }
+    return;
+  }
+  send("ping", { ts: new Date().toISOString() });
+}, 25000);
+
+/* -------------------------------------------------------- context meter */
+
+function formatCount(n) {
+  if (!n) return "0";
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
+  if (n >= 1000) return (n / 1000).toFixed(n < 10000 ? 1 : 0) + "k";
+  return String(n);
+}
+
+function renderContextMeter() {
+  const usage = S.usage || {};
+  const session = S.session || {};
+  const tokens = usage.input_tokens || usage.tokens || S.contextTokens || 0;
+  const maxTokens = S.contextWindow || session.context_window || 128000;
+  const pct = Math.min(100, Math.round((tokens / maxTokens) * 100));
+  const isWarn = pct >= 80;
+
+  const pctEl = $("ctx-percent");
+  const detailEl = $("ctx-detail");
+  const barEl = $("ctx-bar");
+
+  if (pctEl) {
+    pctEl.textContent = `${pct}% context`;
+    pctEl.classList.toggle("warning", isWarn);
+  }
+  if (detailEl) {
+    detailEl.textContent = `${formatCount(tokens)} / ${formatCount(maxTokens)}`;
+  }
+  if (barEl) {
+    barEl.style.width = `${pct}%`;
+    barEl.classList.toggle("warning", isWarn);
+  }
+}
+
+/* ---------------------------------------------------- model & effort sheet */
+
+function openModelSheet() {
+  const list = $("model-list");
+  list.innerHTML = "";
+  const active = (S.session && S.session.model) || (S.session && S.session.profile) || "";
+  
+  if (S.models && S.models.length > 0) {
+    for (const profile of S.models) {
+      const isCur = profile === active || (active && active.includes(profile));
+      list.appendChild(row(
+        { label: profile, note: isCur ? "Active model profile" : "Switch to this profile", icon: "chip" },
+        {
+          on: isCur,
+          tag: isCur ? "active" : "",
+          onClick: () => {
+            sendCommand("model", profile);
+            closeSheet("model-sheet");
+            toast("Switched to " + profile);
+          }
+        }
+      ));
+    }
+  } else {
+    list.appendChild(row(
+      { label: active || "default", note: "Current session model", icon: "chip" },
+      { on: true, tag: "active" }
+    ));
+  }
+
+  const effortGrid = $("effort-grid");
+  if (effortGrid) {
+    const curEffort = S.reasoningEffort || "off";
+    effortGrid.querySelectorAll(".effort-btn").forEach(btn => {
+      const eff = btn.dataset.effort;
+      btn.classList.toggle("active", eff === curEffort);
+      btn.onclick = () => {
+        sendCommand("effort", eff);
+        S.reasoningEffort = eff;
+        effortGrid.querySelectorAll(".effort-btn").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+        toast("Effort set to " + eff);
+      };
+    });
+  }
+
+  openSheet("model-sheet");
+}
+
+/* -------------------------------------------- VS Code Appearance Engine */
+
+const THEME_KEY = "abacus.theme_config";
+
+const THEME_PRESETS = {
+  vscode: {
+    name: "VS Code Dark+",
+    bg: "#1e1e1e",
+    surface: "#252526",
+    card: "#252526",
+    ink: "#d4d4d4",
+    subtle: "#cccccc",
+    muted: "#858585",
+    primary: "#007acc",
+    font: "sans",
+  },
+  abacus: {
+    name: "Abacus Dark",
+    bg: "#0e0b14",
+    surface: "#151020",
+    card: "#151020",
+    ink: "#e9e4f0",
+    subtle: "#bcb5c9",
+    muted: "#8f88a0",
+    primary: "#b66bff",
+    font: "sans",
+  },
+  monokai: {
+    name: "Monokai Pro",
+    bg: "#2d2a2e",
+    surface: "#3a383d",
+    card: "#3a383d",
+    ink: "#fcfcfa",
+    subtle: "#c1c0c0",
+    muted: "#727072",
+    primary: "#ffd866",
+    font: "mono",
+  },
+  tokyo: {
+    name: "Tokyo Night",
+    bg: "#1a1b26",
+    surface: "#24283b",
+    card: "#24283b",
+    ink: "#c0caf5",
+    subtle: "#a9b1d6",
+    muted: "#565f89",
+    primary: "#7aa2f7",
+    font: "sans",
+  },
+  github: {
+    name: "GitHub Dark",
+    bg: "#0d1117",
+    surface: "#161b22",
+    card: "#161b22",
+    ink: "#c9d1d9",
+    subtle: "#8b949e",
+    muted: "#484f58",
+    primary: "#58a6ff",
+    font: "sans",
+  },
+  amoled: {
+    name: "AMOLED Black",
+    bg: "#000000",
+    surface: "#121212",
+    card: "#121212",
+    ink: "#ffffff",
+    subtle: "#d1d5db",
+    muted: "#6b7280",
+    primary: "#a78bfa",
+    font: "sans",
+  }
+};
+
+const FONT_FAMILIES = {
+  sans: '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+  mono: '"JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+  consolas: 'Consolas, "Lucida Console", Monaco, monospace',
+  firacode: '"Fira Code", "JetBrains Mono", monospace',
+  system: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif',
+  serif: 'Merriweather, Georgia, "Times New Roman", serif',
+};
+
+let currentTheme = {
+  preset: "abacus",
+  bg: "#0e0b14",
+  surface: "#151020",
+  ink: "#e9e4f0",
+  primary: "#b66bff",
+  font: "sans",
+  fontSize: "14px",
+  veil: 34,
+  blur: 0,
+  bgImage: null
+};
+
+/* -------------------------------- IndexedDB Wallpaper Store */
+const DB_NAME = "abacus_mobile_db";
+const DB_STORE = "theme_assets";
+const WALLPAPER_KEY = "mobile_wallpaper";
+
+function openThemeDB() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) return reject(new Error("IndexedDB not supported"));
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(DB_STORE)) {
+        db.createObjectStore(DB_STORE);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function saveWallpaperData(dataUrl) {
+  return openThemeDB().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, "readwrite");
+    const store = tx.objectStore(DB_STORE);
+    store.put(dataUrl, WALLPAPER_KEY);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  })).catch(err => console.warn("Failed to save wallpaper to IndexedDB:", err));
+}
+
+function loadWallpaperData() {
+  return openThemeDB().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, "readonly");
+    const store = tx.objectStore(DB_STORE);
+    const req = store.get(WALLPAPER_KEY);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  })).catch(() => null);
+}
+
+function deleteWallpaperData() {
+  return openThemeDB().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, "readwrite");
+    const store = tx.objectStore(DB_STORE);
+    store.delete(WALLPAPER_KEY);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  })).catch(() => {});
+}
+
+function hexToRgba(hex, alpha) {
+  if (!hex || hex[0] !== '#') return hex;
+  let c = hex.slice(1);
+  if (c.length === 3) c = c.split('').map(x => x + x).join('');
+  const num = parseInt(c, 16);
+  if (isNaN(num)) return hex;
+  return `rgba(${(num >> 16) & 255}, ${(num >> 8) & 255}, ${num & 255}, ${alpha})`;
+}
+
+function applyTheme(cfg) {
+  currentTheme = Object.assign({}, currentTheme, cfg);
+  const root = document.documentElement.style;
+
+  root.setProperty("--bg", currentTheme.bg);
+  root.setProperty("--surface", currentTheme.surface);
+  root.setProperty("--card", currentTheme.surface);
+  root.setProperty("--popover", currentTheme.surface);
+  root.setProperty("--raise", currentTheme.surface);
+  root.setProperty("--user", currentTheme.surface);
+  root.setProperty("--code", currentTheme.bg);
+  root.setProperty("--ink", currentTheme.ink);
+  root.setProperty("--primary", currentTheme.primary);
+  root.setProperty("--font-size", currentTheme.fontSize);
+  root.setProperty("--veil", String(currentTheme.veil / 100));
+  root.setProperty("--backdrop-blur", `${currentTheme.blur}px`);
+
+  const fontStack = FONT_FAMILIES[currentTheme.font] || FONT_FAMILIES.sans;
+  root.setProperty("--sans", fontStack);
+  let mobileStyle = document.getElementById("mobile-font-override");
+  if (!mobileStyle) {
+    mobileStyle = document.createElement("style");
+    mobileStyle.id = "mobile-font-override";
+    document.head.appendChild(mobileStyle);
+  }
+  mobileStyle.textContent = `body, body *, button, input, textarea, select, .wordmark, .chip, #title, .bubble, .bubble * { font-family: ${fontStack} !important; }`;
+
+  const hasBg = Boolean(currentTheme.bgImage);
+  document.body.classList.toggle("has-custom-bg", hasBg);
+
+  if (hasBg) {
+    root.setProperty("--header-bg", hexToRgba(currentTheme.bg, 0.65));
+    root.setProperty("--card-bg", hexToRgba(currentTheme.surface, 0.72));
+    root.setProperty("--sheet-bg", hexToRgba(currentTheme.surface, 0.88));
+  } else {
+    root.setProperty("--header-bg", hexToRgba(currentTheme.bg, 0.92));
+    root.setProperty("--card-bg", currentTheme.surface);
+    root.setProperty("--sheet-bg", currentTheme.surface);
+  }
+
+  const backdrop = $("backdrop");
+  if (backdrop) {
+    backdrop.style.backgroundImage = currentTheme.bgImage ? `url(${JSON.stringify(currentTheme.bgImage)})` : "none";
+  }
+
+  // Handle wallpaper persistence in IndexedDB
+  if (cfg && "bgImage" in cfg) {
+    if (cfg.bgImage) {
+      saveWallpaperData(cfg.bgImage);
+    } else {
+      deleteWallpaperData();
+    }
+  }
+
+  // Sync inputs
+  if ($("bg-veil")) $("bg-veil").value = currentTheme.veil;
+  if ($("bg-veil-val")) $("bg-veil-val").textContent = `${currentTheme.veil}%`;
+  if ($("bg-blur")) $("bg-blur").value = currentTheme.blur;
+  if ($("bg-blur-val")) $("bg-blur-val").textContent = `${currentTheme.blur}px`;
+  if ($("pick-primary")) $("pick-primary").value = currentTheme.primary;
+  if ($("pick-ink")) $("pick-ink").value = currentTheme.ink;
+  if ($("pick-bg")) $("pick-bg").value = currentTheme.bg;
+
+  // Sync active pills
+  document.querySelectorAll(".preset-card").forEach(c => c.classList.toggle("active", c.dataset.preset === currentTheme.preset));
+  document.querySelectorAll("#font-family-row .font-pill").forEach(p => p.classList.toggle("active", p.dataset.font === currentTheme.font));
+  document.querySelectorAll("#font-size-row .font-pill").forEach(p => p.classList.toggle("active", p.dataset.size === currentTheme.fontSize));
+
+  // Save metadata to localStorage (without bgImage to prevent QuotaExceededError)
+  const toPersist = Object.assign({}, currentTheme);
+  delete toPersist.bgImage;
+  try {
+    localStorage.setItem(THEME_KEY, JSON.stringify(toPersist));
+  } catch (e) {
+    console.warn("Theme storage limit", e);
+  }
+}
+
+async function loadSavedTheme() {
+  try {
+    let saved = {};
+    const raw = localStorage.getItem(THEME_KEY);
+    if (raw) {
+      try { saved = JSON.parse(raw); } catch (e) {}
+    }
+    // Apply colors and fonts immediately from localStorage
+    applyTheme(saved);
+
+    // Then load the high-res wallpaper from IndexedDB
+    const wallpaper = await loadWallpaperData();
+    if (wallpaper) {
+      applyTheme({ bgImage: wallpaper });
+    } else {
+      const legacyBg = localStorage.getItem("abacus.background");
+      if (legacyBg) {
+        saveWallpaperData(legacyBg);
+        localStorage.removeItem("abacus.background");
+        applyTheme({ bgImage: legacyBg });
+      }
+    }
+  } catch (e) {
+    console.warn("Error loading theme", e);
+  }
+}
+
+function openThemeSheet() {
+  openSheet("theme-sheet");
+}
+
+// Preset clicks
+document.querySelectorAll(".preset-card").forEach(card => {
+  card.addEventListener("click", () => {
+    const pKey = card.dataset.preset;
+    const p = THEME_PRESETS[pKey];
+    if (!p) return;
+    applyTheme({
+      preset: pKey,
+      bg: p.bg,
+      surface: p.surface,
+      ink: p.ink,
+      primary: p.primary,
+      font: p.font || currentTheme.font
+    });
+    toast(`Theme: ${p.name}`);
+  });
+});
+
+// Font family clicks
+document.querySelectorAll("#font-family-row .font-pill").forEach(btn => {
+  btn.addEventListener("click", () => {
+    applyTheme({ font: btn.dataset.font });
+  });
+});
+
+// Font size clicks
+document.querySelectorAll("#font-size-row .font-pill").forEach(btn => {
+  btn.addEventListener("click", () => {
+    applyTheme({ fontSize: btn.dataset.size });
+  });
+});
+
+// Color pickers
+if ($("pick-primary")) {
+  $("pick-primary").addEventListener("input", (e) => applyTheme({ primary: e.target.value, preset: "custom" }));
+}
+if ($("pick-ink")) {
+  $("pick-ink").addEventListener("input", (e) => applyTheme({ ink: e.target.value, preset: "custom" }));
+}
+if ($("pick-bg")) {
+  $("pick-bg").addEventListener("input", (e) => applyTheme({ bg: e.target.value, surface: e.target.value, preset: "custom" }));
+}
+
+// Background controls
+if ($("bg-pick")) $("bg-pick").addEventListener("click", () => $("bg-file").click());
+if ($("bg-file")) $("bg-file").addEventListener("change", (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      const maxDim = 2560;
+      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      const data = canvas.toDataURL("image/jpeg", 0.88);
+      applyTheme({ bgImage: data });
+      toast("Background image set");
+    };
+    img.onerror = () => toast("Invalid image format", true);
+    img.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+  e.target.value = "";
+});
+
+if ($("bg-clear")) $("bg-clear").addEventListener("click", () => {
+  applyTheme({ bgImage: null });
+  toast("Background removed");
+});
+
+if ($("bg-veil")) $("bg-veil").addEventListener("input", (e) => {
+  applyTheme({ veil: Number(e.target.value) });
+});
+
+if ($("bg-blur")) $("bg-blur").addEventListener("input", (e) => {
+  applyTheme({ blur: Number(e.target.value) });
+});
+
+if ($("theme-reset")) $("theme-reset").addEventListener("click", () => {
+  applyTheme(THEME_PRESETS.abacus);
+  toast("Theme reset to defaults");
+});
+
+
+</script>
+</body>
+</html>

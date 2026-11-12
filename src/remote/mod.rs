@@ -44,8 +44,9 @@ use link::{Connector, LinkConfig, LinkError, Stop};
 use protocol::{
     Accepted, ApprovalFrame, ApprovalResolved, DeltaFrame, DeltaKind, DoneFrame, DoneReason, Entry, EntryFrame,
     EntryKind, ErrorFrame, Level, ModeFrame, NoticeFrame, Outbound, Pending, Phase, QuestionFrame, QuestionResolved,
-    SnapshotHead, State, Status, ToolFrame, ToolInfo, ToolPhase, ToolState,
+    SnapshotHead, State, Status, ToolFrame, ToolInfo, ToolPhase, ToolState, WorkersFrame,
 };
+pub use protocol::{SessionRow, SessionsFrame};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -107,6 +108,14 @@ pub enum Inbound {
         ref_id: String,
     },
     SnapshotRequested,
+    /// A session action a client asked for. Only the local mobile transport
+    /// carries these; the relay refuses the frame type, so a browser cannot
+    /// reach a session's model, mode or history.
+    Command {
+        ref_id: String,
+        name: String,
+        args: String,
+    },
 }
 
 /// The connection as the footer badge shows it.
@@ -126,6 +135,7 @@ pub struct SnapshotView<'a> {
     pub session: SessionInfo,
     pub entries: &'a [ui::Entry],
     pub usage: &'a TokenUsage,
+    pub models: &'a [String],
 }
 
 /// Frames queued for the link before the bridge starts dropping them and asks
@@ -237,6 +247,11 @@ pub struct Bridge {
     /// A frame was dropped because the queue was full; the next tick sends a
     /// snapshot so the browsers repair the gap.
     resync: bool,
+    /// The board as last sent, so an unchanged one costs no frames.
+    workers_sent: Option<WorkersFrame>,
+    /// True when speaking through the sync relay (`abacus.empero.org`), which
+    /// validates frame types against the v1 browser spec.
+    relay: bool,
 }
 
 impl Bridge {
@@ -244,7 +259,10 @@ impl Bridge {
     /// and keeps a socket to the relay open until [`Bridge::stop`].
     pub fn start(client: SyncClient, paths: AbacusPaths, session: Session, notify: Notify) -> Self {
         let session_id = session.id.to_string();
-        Self::launch(session_id, SyncConnector { client, paths, session }, notify, LinkConfig::default())
+        let mut bridge =
+            Self::launch(session_id, SyncConnector { client, paths, session }, notify, LinkConfig::default());
+        bridge.relay = true;
+        bridge
     }
 
     pub(crate) fn launch<C: Connector>(session_id: String, connector: C, notify: Notify, config: LinkConfig) -> Self {
@@ -277,6 +295,8 @@ impl Bridge {
             connected_once: false,
             browsers: 0,
             resync: false,
+            workers_sent: None,
+            relay: false,
         }
     }
 
@@ -472,6 +492,36 @@ impl Bridge {
         self.emit(Outbound::Notice(NoticeFrame::new(text, level)));
     }
 
+    /// Send the subagent board if it differs from the last one sent, so a
+    /// phone sees workers start, work and finish. Returns whether a frame
+    /// went out.
+    pub fn workers_changed(&mut self, board: &[crate::workers::WorkerStatus]) -> bool {
+        let frame = WorkersFrame::from_board(board);
+        if self.workers_sent.as_ref() == Some(&frame) {
+            return false;
+        }
+        self.workers_sent = Some(frame.clone());
+        if self.relay {
+            let meta = serde_json::json!({ "workers": frame.workers });
+            self.push(Outbound::Notice(NoticeFrame::new(&format!("__abacus_meta__:{meta}"), Level::Info)));
+        } else {
+            self.push(Outbound::Workers(frame));
+        }
+        true
+    }
+
+    /// The saved sessions, sent when a phone asks for them. Not cached: the
+    /// list changes as sessions are created, renamed and resumed, and a phone
+    /// only asks when it opens the list.
+    pub fn sessions(&mut self, rows: Vec<SessionRow>) {
+        if self.relay {
+            let meta = serde_json::json!({ "sessions": rows });
+            self.push(Outbound::Notice(NoticeFrame::new(&format!("__abacus_meta__:{meta}"), Level::Info)));
+        } else {
+            self.push(Outbound::Sessions(SessionsFrame { sessions: rows }));
+        }
+    }
+
     /// An approval dialog opened; returns its id for the terminal to keep.
     pub fn approval_opened(&mut self, tool: &str, summary: &str, details: &str) -> String {
         self.close_text();
@@ -552,6 +602,7 @@ impl Bridge {
     /// Tell the browsers what became of their input. A refusal always says why,
     /// in words the browser shows as they are.
     pub fn accepted(&mut self, ref_id: &str, kind: InputKind, result: AcceptResult, reason: Option<&str>) {
+        let kind = if self.relay && kind == InputKind::Command { InputKind::Prompt } else { kind };
         let reason = match (result, reason) {
             (_, Some(reason)) => Some(reason.to_owned()),
             (AcceptResult::Rejected, None) => Some("the terminal could not act on that".to_owned()),
@@ -599,6 +650,9 @@ impl Bridge {
             entry.clipped |= open.clipped;
             entries.push(entry);
         }
+        let profile = view.session.profile.clone();
+        let workers = self.workers_sent.clone().unwrap_or_default();
+        let models = view.models.to_vec();
         let head = SnapshotHead {
             snapshot_id: uuid::Uuid::new_v4().to_string(),
             reason,
@@ -606,9 +660,19 @@ impl Bridge {
             status: self.status.clone(),
             pending: Pending { approval: self.approval.clone(), question: self.question.clone() },
             usage: view.usage.into(),
+            workers: workers.clone(),
+            models: models.clone(),
         };
         for page in protocol::paginate(head, entries, protocol::TARGET_FRAME_BYTES) {
             self.push(Outbound::Snapshot(Box::new(page)));
+        }
+        if self.relay {
+            let meta = serde_json::json!({
+                "profile": profile,
+                "models": models,
+                "workers": workers.workers,
+            });
+            self.push(Outbound::Notice(NoticeFrame::new(&format!("__abacus_meta__:{meta}"), Level::Info)));
         }
     }
 
@@ -994,16 +1058,25 @@ struct SyncConnector {
 impl Connector for SyncConnector {
     async fn prepare(&self) -> Result<(), LinkError> {
         // The server can only share a session it holds, so upload first —
-        // through the sync engine, never forcing over another device's copy.
-        // A refused upload still leaves that copy there to share.
-        let uploaded = crate::sync::push_session(&self.paths, &self.session).await;
+        // through the sync engine when it has content, or directly for a brand
+        // new session so a phone can drive it before any terminal prompt.
+        let uploaded = if crate::sync::is_placeholder(&self.session) {
+            self.client.push(&self.session, &[], false).await.map(drop)
+        } else {
+            crate::sync::push_session(&self.paths, &self.session).await
+        };
         match self.client.enable_remote(&self.session.id.to_string()).await {
             Ok(()) => Ok(()),
-            Err(SyncError::Gone) if uploaded.is_err() => Err(LinkError::Retry(format!(
-                "could not upload the session: {:#}",
-                uploaded.err().map(|error| format!("{error:#}")).unwrap_or_default()
-            ))),
-            Err(error) => Err(classify(error)),
+            Err(SyncError::Gone) => {
+                if let Err(error) = self.client.push(&self.session, &[], false).await {
+                    return Err(LinkError::Retry(format!("could not upload the session: {error:#}")));
+                }
+                self.client.enable_remote(&self.session.id.to_string()).await.map_err(classify)
+            }
+            Err(error) => {
+                let _ = uploaded;
+                Err(classify(error))
+            }
         }
     }
 

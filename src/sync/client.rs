@@ -25,7 +25,7 @@ use crate::sync_state::{Hashes, SyncState, sha256_hex};
 
 pub(crate) const PROTOCOL: &str = "1";
 const USER_AGENT: &str = concat!("abacus-agent/", env!("CARGO_PKG_VERSION"));
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// For metadata calls: listing, changes, a session document.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// The slowest link a transfer is still expected to finish on; a trace's
@@ -318,12 +318,31 @@ pub struct SyncClient {
     offline: Arc<AtomicBool>,
 }
 
+pub(crate) fn resolve_ipv4(mut builder: reqwest::ClientBuilder, server: &str) -> reqwest::ClientBuilder {
+    use std::net::ToSocketAddrs;
+    if let Ok(url) = reqwest::Url::parse(server)
+        && let Some(host) = url.host_str()
+    {
+        let port = url.port_or_known_default().unwrap_or(443);
+        if let Ok(addrs) = (host, port).to_socket_addrs() {
+            for addr in addrs {
+                if addr.is_ipv4() {
+                    builder = builder.resolve(host, addr);
+                }
+            }
+        }
+    }
+    builder
+}
+
 impl SyncClient {
     pub fn new(credentials: &SyncCredentials) -> Result<Self> {
         let server = credentials.server.trim_end_matches('/').to_owned();
         check_server(&server)?;
+        let mut builder = Client::builder().user_agent(USER_AGENT).connect_timeout(CONNECT_TIMEOUT);
+        builder = resolve_ipv4(builder, &server);
         Ok(Self {
-            http: Client::builder().user_agent(USER_AGENT).connect_timeout(CONNECT_TIMEOUT).build()?,
+            http: builder.build()?,
             server,
             token: credentials.token.clone(),
             email: credentials.email.clone(),
@@ -850,8 +869,11 @@ fn transfer_timeout(bytes: u64) -> Duration {
 }
 
 /// A client for the unauthenticated sign-in endpoints.
-pub(crate) fn anonymous_client() -> Result<Client> {
-    Ok(Client::builder().user_agent(USER_AGENT).connect_timeout(CONNECT_TIMEOUT).timeout(REQUEST_TIMEOUT).build()?)
+pub(crate) fn anonymous_client(server: &str) -> Result<Client> {
+    let mut builder =
+        Client::builder().user_agent(USER_AGENT).connect_timeout(CONNECT_TIMEOUT).timeout(REQUEST_TIMEOUT);
+    builder = resolve_ipv4(builder, server);
+    Ok(builder.build()?)
 }
 
 /// Decode a response from an unauthenticated endpoint (sign-in), with the

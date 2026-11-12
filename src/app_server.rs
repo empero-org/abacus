@@ -38,11 +38,13 @@ use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
+use uuid::Uuid;
 
 use crate::{
     agent::{AgentEvent, ApprovalDecision, DoneReason, TurnOptions, UserAnswer, initial_messages, run_turn},
     config::{Config, Credentials, Permission, Settings},
     provider::Provider,
+    remote::{AcceptResult, Bridge, By, Inbound, InputKind, SnapshotReason},
     services::AgentServices,
     session::{Opened, Session, SessionState, SessionStore},
     tools::ToolCall,
@@ -243,6 +245,11 @@ struct App {
     /// The open thread's presence and inbox: other sessions see it as open,
     /// and their messages reach it here.
     mailbox: crate::inbox::Mailbox,
+    /// Live remote connection to Empero Cloud / Phone
+    remote: Option<Bridge>,
+    remote_tx: mpsc::UnboundedSender<Inbound>,
+    approval_remote_id: Option<String>,
+    question_remote_id: Option<String>,
 }
 
 /// Idle compaction finished, written from `basis`. `job` is the flag it could
@@ -283,6 +290,7 @@ pub async fn run(
     let usage = UsageReporter::new(&config.paths, &credentials, "app-server");
     let workers = crate::workers::Workers::default();
     let (idle_done, mut idle_rx) = mpsc::unbounded_channel::<IdleDone>();
+    let (remote_tx, mut remote_rx) = mpsc::unbounded_channel::<Inbound>();
     let mailbox = crate::inbox::Mailbox::new(config.paths.clone(), crate::presence::FrontEnd::Desktop);
     let mut app = App {
         thread: match session {
@@ -325,8 +333,13 @@ pub async fn run(
             .map(std::time::Duration::from_secs),
         last_activity: tokio::time::Instant::now(),
         mailbox,
+        remote: None,
+        remote_tx: remote_tx.clone(),
+        approval_remote_id: None,
+        question_remote_id: None,
     };
     app.thread_opened();
+    app.maybe_start_remote();
     let usage_task = app.usage.as_ref().map(UsageReporter::spawn_periodic);
     let tasks_task = watch_tasks(app.workers.board.clone());
     if crate::sync::is_configured(&credentials) {
@@ -359,6 +372,8 @@ pub async fn run(
     let (line_tx, mut line_rx) = mpsc::unbounded_channel::<String>();
     let mut inbox_checks = tokio::time::interval(std::time::Duration::from_secs(1));
     inbox_checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut remote_ticks = tokio::time::interval(std::time::Duration::from_millis(100));
+    remote_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // stdin on its own task: a blocking read must never stall event delivery,
     // or an approval could not be answered while the agent waits on it.
@@ -444,8 +459,16 @@ pub async fn run(
                 app.check_inbox();
                 app.start_pending_turn(&events);
             }
+            inbound = remote_rx.recv() => {
+                let Some(inbound) = inbound else { continue };
+                app.remote_event(inbound, &events);
+            }
+            _ = remote_ticks.tick() => {
+                app.tick_remote();
+            }
         }
     }
+    app.stop_remote("Desktop GUI closed.");
     if let Some(task) = usage_task {
         task.abort();
     }
@@ -528,6 +551,7 @@ impl App {
                 "modes": ["auto", "yolo"],
                 "capabilities": {
                     "threads": true,
+                    "threadDelete": true,
                     "approvals": true,
                     "userInput": true,
                     "diff": true,
@@ -599,6 +623,30 @@ impl App {
             "shutdown" => Ok(json!({})),
 
             // ---- threads ----------------------------------------------------
+            "thread/delete" => {
+                let id_str = params.get("threadId").or_else(|| params.get("id")).and_then(|v| v.as_str());
+                let target_id = if let Some(s) = id_str {
+                    Uuid::parse_str(s).map_err(|e| anyhow!("invalid threadId: {e}"))?
+                } else {
+                    self.thread.session.id
+                };
+                let store = self.store.as_ref().ok_or_else(|| anyhow!("sessions off"))?;
+                store.delete(target_id)?;
+                crate::sync::session_closed(target_id);
+                let current_deleted = self.thread.session.id == target_id;
+                if current_deleted {
+                    self.require_idle()?;
+                    self.stop_idle_compaction();
+                    self.thread_closed();
+                    self.thread = ThreadState::new(&self.config, None);
+                    self.tokens.store_total(0);
+                    self.thread_opened();
+                    self.rebind_remote();
+                    notify("thread/started", json!({"threadId": self.thread_id()}));
+                }
+                notify("thread/deleted", json!({"threadId": target_id.to_string()}));
+                Ok(json!({"ok": true, "deleted": target_id.to_string(), "activeReset": current_deleted}))
+            }
             "thread/list" => {
                 let store = self.store.as_ref().ok_or_else(|| anyhow!("sessions off"))?;
                 let live = crate::presence::live_sessions(&self.config.paths);
@@ -626,6 +674,7 @@ impl App {
                 self.thread = ThreadState::new(&self.config, None);
                 self.tokens.store_total(0);
                 self.thread_opened();
+                self.rebind_remote();
                 notify("thread/started", json!({"threadId": self.thread_id()}));
                 Ok(self.thread_snapshot())
             }
@@ -645,6 +694,7 @@ impl App {
                     self.thread.state.opened = owed;
                 }
                 self.thread_opened();
+                self.rebind_remote();
                 Ok(self.thread_snapshot())
             }
             // Continue a thread as a new one that remembers where it came
@@ -678,6 +728,7 @@ impl App {
                 self.provider.clear_context_tokens();
                 self.thread = ThreadState::new(&self.config, Some(fork));
                 self.thread_opened();
+                self.rebind_remote();
                 notify("thread/started", json!({"threadId": self.thread_id(), "forkedFrom": original.id.to_string()}));
                 let mut snapshot = self.thread_snapshot();
                 if let Some(draft) = draft {
@@ -712,6 +763,9 @@ impl App {
                 store.rename(&mut self.thread.session, name)?;
                 self.thread.persisted = true;
                 notify("thread/name/updated", json!({"threadId": self.thread_id(), "name": self.thread.session.title}));
+                if self.remote.is_some() {
+                    self.send_remote_snapshot(SnapshotReason::Requested);
+                }
                 Ok(json!({"name": self.thread.session.title}))
             }
 
@@ -1686,6 +1740,15 @@ impl App {
         item["id"] = json!(self.next("item"));
         self.item("completed", item);
 
+        if let Some(bridge) = &mut self.remote {
+            let prompt_str = match &content {
+                Value::String(s) => s.clone(),
+                _ => content.to_string(),
+            };
+            bridge.user_prompt(0, &prompt_str);
+            bridge.turn_started();
+        }
+
         let options = self.turn_options();
         tokio::spawn(run_turn(self.provider.clone(), self.thread.messages.clone(), options, events.clone()));
     }
@@ -1847,6 +1910,9 @@ impl App {
     }
 
     fn handle_event(&mut self, event: AgentEvent) {
+        if let Some(bridge) = &mut self.remote {
+            bridge.on_event(&event, &self.provider.usage(), None);
+        }
         match event {
             AgentEvent::Delta(text) => self.stream("agentMessage", "item/agentMessage/delta", text),
             AgentEvent::Reasoning(text) => self.stream("reasoning", "item/reasoning/textDelta", text),
@@ -1958,6 +2024,8 @@ impl App {
                         "availableDecisions": ["accept", "decline", "cancel"],
                     }
                 }));
+                self.approval_remote_id =
+                    self.remote.as_mut().map(|b| b.approval_opened(&request.tool, &request.summary, &request.details));
                 self.pending_approvals.insert(id, request.respond);
             }
             AgentEvent::UserQuestion(request) => {
@@ -1975,6 +2043,9 @@ impl App {
                         "multiSelect": request.multi_select,
                     }
                 }));
+                self.question_remote_id = self.remote.as_mut().map(|b| {
+                    b.question_opened(&request.header, &request.question, &request.options, request.multi_select)
+                });
                 self.pending_questions.insert(id, request.respond);
             }
             AgentEvent::Done { messages, reason } => {
@@ -2236,14 +2307,20 @@ impl App {
                 }
                 _ => ApprovalDecision::Reject,
             };
+            if let (Some(bridge), Some(remote_id)) = (&mut self.remote, self.approval_remote_id.take()) {
+                bridge.approval_resolved(&remote_id, decision, By::Terminal, 0);
+            }
             let _ = responder.send(decision);
             return;
         }
         if let Some(responder) = self.pending_questions.remove(id) {
-            let selected = result["selected"]
+            let selected: Vec<String> = result["selected"]
                 .as_array()
                 .map(|values| values.iter().filter_map(|value| value.as_str().map(str::to_owned)).collect())
                 .unwrap_or_default();
+            if let (Some(bridge), Some(remote_id)) = (&mut self.remote, self.question_remote_id.take()) {
+                bridge.question_resolved(&remote_id, &selected, result["custom"].as_str(), By::Terminal, 0);
+            }
             let _ = responder.send(UserAnswer {
                 selected_labels: selected,
                 custom_text: result["custom"].as_str().map(str::to_owned),
@@ -2328,6 +2405,293 @@ impl App {
 
     fn thread_closed(&self) {
         crate::sync::session_closed(self.thread.session.id);
+    }
+
+    fn maybe_start_remote(&mut self) {
+        if !self.settings.remote.auto_share {
+            return;
+        }
+        if !crate::sync::is_configured(&self.credentials) {
+            return;
+        }
+        if self.remote.is_some() {
+            return;
+        }
+        let Ok(client) = crate::sync::configured_client(&self.config.paths) else {
+            return;
+        };
+        let tx = self.remote_tx.clone();
+        let notify: crate::remote::Notify = Arc::new(move |event| {
+            let _ = tx.send(event);
+        });
+        let mut bridge = Bridge::start(client, self.config.paths.clone(), self.thread.session.clone(), notify);
+        if self.turn_id.is_some() {
+            bridge.turn_started();
+        }
+        bridge.workers_changed(&self.workers.board.snapshot());
+        self.remote = Some(bridge);
+    }
+
+    fn stop_remote(&mut self, notice: &str) {
+        if let Some(bridge) = self.remote.take() {
+            drop(bridge.stop(notice, true));
+        }
+    }
+
+    fn rebind_remote(&mut self) {
+        let current = self.thread.session.id.to_string();
+        if self.remote.as_ref().map(Bridge::session_id) == Some(current.as_str()) {
+            self.send_remote_snapshot(SnapshotReason::Requested);
+            return;
+        }
+        let notice = format!("Switched to session {current}");
+        self.stop_remote(&notice);
+        self.maybe_start_remote();
+    }
+
+    fn send_remote_snapshot(&mut self, reason: SnapshotReason) {
+        let Some(bridge) = &mut self.remote else {
+            return;
+        };
+        let session = &self.thread.session;
+        let id = match bridge.session_id() {
+            "" => session.id.to_string(),
+            relay => relay.to_owned(),
+        };
+        let mode = if self.yolo.load(Ordering::Relaxed) { "yolo" } else { "auto" }.to_owned();
+        let info = crate::remote::SessionInfo {
+            id,
+            title: session.title.clone(),
+            workspace: self.config.workspace.display().to_string(),
+            model: self.config.model_ref(),
+            profile: self.settings.default_profile.clone(),
+            mode,
+            app_version: env!("CARGO_PKG_VERSION").to_owned(),
+            started_at: session.created_at.to_rfc3339(),
+        };
+        let usage = self.provider.usage();
+        let mut models: Vec<String> = self.settings.profiles.keys().cloned().collect();
+        models.sort();
+        let entries = crate::tui::entries_from_messages(&self.thread.messages);
+        let view = crate::remote::SnapshotView { session: info, entries: &entries, usage: &usage, models: &models };
+        bridge.send_snapshot(view, reason);
+    }
+
+    fn tick_remote(&mut self) {
+        let Some(bridge) = &mut self.remote else {
+            return;
+        };
+        bridge.flush();
+        if self.turn_id.is_some() {
+            bridge.thinking_label("thinking…");
+        }
+        if bridge.needs_resync() {
+            self.send_remote_snapshot(SnapshotReason::Requested);
+        }
+    }
+
+    fn remote_event(&mut self, event: Inbound, events: &mpsc::UnboundedSender<AgentEvent>) {
+        if let Some(bridge) = &mut self.remote {
+            bridge.observe(&event);
+        }
+        match event {
+            Inbound::Connected { reconnect } => {
+                let reason = if reconnect { SnapshotReason::Reconnect } else { SnapshotReason::Connect };
+                self.send_remote_snapshot(reason);
+            }
+            Inbound::SnapshotRequested => {
+                self.send_remote_snapshot(SnapshotReason::Requested);
+            }
+            Inbound::Prompt { ref_id, text } => {
+                self.remote_accepted(&ref_id, InputKind::Prompt, AcceptResult::Queued, None);
+                self.remote_prompt(text, events);
+            }
+            Inbound::Interrupt { ref_id } => {
+                self.remote_interrupt(&ref_id);
+            }
+            Inbound::Approve { ref_id, approval_id, decision } => {
+                self.remote_approve(&ref_id, &approval_id, decision);
+            }
+            Inbound::Answer { ref_id, question_id, selected, custom } => {
+                self.remote_answer(&ref_id, &question_id, selected, custom);
+            }
+            Inbound::Command { ref_id, name, args } => {
+                self.remote_command(&ref_id, &name, &args);
+            }
+            Inbound::Closed { .. } | Inbound::Warning { .. } | Inbound::Peers { .. } | Inbound::Disconnected { .. } => {
+            }
+        }
+    }
+
+    fn remote_accepted(&mut self, ref_id: &str, kind: InputKind, result: AcceptResult, reason: Option<&str>) {
+        if let Some(bridge) = &mut self.remote {
+            bridge.accepted(ref_id, kind, result, reason);
+        }
+    }
+
+    fn remote_prompt(&mut self, text: String, events: &mpsc::UnboundedSender<AgentEvent>) {
+        if self.turn_id.is_some() {
+            let content = self.user_content(&text, Vec::new());
+            self.thread.state.injections.push(match content {
+                Value::String(_) => crate::agent::Injection::UserMessage(text.clone()),
+                content => crate::agent::Injection::UserContent { text: text.clone(), content },
+            });
+        } else {
+            let text = crate::context::expand_file_references(&self.config.workspace, &text).unwrap_or(text);
+            let content = self.user_content(&text, Vec::new());
+            self.start_turn(content, None, events);
+        }
+    }
+
+    fn remote_interrupt(&mut self, ref_id: &str) {
+        if self.turn_id.is_none() {
+            self.remote_accepted(
+                ref_id,
+                InputKind::Interrupt,
+                AcceptResult::Rejected,
+                Some("nothing is running to interrupt"),
+            );
+            return;
+        }
+        self.cancel.store(true, Ordering::Relaxed);
+        self.remote_accepted(ref_id, InputKind::Interrupt, AcceptResult::Applied, None);
+    }
+
+    fn remote_approve(&mut self, ref_id: &str, approval_id: &str, decision: ApprovalDecision) {
+        if let Some(id) = self.pending_approvals.keys().next().cloned()
+            && let Some(responder) = self.pending_approvals.remove(&id)
+        {
+            if let Some(bridge) = &mut self.remote {
+                bridge.approval_resolved(approval_id, decision, By::Browser, 0);
+            }
+            self.approval_remote_id = None;
+            self.remote_accepted(ref_id, InputKind::Approve, AcceptResult::Applied, None);
+            let _ = responder.send(decision);
+            return;
+        }
+        self.remote_accepted(ref_id, InputKind::Approve, AcceptResult::Rejected, Some("no open approval"));
+    }
+
+    fn remote_answer(&mut self, ref_id: &str, question_id: &str, selected: Vec<String>, custom: Option<String>) {
+        if let Some(id) = self.pending_questions.keys().next().cloned()
+            && let Some(responder) = self.pending_questions.remove(&id)
+        {
+            if let Some(bridge) = &mut self.remote {
+                bridge.question_resolved(question_id, &selected, custom.as_deref(), By::Browser, 0);
+            }
+            self.question_remote_id = None;
+            self.remote_accepted(ref_id, InputKind::Answer, AcceptResult::Applied, None);
+            let _ = responder.send(UserAnswer { selected_labels: selected, custom_text: custom });
+            return;
+        }
+        self.remote_accepted(ref_id, InputKind::Answer, AcceptResult::Rejected, Some("no open question"));
+    }
+
+    fn remote_command(&mut self, ref_id: &str, name: &str, args: &str) {
+        match name {
+            "sessions" => {
+                if let Some(store) = &self.store {
+                    let rows: Vec<_> = store
+                        .list()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|session| crate::remote::SessionRow {
+                            id: session.id.to_string(),
+                            title: session.title,
+                            updated: session.updated_at.to_rfc3339(),
+                        })
+                        .collect();
+                    if let Some(bridge) = &mut self.remote {
+                        bridge.sessions(rows);
+                    }
+                }
+                self.remote_accepted(ref_id, InputKind::Command, AcceptResult::Applied, None);
+            }
+            "resume" => {
+                let id = args.trim();
+                if let Some(store) = &self.store
+                    && let Ok(session) = store.load(id)
+                {
+                    self.stop_idle_compaction();
+                    self.thread_closed();
+                    self.tokens.store_total(session.tokens_used);
+                    self.thread = ThreadState::new(&self.config, Some(session));
+                    self.thread_opened();
+                    self.rebind_remote();
+                    notify("thread/started", json!({"threadId": self.thread_id()}));
+                    self.remote_accepted(ref_id, InputKind::Command, AcceptResult::Applied, None);
+                } else {
+                    self.remote_accepted(
+                        ref_id,
+                        InputKind::Command,
+                        AcceptResult::Rejected,
+                        Some("could not load session"),
+                    );
+                }
+            }
+            "new" => {
+                self.stop_idle_compaction();
+                self.thread_closed();
+                self.thread = ThreadState::new(&self.config, None);
+                self.tokens.store_total(0);
+                self.thread_opened();
+                self.rebind_remote();
+                notify("thread/started", json!({"threadId": self.thread_id()}));
+                self.remote_accepted(ref_id, InputKind::Command, AcceptResult::Applied, None);
+            }
+            "model" => {
+                let target = args.trim();
+                if target.is_empty() {
+                    self.remote_accepted(
+                        ref_id,
+                        InputKind::Command,
+                        AcceptResult::Rejected,
+                        Some("model name required"),
+                    );
+                    return;
+                }
+                if self.settings.profiles.contains_key(target) {
+                    if let Err(e) = self.select_profile(target) {
+                        self.remote_accepted(ref_id, InputKind::Command, AcceptResult::Rejected, Some(&e.to_string()));
+                        return;
+                    }
+                } else {
+                    self.config.model = target.to_string();
+                }
+                self.thread.session.model = self.config.model.clone();
+                self.rebind_remote();
+                notify("thread/name/updated", json!({"threadId": self.thread_id(), "name": self.thread.session.title}));
+                self.remote_accepted(ref_id, InputKind::Command, AcceptResult::Applied, None);
+            }
+            "effort" => {
+                let effort_str = args.trim();
+                if effort_str.is_empty() || effort_str == "off" || effort_str == "none" {
+                    self.config.reasoning_effort = None;
+                    if let Some(profile) = self.settings.profiles.get_mut(&self.settings.default_profile) {
+                        profile.reasoning_effort = None;
+                        let _ = self.settings.save(&self.config.paths);
+                    }
+                    self.remote_accepted(ref_id, InputKind::Command, AcceptResult::Applied, None);
+                } else if let Some(effort) = crate::config::ReasoningEffort::parse(effort_str) {
+                    self.config.reasoning_effort = Some(effort);
+                    if let Some(profile) = self.settings.profiles.get_mut(&self.settings.default_profile) {
+                        profile.reasoning_effort = Some(effort);
+                        let _ = self.settings.save(&self.config.paths);
+                    }
+                    self.remote_accepted(ref_id, InputKind::Command, AcceptResult::Applied, None);
+                } else {
+                    self.remote_accepted(
+                        ref_id,
+                        InputKind::Command,
+                        AcceptResult::Rejected,
+                        Some("invalid reasoning effort"),
+                    );
+                }
+            }
+            _ => {
+                self.remote_accepted(ref_id, InputKind::Command, AcceptResult::Rejected, Some("unsupported command"));
+            }
+        }
     }
 
     /// Flush what the front end can no longer wait for: the thread's last
@@ -3257,5 +3621,73 @@ mod tests {
             goal_item(goal.snapshot()),
             json!({"objective": "Ship the parser", "status": "paused", "iterations": 1, "note": "waiting on review"})
         );
+    }
+
+    #[tokio::test]
+    async fn thread_delete_removes_session_and_resets_active() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::config::AbacusPaths::under(temp.path().to_path_buf());
+        let store = SessionStore::new(&paths, temp.path().to_path_buf());
+        let session = store.create("default".into(), "model".into(), vec![]).unwrap();
+        assert!(store.path(session.id).exists());
+
+        let config = Config::for_endpoint(
+            temp.path().to_path_buf(),
+            "http://127.0.0.1:9999/v1".into(),
+            "mock-model".into(),
+            paths,
+        );
+        let tokens = std::sync::Arc::new(crate::provider::TokenLedger::new(0));
+        let provider = Provider::with_tokens(&config, tokens.clone()).unwrap();
+        let (remote_tx, _remote_rx) = mpsc::unbounded_channel();
+        let (idle_done, _idle_rx) = mpsc::unbounded_channel();
+        let (events, _event_rx) = mpsc::unbounded_channel();
+        let mailbox = crate::inbox::Mailbox::new(config.paths.clone(), crate::presence::FrontEnd::Desktop);
+        let mut app = App {
+            thread: ThreadState::new(&config, Some(session.clone())),
+            config: config.clone(),
+            settings: Settings::default(),
+            credentials: Credentials::default(),
+            services: std::sync::Arc::new(AgentServices::empty(temp.path().to_path_buf())),
+            store: Some(store.clone()),
+            provider,
+            tokens,
+            reported_context: 0,
+            reported_goal: Value::Null,
+            reported_tasks: Value::Null,
+            turn_worked: false,
+            goal_turn: None,
+            yolo: std::sync::Arc::new(AtomicBool::new(false)),
+            cancel: std::sync::Arc::new(AtomicBool::new(false)),
+            journal: Default::default(),
+            turn_id: None,
+            open_items: HashMap::new(),
+            descriptions: HashMap::new(),
+            pending_approvals: HashMap::new(),
+            pending_questions: HashMap::new(),
+            pending_client_calls: HashMap::new(),
+            client_calls: None,
+            counter: 0,
+            usage: None,
+            sync_warned: std::sync::Arc::default(),
+            workers: crate::workers::Workers::default(),
+            idle_due: None,
+            idle_compaction: None,
+            idle_done,
+            idle_exit: None,
+            last_activity: tokio::time::Instant::now(),
+            mailbox,
+            remote: None,
+            remote_tx,
+            approval_remote_id: None,
+            question_remote_id: None,
+        };
+
+        let result = app.handle("thread/delete", json!({"threadId": session.id.to_string()}), &events).await.unwrap();
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["deleted"], session.id.to_string());
+        assert_eq!(result["activeReset"], true);
+        assert!(!store.path(session.id).exists());
+        assert_ne!(app.thread.session.id, session.id);
     }
 }

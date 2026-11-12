@@ -96,6 +96,19 @@ pub struct Cli {
     #[arg(long)]
     pub no_session: bool,
 
+    /// Serve this session to a phone (port, default 8787). Listens on
+    /// loopback only; add --mobile-lan to accept phones from the network
+    #[arg(long, value_name = "PORT", num_args = 0..=1, default_missing_value = "8787")]
+    pub mobile: Option<u16>,
+
+    /// Let phones on the network reach the --mobile link, not just this machine
+    #[arg(long)]
+    pub mobile_lan: bool,
+    /// Publish the phone link with a cloudflared quick tunnel, so it works
+    /// from another network without an account or a router port.
+    #[arg(long = "mobile-tunnel", requires = "mobile")]
+    pub mobile_tunnel: bool,
+
     /// Override the maximum model/tool round trips per prompt
     #[arg(long)]
     pub max_steps: Option<usize>,

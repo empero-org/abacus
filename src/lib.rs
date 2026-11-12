@@ -24,6 +24,7 @@ pub mod input;
 pub mod markdown;
 pub mod mcp;
 pub mod memories;
+pub mod mobile;
 pub mod model_hub;
 pub mod model_info;
 pub mod peers;

@@ -251,7 +251,7 @@ async fn password_login_flow(
         Some(value) => value,
         None => prompt_password()?,
     };
-    let response = anonymous_client()?
+    let response = anonymous_client(server)?
         .post(format!("{server}/v1/auth/login"))
         .header("Abacus-Protocol", client::PROTOCOL)
         .json(&with_identity(paths, json!({"email": email, "password": password})))
@@ -261,8 +261,9 @@ async fn password_login_flow(
 }
 
 async fn device_login_flow(paths: &AbacusPaths, server: &str) -> Result<LoginResponse> {
+    let client = anonymous_client(server)?;
     let start: DeviceStart = decode(
-        anonymous_client()?
+        client
             .post(format!("{server}/v1/auth/device"))
             .header("Abacus-Protocol", client::PROTOCOL)
             .json(&identity(paths))
@@ -277,6 +278,7 @@ async fn device_login_flow(paths: &AbacusPaths, server: &str) -> Result<LoginRes
     println!("  {}", start.user_code);
     println!();
     println!("Waiting for approval…");
+    let _ = std::io::stdout().flush();
     let deadline = std::time::Instant::now() + Duration::from_secs(start.expires_in.max(30));
     let mut interval = Duration::from_secs(start.interval.max(1));
     loop {
@@ -284,7 +286,7 @@ async fn device_login_flow(paths: &AbacusPaths, server: &str) -> Result<LoginRes
             bail!("device login expired; run `abacus sync login` again");
         }
         tokio::time::sleep(interval).await;
-        let response = anonymous_client()?
+        let response = client
             .post(format!("{server}/v1/auth/device/token"))
             .header("Abacus-Protocol", client::PROTOCOL)
             .json(&json!({"device_code": start.device_code}))
