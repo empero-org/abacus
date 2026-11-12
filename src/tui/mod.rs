@@ -300,6 +300,7 @@ enum ConfigKey {
     Mode,
     MaxSteps,
     ToolOutputLimit,
+    MaxTimers,
     ProjectTrust,
     TokenCompression,
     IdleCompaction,
@@ -1254,6 +1255,10 @@ fn entries_from_messages(messages: &[Value]) -> Vec<Entry> {
             }
             // The turn an unfinished goal started by itself.
             "user" if crate::goal::is_carry_on(content) => entries.push(Entry::new(EntryKind::System, GOAL_CARRIES_ON)),
+            // The wake-up of a timer the model set.
+            "user" if crate::timers::parse(content).is_some() => {
+                entries.extend(crate::timers::parse(content).map(|fired| Entry::new(EntryKind::System, fired.shown())))
+            }
             "user" => entries.push(match crate::inbox::shown(content) {
                 // Another session's message, shown as it was when it arrived.
                 Some((title, text)) => Entry::new(EntryKind::System, format!("Message from \"{title}\": {text}")),
@@ -1723,6 +1728,7 @@ impl App {
                     self.say(notice);
                 }
                 AgentEvent::PeerMessage(message) => self.show_peer_message(&message),
+                AgentEvent::TimerFired(fired) => self.say(fired.shown()),
                 AgentEvent::Reasoning(piece) => {
                     self.turn_output_chars = self.turn_output_chars.saturating_add(piece.len());
                     // The status header follows the reasoning even when the
@@ -1780,9 +1786,13 @@ impl App {
                     self.ctx_chars = message_chars(&self.messages);
                     // A turn that ended by itself carries an active goal on,
                     // unless something waiting starts the next turn anyway:
-                    // the goal carries on once that one ends. A turn the
-                    // person stopped ends the run of turns.
-                    let goal = (reason != DoneReason::Interrupted && !self.state.injections.has_starter())
+                    // the goal carries on once that one ends. A pending timer
+                    // is such a thing, only later — the model ended its turn
+                    // to wait for it. A turn the person stopped ends the run
+                    // of turns.
+                    let goal = (reason != DoneReason::Interrupted
+                        && !self.state.injections.has_starter()
+                        && self.state.timers.pending() == 0)
                         .then(|| self.state.goal.after_turn(self.turn_had_tools))
                         .flatten();
                     let carries_on = matches!(goal, Some(crate::goal::Next::Turn(_)));
@@ -1814,6 +1824,7 @@ impl App {
                         DoneReason::Complete => {}
                         DoneReason::Interrupted => {
                             self.say("Interrupted.");
+                            self.stop_timers();
                             self.status = "interrupted".to_owned();
                         }
                         DoneReason::StepLimit => {
@@ -2413,10 +2424,17 @@ impl App {
         // Traces are keyed by session id: the next persist opens the right one
         // instead of appending this session's calls to the previous trace.
         self.trace = None;
+        // The queue carries over, so a worker still running reports here;
+        // the timers do not: they would wake this session for another's work.
+        if !same {
+            self.state.timers.cancel_all();
+            while self.state.injections.take_timer().is_some() {}
+        }
         let injections = self.state.injections.clone();
+        let timers = if same { self.state.timers.clone() } else { Default::default() };
         let state = SessionState::open(&self.config, session.as_ref());
         let opened = Some(Opened::of(session.as_ref()));
-        self.state = SessionState { injections, opened, ..state };
+        self.state = SessionState { injections, timers, opened, ..state };
         self.messages =
             session.as_ref().map_or_else(|| initial_messages(&self.config.workspace), |s| s.messages.clone());
         self.ctx_chars = message_chars(&self.messages);
@@ -3019,6 +3037,7 @@ impl App {
                 call.duration_ms = elapsed;
             }
             self.say("Interrupted.");
+            self.stop_timers();
             self.status = "interrupted".to_owned();
             self.last_outcome = Some(TurnOutcome::Interrupted);
             self.follow = true;
@@ -3099,9 +3118,29 @@ impl App {
                 }
                 // A tool's images belong to the turn that called it.
                 Injection::ToolImages { .. } => {}
+                // A timer the model set came due with nothing running: its
+                // note is the turn, shown as the wake-up it is.
+                Injection::Timer(fired) => {
+                    self.say(fired.shown());
+                    self.start_turn(String::new(), fired.prompt(), false);
+                }
             }
         }
         pending.for_each(|injection| self.state.injections.push(injection));
         delivered
+    }
+
+    /// The person stopped the run: no timer it set wakes it again, neither
+    /// one still waiting nor one that came due as it was stopped.
+    fn stop_timers(&mut self) {
+        let mut cancelled = self.state.timers.cancel_all();
+        while self.state.injections.take_timer().is_some() {
+            cancelled += 1;
+        }
+        match cancelled {
+            0 => {}
+            1 => self.say("Its pending timer was cancelled."),
+            count => self.say(format!("Its {count} pending timers were cancelled.")),
+        }
     }
 }

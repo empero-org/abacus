@@ -174,6 +174,135 @@ async fn a_background_report_arriving_while_idle_starts_a_delivery_turn() {
     assert!(delivered.contains("background subagent finished"));
 }
 
+/// A timer the model set comes due with nothing running: its note starts a
+/// turn, shown as the wake-up it is rather than as a message the person sent.
+#[tokio::test]
+async fn a_timer_coming_due_while_idle_starts_a_wake_up_turn() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    let fired = crate::timers::Fired { id: 1, after: "1m".into(), note: "check the build".into() };
+    app.state.injections.push(crate::agent::Injection::Timer(fired));
+    assert!(app.deliver_pending_injections(), "a turn was started");
+    assert!(app.running.is_some());
+    let delivered = app.messages.iter().rev().find_map(|message| message["content"].as_str()).unwrap_or_default();
+    assert!(delivered.starts_with("[timer #1 fired after 1m] check the build"), "{delivered}");
+    assert!(
+        app.entries
+            .iter()
+            .any(|entry| entry.kind == EntryKind::System && entry.text == "Timer #1 fired after 1m: check the build")
+    );
+    assert!(app.entries.iter().all(|entry| entry.kind != EntryKind::User), "nobody typed it");
+
+    // A reopened session shows it the same way.
+    let rebuilt = entries_from_messages(&app.messages);
+    assert!(rebuilt.iter().any(|entry| entry.kind == EntryKind::System && entry.text.starts_with("Timer #1 fired")));
+    assert!(rebuilt.iter().all(|entry| !entry.text.contains("[timer #")));
+}
+
+/// The model ended its turn to wait for a timer: an active goal does not
+/// carry on over it, or each carried-on turn would set another.
+#[tokio::test]
+async fn a_pending_timer_holds_an_active_goal_until_it_fires() {
+    use crate::agent::{AgentEvent, DoneReason};
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    app.state.goal.create("Ship the parser").unwrap();
+    app.state.timers.execute("timer", r#"{"seconds":600,"note":"check CI"}"#, &app.state.injections, 16);
+    app.turn_had_tools = true;
+    let _ = app.event_tx.send(AgentEvent::Done { messages: app.messages.clone(), reason: DoneReason::Complete });
+    app.drain_agent_events();
+    assert!(app.running.is_none(), "no carry-on turn while a timer waits");
+    assert_eq!(app.state.timers.pending(), 1);
+    assert!(render(&mut app, 120, 30).contains("timer due"), "the footer says one is coming");
+}
+
+/// Stopping a turn stops the run of turns: no timer wakes it again.
+#[tokio::test]
+async fn stopping_a_turn_cancels_its_timers() {
+    use crate::agent::{AgentEvent, DoneReason};
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    app.state.timers.execute("timer", r#"{"seconds":600,"note":"check CI"}"#, &app.state.injections, 16);
+    let fired = crate::timers::Fired { id: 9, after: "1s".into(), note: "already due".into() };
+    app.state.injections.push(crate::agent::Injection::Timer(fired));
+    let _ = app.event_tx.send(AgentEvent::Done { messages: app.messages.clone(), reason: DoneReason::Interrupted });
+    app.drain_agent_events();
+    assert_eq!(app.state.timers.pending(), 0);
+    assert!(app.state.injections.is_empty(), "nor does one that already came due");
+    assert!(app.entries.iter().any(|entry| entry.text == "Its 2 pending timers were cancelled."));
+    assert!(!app.deliver_pending_injections());
+}
+
+#[test]
+fn max_timers_is_a_setting_the_next_turn_runs_with() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    assert_eq!(app.config_value(ConfigKey::MaxTimers), "16", "the default");
+    let edit = |app: &mut App, text: &str| {
+        let mut input = InputBuffer::new();
+        input.insert_str(text);
+        app.config_panel = Some(ConfigPanel { editing: Some((ConfigKey::MaxTimers, input)), ..panel() });
+        app.commit_config_edit();
+    };
+    edit(&mut app, "4");
+    assert_eq!(app.settings.agent.max_timers, 4);
+    assert_eq!(app.turn_options().max_timers, 4);
+    edit(&mut app, "100000");
+    assert_eq!(app.settings.agent.max_timers, 4, "out of range is refused: {}", app.status);
+    edit(&mut app, "0");
+    assert!(
+        crate::agent::turn_tool_specs(&app.turn_options()).iter().all(|spec| spec["function"]["name"] != "timer"),
+        "0 takes the tool away"
+    );
+}
+
+/// The whole round: the model sets a timer and ends its turn; the timer
+/// comes due and wakes it with its note; it answers.
+#[tokio::test]
+async fn the_model_sets_a_timer_ends_its_turn_and_is_woken_by_it() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let set = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"timer","arguments":"{\"seconds\":1,\"note\":\"check the build\"}"}}]}}]}"#;
+        let answers = [
+            format!(
+                "data: {set}\n\ndata: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\ndata: [DONE]\n\n"
+            ),
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Waiting on the build.\"}}]}\n\ndata: [DONE]\n\n".to_owned(),
+            "data: {\"choices\":[{\"delta\":{\"content\":\"The build passed.\"}}]}\n\ndata: [DONE]\n\n".to_owned(),
+        ];
+        let mut requests = Vec::new();
+        for body in answers {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            requests.push(read_http_request(&mut stream).await);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        }
+        requests
+    });
+    let (_directory, mut app) = test_app(&format!("http://{address}/v1"));
+    // Its request would take the server's next answer.
+    app.settings.ui.draft_replies = false;
+    app.submit_prompt("start the build and tell me when it passes".into());
+    let mut idle_between = false;
+    for _ in 0..400 {
+        sleep(Duration::from_millis(10)).await;
+        app.drain_agent_events();
+        idle_between |= app.running.is_none() && app.state.timers.pending() == 1;
+        app.deliver_pending_injections();
+        if app.entries.iter().any(|entry| entry.text.contains("The build passed.")) && app.running.is_none() {
+            break;
+        }
+    }
+    assert!(idle_between, "the turn ended while the timer waited, rather than blocking on it");
+    let requests = server.await.unwrap();
+    let tools = requests[0].split("\r\n\r\n").nth(1).unwrap();
+    assert!(tools.contains("\"timer\""), "the main agent is offered the tool");
+    let woken = requests[2].split("\r\n\r\n").nth(1).unwrap();
+    assert!(woken.contains("[timer #1 fired after 1s] check the build"), "{woken}");
+    assert!(app.entries.iter().any(|entry| entry.text == "Timer #1 fired after 1s: check the build"));
+    assert!(app.entries.iter().any(|entry| entry.text.contains("The build passed.")));
+}
+
 #[tokio::test]
 async fn reports_queued_behind_the_one_that_starts_a_turn_are_kept() {
     let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");

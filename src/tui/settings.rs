@@ -89,6 +89,11 @@ pub(super) const SETTINGS: &[(&str, &[Setting])] = &[
             ),
             typed(ConfigKey::MaxSteps, "Maximum agent steps", "How many tool calls one turn may make before it stops."),
             typed(ConfigKey::ToolOutputLimit, "Tool output limit", "Characters of tool output kept before truncation."),
+            typed(
+                ConfigKey::MaxTimers,
+                "Max timers",
+                "How many wake-up timers the model may have pending at once, so it cannot spam them. 0 takes the timer tool away.",
+            ),
             toggled(
                 ConfigKey::ProjectTrust,
                 "Trust this project",
@@ -356,6 +361,7 @@ pub(super) fn validate_settings(settings: &Settings) -> Result<()> {
     }
     crate::config::check_max_steps(settings.agent.max_steps)?;
     crate::config::check_tool_output_limit(settings.agent.tool_output_limit)?;
+    crate::timers::check_max_timers(settings.agent.max_timers)?;
     if settings.feedback.enabled {
         crate::feedback::FeedbackClient::new(&settings.feedback.endpoint)?;
     }
@@ -525,6 +531,7 @@ impl App {
         let (steps, output) = (crate::config::MAX_STEPS, crate::config::TOOL_OUTPUT_LIMIT);
         self.config.max_steps = self.settings.agent.max_steps.clamp(*steps.start(), *steps.end());
         self.config.tool_output_limit = self.settings.agent.tool_output_limit.clamp(*output.start(), *output.end());
+        self.config.max_timers = self.settings.agent.max_timers.min(*crate::timers::MAX_TIMERS.end());
         self.config.token_compression = self.settings.agent.token_compression;
         self.config.one_stream = self.settings.agent.one_stream;
         self.config.prompt_cache = self.settings.agent.prompt_cache;
@@ -952,6 +959,11 @@ impl App {
                     crate::config::check_tool_output_limit(number)?;
                     self.settings.agent.tool_output_limit = number;
                 }
+                ConfigKey::MaxTimers => {
+                    let number = trimmed.parse::<usize>().context("max timers must be a number")?;
+                    crate::timers::check_max_timers(number)?;
+                    self.settings.agent.max_timers = number;
+                }
                 ConfigKey::ContentWidth => {
                     if matches!(trimmed.to_ascii_lowercase().as_str(), "full" | "0") {
                         self.settings.ui.content_width = 0;
@@ -1219,6 +1231,7 @@ impl App {
             },
             ConfigKey::MaxSteps => self.settings.agent.max_steps.to_string(),
             ConfigKey::ToolOutputLimit => self.settings.agent.tool_output_limit.to_string(),
+            ConfigKey::MaxTimers => self.settings.agent.max_timers.to_string(),
             ConfigKey::ProjectTrust => on_off(self.settings.trust.contains(&self.config.workspace)),
             ConfigKey::FeedbackEnabled => on_off(self.settings.feedback.enabled),
             ConfigKey::FeedbackDiagnostics => on_off(self.settings.feedback.include_diagnostics),

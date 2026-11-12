@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **The agent sets timers instead of sleeping.** `timer(seconds, note)`
+  answers at once; when the time is up, the note comes back to the model, as
+  a new turn if its turn has ended, or between tool calls if it is still
+  working. To wait on a build, a deploy or a long run, it sets a timer and
+  ends its turn, so the person can talk to it in the meantime rather than
+  waiting out a `sleep`; the system prompt tells it so. `timer_cancel` takes
+  one back. At most 16 may wait at once: **Max timers** in `/config`
+  (`agent.max_timers`, 0 turns the tool off) keeps the model from setting
+  them by the hundred. Timers last while the session is open; stopping a
+  turn, or leaving the session, cancels them, and an active goal does not
+  carry on past one that waits. The terminal's footer says when the next is
+  due, a headless run waits for them before it exits, and the app server
+  reports them (`timers` in the thread snapshot, `thread/timers/updated`,
+  capability `timers`), lets the front end cancel one
+  (`thread/timers/cancel`), and shows a wake-up as a `userMessage` with
+  `timer: true`. Subagents and chats have no timers.
 - **abacus.exe starts on any 64-bit Windows.** The Windows build links the C
   runtime in, so it no longer needs `VCRUNTIME140.dll`. Without the Visual
   C++ Redistributable, the installer used to report success and then

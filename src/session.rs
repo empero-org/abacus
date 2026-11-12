@@ -30,6 +30,9 @@ pub struct SessionState {
     pub handles: crate::handles::HandleStore,
     /// Mid-turn arrivals: user steering and finished background subagents.
     pub injections: crate::agent::InjectionQueue,
+    /// The timers the model set, which fire into `injections`. Not saved:
+    /// they last while the session is open here.
+    pub timers: crate::timers::Timers,
     /// How the session came to be open, until its next turn has told the
     /// model so (see [`opening_note`]).
     pub opened: Option<Opened>,
@@ -70,6 +73,7 @@ impl SessionState {
             memories,
             handles: Default::default(),
             injections: Default::default(),
+            timers: Default::default(),
             // A session opened from disk says how only where it was resumed;
             // a fork, say, goes on as if never left.
             opened: session.is_none().then_some(Opened::New),
@@ -102,6 +106,7 @@ impl SessionState {
             memories: self.memories.clone(),
             handles: self.handles.clone(),
             injections: self.injections.clone(),
+            timers: self.timers.clone(),
             ..crate::agent::TurnOptions::for_config(config, services)
         }
     }

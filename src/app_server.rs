@@ -195,6 +195,8 @@ struct App {
     /// each change is reported once.
     reported_goal: Value,
     reported_tasks: Value,
+    /// The timers waiting, as last told to the front end.
+    reported_timers: Value,
     /// Whether the running turn has called a tool, which tells an active
     /// goal whether its turns still get anywhere.
     turn_worked: bool,
@@ -299,6 +301,7 @@ pub async fn run(
         reported_context: 0,
         reported_goal: Value::Null,
         reported_tasks: Value::Null,
+        reported_timers: Value::Null,
         turn_worked: false,
         goal_turn: None,
         yolo,
@@ -439,10 +442,12 @@ pub async fn run(
                 }
             }
             // Another session can write, and a background subagent can
-            // finish or message `main`, while no turn runs to pick it up.
+            // finish or message `main`, while no turn runs to pick it up. A
+            // timer the model set comes due the same way.
             _ = inbox_checks.tick() => {
                 app.check_inbox();
                 app.start_pending_turn(&events);
+                app.report_timers();
             }
         }
     }
@@ -575,8 +580,8 @@ impl App {
                     // model's `description` of what the call is for.
                     "toolDescriptions": true,
                     // command/run answers /memory, /goal, /usage, /repair
-                    // and /tools; `max_steps` and `tool_output_limit` are
-                    // writable config keys.
+                    // and /tools; `max_steps`, `tool_output_limit` and
+                    // `max_timers` are writable config keys.
                     "commandRun": true,
                     "agentLimits": true,
                     // The thread snapshot carries the `goal` and the
@@ -584,6 +589,10 @@ impl App {
                     // thread/taskList/updated report each change.
                     "goal": true,
                     "taskList": true,
+                    // The thread snapshot carries the `timers` the model set
+                    // to wake itself; thread/timers/updated reports each
+                    // change, and thread/timers/cancel takes one back.
+                    "timers": true,
                     // feedback/submit sends a report where the terminal's
                     // /feedback sends it.
                     "feedback": true,
@@ -594,6 +603,7 @@ impl App {
                 "idleCompaction": self.config.idle_compaction,
                 "maxSteps": self.config.max_steps,
                 "toolOutputLimit": self.config.tool_output_limit,
+                "maxTimers": self.config.max_timers,
                 "thread": self.thread_snapshot(),
             })),
             "shutdown" => Ok(json!({})),
@@ -623,6 +633,7 @@ impl App {
                 self.require_idle()?;
                 self.stop_idle_compaction();
                 self.thread_closed();
+                self.thread.state.timers.cancel_all();
                 self.thread = ThreadState::new(&self.config, None);
                 self.tokens.store_total(0);
                 self.thread_opened();
@@ -638,11 +649,22 @@ impl App {
                 self.thread_closed();
                 self.tokens.store_total(session.tokens_used);
                 // Reading the thread already open again is no resume: it was
-                // never left, and keeps whatever note it still owes.
-                let owed = (self.thread.persisted && self.thread.id() == id).then_some(self.thread.state.opened);
+                // never left, and keeps whatever note it still owes, and its
+                // timers with the queue they fire into. Another thread's
+                // timers would wake this one for work that is not its own.
+                let same = self.thread.persisted && self.thread.id() == id;
+                let owed = same.then_some(self.thread.state.opened);
+                let kept = same.then(|| (self.thread.state.injections.clone(), self.thread.state.timers.clone()));
+                if !same {
+                    self.thread.state.timers.cancel_all();
+                }
                 self.thread = ThreadState::reopened(&self.config, session);
                 if let Some(owed) = owed {
                     self.thread.state.opened = owed;
+                }
+                if let Some((injections, timers)) = kept {
+                    self.thread.state.injections = injections;
+                    self.thread.state.timers = timers;
                 }
                 self.thread_opened();
                 Ok(self.thread_snapshot())
@@ -676,6 +698,7 @@ impl App {
                 self.thread_closed();
                 self.tokens.store_total(0);
                 self.provider.clear_context_tokens();
+                self.thread.state.timers.cancel_all();
                 self.thread = ThreadState::new(&self.config, Some(fork));
                 self.thread_opened();
                 notify("thread/started", json!({"threadId": self.thread_id(), "forkedFrom": original.id.to_string()}));
@@ -1081,6 +1104,18 @@ impl App {
                     params["checkpoint"].as_str().ok_or_else(|| anyhow!("checkpoint required"))?.to_owned();
                 self.undo_edits(&checkpoint)
             }
+            // The person takes back a wake-up the model set: `id`, or `all`.
+            "thread/timers/cancel" => {
+                let timers = &self.thread.state.timers;
+                let cancelled = if params["all"].as_bool() == Some(true) {
+                    timers.cancel_all()
+                } else {
+                    let id = params["id"].as_u64().ok_or_else(|| anyhow!("id or all required"))?;
+                    usize::from(timers.cancel_one(id).is_some())
+                };
+                self.report_timers();
+                Ok(json!({"cancelled": cancelled}))
+            }
 
             other => Err(anyhow!("unknown method `{other}`")),
         }
@@ -1159,6 +1194,13 @@ impl App {
                 self.settings.agent.tool_output_limit = limit;
                 self.settings.save(&self.config.paths)?;
                 self.config.tool_output_limit = limit;
+            }
+            "max_timers" => {
+                let limit = value.as_u64().ok_or_else(|| anyhow!("max_timers must be a number"))? as usize;
+                crate::timers::check_max_timers(limit)?;
+                self.settings.agent.max_timers = limit;
+                self.settings.save(&self.config.paths)?;
+                self.config.max_timers = limit;
             }
             other => return Err(anyhow!("`{other}` is not a writable key")),
         }
@@ -1239,6 +1281,7 @@ impl App {
             "idleCompaction": self.config.idle_compaction,
             "maxSteps": self.config.max_steps,
             "toolOutputLimit": self.config.tool_output_limit,
+            "maxTimers": self.config.max_timers,
         })
     }
 
@@ -1586,6 +1629,7 @@ impl App {
             "usage": token_usage(&self.tokens.snapshot()),
             "goal": goal_item(self.thread.state.goal.snapshot()),
             "taskList": self.thread.state.tasks.snapshot(),
+            "timers": self.thread.state.timers.snapshot(),
             "items": history_items(&self.thread.messages),
         })
     }
@@ -1604,6 +1648,16 @@ impl App {
         if tasks != self.reported_tasks {
             notify("thread/taskList/updated", tasks.clone());
             self.reported_tasks = tasks;
+        }
+    }
+
+    /// Tell the front end which timers wait, once per change: one was set,
+    /// came due or was cancelled.
+    fn report_timers(&mut self) {
+        let timers = json!({"threadId": self.thread_id(), "timers": self.thread.state.timers.snapshot()});
+        if timers != self.reported_timers {
+            notify("thread/timers/updated", timers.clone());
+            self.reported_timers = timers;
         }
     }
 
@@ -1744,6 +1798,8 @@ impl App {
             && self.pending_questions.is_empty()
             && self.pending_client_calls.is_empty()
             && self.thread.state.injections.is_empty()
+            // A timer that fires into a server that stopped wakes nobody.
+            && self.thread.state.timers.pending() == 0
             && !self.workers.board.all().iter().any(|worker| worker.state == crate::workers::WorkerState::Running)
     }
 
@@ -1879,6 +1935,9 @@ impl App {
                 if matches!(name.as_str(), "goal_update" | "task_create" | "task_update") {
                     self.report_work();
                 }
+                if matches!(name.as_str(), "timer" | "timer_cancel") {
+                    self.report_timers();
+                }
             }
             AgentEvent::Notice(text) => match text.strip_prefix(crate::agent::STEERING_NOTICE) {
                 // The model read a steering message: it joins the transcript
@@ -1911,6 +1970,13 @@ impl App {
             AgentEvent::SubagentReport(report) => {
                 self.flush_streaming();
                 let mut item = report_item(&report);
+                item["id"] = json!(self.next("item"));
+                self.item("completed", item);
+            }
+            // And a timer the model set, when it comes due mid-turn.
+            AgentEvent::TimerFired(fired) => {
+                self.flush_streaming();
+                let mut item = timer_item(&fired);
                 item["id"] = json!(self.next("item"));
                 self.item("completed", item);
             }
@@ -2021,9 +2087,28 @@ impl App {
         }
         // A turn that ended by itself carries an active goal on, unless
         // something waiting starts the next turn anyway: the goal carries on
-        // once that one ends. A turn the person stopped, or that failed, ends
-        // the run of turns.
-        if matches!(status, "completed" | "stepLimit") && !self.thread.state.injections.has_starter() {
+        // once that one ends. A pending timer is such a thing, only later —
+        // the model ended its turn to wait for it. A turn the person stopped,
+        // or that failed, ends the run of turns, and no timer wakes it again.
+        if status == "interrupted" {
+            let mut cancelled = self.thread.state.timers.cancel_all();
+            while self.thread.state.injections.take_timer().is_some() {
+                cancelled += 1;
+            }
+            if cancelled > 0 {
+                let message = if cancelled == 1 {
+                    "Its pending timer was cancelled.".to_owned()
+                } else {
+                    format!("Its {cancelled} pending timers were cancelled.")
+                };
+                notify("warning", json!({"message": message}));
+            }
+            self.report_timers();
+        }
+        if matches!(status, "completed" | "stepLimit")
+            && !self.thread.state.injections.has_starter()
+            && self.thread.state.timers.pending() == 0
+        {
             match self.thread.state.goal.after_turn(self.turn_worked) {
                 Some(crate::goal::Next::Turn(prompt)) => self.goal_turn = Some(prompt),
                 Some(crate::goal::Next::Stalled) => notify(
@@ -2085,6 +2170,11 @@ impl App {
             Some(Injection::PeerMessage(message)) => {
                 let item = peer_item(&message.from.title, message.from.session, &message.text);
                 self.begin_turn(Value::String(message.prompt(&self.config.workspace)), item, events);
+                return;
+            }
+            // A timer the model set came due: its note is the next turn.
+            Some(Injection::Timer(fired)) => {
+                self.begin_turn(Value::String(fired.prompt()), timer_item(&fired), events);
                 return;
             }
             Some(Injection::SideNote(_) | Injection::ToolImages { .. }) | None => {
@@ -2597,6 +2687,7 @@ fn from_the_person(message: &Value) -> bool {
         || crate::goal::is_carry_on(&said)
         || crate::inbox::shown(&said).is_some()
         || crate::agent::arrival(&said).is_some()
+        || crate::timers::parse(&said).is_some()
     {
         return false;
     }
@@ -2705,6 +2796,19 @@ fn carry_on_item() -> Value {
     })
 }
 
+/// A timer's wake-up as a client item: a `userMessage` `from` the timer, with
+/// how long it ran, which a client that predates timers shows like a
+/// subagent's message.
+fn timer_item(fired: &crate::timers::Fired) -> Value {
+    json!({
+        "type": "userMessage",
+        "text": fired.note,
+        "timer": true,
+        "after": fired.after,
+        "from": {"title": format!("Timer #{}", fired.id), "agent": true},
+    })
+}
+
 /// Background subagents' report as a client item, from the workers it covers.
 fn report_item(report: &str) -> Value {
     let workers = crate::subagent::report_workers(report);
@@ -2800,6 +2904,8 @@ fn history_items(messages: &[Value]) -> Vec<Value> {
                     carry_on_item()
                 } else if let Some((title, text)) = crate::inbox::shown(&said) {
                     peer_item(&title, None, &text)
+                } else if let Some(fired) = crate::timers::parse(&said) {
+                    timer_item(&fired)
                 } else {
                     match crate::agent::arrival(&said) {
                         Some(crate::agent::Arrival::Report(report)) => report_item(&report),

@@ -140,6 +140,71 @@ fn headless_goal_runs_until_the_model_completes_it() {
     assert!(served[1].contains("[goal not done]") && served[1].contains("finish the task"), "{}", served[1]);
 }
 
+/// A one-shot run is not over while a timer the model set waits: the model
+/// ended its turn to be woken by it, and the run delivers the wake-up before
+/// it exits.
+#[test]
+fn headless_waits_for_a_timer_the_model_set_and_wakes_it() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let set = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"timer","arguments":"{\"seconds\":1,\"note\":\"check the run\"}"}}]}}]}"#;
+        let answers = [
+            format!(
+                "data: {set}\n\ndata: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\ndata: [DONE]\n\n"
+            ),
+            "data: {\"choices\":[{\"delta\":{\"content\":\"waiting \"}}]}\n\ndata: [DONE]\n\n".to_owned(),
+            "data: {\"choices\":[{\"delta\":{\"content\":\"run finished\"}}]}\n\ndata: [DONE]\n\n".to_owned(),
+        ];
+        let mut served = Vec::new();
+        while served.len() < answers.len() {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            if request.starts_with("GET /v1/models") {
+                let response = "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+                stream.write_all(response.as_bytes()).unwrap();
+                continue;
+            }
+            let body = &answers[served.len()];
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            served.push(request);
+        }
+        served
+    });
+
+    let directory = tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_abacus"))
+        .current_dir(directory.path())
+        .env("ABACUS_HOME", directory.path().join("home"))
+        .env("ABACUS_NO_ACTIVITY", "1")
+        .args([
+            "--base-url",
+            &format!("http://{address}/v1"),
+            "--model",
+            "test-model",
+            "--protocol",
+            "chat-completions",
+            "--no-session",
+            "--prompt",
+            "start the run and tell me when it is done",
+            "--output-format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    let served = server.join().unwrap();
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["text"], "waiting run finished");
+    assert!(served[2].contains("[timer #1 fired after 1s] check the run"), "{}", served[2]);
+}
+
 /// What the scripted model reports for every request, as the provider's final
 /// stream chunk: 1200 prompt tokens (1000 of them cached) and 34 generated.
 const MODEL_USAGE: &str = r#"{"choices":[],"usage":{"prompt_tokens":1200,"completion_tokens":34,"total_tokens":1234,"prompt_tokens_details":{"cached_tokens":1000}}}"#;
@@ -1058,6 +1123,102 @@ async fn app_server_lets_the_front_end_provide_tools() {
 
     input
         .write_all(frame(serde_json::json!({"jsonrpc": "2.0", "id": 4, "method": "shutdown"})).as_bytes())
+        .await
+        .unwrap();
+    drop(input);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait()).await;
+}
+
+/// The desktop sees the timers the model set: the thread reports each change,
+/// and when one comes due with nothing running it starts a turn, shown as the
+/// timer's wake-up rather than as the person's message.
+#[tokio::test]
+async fn app_server_reports_timers_and_wakes_the_thread_when_one_fires() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    fn answer(request: &str) -> String {
+        let says = |text: &str| {
+            format!(
+                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{text}\"}}}}]}}\n\ndata: {MODEL_USAGE}\n\ndata: [DONE]\n\n"
+            )
+        };
+        if request.contains("[timer #1 fired after 1s] check the run") {
+            return says("The run finished.");
+        }
+        if request.contains("Timer #1 set") {
+            return says("Waiting on the run.");
+        }
+        if request.contains(r#""name":"timer""#) {
+            let call = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"timer","arguments":"{\"seconds\":1,\"note\":\"check the run\"}"}}]}}]}"#;
+            let finish = r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
+            return format!("data: {call}\n\ndata: {finish}\n\ndata: {MODEL_USAGE}\n\ndata: [DONE]\n\n");
+        }
+        says("ok")
+    }
+    let (model, _requests) = scripted_model_endpoint(answer);
+    let sync = sync_server::SyncServer::start("secret-token").await;
+    let device = SignedIn::new(&sync, "secret-token");
+    let mut child = device
+        .command(&model, &["app-server"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let frame = |value: serde_json::Value| format!("{value}\n");
+    for request in [
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "turn/start", "params": {"text": "start the run"}}),
+    ] {
+        input.write_all(frame(request).as_bytes()).await.unwrap();
+    }
+
+    let mut initialized = serde_json::Value::Null;
+    let mut timers = Vec::new();
+    let mut wake_up = serde_json::Value::Null;
+    let mut completed = 0;
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let message: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if message["id"] == 1 {
+                initialized = message["result"].clone();
+            }
+            if message["method"] == "thread/timers/updated" {
+                timers.push(message["params"]["timers"].clone());
+            }
+            let item = &message["params"]["item"];
+            if message["method"] == "item/completed" && item["timer"] == true {
+                wake_up = item.clone();
+            }
+            if message["method"] == "turn/completed" {
+                completed += 1;
+                if completed == 2 {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+    .await;
+    assert_eq!(finished, Ok(true), "the timer should start a second turn");
+    assert_eq!(initialized["capabilities"]["timers"], true);
+    assert_eq!(initialized["thread"]["timers"], serde_json::json!([]));
+    // Set, then gone once it fired. (A first report of none may come before.)
+    let set = timers.iter().position(|timers| timers != &serde_json::json!([]));
+    let set = set.unwrap_or_else(|| panic!("never reported as set: {timers:?}"));
+    assert_eq!(timers[set][0]["id"], 1);
+    assert_eq!(timers[set][0]["note"], "check the run");
+    assert!(timers[set][0]["dueAtMs"].as_i64().is_some_and(|due| due > 0));
+    assert_eq!(timers[set + 1..], [serde_json::json!([])], "{timers:?}");
+    assert_eq!(wake_up["type"], "userMessage");
+    assert_eq!(wake_up["text"], "check the run");
+    assert_eq!(wake_up["after"], "1s");
+    assert_eq!(wake_up["from"]["title"], "Timer #1");
+
+    input
+        .write_all(frame(serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "shutdown"})).as_bytes())
         .await
         .unwrap();
     drop(input);

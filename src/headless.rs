@@ -170,6 +170,19 @@ pub async fn run(
             }
             AgentEvent::Done { messages, .. } => {
                 final_messages = messages;
+                // The model ended its turn to be woken by a timer it set: the
+                // run is not over while one waits. A goal carries on once no
+                // timer does.
+                if let Some(fired) = next_timer(&state, format).await {
+                    announce(
+                        format,
+                        &fired.shown(),
+                        json!({"type": "timer.fired", "id": fired.id, "after": fired.after, "note": fired.note}),
+                    )?;
+                    final_messages.push(json!({"role": "user", "content": fired.prompt()}));
+                    current_task = Some(start(final_messages.clone()));
+                    continue;
+                }
                 if !goal_run {
                     break;
                 }
@@ -200,6 +213,7 @@ pub async fn run(
             }
             AgentEvent::MessageSent { .. } | AgentEvent::ToolDescribed { .. } => {}
             AgentEvent::PeerMessage(message) => eprintln!("message {}: {}", message.origin(), message.text),
+            AgentEvent::TimerFired(fired) => eprintln!("note: {}", fired.shown()),
             AgentEvent::TraceFailed { error } => {
                 eprintln!("warning: training trace disabled — {error}");
             }
@@ -366,6 +380,32 @@ fn turn_options(
         _ => Default::default(),
     };
     TurnOptions { trace, yolo: yolo.clone(), session_id, peers, ..state.turn(config, services.clone()) }
+}
+
+/// The next timer the model set, once it comes due; None when none waits.
+async fn next_timer(state: &SessionState, format: OutputFormat) -> Option<crate::timers::Fired> {
+    let mut told = false;
+    loop {
+        // Pending first: a timer gone from there is already in the queue.
+        let due = state.timers.next_due();
+        if let Some(fired) = state.injections.take_timer() {
+            return Some(fired);
+        }
+        let due = due?;
+        if !told {
+            told = true;
+            let count = state.timers.pending();
+            let what = if count == 1 { "a timer".to_owned() } else { format!("{count} timers") };
+            aside(
+                format,
+                &format!(
+                    "waiting for {what}, the next due in {}",
+                    crate::timers::span(due.as_secs_f64().ceil() as u64)
+                ),
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
 }
 
 /// A bracketed aside on stderr, in the plain format only.

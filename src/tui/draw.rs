@@ -749,7 +749,19 @@ pub(super) fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Some(TurnOutcome::Interrupted) => (set.paused, warning()),
             None => (set.still, success()),
         };
-        vec![bold(format!(" {glyph} "), color), fg(ui::truncate(&app.status, 28), muted())]
+        let mut spans = vec![bold(format!(" {glyph} "), color), fg(ui::truncate(&app.status, 28), muted())];
+        // A turn will start by itself when a timer the model set comes due.
+        // The clock time it is due at, rather than a countdown, holds still
+        // between redraws.
+        if let Some(due) = app.state.timers.next_due() {
+            let at = chrono::Local::now() + chrono::Duration::milliseconds(due.as_millis() as i64);
+            let what = match app.state.timers.pending() {
+                1 => "timer due".to_owned(),
+                count => format!("{count} timers, next due"),
+            };
+            spans.push(fg(format!("  {what} {}", at.format("%H:%M:%S")), rail()));
+        }
+        spans
     };
 
     // Contextual hints: only the keys that do something in the current state.

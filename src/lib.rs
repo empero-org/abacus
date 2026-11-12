@@ -46,6 +46,7 @@ pub mod task;
 pub mod terminal;
 pub mod text;
 pub mod theme;
+pub mod timers;
 pub mod tool_format;
 pub mod tools;
 pub mod tui;

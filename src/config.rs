@@ -413,6 +413,8 @@ pub struct Config {
     pub connection: Connection,
     pub max_steps: usize,
     pub tool_output_limit: usize,
+    /// How many timers the model may have waiting at once; 0 offers none.
+    pub max_timers: usize,
     /// Whether actions are reviewed (AUTO) or simply run (YOLO).
     pub permission: Permission,
     pub no_session: bool,
@@ -452,6 +454,7 @@ impl Config {
             connection: Connection::inline(&base_url, ProviderProtocol::default(), None),
             max_steps: 32,
             tool_output_limit: 30_000,
+            max_timers: crate::timers::DEFAULT_MAX_TIMERS,
             permission: Permission::default(),
             no_session: false,
             model_limits: ModelLimits::default(),
@@ -543,6 +546,7 @@ impl Config {
         self.max_steps = cli.max_steps.unwrap_or(settings.agent.max_steps).clamp(*MAX_STEPS.start(), *MAX_STEPS.end());
         self.tool_output_limit =
             settings.agent.tool_output_limit.clamp(*TOOL_OUTPUT_LIMIT.start(), *TOOL_OUTPUT_LIMIT.end());
+        self.max_timers = settings.agent.max_timers.min(*crate::timers::MAX_TIMERS.end());
         self.permission = if cli.yes { Permission::Yolo } else { cli.mode.unwrap_or(settings.agent.mode) };
         self.no_session = cli.no_session;
         self.chat = matches!(cli.command, Some(Command::AppServer { chat: true }));
@@ -1409,6 +1413,10 @@ pub struct AgentSettings {
     /// Characters of tool output kept before truncation, within
     /// [`TOOL_OUTPUT_LIMIT`].
     pub tool_output_limit: usize,
+    /// Timers the model may have waiting at once, within
+    /// [`crate::timers::MAX_TIMERS`]. Keeps it from setting them by the
+    /// hundred; 0 takes the timer tool away.
+    pub max_timers: usize,
     /// Balanced high-savings mode for upstream tokens.
     #[serde(default)]
     pub token_compression: bool,
@@ -1487,6 +1495,7 @@ impl Default for AgentSettings {
             mode: Permission::Auto,
             max_steps: 128,
             tool_output_limit: 30_000,
+            max_timers: crate::timers::DEFAULT_MAX_TIMERS,
             token_compression: false,
             one_stream: false,
             prompt_cache: true,

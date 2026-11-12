@@ -166,6 +166,15 @@ impl ToolCall {
                 if names.is_empty() { "subagents".to_owned() } else { names.join(", ") }
             }
             "send_message" => args["to"].as_str().unwrap_or("subagent").to_owned(),
+            "timer" => {
+                let after =
+                    args["seconds"].as_u64().map(crate::timers::span).unwrap_or_else(|| args["seconds"].to_string());
+                format!("{after}: {}", args["note"].as_str().unwrap_or_default())
+            }
+            "timer_cancel" => match args["id"].as_u64() {
+                Some(id) => format!("timer #{id}"),
+                None => "all timers".to_owned(),
+            },
             // The desktop's browser tools: what was visited, clicked or typed.
             name if name.starts_with("browser_") => ["url", "element", "text", "key", "direction"]
                 .iter()

@@ -389,6 +389,7 @@ impl Bridge {
             AgentEvent::PeerMessage(message) => {
                 self.notice(&format!("Message {}: {}", message.origin(), message.text), Level::Info)
             }
+            AgentEvent::TimerFired(fired) => self.notice(&fired.shown(), Level::Info),
             AgentEvent::TraceFailed { error } => {
                 self.notice(&format!("Trace capture stopped: {error}"), Level::Warning)
             }
