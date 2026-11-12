@@ -819,8 +819,22 @@ pub(super) fn draw_qr(frame: &mut Frame<'_>, area: Rect, app: &App) {
         return;
     };
     let hints = [("esc", "close")];
-    let (url, rows, expires_in, opens_session) = match overlay {
-        QrOverlay::Ready { url, rows, expires_in, opens_session } => (url, rows, *expires_in, *opens_session),
+    let (url, rows, fine_print, target, title) = match overlay {
+        QrOverlay::Ready { url, rows, expires_in, opens_session } => {
+            let target = if *opens_session { "this session" } else { "your sessions" };
+            let fine = format!(
+                "Works once · expires in {} · signs in as you — keep it private",
+                super::commands::expiry(*expires_in)
+            );
+            (url, rows, fine, target, "PAIR A PHONE")
+        }
+        QrOverlay::Local { url, rows } => (
+            url,
+            rows,
+            "This link can run commands here · /mobile off ends it".to_owned(),
+            "this session",
+            "PHONE LINK",
+        ),
         QrOverlay::Loading | QrOverlay::Failed(_) => {
             let line = match overlay {
                 QrOverlay::Failed(error) => fg(format!("Could not create a pairing link: {error}"), danger()),
@@ -834,9 +848,6 @@ pub(super) fn draw_qr(frame: &mut Frame<'_>, area: Rect, app: &App) {
             return;
         }
     };
-    let target = if opens_session { "this session" } else { "your sessions" };
-    let expiry = super::commands::expiry(expires_in);
-    let fine_print = format!("Works once · expires in {expiry} · signs in as you — keep it private");
 
     let code = rows.as_deref().unwrap_or_default();
     let code_width = code.first().map_or(0, |row| row.chars().count()) as u16;
@@ -869,7 +880,7 @@ pub(super) fn draw_qr(frame: &mut Frame<'_>, area: Rect, app: &App) {
         lines.push(Line::from(""));
         lines.extend(fine);
     } else if compact {
-        let caption = format!("Scan to open {target} · works once · {expiry}");
+        let caption = format!("Scan to open {target}");
         lines.push(Line::from(fg(ui::truncate(&caption, text_width), text())));
     } else {
         let reason = if code.is_empty() {
@@ -889,7 +900,7 @@ pub(super) fn draw_qr(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
 
     let popup = ui::centered(width, lines.len() as u16 + 2, area);
-    let inner = open_overlay(frame, popup, "PAIR A PHONE", secondary(), &hints);
+    let inner = open_overlay(frame, popup, title, secondary(), &hints);
     lines.truncate(inner.height as usize);
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }

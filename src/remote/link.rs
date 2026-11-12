@@ -203,10 +203,10 @@ pub(crate) async fn run<C: Connector>(
                 Err(LinkError::Fatal(reason)) => return Err(Ended::Fatal(reason)),
                 Err(LinkError::Retry(reason)) => return Err(Ended::Lost(reason)),
             };
-            match timeout(config.connect_timeout, tokio_tungstenite::connect_async(url.as_str())).await {
+            match timeout(config.connect_timeout, connect_socket(url.as_str())).await {
                 Err(_) => Err(Ended::Lost("timed out connecting to the relay".into())),
                 Ok(Err(error)) => Err(handshake_error(&error)),
-                Ok(Ok((socket, _))) => Ok(socket),
+                Ok(Ok(socket)) => Ok(socket),
             }
         };
         let ended = match guarded(attempt, &mut commands, &mut stop).await {
@@ -278,6 +278,49 @@ async fn halt_link<C: Connector>(connector: &C, halt: Halt, config: &LinkConfig)
     if let Halt::Stop(Stop { disable: true, .. }) = halt {
         let _ = timeout(config.disable_timeout, connector.disable()).await;
     }
+}
+
+/// Connect to `url`, trying IPv4 addresses before IPv6 with a short per-address
+/// timeout so a blackholed IPv6 route on Windows cannot stall the entire connect
+/// budget before IPv4 is tried.
+async fn connect_socket(url: &str) -> Result<Socket, Box<WsError>> {
+    if let Ok(parsed) = reqwest::Url::parse(url)
+        && let Some(host) = parsed.host_str()
+    {
+        let port = parsed.port_or_known_default().unwrap_or(443);
+        if let Ok(resolved) = tokio::net::lookup_host((host, port)).await {
+            let mut v4 = Vec::new();
+            let mut v6 = Vec::new();
+            for addr in resolved {
+                if addr.is_ipv4() {
+                    v4.push(addr);
+                } else {
+                    v6.push(addr);
+                }
+            }
+            v4.extend(v6);
+            let mut last_err = None;
+            for addr in v4 {
+                match timeout(Duration::from_secs(4), TcpStream::connect(addr)).await {
+                    Ok(Ok(stream)) => {
+                        let _ = stream.set_nodelay(true);
+                        let (socket, _) = tokio_tungstenite::client_async_tls(url, stream).await.map_err(Box::new)?;
+                        return Ok(socket);
+                    }
+                    Ok(Err(err)) => last_err = Some(WsError::Io(err)),
+                    Err(_) => {
+                        last_err =
+                            Some(WsError::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timed out")));
+                    }
+                }
+            }
+            if let Some(err) = last_err {
+                return Err(Box::new(err));
+            }
+        }
+    }
+    let (socket, _) = tokio_tungstenite::connect_async(url).await.map_err(Box::new)?;
+    Ok(socket)
 }
 
 /// A failed WebSocket handshake. The relay answers an unusable ticket with
@@ -414,6 +457,7 @@ fn inbound(ref_id: String, input: Input) -> Inbound {
         }
         Input::Interrupt => Inbound::Interrupt { ref_id },
         Input::RequestSnapshot => Inbound::SnapshotRequested,
+        Input::Command { name, args } => Inbound::Command { ref_id, name, args },
     }
 }
 
