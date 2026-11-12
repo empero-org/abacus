@@ -1,0 +1,858 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: abacus-file: https://codex-pets.net;"
+  />
+  <title>Abacus Desktop Pet</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: transparent !important;
+      font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    #pet-root {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-end;
+      padding: 8px 12px 10px;
+      pointer-events: none;
+    }
+    #pet-root.hidden-pet {
+      display: none;
+    }
+
+    /* Speech Bubble */
+    .pet-bubble {
+      position: relative;
+      margin-bottom: 8px;
+      max-width: 290px;
+      min-width: 128px;
+      padding: 8px 12px;
+      border-radius: 11px;
+      background: rgba(16, 14, 24, 0.94);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      color: #f8fafc;
+      font-size: 11.5px;
+      line-height: 1.4;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.6);
+      text-align: center;
+      opacity: 0;
+      transform: translateY(6px) scale(0.95);
+      transition: opacity 0.18s ease, transform 0.18s ease, border-color 0.18s ease;
+      pointer-events: none;
+      cursor: pointer;
+    }
+    .pet-bubble.visible {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+      pointer-events: auto;
+    }
+    .pet-bubble::after {
+      content: "";
+      position: absolute;
+      bottom: -5px;
+      left: 50%;
+      transform: translateX(-50%) rotate(45deg);
+      width: 9px;
+      height: 9px;
+      background: inherit;
+      border-right: 1px solid rgba(255, 255, 255, 0.18);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.18);
+    }
+    .pet-bubble.status-running {
+      border-color: rgba(56, 189, 248, 0.65);
+    }
+    .pet-bubble.status-waiting {
+      border-color: rgba(251, 191, 36, 0.85);
+      background: rgba(48, 30, 8, 0.96);
+      color: #fef3c7;
+    }
+    .pet-bubble.status-success {
+      border-color: rgba(74, 222, 128, 0.72);
+    }
+    .pet-bubble.status-failed {
+      border-color: rgba(248, 113, 113, 0.85);
+      background: rgba(52, 14, 18, 0.96);
+      color: #fee2e2;
+    }
+    .pet-bubble-head {
+      font-weight: 700;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #c084fc;
+      margin-bottom: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .pet-bubble.status-waiting .pet-bubble-head {
+      color: #fbbf24;
+    }
+    .pet-bubble.status-failed .pet-bubble-head {
+      color: #f87171;
+    }
+    .pet-bubble.status-success .pet-bubble-head {
+      color: #4ade80;
+    }
+    .pet-bubble-text {
+      font-weight: 500;
+      word-break: break-word;
+    }
+
+    /* Sprite Actor */
+    .pet-actor {
+      position: relative;
+      pointer-events: auto;
+      cursor: grab;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.6));
+      transform-origin: 50% 24%;
+      transition: filter 0.14s ease, transform 0.2s cubic-bezier(0.22, 1.4, 0.36, 1);
+      touch-action: none;
+    }
+    .pet-actor::before {
+      content: "";
+      position: absolute;
+      inset: -10px;
+      pointer-events: auto;
+    }
+    .pet-actor:hover {
+      filter: drop-shadow(0 10px 20px rgba(182, 107, 255, 0.45));
+    }
+    .pet-actor.dragging {
+      cursor: grabbing;
+      filter: drop-shadow(0 16px 24px rgba(0, 0, 0, 0.72));
+      transition: filter 0.12s ease, transform 0.08s ease-out;
+    }
+    .pet-sprite {
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      background-repeat: no-repeat;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+    }
+
+    /* Compact Floating HUD */
+    .pet-hud {
+      margin-top: 5px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: rgba(15, 13, 24, 0.9);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55);
+      opacity: 0;
+      transform: translateY(-3px);
+      transition: opacity 0.15s ease, transform 0.15s ease;
+      pointer-events: none;
+    }
+    #pet-root.hud-visible .pet-hud {
+      opacity: 1;
+      transform: translateY(0);
+      pointer-events: auto;
+    }
+    .pet-hud-name {
+      font-size: 10px;
+      font-weight: 600;
+      color: #cbd5e1;
+      padding-right: 4px;
+      max-width: 110px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .pet-hud-btn {
+      background: rgba(255, 255, 255, 0.09);
+      border: none;
+      color: #e2e8f0;
+      font-size: 9.5px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 999px;
+      cursor: pointer;
+    }
+    .pet-hud-btn:hover {
+      background: #b66bff;
+      color: #0b0a10;
+    }
+    .pet-hud-btn.accent {
+      background: rgba(182, 107, 255, 0.25);
+      color: #e9d5ff;
+      border: 1px solid rgba(182, 107, 255, 0.45);
+    }
+  </style>
+</head>
+<body>
+  <div id="pet-root">
+    <div id="pet-bubble" class="pet-bubble" title="Click to open Abacus">
+      <div id="pet-bubble-head" class="pet-bubble-head">Abacus</div>
+      <div id="pet-bubble-text" class="pet-bubble-text">Ready!</div>
+    </div>
+    <div id="pet-actor" class="pet-actor" title="Drag anywhere on screen · Click to pet · Double-click to open Abacus">
+      <div id="pet-sprite" class="pet-sprite"></div>
+    </div>
+    <div id="pet-hud" class="pet-hud">
+      <span id="pet-hud-name" class="pet-hud-name">Pet</span>
+      <button type="button" class="pet-hud-btn accent" id="pet-btn-toggle-main">Hide App</button>
+      <button type="button" class="pet-hud-btn" id="pet-btn-studio">Studio</button>
+      <button type="button" class="pet-hud-btn" id="pet-btn-wave">Wave</button>
+    </div>
+  </div>
+
+  <script>
+    (() => {
+      const PET_CELL_W = 192;
+      const PET_CELL_H = 208;
+      const PET_COLS = 8;
+
+      const STATES = [
+        { id: "idle", row: 0, v1: 6, v2: 7, fps: 4 },
+        { id: "running-right", row: 1, v1: 8, v2: 8, fps: 7 },
+        { id: "running-left", row: 2, v1: 8, v2: 8, fps: 7 },
+        { id: "waving", row: 3, v1: 4, v2: 4, fps: 5 },
+        { id: "jumping", row: 4, v1: 5, v2: 5, fps: 6 },
+        { id: "failed", row: 5, v1: 8, v2: 8, fps: 5 },
+        { id: "waiting", row: 6, v1: 6, v2: 6, fps: 4 },
+        { id: "running", row: 7, v1: 6, v2: 6, fps: 6 },
+        { id: "review", row: 8, v1: 6, v2: 6, fps: 4 }
+      ];
+
+      let config = {
+        enabled: true,
+        activePetId: "yuki-cream-rabbit",
+        size: 96,
+        roaming: true,
+        cursorLook: true,
+        speechBubbles: true,
+        osNotifications: "always",
+        soundEffects: true,
+        manualState: "auto"
+      };
+      let installedPets = [];
+      let activePet = null;
+      let mainWindowVisible = true;
+
+      let currentState = "idle";
+      let overrideUntil = 0;
+      let overrideExpireTimer = null;
+      let agentState = null;
+      let turnStartedAt = 0;
+      let frameIdx = 0;
+      let animTimer = null;
+      let roamTimer = null;
+      let bubbleTimer = null;
+      let cursorAngleIdx = null;
+      let lastCursorAt = 0;
+      let isDragging = false;
+      let isHovered = false;
+      let hudHideTimer = null;
+
+      const rootEl = document.getElementById("pet-root");
+      const bubbleEl = document.getElementById("pet-bubble");
+      const bubbleHeadEl = document.getElementById("pet-bubble-head");
+      const bubbleTextEl = document.getElementById("pet-bubble-text");
+      const actorEl = document.getElementById("pet-actor");
+      const spriteEl = document.getElementById("pet-sprite");
+      const hudEl = document.getElementById("pet-hud");
+      const hudNameEl = document.getElementById("pet-hud-name");
+      const toggleMainBtn = document.getElementById("pet-btn-toggle-main");
+      const studioBtn = document.getElementById("pet-btn-studio");
+      const waveBtn = document.getElementById("pet-btn-wave");
+
+      const api = window.abacus && window.abacus.pets;
+
+      // OS-backed hit rects in main process control click-through (eliminates mouseleave flicker)
+      function computeInteractiveRects() {
+        const rects = [];
+        const addRect = (el, padX, padY) => {
+          if (!el) return;
+          const r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) return;
+          rects.push({
+            left: Math.floor(r.left - padX),
+            top: Math.floor(r.top - padY),
+            right: Math.ceil(r.right + padX),
+            bottom: Math.ceil(r.bottom + padY)
+          });
+        };
+        if (config.enabled && activePet) {
+          addRect(actorEl, 10, 10);
+          addRect(hudEl, 6, 6);
+          if (bubbleEl.classList.contains("visible")) {
+            addRect(bubbleEl, 4, 4);
+          }
+        }
+        return rects;
+      }
+
+      function syncInteractiveRects() {
+        if (api && api.setInteractiveRects) {
+          api.setInteractiveRects(computeInteractiveRects());
+        }
+      }
+
+      function setHoveredState(over) {
+        if (Boolean(over) === isHovered) return;
+        isHovered = Boolean(over);
+        if (isHovered) {
+          if (hudHideTimer) {
+            clearTimeout(hudHideTimer);
+            hudHideTimer = null;
+          }
+          rootEl.classList.add("hud-visible");
+        } else {
+          if (hudHideTimer) clearTimeout(hudHideTimer);
+          hudHideTimer = setTimeout(() => {
+            if (!isHovered && !isDragging) {
+              rootEl.classList.remove("hud-visible");
+              syncInteractiveRects();
+            }
+          }, 350);
+        }
+      }
+
+      window.addEventListener("mousemove", (e) => {
+        const rects = computeInteractiveRects();
+        const over = rects.some(r => e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom);
+        if (over) {
+          if (api && api.wakeMouse) api.wakeMouse();
+          setHoveredState(true);
+        }
+      }, true);
+
+      // Audio synthesizer
+      let audioCtx = null;
+      function playSound(kind) {
+        if (!config.soundEffects) return;
+        try {
+          const Ctx = window.AudioContext || window.webkitAudioContext;
+          if (!Ctx) return;
+          if (!audioCtx) audioCtx = new Ctx();
+          if (audioCtx.state === "suspended") audioCtx.resume();
+          const now = audioCtx.currentTime;
+          const tone = (freq, off, dur, type = "sine", vol = 0.06) => {
+            const osc = audioCtx.createOscillator();
+            const g = audioCtx.createGain();
+            osc.type = type;
+            osc.frequency.setValueAtTime(freq, now + off);
+            g.gain.setValueAtTime(0.0001, now + off);
+            g.gain.exponentialRampToValueAtTime(vol, now + off + 0.015);
+            g.gain.exponentialRampToValueAtTime(0.0001, now + off + dur);
+            osc.connect(g);
+            g.connect(audioCtx.destination);
+            osc.start(now + off);
+            osc.stop(now + off + dur + 0.02);
+          };
+          if (kind === "complete") {
+            tone(523.25, 0.0, 0.11, "triangle", 0.07);
+            tone(659.25, 0.09, 0.11, "triangle", 0.07);
+            tone(783.99, 0.18, 0.14, "triangle", 0.07);
+            tone(1046.5, 0.28, 0.25, "triangle", 0.08);
+          } else if (kind === "waiting") {
+            tone(440.0, 0.0, 0.14, "sine", 0.07);
+            tone(659.25, 0.15, 0.22, "sine", 0.08);
+          } else if (kind === "failed") {
+            tone(329.63, 0.0, 0.14, "sawtooth", 0.045);
+            tone(261.63, 0.14, 0.16, "sawtooth", 0.045);
+            tone(220.0, 0.28, 0.26, "sawtooth", 0.05);
+          } else if (kind === "interact") {
+            tone(783.99, 0.0, 0.08, "sine", 0.045);
+            tone(987.77, 0.07, 0.12, "sine", 0.05);
+          }
+        } catch (e) {}
+      }
+
+      function showBubble(text, status = "normal", durationMs = 4500, header = "") {
+        if (!config.speechBubbles) return;
+        bubbleEl.className = `pet-bubble visible status-${status}`;
+        const petName = activePet ? activePet.displayName : "Abacus";
+        bubbleHeadEl.textContent = header ? `${petName} · ${header}` : petName;
+        bubbleTextEl.textContent = text;
+        requestAnimationFrame(syncInteractiveRects);
+        if (bubbleTimer) clearTimeout(bubbleTimer);
+        if (durationMs > 0) {
+          bubbleTimer = setTimeout(() => {
+            bubbleEl.classList.remove("visible");
+            syncInteractiveRects();
+          }, durationMs);
+        }
+      }
+
+      function setTempState(stateId, text, durationMs = 1500, status = "normal", header = "", bubbleDurationMs = null) {
+        currentState = stateId;
+        frameIdx = 0;
+        overrideUntil = Date.now() + durationMs;
+        if (overrideExpireTimer) {
+          clearTimeout(overrideExpireTimer);
+          overrideExpireTimer = null;
+        }
+        if (durationMs > 0) {
+          overrideExpireTimer = setTimeout(() => {
+            overrideExpireTimer = null;
+            if (!isDragging) restartAnimLoop();
+          }, durationMs + 15);
+        }
+        if (text) {
+          const bDur = typeof bubbleDurationMs === "number" ? bubbleDurationMs : durationMs;
+          showBubble(text, status, bDur, header);
+        }
+        restartAnimLoop();
+      }
+
+      function getEffectiveState() {
+        if (config.manualState && config.manualState !== "auto") return config.manualState;
+        if (isDragging && dragAnimActive) return dragAnimState;
+        if (Date.now() < overrideUntil) return currentState;
+        if (agentState) return agentState;
+        return currentState || "idle";
+      }
+
+      let lastReportedSizeKey = "";
+      function renderFrame() {
+        if (!config.enabled || !activePet) {
+          rootEl.classList.add("hidden-pet");
+          if (lastReportedSizeKey !== "hidden") {
+            lastReportedSizeKey = "hidden";
+            syncInteractiveRects();
+          }
+          return;
+        }
+        rootEl.classList.remove("hidden-pet");
+
+        const w = Math.max(48, Math.min(180, Number(config.size) || 96));
+        const h = Math.round((w * PET_CELL_H) / PET_CELL_W);
+        const vNum = activePet.spriteVersionNumber === 2 ? 2 : 1;
+        const totalRows = vNum === 2 ? 11 : 9;
+
+        actorEl.style.width = `${w}px`;
+        actorEl.style.height = `${h}px`;
+
+        const eff = getEffectiveState();
+        let row = 0;
+        let frame = 0;
+        if (
+          vNum === 2 &&
+          eff === "idle" &&
+          config.cursorLook &&
+          cursorAngleIdx !== null &&
+          Date.now() - lastCursorAt < 2500
+        ) {
+          row = 9 + Math.floor(cursorAngleIdx / 8);
+          frame = cursorAngleIdx % 8;
+        } else {
+          const meta = STATES.find(s => s.id === eff) || STATES[0];
+          const maxFrames = vNum === 2 ? meta.v2 : meta.v1;
+          row = meta.row;
+          frame = frameIdx % Math.max(1, maxFrames);
+        }
+
+        spriteEl.style.backgroundImage = `url("${activePet.spritesheetUrl}")`;
+        spriteEl.style.backgroundSize = `${w * PET_COLS}px ${h * totalRows}px`;
+        spriteEl.style.backgroundPosition = `-${frame * w}px -${row * h}px`;
+        hudNameEl.textContent = `${activePet.displayName} (${eff})`;
+
+        const sizeKey = `${w}x${h}:${bubbleEl.classList.contains("visible") ? 1 : 0}`;
+        if (sizeKey !== lastReportedSizeKey) {
+          lastReportedSizeKey = sizeKey;
+          requestAnimationFrame(syncInteractiveRects);
+        }
+      }
+
+      function restartAnimLoop() {
+        if (animTimer) clearInterval(animTimer);
+        const eff = getEffectiveState();
+        const meta = STATES.find(s => s.id === eff) || STATES[0];
+        const interval = Math.round(1000 / Math.max(4, meta.fps || 6));
+        renderFrame();
+        animTimer = setInterval(() => {
+          frameIdx = (frameIdx + 1) % 64;
+          renderFrame();
+        }, interval);
+      }
+
+      // Free screen-wide dragging across entire desktop using Electron main cursor tracking
+      let dragMoved = false;
+      let dragAnimActive = false;
+      let dragAnimState = "jumping";
+      let dragOriginScreenX = 0;
+      let dragOriginScreenY = 0;
+      let lastDragScreenX = 0;
+      let lastDragScreenY = 0;
+      let smoothVx = 0;
+      let smoothVy = 0;
+      let dragSettleTimer = null;
+      let lastClickAt = 0;
+
+      actorEl.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        isDragging = true;
+        dragMoved = false;
+        dragAnimActive = false;
+        dragAnimState = "jumping";
+        dragOriginScreenX = typeof e.screenX === "number" ? e.screenX : e.clientX;
+        dragOriginScreenY = typeof e.screenY === "number" ? e.screenY : e.clientY;
+        lastDragScreenX = dragOriginScreenX;
+        lastDragScreenY = dragOriginScreenY;
+        smoothVx = 0;
+        smoothVy = 0;
+        actorEl.classList.add("dragging");
+        try { actorEl.setPointerCapture(e.pointerId); } catch {}
+        if (api && api.dragStart) {
+          api.dragStart();
+        }
+      });
+
+      const endDrag = async (e) => {
+        if (!isDragging) return;
+        const hadDragAnim = dragAnimActive;
+        isDragging = false;
+        dragAnimActive = false;
+        dragAnimState = "jumping";
+        if (dragSettleTimer) {
+          clearTimeout(dragSettleTimer);
+          dragSettleTimer = null;
+        }
+        actorEl.classList.remove("dragging");
+        actorEl.style.transform = "";
+        if (e && typeof e.pointerId === "number") {
+          try { actorEl.releasePointerCapture(e.pointerId); } catch {}
+        }
+        let totalMoved = 0;
+        if (api && api.dragEnd) {
+          totalMoved = await api.dragEnd();
+        }
+
+        if (!dragMoved || totalMoved < 5) {
+          if (hadDragAnim) restartAnimLoop();
+          const now = Date.now();
+          if (now - lastClickAt < 340) {
+            lastClickAt = 0;
+            // Double-click -> summon / restore Abacus main window
+            if (api && api.showMainWindow) api.showMainWindow();
+          } else {
+            lastClickAt = now;
+            const msgs = [
+              "Everything is running smoothly!",
+              "Drag me anywhere outside Abacus!",
+              "Minimize Abacus anytime — I'll watch your tasks!",
+              "Double-click me or click 'Open App' to bring Abacus back."
+            ];
+            setTempState("jumping", msgs[Math.floor(Math.random() * msgs.length)], 680, "success", "", 2000);
+            playSound("interact");
+          }
+        } else if (!agentState && Date.now() >= overrideUntil) {
+          // Brief landing settle animation after dropping the pet
+          setTempState("waving", "", 300);
+        } else {
+          restartAnimLoop();
+        }
+      };
+
+      window.addEventListener("pointermove", (e) => {
+        if (!isDragging) return;
+        if (typeof e.buttons === "number" && (e.buttons & 1) === 0) {
+          endDrag(e);
+          return;
+        }
+        dragMoved = true;
+        if (api && api.dragStep) {
+          api.dragStep();
+        }
+
+        const sx = typeof e.screenX === "number" ? e.screenX : lastDragScreenX;
+        const sy = typeof e.screenY === "number" ? e.screenY : lastDragScreenY;
+        const dist = Math.hypot(sx - dragOriginScreenX, sy - dragOriginScreenY);
+        const vx = sx - lastDragScreenX;
+        const vy = sy - lastDragScreenY;
+        smoothVx = smoothVx * 0.4 + vx * 0.6;
+        smoothVy = smoothVy * 0.4 + vy * 0.6;
+
+        let nextAnim = dragAnimState;
+        if (Math.hypot(smoothVx, smoothVy) >= 1.2) {
+          if (Math.abs(smoothVx) > Math.abs(smoothVy) * 0.85 && Math.abs(smoothVx) >= 1.2) {
+            nextAnim = smoothVx < 0 ? "running-left" : "running-right";
+          } else {
+            nextAnim = "jumping";
+          }
+        }
+
+        if (!dragAnimActive && dist >= 3) {
+          dragAnimActive = true;
+          dragAnimState = nextAnim;
+          frameIdx = 0;
+          restartAnimLoop();
+        } else if (dragAnimActive && nextAnim !== dragAnimState) {
+          dragAnimState = nextAnim;
+          frameIdx = 0;
+          restartAnimLoop();
+        }
+
+        if (dragAnimActive) {
+          const tilt = Math.max(-15, Math.min(15, -smoothVx * 0.75));
+          actorEl.style.transform = `translateY(-5px) scale(1.06) rotate(${tilt.toFixed(1)}deg)`;
+          if (dragSettleTimer) clearTimeout(dragSettleTimer);
+          dragSettleTimer = setTimeout(() => {
+            if (isDragging && dragAnimActive) {
+              actorEl.style.transform = "translateY(-5px) scale(1.06) rotate(0deg)";
+              if (dragAnimState !== "jumping") {
+                dragAnimState = "jumping";
+                frameIdx = 0;
+                restartAnimLoop();
+              }
+            }
+          }, 120);
+        }
+        lastDragScreenX = sx;
+        lastDragScreenY = sy;
+      }, true);
+
+      window.addEventListener("pointerup", endDrag, true);
+      window.addEventListener("pointercancel", endDrag, true);
+      window.addEventListener("blur", endDrag);
+
+      actorEl.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        if (api && api.openStudio) api.openStudio();
+      });
+
+      bubbleEl.addEventListener("click", () => {
+        if (api && api.showMainWindow) api.showMainWindow();
+      });
+
+      toggleMainBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (api && api.toggleMainWindow) api.toggleMainWindow();
+      });
+
+      studioBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (api && api.openStudio) api.openStudio();
+      });
+
+      waveBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        setTempState("waving", "Hello! I'm always here on your desktop.", 900, "normal", "", 2200);
+        playSound("interact");
+      });
+
+      // Screen-wide horizontal patrolling
+      if (roamTimer) clearInterval(roamTimer);
+      roamTimer = setInterval(async () => {
+        if (!config.enabled || !config.roaming || !activePet) return;
+        if (config.manualState !== "auto" || agentState || Date.now() < overrideUntil || isDragging || isHovered || Date.now() - lastClickAt < 2500) return;
+        if (!api || !api.roamStep) return;
+
+        const dir = Math.random() > 0.5 ? 1 : -1;
+        const steps = 16 + Math.floor(Math.random() * 14);
+        currentState = dir > 0 ? "running-right" : "running-left";
+        restartAnimLoop();
+
+        let count = 0;
+        const stepId = setInterval(async () => {
+          if (isDragging || agentState || !config.roaming || config.manualState !== "auto" || Date.now() < overrideUntil || count >= steps) {
+            clearInterval(stepId);
+            if (Date.now() >= overrideUntil && !agentState) {
+              currentState = "idle";
+              restartAnimLoop();
+            }
+            return;
+          }
+          count += 1;
+          const ok = await api.roamStep(dir * 4);
+          if (!ok) {
+            clearInterval(stepId);
+            if (Date.now() >= overrideUntil && !agentState) {
+              currentState = "idle";
+              restartAnimLoop();
+            }
+          }
+        }, 48);
+      }, 7500);
+
+      // Listen to live Agent events from Electron Main Process
+      let lastDeltaAt = 0;
+      function handleAgentEvent(msg) {
+        if (!msg || !msg.method) return;
+        const m = msg.method;
+        const p = msg.params || {};
+        const ws = msg.workspaceName ? `[${msg.workspaceName}] ` : "";
+
+        if (m === "turn/started") {
+          turnStartedAt = Date.now();
+          agentState = "running";
+          overrideUntil = 0;
+          showBubble(`${ws}Working on your prompt…`, "running", 0, "Coding");
+          restartAnimLoop();
+        } else if (m === "item/reasoning/textDelta") {
+          agentState = "running";
+          if (Date.now() - lastDeltaAt > 3200) {
+            lastDeltaAt = Date.now();
+            const sec = turnStartedAt ? `${Math.round((Date.now() - turnStartedAt) / 1000)}s` : "Thinking";
+            showBubble(`${ws}Analyzing & planning…`, "running", 0, sec);
+          }
+          restartAnimLoop();
+        } else if (m === "item/agentMessage/delta") {
+          agentState = "running";
+          if (Date.now() - lastDeltaAt > 3200) {
+            lastDeltaAt = Date.now();
+            const sec = turnStartedAt ? `${Math.round((Date.now() - turnStartedAt) / 1000)}s` : "Writing";
+            showBubble(`${ws}Streaming response…`, "running", 0, sec);
+          }
+          restartAnimLoop();
+        } else if (m === "item/started" || m === "tool/call") {
+          const item = p.item || p;
+          const rawName = String(item.name || item.tool || item.type || "tool");
+          const isRead = /read|grep|glob|search|list|view|diff/i.test(rawName);
+          agentState = isRead ? "review" : "running";
+          const hint = item.filePath || item.path || item.command || "";
+          const shortHint = hint ? ` · ${String(hint).split(/[\\/]/).pop().slice(0, 24)}` : "";
+          showBubble(
+            `${ws}${isRead ? "Reviewing" : "Running"} ${rawName}${shortHint}`,
+            "running",
+            0,
+            isRead ? "Review" : "Tool"
+          );
+          restartAnimLoop();
+        } else if (
+          m === "item/commandExecution/requestApproval" ||
+          m === "item/fileChange/requestApproval" ||
+          m === "tool/requestUserInput"
+        ) {
+          agentState = "waiting";
+          const reason = m.includes("command")
+            ? "Command needs your approval! (Click to open Abacus)"
+            : m.includes("fileChange")
+              ? "File change needs your approval! (Click to open Abacus)"
+              : "Agent is waiting for your input! (Click to open Abacus)";
+          showBubble(`${ws}${reason}`, "waiting", 0, "Action Needed");
+          playSound("waiting");
+          if (api && api.notify) {
+            api.notify({
+              title: `${activePet ? activePet.displayName : "Abacus"} · Action Needed`,
+              body: `${ws}${reason}`,
+              silent: true
+            });
+          }
+          restartAnimLoop();
+        } else if (m === "turn/diff/updated" || m === "checkpoints/updated") {
+          const count = Array.isArray(p.files) ? p.files.length : 0;
+          if (count > 0 && !agentState) {
+            showBubble(`Checkpoint saved (${count} file${count === 1 ? "" : "s"})`, "running", 3800, "Checkpoint");
+          }
+        } else if (m === "turn/completed") {
+          const dur = turnStartedAt ? ((Date.now() - turnStartedAt) / 1000).toFixed(1) : null;
+          turnStartedAt = 0;
+          agentState = null;
+          const failed = p.status === "failed" || Boolean(p.error);
+          if (failed) {
+            const errTxt = p.error ? String(p.error).slice(0, 90) : "Turn ended with an error.";
+            setTempState("failed", `${ws}${errTxt}`, 1300, "failed", "Failed", 5500);
+            playSound("failed");
+            if (api && api.notify) {
+              api.notify({
+                title: `${activePet ? activePet.displayName : "Abacus"} · Failed`,
+                body: `${ws}${errTxt}`,
+                silent: true
+              });
+            }
+          } else {
+            const doneTxt = dur ? `${ws}Task finished in ${dur}s!` : `${ws}Task completed!`;
+            setTempState("jumping", doneTxt, 1100, "success", "Done", 4500);
+            playSound("complete");
+            if (api && api.notify) {
+              api.notify({
+                title: `${activePet ? activePet.displayName : "Abacus"} · Completed`,
+                body: doneTxt,
+                silent: true
+              });
+            }
+          }
+        } else if (m === "warning" && p.message) {
+          showBubble(String(p.message).slice(0, 90), "waiting", 5000, "Notice");
+        }
+      }
+
+      async function syncAll() {
+        if (!api) return;
+        const state = await api.getOverlayState();
+        if (state) {
+          if (state.config) Object.assign(config, state.config);
+          if (Array.isArray(state.installed)) installedPets = state.installed;
+          mainWindowVisible = Boolean(state.mainVisible);
+          toggleMainBtn.textContent = mainWindowVisible ? "Hide App" : "Open App";
+          activePet = installedPets.find(p => p.id === config.activePetId) || installedPets[0] || null;
+          restartAnimLoop();
+        }
+      }
+
+      if (api && api.onOverlayEvent) {
+        api.onOverlayEvent((ev) => {
+          if (!ev) return;
+          if (ev.type === "state") {
+            if (ev.config) Object.assign(config, ev.config);
+            if (Array.isArray(ev.installed)) installedPets = ev.installed;
+            if (typeof ev.mainVisible === "boolean") {
+              mainWindowVisible = ev.mainVisible;
+              toggleMainBtn.textContent = mainWindowVisible ? "Hide App" : "Open App";
+            }
+            activePet = installedPets.find(p => p.id === config.activePetId) || installedPets[0] || null;
+            restartAnimLoop();
+          } else if (ev.type === "agent") {
+            handleAgentEvent(ev.payload);
+          } else if (ev.type === "command") {
+            const c = ev.payload || {};
+            setTempState(
+              c.state || "jumping",
+              c.text || "",
+              Math.min(1100, c.duration || 1100),
+              c.status || "success",
+              c.header || "",
+              c.duration || 4000
+            );
+            if (c.sound) playSound(c.sound);
+          } else if (ev.type === "hover") {
+            setHoveredState(Boolean(ev.payload));
+          } else if (ev.type === "cursor") {
+            const { dx, dy } = ev.payload || {};
+            if (typeof dx === "number" && typeof dy === "number") {
+              const deg = (Math.atan2(dx, -dy) * 180) / Math.PI;
+              cursorAngleIdx = ((Math.round(deg / 22.5) % 16) + 16) % 16;
+              lastCursorAt = Date.now();
+            }
+          }
+        });
+      }
+
+      syncAll().then(() => {
+        if (activePet && config.enabled) {
+          setTimeout(() => {
+            setTempState("waving", `${activePet.displayName} is now floating free! Hide Abacus anytime.`, 900, "normal", "Online", 3200);
+          }, 600);
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
