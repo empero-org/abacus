@@ -1,8 +1,16 @@
 <p align="center">
-  <img src="assets/logo.jpg" alt="Abacus logo" width="300" />
+  <img src="assets/kojo-art.png" alt="Woodcut-style night print: a moon over a misted valley, a treeline of bare branches along the far bank, and a river of broken amber light running from the foreground to the moon. In the dark water at the lower left the word abacus is drawn out of the same thin amber scanlines, so it reads as light on the surface rather than as a caption" width="100%" />
 </p>
 
-# Abacus
+<h1 align="center">Abacus</h1>
+
+<p align="center">A simple but powerful TUI coding agent.</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/license-modified%20MIT-1C3552" alt="License: modified MIT" />
+  <img src="https://img.shields.io/badge/rust-1.88%2B-F2A33A" alt="Rust 1.88 or newer" />
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-6F8FA6" alt="macOS, Linux and Windows" />
+</p>
 
 Abacus is a coding agent that runs in your terminal and works in your
 repository. It reads code, edits files, runs commands and tests, and has a
@@ -11,6 +19,25 @@ OpenAI-compatible Chat Completions endpoint, the OpenAI Responses API or the
 Anthropic Messages API, including local models served by Ollama, llama.cpp or
 LM Studio. It is for developers who want an agent in the terminal and want to
 choose the model. It is one Rust binary for macOS, Linux and Windows.
+
+## Features
+
+- **Any model you want.** Chat Completions, the Responses API, Anthropic
+  Messages, or a server on your own machine. Profiles let one session hand
+  background work to a different model than the one doing the work.
+- **A reviewer before anything risky.** In AUTO mode, edits inside the
+  workspace and read-only commands run at once; anything else is compared
+  against what you actually asked for and blocked if it does not match.
+- **Sessions that survive.** Saved per workspace, resumable by ID, forked,
+  compacted when the context fills, and able to talk to each other.
+- **Headless when you need it.** One prompt with `-p`, JSON or streaming JSON
+  out, and `--goal` to keep working until the job is done.
+- **Long-running work.** Goals, parallel subagents in separate worktrees, and
+  `abacus cron` for scheduled runs.
+- **Skills, plugins and MCP.** Folders with a `SKILL.md`, plugin bundles with
+  hooks and commands, and MCP servers over stdio or HTTP.
+- **Sync and remote.** Keep sessions across machines and follow a running one
+  from your phone.
 
 ## Install
 
@@ -612,8 +639,16 @@ Abacus is a coding tool. It has no chat-platform integrations. The built-in web
 tools search and fetch pages; browser automation (running JavaScript, clicking,
 filling forms) is available only through an MCP server or plugin.
 
+## Contributing
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. It covers
+the verification gate every change has to pass, and how to record whether a
+failing check was introduced by the change or was already there.
+
 ## License
 
 Abacus is by Leon Lehmann and [Empero AI](https://empero.org), released under a
 modified MIT license: you may use, modify, and build on it freely, provided you
 credit the original Abacus project. See [LICENSE](LICENSE).
+
+<p align="center"><i>Art create by Kojo - a model of Empero</i></p>
