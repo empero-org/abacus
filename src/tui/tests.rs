@@ -3590,3 +3590,53 @@ async fn panels_open_mid_turn_and_a_decision_shows_over_them() {
     assert!(after.contains("CONFIGURATION") && !after.contains("YOUR CALL"), "{after}");
     app.running.take().unwrap().abort();
 }
+
+/// A spinner tick re-renders only the running tool's block: the spliced
+/// frame must read exactly like a from-scratch wrap with the new frame.
+#[test]
+fn spinner_phase_change_splices_only_the_running_block() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    app.push_entry(Entry::new(EntryKind::User, "build it".to_owned()));
+    app.push_entry(Entry::tool(ui::ToolCall {
+        status: ui::ToolStatus::Running,
+        output: "building…".to_owned(),
+        full: "building…\nline 2\nline 3".to_owned(),
+        ..ui::ToolCall::running("run_command", "cargo build")
+    }));
+    let width = 80u16;
+    let _ = app.wrapped_transcript(width, "X", 0).lines.len();
+    let spliced = app.wrapped_transcript(width, "Y", 1).lines.clone();
+    let spliced_spans = app.transcript_cache.as_ref().unwrap().1.spans.clone();
+    app.transcript_cache = None;
+    let fresh = app.wrapped_transcript(width, "Y", 1).lines.clone();
+    assert_eq!(
+        spliced.len(),
+        fresh.len(),
+        "splice covers exactly the running block: {} vs {} lines",
+        spliced.len(),
+        fresh.len()
+    );
+    assert_eq!(spliced_spans, app.transcript_cache.as_ref().unwrap().1.spans);
+    // The spinner glyph itself moved into the running row.
+    assert!(spliced.iter().any(|line| line.to_string().contains('Y')), "{spliced:?}");
+}
+
+/// When the running tool is not the last entry, a phase change takes the
+/// full re-wrap path and stays correct.
+#[test]
+fn spinner_phase_change_with_trailing_entry_rewraps_fully() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    app.push_entry(Entry::tool(ui::ToolCall {
+        status: ui::ToolStatus::Running,
+        output: "building…".to_owned(),
+        full: "building…".to_owned(),
+        ..ui::ToolCall::running("run_command", "cargo build")
+    }));
+    app.push_entry(Entry::new(EntryKind::Assistant, "meanwhile…".to_owned()));
+    let width = 80u16;
+    let _ = app.wrapped_transcript(width, "X", 0).lines.len();
+    let via_phase = app.wrapped_transcript(width, "Y", 1).lines.clone();
+    app.transcript_cache = None;
+    let fresh = app.wrapped_transcript(width, "Y", 1).lines.clone();
+    assert_eq!(via_phase.len(), fresh.len());
+}
