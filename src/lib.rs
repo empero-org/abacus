@@ -15,6 +15,7 @@ pub mod diff;
 pub mod environment;
 pub mod extensions;
 pub mod feedback;
+pub mod git_checkpoint;
 pub mod goal;
 pub mod handles;
 pub mod headless;

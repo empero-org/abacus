@@ -46,6 +46,8 @@ impl App {
             "/compact" => self.compact_command(),
             "/repair" => self.repair_command(),
             "/memory" | "/memories" => self.memory_command(argument),
+            "/rollback" => self.rollback_command(argument),
+            "/checkpoints" => self.checkpoints_command(),
             // A `/name` that is a skill or a plugin command is not a slash
             // command; the caller resolves it into a prompt.
             _ if command.starts_with('/') && !self.has_extension(&command[1..]) => {
@@ -498,6 +500,98 @@ impl App {
             }
             [] => self.fail(format!("No profile matches `{argument}`. /profile lists them.")),
             several => self.fail(format!("`{argument}` matches {} — say which.", several.join(", "))),
+        }
+    }
+
+    pub(super) fn checkpoints_command(&mut self) {
+        let session_id = self.session.as_ref().map(|s| s.id.to_string()).unwrap_or_else(|| "default".to_owned());
+        let checkpoint_mgr = self.checkpoint_mgr.clone();
+        let checkpoints_info = {
+            let mut mgr = match checkpoint_mgr.try_lock() {
+                Ok(m) => m,
+                Err(_) => {
+                    self.fail("Could not lock checkpoint manager");
+                    return;
+                }
+            };
+            let _ = mgr.load_metadata(&session_id);
+            mgr.checkpoints.get(&session_id).cloned()
+        };
+
+        if let Some(list) = checkpoints_info {
+            if list.is_empty() {
+                self.status = "No checkpoints for this session".to_owned();
+            } else {
+                let mut summary = format!("Checkpoints for session {}:\n", &session_id[..8.min(session_id.len())]);
+                for c in &list {
+                    summary.push_str(&format!(
+                        "- ID: {}, Turn: {}, Summary: '{}', Touched: {:?}, Created: {:?}\n",
+                        c.id, c.turn_index, c.prompt_summary, c.touched_files, c.created_files
+                    ));
+                }
+                self.say(summary);
+                self.status = format!("{} checkpoints listed", list.len());
+            }
+        } else {
+            self.status = "No checkpoints for this session".to_owned();
+        }
+    }
+
+    pub(super) fn rollback_command(&mut self, argument: &str) {
+        let session_id = self.session.as_ref().map(|s| s.id.to_string()).unwrap_or_else(|| "default".to_owned());
+        let checkpoint_mgr = self.checkpoint_mgr.clone();
+        let target_id = {
+            let mut mgr = match checkpoint_mgr.try_lock() {
+                Ok(m) => m,
+                Err(_) => {
+                    self.fail("Could not lock checkpoint manager");
+                    return;
+                }
+            };
+            let _ = mgr.load_metadata(&session_id);
+            if argument.trim().is_empty() {
+                mgr.checkpoints.get(&session_id).and_then(|list| list.last().map(|c| c.id.clone()))
+            } else {
+                Some(argument.trim().to_string())
+            }
+        };
+
+        let Some(chk_id) = target_id else {
+            self.fail("No checkpoint found to rollback");
+            return;
+        };
+
+        let rollback_result = {
+            let mut mgr = match checkpoint_mgr.try_lock() {
+                Ok(m) => m,
+                Err(_) => {
+                    self.fail("Could not lock checkpoint manager");
+                    return;
+                }
+            };
+            let res = mgr.rollback(&session_id, &chk_id);
+            if res.is_ok() {
+                if let Some(list) = mgr.checkpoints.get_mut(&session_id) {
+                    list.retain(|c| c.id != chk_id);
+                }
+                let _ = mgr.save_metadata(&session_id);
+            }
+            res
+        };
+
+        match rollback_result {
+            Ok(restored) => {
+                let msg = if restored.is_empty() {
+                    format!("Rolled back checkpoint {}", chk_id)
+                } else {
+                    format!("Rewound prompt and restored {} files", restored.len())
+                };
+                self.status = msg.clone();
+                self.say(msg);
+            }
+            Err(e) => {
+                self.fail(format!("Rollback failed: {e}"));
+            }
         }
     }
 }

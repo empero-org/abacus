@@ -82,6 +82,8 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/theme", "Switch theme, or export one to edit"),
     ("/remote", "Share this session live, or pair a phone: on, off, qr, url, status"),
     ("/feedback", "Send product feedback"),
+    ("/rollback", "Rollback workspace files to a checkpoint"),
+    ("/checkpoints", "List checkpoints for current session"),
     ("/help", "Keys and commands"),
     ("/quit", "Exit Abacus"),
 ];
@@ -594,6 +596,7 @@ struct App {
     /// Appends one training record per model call. `None` when disabled or when
     /// the session has not been saved yet, since a trace is keyed by session id.
     trace: Option<crate::sft::TraceWriter>,
+    checkpoint_mgr: Arc<tokio::sync::Mutex<crate::git_checkpoint::CheckpointManager>>,
     /// Raised to ask a running turn to stop. The turn finishes reporting what
     /// it did instead of being killed, which is what kept its tool results.
     cancel: Arc<AtomicBool>,
@@ -1384,6 +1387,7 @@ impl App {
         }
         let mailbox = crate::inbox::Mailbox::new(config.paths.clone(), crate::presence::FrontEnd::Tui);
         let services_inputs = services_inputs(&settings);
+        let checkpoint_mgr = Self::init_checkpoint_mgr(config.workspace.clone(), session.as_ref());
         Ok(Self {
             config,
             settings,
@@ -1396,6 +1400,7 @@ impl App {
             services,
             state,
             workers,
+            checkpoint_mgr,
             press: None,
             selection: None,
             screen: None,
@@ -2088,6 +2093,28 @@ impl App {
             self.status = "nothing to rewind".to_owned();
             return;
         };
+        let session_id = self.session.as_ref().map(|s| s.id.to_string()).unwrap_or_else(|| "default".to_owned());
+        let turn_index = self.messages.iter().filter(|m| m.get("role").and_then(Value::as_str) == Some("user")).count();
+        let mut restored_count = 0;
+        if let Ok(mut mgr) = self.checkpoint_mgr.try_lock() {
+            let _ = mgr.load_metadata(&session_id);
+            let chk_id = mgr.checkpoints.get(&session_id).and_then(|list| {
+                list.iter()
+                    .find(|c| c.turn_index == turn_index)
+                    .map(|c| c.id.clone())
+                    .or_else(|| list.last().map(|c| c.id.clone()))
+            });
+            if let Some(chk_id) = chk_id
+                && let Ok(restored) = mgr.rollback(&session_id, &chk_id)
+            {
+                if let Some(list) = mgr.checkpoints.get_mut(&session_id) {
+                    list.retain(|c| c.id != chk_id);
+                }
+                let _ = mgr.save_metadata(&session_id);
+                restored_count = restored.len();
+            }
+        }
+
         let prompt = self.entries[entry_index].text.clone();
         let first_dropped = self.entries[entry_index].id;
         self.entries.truncate(entry_index);
@@ -2105,7 +2132,11 @@ impl App {
             remote.entries_dropped(first_dropped);
         }
         self.send_remote_snapshot(SnapshotReason::Requested);
-        self.status = "rewound — edit and resend, or esc esc to step further back".to_owned();
+        if restored_count > 0 {
+            self.status = format!("Rewound prompt and restored {} files", restored_count);
+        } else {
+            self.status = "rewound — edit and resend, or esc esc to step further back".to_owned();
+        }
     }
 
     fn start_turn(&mut self, display_prompt: String, effective_prompt: String, display: bool) {
@@ -2184,6 +2215,7 @@ impl App {
             session_id: self.session.as_ref().map(|session| session.id.to_string()),
             workers: self.workers.clone(),
             peers: self.peers(),
+            checkpoint_mgr: Some(self.checkpoint_mgr.clone()),
             ..self.state.turn(&self.config, self.services.clone())
         }
     }
@@ -2394,10 +2426,48 @@ impl App {
         }
     }
 
+    fn init_checkpoint_mgr(
+        workspace: std::path::PathBuf,
+        session: Option<&Session>,
+    ) -> Arc<tokio::sync::Mutex<crate::git_checkpoint::CheckpointManager>> {
+        let mgr = Arc::new(tokio::sync::Mutex::new(crate::git_checkpoint::CheckpointManager::new(workspace)));
+        if let Some(s) = session {
+            if let Ok(mut m) = mgr.try_lock() {
+                let _ = m.load_metadata(&s.id.to_string());
+            } else if tokio::runtime::Handle::try_current().is_ok() {
+                tokio::task::block_in_place(|| {
+                    let mut m = mgr.blocking_lock();
+                    let _ = m.load_metadata(&s.id.to_string());
+                });
+            } else {
+                let mut m = mgr.blocking_lock();
+                let _ = m.load_metadata(&s.id.to_string());
+            }
+        }
+        mgr
+    }
+
+    fn load_checkpoint_metadata(&self, session_id: &str) {
+        if let Ok(mut mgr) = self.checkpoint_mgr.try_lock() {
+            let _ = mgr.load_metadata(session_id);
+        } else if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::block_in_place(|| {
+                let mut mgr = self.checkpoint_mgr.blocking_lock();
+                let _ = mgr.load_metadata(session_id);
+            });
+        } else {
+            let mut mgr = self.checkpoint_mgr.blocking_lock();
+            let _ = mgr.load_metadata(session_id);
+        }
+    }
+
     /// Point the app at `session`, or at a blank conversation, with the state
     /// that travels with one. Steering and worker reports already in flight
     /// stay queued: they belong to the process, not to a session.
     fn adopt(&mut self, session: Option<Session>) {
+        if let Some(ref s) = session {
+            self.load_checkpoint_metadata(&s.id.to_string());
+        }
         self.cancel_idle_compaction();
         let same = matches!((&self.session, &session), (Some(previous), Some(next)) if previous.id == next.id);
         if let Some(previous) = &self.session {
@@ -2841,6 +2911,18 @@ impl App {
         let usage = self.provider.usage();
         let view = crate::remote::SnapshotView { session: info, entries: &self.entries, usage: &usage };
         bridge.send_snapshot(view, reason);
+        let sid = self.session.as_ref().map(|s| s.id.to_string()).unwrap_or_else(|| "default".to_owned());
+        if let Ok(mut mgr) = self.checkpoint_mgr.try_lock() {
+            if !mgr.checkpoints.contains_key(&sid) {
+                let _ = mgr.load_metadata(&sid);
+            }
+            let summaries: Vec<crate::remote::CheckpointSummary> =
+                mgr.list_checkpoints(&sid).iter().map(crate::remote::CheckpointSummary::from).collect();
+            let files = mgr.list_file_histories(&sid);
+            if let Some(bridge) = &mut self.remote {
+                bridge.checkpoints_and_files_updated(summaries, files);
+            }
+        }
     }
 
     /// Every event-loop tick: send coalesced text, mirror the footer's live
@@ -2859,8 +2941,23 @@ impl App {
     }
 
     fn remote_turn_ended(&mut self, reason: crate::remote::protocol::DoneReason) {
+        let sid = self.session.as_ref().map(|s| s.id.to_string()).unwrap_or_else(|| "default".to_owned());
+        let data = if let Ok(mut mgr) = self.checkpoint_mgr.try_lock() {
+            if !mgr.checkpoints.contains_key(&sid) {
+                let _ = mgr.load_metadata(&sid);
+            }
+            let summaries =
+                mgr.list_checkpoints(&sid).iter().map(crate::remote::CheckpointSummary::from).collect::<Vec<_>>();
+            let files = mgr.list_file_histories(&sid);
+            Some((summaries, files))
+        } else {
+            None
+        };
         if let Some(bridge) = &mut self.remote {
             bridge.turn_ended(reason, &self.provider.usage());
+            if let Some((summaries, files)) = data {
+                bridge.checkpoints_and_files_updated(summaries, files);
+            }
         }
     }
 

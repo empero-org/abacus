@@ -112,6 +112,7 @@ struct ThreadState {
     messages: Vec<Value>,
     state: SessionState,
     trace: Option<crate::sft::TraceWriter>,
+    checkpoint_mgr: Arc<tokio::sync::Mutex<crate::git_checkpoint::CheckpointManager>>,
 }
 
 impl ThreadState {
@@ -134,7 +135,10 @@ impl ThreadState {
             .trace_enabled
             .then(|| crate::sft::TraceWriter::open(&config.paths.traces_dir, &session.id.to_string()).ok())
             .flatten();
-        Self { messages: session.messages.clone(), state, trace, persisted, session }
+        let mut mgr = crate::git_checkpoint::CheckpointManager::new(config.workspace.clone());
+        let _ = mgr.load_metadata(&session.id.to_string());
+        let checkpoint_mgr = Arc::new(tokio::sync::Mutex::new(mgr));
+        Self { messages: session.messages.clone(), state, trace, persisted, session, checkpoint_mgr }
     }
 
     /// `session` opened again from disk: its next turn says how long it was left.
@@ -1081,6 +1085,55 @@ impl App {
                     params["checkpoint"].as_str().ok_or_else(|| anyhow!("checkpoint required"))?.to_owned();
                 self.undo_edits(&checkpoint)
             }
+            "checkpoints/list" | "/api/checkpoints" => {
+                let session_id = params
+                    .get("session_id")
+                    .or_else(|| params.get("threadId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| self.thread_id());
+                Ok(self.list_checkpoints_handler(&session_id).await)
+            }
+            "checkpoints/diff" | "/api/checkpoints/diff" => {
+                let session_id = params
+                    .get("session_id")
+                    .or_else(|| params.get("threadId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| self.thread_id());
+                let checkpoint_id = params
+                    .get("checkpoint_id")
+                    .or_else(|| params.get("checkpointId"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("checkpointId is required"))?
+                    .to_owned();
+                let file_path = params
+                    .get("file_path")
+                    .or_else(|| params.get("filePath"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("filePath is required"))?
+                    .to_owned();
+                self.diff_checkpoint_handler(&session_id, &checkpoint_id, &file_path).await
+            }
+            "checkpoints/rollback" | "/api/checkpoints/rollback" => {
+                let session_id = params
+                    .get("session_id")
+                    .or_else(|| params.get("threadId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| self.thread_id());
+                let checkpoint_id = params
+                    .get("checkpoint_id")
+                    .or_else(|| params.get("checkpointId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let file_path = params
+                    .get("file_path")
+                    .or_else(|| params.get("filePath"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                self.rollback_checkpoint_handler(&session_id, checkpoint_id.as_deref(), file_path.as_deref()).await
+            }
 
             other => Err(anyhow!("unknown method `{other}`")),
         }
@@ -1697,6 +1750,7 @@ impl App {
             yolo: self.yolo.clone(),
             session_id: Some(self.thread_id()),
             trace: self.thread.trace.clone(),
+            checkpoint_mgr: Some(self.thread.checkpoint_mgr.clone()),
             cancel: self.cancel.clone(),
             journal: self.journal.clone(),
             workers: self.workers.clone(),
@@ -2041,10 +2095,20 @@ impl App {
         self.report_usage();
         // The turn counted against the goal.
         self.report_work();
+        let sid = self.thread_id();
+        if let Ok(mut mgr) = self.thread.checkpoint_mgr.try_lock() {
+            if !mgr.checkpoints.contains_key(&sid) {
+                let _ = mgr.load_metadata(&sid);
+            }
+            let summaries: Vec<crate::remote::CheckpointSummary> =
+                mgr.list_checkpoints(&sid).iter().map(crate::remote::CheckpointSummary::from).collect();
+            let files = mgr.list_file_histories(&sid);
+            notify("checkpoints/updated", json!({ "threadId": sid, "checkpoints": summaries, "files": files }));
+        }
         notify(
             "turn/completed",
             json!({
-                "threadId": self.thread_id(),
+                "threadId": sid,
                 "turnId": turn,
                 "status": status,
                 "name": self.thread.session.title,
@@ -2328,6 +2392,69 @@ impl App {
 
     fn thread_closed(&self) {
         crate::sync::session_closed(self.thread.session.id);
+    }
+
+    async fn list_checkpoints_handler(&self, session_id: &str) -> Value {
+        let mut mgr = self.thread.checkpoint_mgr.lock().await;
+        if !mgr.checkpoints.contains_key(session_id) {
+            let _ = mgr.load_metadata(session_id);
+        }
+        let summaries: Vec<crate::remote::CheckpointSummary> =
+            mgr.list_checkpoints(session_id).iter().map(crate::remote::CheckpointSummary::from).collect();
+        let files = mgr.list_file_histories(session_id);
+        json!({ "checkpoints": summaries, "files": files })
+    }
+
+    async fn diff_checkpoint_handler(&self, session_id: &str, checkpoint_id: &str, file_path: &str) -> Result<Value> {
+        let mut mgr = self.thread.checkpoint_mgr.lock().await;
+        if !mgr.checkpoints.contains_key(session_id) {
+            let _ = mgr.load_metadata(session_id);
+        }
+        let diff = mgr.diff_file(session_id, checkpoint_id, file_path)?;
+        Ok(serde_json::to_value(diff)?)
+    }
+
+    async fn rollback_checkpoint_handler(
+        &mut self,
+        session_id: &str,
+        checkpoint_id: Option<&str>,
+        file_path: Option<&str>,
+    ) -> Result<Value> {
+        let (restored, summaries, files) = {
+            let mut mgr = self.thread.checkpoint_mgr.lock().await;
+            if !mgr.checkpoints.contains_key(session_id) {
+                let _ = mgr.load_metadata(session_id);
+            }
+            let target_id = match checkpoint_id.filter(|s| !s.trim().is_empty()) {
+                Some(id) => id.trim().to_owned(),
+                None => mgr
+                    .list_checkpoints(session_id)
+                    .last()
+                    .map(|c| c.id.clone())
+                    .ok_or_else(|| anyhow!("no checkpoints available to roll back"))?,
+            };
+            let restored = if let Some(fp) = file_path.filter(|s| !s.trim().is_empty()) {
+                mgr.rollback_file(session_id, &target_id, fp.trim())?
+            } else {
+                let res = mgr.rollback(session_id, &target_id)?;
+                if let Some(list) = mgr.checkpoints.get_mut(session_id)
+                    && let Some(pos) = list.iter().position(|c| c.id == target_id)
+                {
+                    list.remove(pos);
+                }
+                res
+            };
+            let _ = mgr.save_metadata(session_id);
+            let summaries: Vec<crate::remote::CheckpointSummary> =
+                mgr.list_checkpoints(session_id).iter().map(crate::remote::CheckpointSummary::from).collect();
+            let files = mgr.list_file_histories(session_id);
+            (restored, summaries, files)
+        };
+        notify(
+            "checkpoints/updated",
+            json!({ "threadId": session_id, "checkpoints": summaries, "files": files, "restoredFiles": restored }),
+        );
+        Ok(json!({ "ok": true, "restoredFiles": restored, "checkpoints": summaries, "files": files }))
     }
 
     /// Flush what the front end can no longer wait for: the thread's last

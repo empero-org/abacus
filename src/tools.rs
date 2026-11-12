@@ -205,6 +205,100 @@ impl ToolCall {
                 | "skill_update"
         )
     }
+
+    pub fn is_file_mutating(&self) -> bool {
+        is_file_mutating_tool(&self.name)
+    }
+}
+
+/// Whether a tool mutates files in the workspace.
+pub fn is_file_mutating_tool(name: &str) -> bool {
+    matches!(name, "edit_file" | "write_file" | "apply_patch" | "delete_file" | "move_file")
+}
+
+/// Extract paths touched or created by a mutating tool call.
+/// Returns a list of `(relative_path, is_creation)`.
+pub fn extract_mutating_paths(call: &ToolCall, workspace: &Path) -> Vec<(String, bool)> {
+    let mut results = Vec::new();
+    let Ok(args) = serde_json::from_str::<Value>(&call.arguments) else {
+        return results;
+    };
+    match call.name.as_str() {
+        "write_file" => {
+            if let Some(path) = args.get("path").and_then(Value::as_str) {
+                let norm = path.replace('\\', "/").trim_start_matches("./").trim_start_matches('/').to_string();
+                let is_creation = !workspace.join(&norm).exists();
+                results.push((norm, is_creation));
+            }
+        }
+        "edit_file" => {
+            if let Some(path) = args.get("path").and_then(Value::as_str) {
+                let norm = path.replace('\\', "/").trim_start_matches("./").trim_start_matches('/').to_string();
+                results.push((norm, false));
+            }
+        }
+        "delete_file" => {
+            if let Some(path) = args.get("path").and_then(Value::as_str) {
+                let norm = path.replace('\\', "/").trim_start_matches("./").trim_start_matches('/').to_string();
+                results.push((norm, false));
+            }
+        }
+        "move_file" => {
+            if let Some(src) = args.get("source").and_then(Value::as_str) {
+                let norm_src = src.replace('\\', "/").trim_start_matches("./").trim_start_matches('/').to_string();
+                results.push((norm_src, false));
+            }
+            if let Some(dest) = args.get("destination").and_then(Value::as_str) {
+                let norm_dest = dest.replace('\\', "/").trim_start_matches("./").trim_start_matches('/').to_string();
+                results.push((norm_dest, true));
+            }
+        }
+        "apply_patch" => {
+            if let Some(patch) = args.get("patch").and_then(Value::as_str) {
+                let mut created_in_patch = std::collections::HashSet::new();
+                let mut all_paths = Vec::new();
+                let mut saw_dev_null_old = false;
+                for line in patch.lines() {
+                    if line.starts_with("--- ") {
+                        saw_dev_null_old = line.trim() == "--- /dev/null" || line.starts_with("--- /dev/null\t");
+                        let raw = line.strip_prefix("--- ").unwrap();
+                        let raw = raw.split('\t').next().unwrap_or(raw).trim();
+                        if raw != "/dev/null" {
+                            let rel = raw.strip_prefix("a/").or_else(|| raw.strip_prefix("b/")).unwrap_or(raw);
+                            let norm =
+                                rel.replace('\\', "/").trim_start_matches("./").trim_start_matches('/').to_string();
+                            if !norm.is_empty() && !all_paths.contains(&norm) {
+                                all_paths.push(norm);
+                            }
+                        }
+                    } else if line.starts_with("+++ ") {
+                        let raw = line.strip_prefix("+++ ").unwrap();
+                        let raw = raw.split('\t').next().unwrap_or(raw).trim();
+                        if raw != "/dev/null" {
+                            let rel = raw.strip_prefix("b/").or_else(|| raw.strip_prefix("a/")).unwrap_or(raw);
+                            let norm =
+                                rel.replace('\\', "/").trim_start_matches("./").trim_start_matches('/').to_string();
+                            if !norm.is_empty() {
+                                if !all_paths.contains(&norm) {
+                                    all_paths.push(norm.clone());
+                                }
+                                if saw_dev_null_old {
+                                    created_in_patch.insert(norm);
+                                }
+                            }
+                        }
+                        saw_dev_null_old = false;
+                    }
+                }
+                for path in all_paths {
+                    let is_creation = created_in_patch.contains(&path) || !workspace.join(&path).exists();
+                    results.push((path, is_creation));
+                }
+            }
+        }
+        _ => {}
+    }
+    results
 }
 
 #[derive(Debug, Clone)]

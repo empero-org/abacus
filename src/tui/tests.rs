@@ -2760,9 +2760,10 @@ async fn snapshots_are_sent_on_connect_and_on_request() {
     app.remote_event(generation, Inbound::SnapshotRequested);
     app.remote_event(generation, Inbound::Connected { reconnect: true });
     let snapshots = sent(&mut frames);
-    let reasons: Vec<&str> = snapshots.iter().map(|frame| frame["payload"]["reason"].as_str().unwrap()).collect();
+    let snapshot_frames = of_type(&snapshots, "snapshot");
+    let reasons: Vec<&str> = snapshot_frames.iter().map(|frame| frame["payload"]["reason"].as_str().unwrap()).collect();
     assert_eq!(reasons, ["connect", "requested", "reconnect"]);
-    let payload = &snapshots[0]["payload"];
+    let payload = &snapshot_frames[0]["payload"];
     assert_eq!(payload["session"]["mode"], "auto");
     assert_eq!(payload["session"]["model"], "test/test-model", "the phone shows which provider too");
     let texts: Vec<&str> = payload["entries"].as_array().unwrap().iter().map(|e| e["text"].as_str().unwrap()).collect();
@@ -3460,4 +3461,68 @@ async fn panels_open_mid_turn_and_a_decision_shows_over_them() {
     let after = render(&mut app, 100, 30);
     assert!(after.contains("CONFIGURATION") && !after.contains("YOUR CALL"), "{after}");
     app.running.take().unwrap().abort();
+}
+
+#[test]
+fn esc_esc_rewinds_prompt_and_rolls_back_files() {
+    let (_dir, mut app) = test_app("http://localhost");
+    let mut session = Session::new(
+        app.config.workspace.clone(),
+        "test".to_string(),
+        "test/test-model".to_string(),
+        vec![json!({"role": "user", "content": "Hello"}), json!({"role": "assistant", "content": "Hi"})],
+    );
+    session.title = "Test Session".to_string();
+    let session_id = session.id.to_string();
+    app.messages = session.messages.clone();
+    app.entries = entries_from_messages(&app.messages);
+    app.session = Some(session);
+
+    {
+        let mut mgr = app.checkpoint_mgr.blocking_lock();
+        let _chk = mgr.prepare_turn_checkpoint(&session_id, 1, "Hello").unwrap();
+        let test_file = app.config.workspace.join("test.txt");
+        std::fs::write(&test_file, "hello").unwrap();
+        mgr.record_tool_touch(&session_id, 1, "test.txt", true);
+        let _ = mgr.save_metadata(&session_id);
+    }
+
+    assert!(app.config.workspace.join("test.txt").exists());
+
+    app.rewind_to_previous_prompt();
+
+    assert!(!app.config.workspace.join("test.txt").exists(), "file should be rolled back");
+    assert!(app.status.contains("Rewound prompt"), "status should mention rewind: {}", app.status);
+}
+
+#[test]
+fn rollback_slash_command() {
+    let (_dir, mut app) = test_app("http://localhost");
+    let mut session = Session::new(
+        app.config.workspace.clone(),
+        "test".to_string(),
+        "test/test-model".to_string(),
+        vec![json!({"role": "user", "content": "Build feature"}), json!({"role": "assistant", "content": "Done"})],
+    );
+    session.title = "Test Session 2".to_string();
+    let session_id = session.id.to_string();
+    app.messages = session.messages.clone();
+    app.entries = entries_from_messages(&app.messages);
+    app.session = Some(session);
+
+    {
+        let mut mgr = app.checkpoint_mgr.blocking_lock();
+        let _chk = mgr.prepare_turn_checkpoint(&session_id, 1, "Build feature").unwrap();
+        let test_file = app.config.workspace.join("feat.txt");
+        std::fs::write(&test_file, "content").unwrap();
+        mgr.record_tool_touch(&session_id, 1, "feat.txt", true);
+        let _ = mgr.save_metadata(&session_id);
+    }
+
+    assert!(app.config.workspace.join("feat.txt").exists());
+
+    app.slash_command("/rollback");
+
+    assert!(!app.config.workspace.join("feat.txt").exists(), "file should be rolled back via /rollback");
+    assert!(app.status.contains("Rewound prompt") || app.status.contains("Rolled back"), "status: {}", app.status);
 }

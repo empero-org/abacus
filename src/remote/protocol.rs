@@ -473,6 +473,44 @@ pub struct Ping {
     pub ts: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointSummary {
+    pub id: String,
+    pub turn_index: usize,
+    #[serde(default)]
+    pub step_index: usize,
+    #[serde(default)]
+    pub tool_name: String,
+    pub timestamp: u64,
+    pub prompt_preview: String,
+    pub touched_files: Vec<String>,
+    pub created_files: Vec<String>,
+    pub is_fallback: bool,
+}
+
+impl From<&crate::git_checkpoint::Checkpoint> for CheckpointSummary {
+    fn from(chk: &crate::git_checkpoint::Checkpoint) -> Self {
+        Self {
+            id: chk.id.clone(),
+            turn_index: chk.turn_index,
+            step_index: chk.step_index,
+            tool_name: chk.tool_name.clone(),
+            timestamp: chk.timestamp,
+            prompt_preview: chk.prompt_summary.clone(),
+            touched_files: chk.touched_files.clone(),
+            created_files: chk.created_files.clone(),
+            is_fallback: chk.is_fallback,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointUpdated {
+    pub checkpoints: Vec<CheckpointSummary>,
+    #[serde(default)]
+    pub files: Vec<crate::git_checkpoint::FileHistory>,
+}
+
 /// Every frame the agent sends. Serialises as `{"type":…,"payload":…}`; the
 /// link adds `v`, `id` and `seq` when it puts the frame on the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -494,6 +532,7 @@ pub enum Outbound {
     Error(ErrorFrame),
     Done(DoneFrame),
     Accepted(Accepted),
+    CheckpointUpdated(CheckpointUpdated),
     /// Answer to a browser's `ping`.
     Pong(Ping),
     /// The agent's own heartbeat; the relay answers it.
