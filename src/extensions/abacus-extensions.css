@@ -1,0 +1,1208 @@
+/* Abacus Desktop VS Code Theme & Custom Appearance Extension + Git Checkpoints & Rollback */
+
+/* Custom background layers */
+#abacus-custom-backdrop {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: -2;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  transition: filter 0.2s ease, opacity 0.3s ease;
+}
+
+#abacus-custom-overlay {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  transition: background-color 0.2s ease;
+}
+
+/* Extension Modals / Dialogs */
+.abacus-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.70);
+  backdrop-filter: blur(6px);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+.abacus-modal-overlay.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.abacus-modal-content {
+  background: #14101e;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  width: 90%;
+  max-width: 560px;
+  max-height: 88vh;
+  overflow-y: auto;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.75);
+  color: #f1f5f9;
+  font-family: inherit;
+  transform: translateY(12px) scale(0.98);
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  padding: 24px;
+}
+
+.abacus-modal-overlay.open .abacus-modal-content {
+  transform: translateY(0) scale(1);
+}
+
+.abacus-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding-bottom: 12px;
+}
+
+.abacus-modal-title {
+  font-size: 16px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #f8fafc;
+}
+
+.abacus-modal-close {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  font-size: 20px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: color 0.15s, background 0.15s;
+}
+
+.abacus-modal-close:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.abacus-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #94a3b8;
+  margin: 16px 0 8px;
+}
+
+/* Preset Grids */
+.abacus-presets-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.abacus-preset-item {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 10px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.abacus-preset-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.abacus-preset-item.active {
+  border-color: var(--color-primary, #b66bff);
+  background: rgba(182, 107, 255, 0.12);
+}
+
+.abacus-preset-name {
+  font-size: 12px;
+  font-weight: 500;
+  color: #f1f5f9;
+}
+
+.abacus-preset-swatches {
+  display: flex;
+  gap: 5px;
+}
+
+.abacus-preset-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+}
+
+/* Button & Action controls */
+.abacus-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 8px;
+  border: none;
+  background: var(--color-primary, #b66bff);
+  color: #ffffff;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.abacus-action-btn:hover {
+  opacity: 0.9;
+}
+
+.abacus-action-btn.secondary {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e2e8f0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.abacus-action-btn.secondary:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.abacus-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.abacus-slider-label {
+  font-size: 13px;
+  color: #cbd5e1;
+  width: 120px;
+  flex-shrink: 0;
+}
+
+.abacus-slider {
+  flex: 1;
+  accent-color: var(--color-primary, #b66bff);
+  cursor: pointer;
+}
+
+.abacus-slider-val {
+  font-size: 12px;
+  color: #94a3b8;
+  width: 44px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Segmented button row */
+.abacus-segmented {
+  display: flex;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 3px;
+  gap: 2px;
+}
+
+.abacus-segment-btn {
+  flex: 1;
+  background: transparent;
+  border: none;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #94a3b8;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: center;
+}
+
+.abacus-segment-btn:hover {
+  color: #ffffff;
+}
+
+.abacus-segment-btn.active {
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+  font-weight: 500;
+}
+
+/* Color pickers */
+.abacus-color-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 8px;
+}
+
+.abacus-color-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.abacus-color-label {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.abacus-color-picker {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+}
+
+.abacus-color-picker::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.abacus-color-picker::-webkit-color-swatch {
+  border: none;
+  border-radius: 5px;
+}
+
+/* VS Code Style File History & Checkpoints Studio (Zero Icons) */
+.abacus-cp-modal-content {
+  background: var(--abacus-bg, #13111c);
+  color: var(--abacus-text, #f8fafc);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  width: 92vw;
+  max-width: 900px;
+  height: 600px;
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+  box-shadow: 0 28px 60px rgba(0, 0, 0, 0.72);
+  font-family: var(--abacus-font, 'Inter', -apple-system, BlinkMacSystemFont, sans-serif);
+}
+
+body.abacus-has-custom-bg .abacus-cp-modal-content {
+  background: rgba(19, 17, 28, 0.88);
+  backdrop-filter: blur(20px);
+}
+
+.abacus-cp-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+  flex-shrink: 0;
+}
+
+.abacus-cp-topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.abacus-cp-heading {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--abacus-text, #f8fafc);
+}
+
+.abacus-cp-count-pill {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: #cbd5e1;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.abacus-cp-topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.abacus-cp-search {
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--abacus-text, #f8fafc);
+  width: 190px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.abacus-cp-search:focus {
+  border-color: var(--abacus-primary, #b66bff);
+}
+
+.abacus-cp-btn {
+  padding: 5px 11px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--abacus-text, #f8fafc);
+  transition: all 0.15s ease;
+}
+
+.abacus-cp-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.abacus-cp-btn.primary {
+  background: var(--abacus-primary, #b66bff);
+  border-color: transparent;
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.abacus-cp-btn.primary:hover {
+  opacity: 0.92;
+}
+
+.abacus-cp-btn.danger-subtle {
+  border-color: rgba(248, 113, 113, 0.35);
+  background: rgba(248, 113, 113, 0.1);
+  color: #fca5a5;
+}
+
+.abacus-cp-btn.danger-subtle:hover {
+  background: rgba(248, 113, 113, 0.2);
+}
+
+.abacus-cp-split {
+  display: grid;
+  grid-template-columns: 290px 1fr;
+  flex: 1;
+  min-height: 0;
+}
+
+.abacus-cp-files-pane {
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.abacus-cp-pane-label {
+  padding: 10px 14px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #94a3b8;
+}
+
+.abacus-cp-files-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.abacus-cp-file-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  transition: all 0.14s ease;
+  text-align: left;
+}
+
+.abacus-cp-file-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.abacus-cp-file-row.active {
+  background: rgba(182, 107, 255, 0.12);
+  border-color: var(--abacus-primary, #b66bff);
+}
+
+.abacus-cp-file-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.abacus-cp-ext-badge {
+  font-size: 9px;
+  font-weight: 700;
+  font-family: monospace;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #e2e8f0;
+  flex-shrink: 0;
+  text-transform: uppercase;
+}
+
+.abacus-cp-file-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.abacus-cp-file-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--abacus-text, #f8fafc);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.abacus-cp-file-dir {
+  font-size: 10.5px;
+  color: #64748b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.abacus-cp-file-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.abacus-cp-stats {
+  font-family: monospace;
+  font-size: 10.5px;
+  display: flex;
+  gap: 4px;
+}
+
+.abacus-cp-stat-add {
+  color: #4ade80;
+}
+
+.abacus-cp-stat-del {
+  color: #f87171;
+}
+
+.abacus-cp-status-badge {
+  font-size: 10px;
+  font-weight: 700;
+  font-family: monospace;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+
+.abacus-cp-status-badge.modified {
+  background: rgba(245, 158, 11, 0.16);
+  color: #fbbf24;
+}
+
+.abacus-cp-status-badge.created {
+  background: rgba(34, 197, 94, 0.16);
+  color: #4ade80;
+}
+
+.abacus-cp-status-badge.deleted {
+  background: rgba(239, 68, 68, 0.16);
+  color: #f87171;
+}
+
+.abacus-cp-detail-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.abacus-cp-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.abacus-cp-detail-path {
+  font-family: monospace;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--abacus-text, #f8fafc);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.abacus-cp-timeline-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  overflow-x: auto;
+  background: rgba(0, 0, 0, 0.12);
+  flex-shrink: 0;
+}
+
+.abacus-cp-rev-pill {
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: #94a3b8;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.14s ease;
+}
+
+.abacus-cp-rev-pill:hover {
+  color: #f8fafc;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.abacus-cp-rev-pill.active {
+  background: var(--abacus-primary, #b66bff);
+  border-color: transparent;
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.abacus-cp-diff-viewer {
+  flex: 1;
+  overflow: auto;
+  padding: 10px 0;
+  font-family: 'JetBrains Mono', Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.abacus-diff-line {
+  padding: 1px 16px;
+  white-space: pre;
+  overflow-x: visible;
+}
+
+.abacus-diff-add {
+  background: rgba(34, 197, 94, 0.14);
+  color: #86efac;
+}
+
+.abacus-diff-del {
+  background: rgba(239, 68, 68, 0.14);
+  color: #fca5a5;
+}
+
+.abacus-diff-hunk {
+  background: rgba(59, 130, 246, 0.12);
+  color: #93c5fd;
+  padding-top: 3px;
+  padding-bottom: 3px;
+  margin: 2px 0;
+}
+
+.abacus-diff-meta {
+  color: #64748b;
+}
+
+.abacus-diff-ctx {
+  color: #cbd5e1;
+}
+
+.abacus-cp-empty {
+  padding: 36px 20px;
+  text-align: center;
+  color: #94a3b8;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* Notification toast */
+#abacus-ext-toast {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  background: #1e1b2e;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #ffffff;
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+  z-index: 20000;
+  opacity: 0;
+  transform: translateY(10px);
+  transition: all 0.2s ease;
+  pointer-events: none;
+}
+
+#abacus-ext-toast.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+
+/* ==========================================================================
+   ABACUS PET SYSTEM & CODEX-PETS.NET STUDIO (v1 9-State & v2 11-State + 360°)
+   ========================================================================== */
+
+#abacus-pet-stage {
+  position: fixed;
+  bottom: 18px;
+  right: 36px;
+  z-index: 9500;
+  user-select: none;
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  transition: left 0.08s linear, bottom 0.2s ease;
+}
+
+#abacus-pet-stage.hidden-pet {
+  display: none !important;
+}
+
+#abacus-pet-stage.dragging {
+  transition: none !important;
+  cursor: grabbing !important;
+}
+
+/* Speech Bubble */
+.abacus-pet-bubble {
+  position: relative;
+  margin-bottom: 8px;
+  max-width: 260px;
+  min-width: 110px;
+  padding: 7px 12px;
+  border-radius: 10px;
+  background: rgba(19, 17, 28, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #f1f5f9;
+  font-size: 11.5px;
+  line-height: 1.4;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(12px);
+  opacity: 0;
+  transform: translateY(6px) scale(0.96);
+  transition: opacity 0.2s ease, transform 0.2s ease, border-color 0.2s ease;
+  pointer-events: none;
+  text-align: center;
+}
+
+.abacus-pet-bubble.visible {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.abacus-pet-bubble::after {
+  content: "";
+  position: absolute;
+  bottom: -5px;
+  left: 50%;
+  transform: translateX(-50%) rotate(45deg);
+  width: 9px;
+  height: 9px;
+  background: rgba(19, 17, 28, 0.94);
+  border-right: 1px solid rgba(255, 255, 255, 0.16);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+.abacus-pet-bubble.status-running {
+  border-color: rgba(56, 189, 248, 0.55);
+}
+
+.abacus-pet-bubble.status-waiting {
+  border-color: rgba(251, 191, 36, 0.75);
+  background: rgba(45, 30, 10, 0.94);
+  color: #fef3c7;
+}
+
+.abacus-pet-bubble.status-success {
+  border-color: rgba(74, 222, 128, 0.65);
+}
+
+.abacus-pet-bubble.status-failed {
+  border-color: rgba(248, 113, 113, 0.75);
+  background: rgba(45, 14, 18, 0.94);
+  color: #fee2e2;
+}
+
+.abacus-pet-bubble-head {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-weight: 700;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--abacus-primary, #b66bff);
+  margin-bottom: 2px;
+}
+
+.abacus-pet-bubble-text {
+  font-weight: 500;
+  word-break: break-word;
+}
+
+/* Sprite Viewport */
+.abacus-pet-actor {
+  position: relative;
+  cursor: grab;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.55));
+  transition: transform 0.15s ease;
+}
+
+.abacus-pet-actor:hover {
+  transform: translateY(-2px);
+}
+
+.abacus-pet-actor:active {
+  cursor: grabbing;
+}
+
+.abacus-pet-sprite {
+  width: 100%;
+  height: 100%;
+  background-repeat: no-repeat;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+/* Hover Quick HUD Bar */
+.abacus-pet-hud {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(15, 14, 23, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  opacity: 0;
+  transform: translateY(-3px);
+  transition: all 0.16s ease;
+  pointer-events: none;
+}
+
+#abacus-pet-stage:hover .abacus-pet-hud {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.abacus-pet-hud-name {
+  font-size: 10px;
+  font-weight: 600;
+  color: #cbd5e1;
+  padding-right: 4px;
+}
+
+.abacus-pet-hud-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border: none;
+  color: #e2e8f0;
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.abacus-pet-hud-btn:hover {
+  background: var(--abacus-primary, #b66bff);
+  color: #0b0a10;
+}
+
+/* Pets Studio Modal */
+.abacus-pets-modal-content {
+  width: 960px;
+  max-width: 95vw;
+  height: 680px;
+  max-height: 90vh;
+  background: rgba(21, 19, 32, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  box-shadow: 0 28px 68px rgba(0, 0, 0, 0.78);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: #f1f5f9;
+  transform: translateY(10px);
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.abacus-modal-overlay.open .abacus-pets-modal-content {
+  transform: translateY(0);
+}
+
+.abacus-pets-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(15, 14, 23, 0.75);
+}
+
+.abacus-pets-tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.abacus-pets-tab {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #94a3b8;
+  padding: 6px 14px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.abacus-pets-tab.active {
+  background: var(--abacus-primary, #b66bff);
+  color: #0b0a10;
+  border-color: transparent;
+}
+
+.abacus-pets-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px 20px;
+}
+
+.abacus-pets-pane {
+  display: none;
+}
+
+.abacus-pets-pane.active {
+  display: block;
+}
+
+.abacus-pets-split {
+  display: grid;
+  grid-template-columns: 350px 1fr;
+  gap: 18px;
+}
+
+.abacus-pets-split .abacus-pets-toggle-row {
+  padding: 8px 0;
+}
+
+@media (max-width: 780px) {
+  .abacus-pets-split {
+    grid-template-columns: 1fr;
+  }
+}
+
+.abacus-pets-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.abacus-pets-stage-preview {
+  height: 170px;
+  border-radius: 8px;
+  background:
+    linear-gradient(45deg, rgba(255,255,255,0.03) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(255,255,255,0.03) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgba(255,255,255,0.03) 75%),
+    linear-gradient(-45deg, transparent 75%, rgba(255,255,255,0.03) 75%);
+  background-size: 20px 20px;
+  background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+  background-color: #11101a;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 12px;
+  position: relative;
+}
+
+.abacus-pets-installed-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(185px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.abacus-pet-item-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 9px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: all 0.15s ease;
+}
+
+.abacus-pet-item-card:hover {
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.abacus-pet-item-card.active {
+  border-color: var(--abacus-primary, #b66bff);
+  background: rgba(182, 107, 255, 0.1);
+}
+
+.abacus-pet-thumb-box {
+  height: 96px;
+  border-radius: 7px;
+  background: #11101a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  position: relative;
+}
+
+.abacus-pet-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(182, 107, 255, 0.22);
+  color: #e9d5ff;
+  border: 1px solid rgba(182, 107, 255, 0.4);
+}
+
+.abacus-pet-badge.v2 {
+  background: rgba(56, 189, 248, 0.2);
+  color: #bae6fd;
+  border-color: rgba(56, 189, 248, 0.45);
+}
+
+.abacus-pets-Controls-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.abacus-pets-input {
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+  padding: 7px 11px;
+  color: #f1f5f9;
+  font-size: 12px;
+  outline: none;
+}
+
+.abacus-pets-input:focus {
+  border-color: var(--abacus-primary, #b66bff);
+}
+
+.abacus-pets-select {
+  background: #161424;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+  padding: 7px 10px;
+  color: #f1f5f9;
+  font-size: 12px;
+  outline: none;
+}
+
+.abacus-pets-catalog-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(195px, 1fr));
+  gap: 12px;
+}
+
+.abacus-pets-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 13px;
+  min-width: 0;
+}
+
+.abacus-pets-toggle-row > span,
+.abacus-pets-toggle-label {
+  flex: 1;
+  min-width: 0;
+  color: #e2e8f0;
+  line-height: 1.35;
+}
+
+.abacus-pets-toggle-row .abacus-pets-select {
+  max-width: 210px;
+  min-width: 0;
+  flex-shrink: 0;
+  text-overflow: ellipsis;
+}
+
+.abacus-pets-state-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.abacus-pets-state-pill {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #cbd5e1;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.abacus-pets-state-pill.active {
+  background: var(--abacus-primary, #b66bff);
+  color: #0b0a10;
+  border-color: transparent;
+}
+
+/* Settings-integrated Appearance & Pets panels */
+.abacus-settings-ext-row {
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.abacus-settings-ext-row .abacus-presets-grid {
+  grid-template-columns: repeat(auto-fill, minmax(136px, 1fr));
+  gap: 8px;
+}
+
+.abacus-settings-ext-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.abacus-settings-ext-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f8fafc;
+}
+
+.abacus-settings-ext-hint {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.abacus-pets-settings-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.abacus-pets-settings-body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.abacus-pets-preview-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.abacus-pets-preview-stage {
+  width: 78px;
+  height: 78px;
+  border-radius: 8px;
+  background:
+    linear-gradient(45deg, rgba(255,255,255,0.03) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(255,255,255,0.03) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgba(255,255,255,0.03) 75%),
+    linear-gradient(-45deg, transparent 75%, rgba(255,255,255,0.03) 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  background-color: #11101a;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.abacus-pets-settings-list {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.2);
+  overflow: hidden;
+}
