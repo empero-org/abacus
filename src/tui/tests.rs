@@ -3461,3 +3461,29 @@ async fn panels_open_mid_turn_and_a_decision_shows_over_them() {
     assert!(after.contains("CONFIGURATION") && !after.contains("YOUR CALL"), "{after}");
     app.running.take().unwrap().abort();
 }
+
+/// Consecutive batched reads emitted as source-order pairs of ToolStarted then
+/// ToolFinished drive cleanly through the TUI's event handler without leaving
+/// any row stuck in running or misattributing output.
+#[tokio::test]
+async fn consecutive_batched_reads_drive_cleanly_through_tui_event_handler() {
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    let events = [
+        AgentEvent::ToolStarted { name: "read_file".into(), summary: "a.rs".into() },
+        AgentEvent::ToolFinished { name: "read_file".into(), output: "fn a() {}".into(), refused: false },
+        AgentEvent::ToolStarted { name: "read_file".into(), summary: "b.rs".into() },
+        AgentEvent::ToolFinished { name: "read_file".into(), output: "fn b() {}".into(), refused: false },
+        AgentEvent::ToolStarted { name: "glob".into(), summary: "*.rs".into() },
+        AgentEvent::ToolFinished { name: "glob".into(), output: "a.rs\nb.rs".into(), refused: false },
+    ];
+    for event in events {
+        let _ = app.event_tx.send(event);
+    }
+    assert!(app.drain_agent_events());
+    // In TUI, consecutive read-only tools settle and merge under "explored"
+    let running =
+        app.entries.iter().any(|entry| entry.tool.as_ref().is_some_and(|call| call.status == ui::ToolStatus::Running));
+    assert!(!running, "no tool row left in running status");
+    let rendered = render(&mut app, 100, 30);
+    assert!(!rendered.contains("running"), "no tool stuck in running state: {rendered}");
+}
