@@ -304,17 +304,17 @@ The agent has `web_search` and `read_page` tools, configured under `[search]`:
 
 ```toml
 [search]
-backend = "auto"                        # auto | searxng | brave | bing
+backend = "auto"                        # auto | searxng | brave | firecrawl
 instance_url = "http://localhost:8888"  # your SearXNG instance
 ```
 
 `auto` uses your SearXNG instance if `instance_url` is set, then Brave if
-`BRAVE_API_KEY` is set, then Bing's public results page. The Bing fallback needs
-no key but is unreliable; for dependable search, run SearXNG (enable the JSON
-format in its `settings.yml`) or set a Brave key. `use_shared_instance = true`
-adds a public SearXNG instance as a fallback; it is off by default because it
-sends your queries to a host you do not control. `enabled = false` removes the
-web tools.
+`BRAVE_API_KEY` is set, then Firecrawl. Firecrawl's search API works without a
+key; `FIRECRAWL_API_KEY` raises its rate limits. When the chosen engine fails,
+the others that can run are tried, Firecrawl last, and the results say which
+engine answered and why the chosen one did not. For search that never leaves
+your own infrastructure, run SearXNG (enable the JSON format in its
+`settings.yml`). `enabled = false` removes the web tools.
 
 ## Tools
 

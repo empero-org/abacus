@@ -2461,7 +2461,7 @@ fn settings_choices() -> Value {
                 "mistral", "glm", "kimi", "deepseek", "json",
             ],
             "providers.*.protocol": ["chat-completions", "responses", "anthropic"],
-            "search.backend": ["auto", "bing", "searxng", "brave"],
+            "search.backend": ["auto", "searxng", "brave", "firecrawl"],
             "reasoning_effort": [
                 null, "minimal", "low", "medium", "high", "xhigh", "max",
             ],

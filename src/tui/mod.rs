@@ -311,7 +311,6 @@ enum ConfigKey {
     SearchBackend,
     SearchInstanceUrl,
     SearchApiKeyEnv,
-    SearchSharedInstance,
     // Interface tab.
     Theme,
     Glyphs,

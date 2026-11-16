@@ -132,7 +132,7 @@ pub(super) const SETTINGS: &[(&str, &[Setting])] = &[
             toggled(
                 ConfigKey::SearchBackend,
                 "Search backend",
-                "Enter cycles auto → searxng → brave → bing. Auto picks whatever is configured: your SearXNG instance, then Brave if its key is set, else Bing.",
+                "Enter cycles auto → searxng → brave → firecrawl. Auto picks whatever is configured: your SearXNG instance, then Brave if its key is set, else Firecrawl, which needs no key.",
             ),
             typed(
                 ConfigKey::SearchInstanceUrl,
@@ -142,12 +142,7 @@ pub(super) const SETTINGS: &[(&str, &[Setting])] = &[
             typed(
                 ConfigKey::SearchApiKeyEnv,
                 "Search key variable",
-                "Environment variable holding the search API key. Blank uses the backend default (BRAVE_API_KEY for Brave).",
-            ),
-            toggled(
-                ConfigKey::SearchSharedInstance,
-                "Shared SearXNG",
-                "Allow falling back to a public SearXNG instance when nothing else is configured. Off by default: queries would leave to a host neither you nor Abacus runs.",
+                "Environment variable holding the search API key. Blank uses the engine's default: BRAVE_API_KEY for Brave, FIRECRAWL_API_KEY for Firecrawl (optional; a key raises its rate limits).",
             ),
         ],
     ),
@@ -702,11 +697,10 @@ impl App {
                 self.settings.search.backend = match self.settings.search.backend {
                     SearchBackend::Auto => SearchBackend::Searxng,
                     SearchBackend::Searxng => SearchBackend::Brave,
-                    SearchBackend::Brave => SearchBackend::Bing,
-                    SearchBackend::Bing => SearchBackend::Auto,
+                    SearchBackend::Brave => SearchBackend::Firecrawl,
+                    SearchBackend::Firecrawl => SearchBackend::Auto,
                 };
             }
-            ConfigKey::SearchSharedInstance => toggle(&mut self.settings.search.use_shared_instance),
             // Both cycle through the built-ins and whatever the user has
             // written, so a theme file is reachable without knowing its name.
             ConfigKey::Theme => {
@@ -1215,12 +1209,15 @@ impl App {
             }
             ConfigKey::SearchInstanceUrl => unset(self.settings.search.instance_url.clone(), "(none)"),
             ConfigKey::SearchApiKeyEnv => {
-                let name = unset(self.settings.search.api_key_env.clone(), "BRAVE_API_KEY");
+                let engine = self.settings.search.resolve().backend;
+                let name = unset(
+                    self.settings.search.api_key_env.clone(),
+                    engine.default_key_env().unwrap_or("BRAVE_API_KEY"),
+                );
                 // Report whether the variable is populated, never its contents.
                 let present = std::env::var(&name).is_ok_and(|value| !value.trim().is_empty());
                 format!("{name} · {}", if present { "set" } else { "unset" })
             }
-            ConfigKey::SearchSharedInstance => on_off(self.settings.search.use_shared_instance),
             ConfigKey::TokenCompression => on_off(self.settings.agent.token_compression),
             ConfigKey::IdleCompaction => on_off(self.settings.agent.idle_compaction),
             ConfigKey::OneStream => on_off(self.settings.agent.one_stream),

@@ -1,10 +1,11 @@
 //! Web search and page-reading tools.
 //!
-//! `web_search` works with zero config: with no key set it falls back to
-//! Bing's public HTML page, which is best effort by nature — a bot wall or a
-//! layout change is a miss, and the tool says so rather than implying the web
-//! is empty. The API-key backend (Brave) and a self-hosted SearXNG
-//! instance can be picked via `[search]` in the config. `read_page`
+//! `web_search` works with zero config: with no key set it uses Firecrawl's
+//! search API, which answers without one at lower rate limits. Brave (keyed),
+//! Firecrawl with a key, and a self-hosted SearXNG instance can be picked via
+//! `[search]` in the config; whatever is picked, the others that can run are
+//! tried when it fails, and the failure is reported rather than implying the
+//! web is empty. `read_page`
 //! fetches a URL and converts it to readable text. Both are read-only and
 //! bounded; `read_page` refuses non-HTTP schemes and private / loopback hosts
 //! to avoid being steered into the local network (SSRF).
@@ -23,17 +24,13 @@ const USER_AGENT: &str = concat!("abacus-agent/", env!("CARGO_PKG_VERSION"));
 /// API calls keep the honest `USER_AGENT` above.
 const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
      (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-/// Pages of search results read when an extraction is requested.
-const EXTRACT_RESULT_PAGES: usize = 2;
 /// Ceiling on the results text handed to the reader model.
 const EXTRACT_CORPUS_CHARS: usize = 40_000;
-/// Result pages opened when an extraction runs on a keyed or self-hosted
-/// engine, and how much of each, and how long each may take.
+/// Result pages opened when an extraction runs, how much of each is kept,
+/// and how long each may take.
 const EXTRACT_OPEN_PAGES: usize = 3;
 const EXTRACT_PAGE_CHARS: usize = 12_000;
 const EXTRACT_PAGE_TIMEOUT: Duration = Duration::from_secs(15);
-/// Results read off Bing's page before the off-topic ones are dropped.
-const BING_PAGE_RESULTS: usize = 20;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// Total attempts for one HTTP request, including the first.
 const RETRY_ATTEMPTS: usize = 3;
@@ -41,40 +38,44 @@ const RETRY_ATTEMPTS: usize = 3;
 /// one quick second chance, not a patient exponential climb.
 const RETRY_BACKOFF: [Duration; 2] = [Duration::from_millis(250), Duration::from_millis(750)];
 const MAX_PAGE_CHARS: usize = 20_000;
-/// A public SearXNG instance offered as a convenience, used only when
-/// `[search] use_shared_instance` is explicitly turned on.
-pub const SHARED_SEARXNG: &str = "https://searxng.bluflare.de";
+/// Firecrawl's search endpoint.
+const FIRECRAWL_SEARCH_URL: &str = "https://api.firecrawl.dev/v2/search";
+/// Longest snippet kept from a Firecrawl result. Its descriptions are
+/// sometimes the page's own markdown, code blocks and all.
+const FIRECRAWL_SNIPPET_CHARS: usize = 300;
 
 /// Which search backend `web_search` uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchBackend {
     /// Use whichever backend the environment can support: a configured
-    /// SearXNG instance, then Brave when its key is present, otherwise Bing's
-    /// keyless public page — or a shared SearXNG instance when
-    /// `use_shared_instance` opts into one.
+    /// SearXNG instance, then the engine a key is set for (Brave first),
+    /// otherwise Firecrawl without a key.
+    ///
+    /// `bing` is read as this too. Scraping Bing's results page was the old
+    /// keyless default, and Bing answers requests it takes for a bot with
+    /// unrelated pages, so it was removed; a config that names it still loads.
     #[default]
+    #[serde(alias = "bing")]
     Auto,
-    /// Bing's public HTML search: no key needed. The keyless default, and
-    /// the only one — scraping a public results page is best-effort by
-    /// nature, so there is no chain of fallbacks pretending otherwise.
-    Bing,
     /// A SearXNG instance, named by `[search] instance_url`. Self-hosted ones
     /// are the best option here: no key, no quota, and the query never leaves
-    /// infrastructure you control. With no URL configured this falls back to
-    /// [`DEFAULT_SEARXNG`], a shared instance — a courtesy, not
-    /// infrastructure, so anything depending on search should set its own.
+    /// infrastructure you control.
     Searxng,
+    /// Brave's search API. Needs a key.
     Brave,
+    /// Firecrawl's search API. Works without a key at lower rate limits; a
+    /// key raises them.
+    Firecrawl,
 }
 
 impl SearchBackend {
     pub fn label(self) -> &'static str {
         match self {
             SearchBackend::Auto => "auto",
-            SearchBackend::Bing => "bing",
             SearchBackend::Searxng => "searxng",
             SearchBackend::Brave => "brave",
+            SearchBackend::Firecrawl => "firecrawl",
         }
     }
 
@@ -82,6 +83,16 @@ impl SearchBackend {
     /// it has already resolved to something concrete by the time it is asked.
     fn needs_key(self) -> bool {
         matches!(self, SearchBackend::Brave)
+    }
+
+    /// The variable this engine's key is read from when `[search]
+    /// api_key_env` names none.
+    pub fn default_key_env(self) -> Option<&'static str> {
+        match self {
+            SearchBackend::Brave => Some("BRAVE_API_KEY"),
+            SearchBackend::Firecrawl => Some("FIRECRAWL_API_KEY"),
+            _ => None,
+        }
     }
 }
 
@@ -92,34 +103,23 @@ pub struct SearchSettings {
     /// Master switch. When false, the web tools are not offered to the model.
     pub enabled: bool,
     pub backend: SearchBackend,
-    /// Environment variable holding the API key for key-backed providers.
+    /// Environment variable holding the key for a key-backed engine. Unset,
+    /// each engine reads its own default (`BRAVE_API_KEY`, `FIRECRAWL_API_KEY`).
     pub api_key_env: Option<String>,
     /// Base URL of a SearXNG instance, e.g. `http://localhost:8888`. The
     /// instance must have the JSON format enabled (`search.formats: [json]`
     /// in its settings.yml) — it is off by default in SearXNG.
     pub instance_url: Option<String>,
-    /// Fall back to [`SHARED_SEARXNG`] when nothing else is configured.
-    ///
-    /// Off by default. Turning it on sends every search to a host neither you
-    /// nor Abacus runs — fine for trying things out, worth replacing with your
-    /// own instance or an API key for anything you rely on.
-    pub use_shared_instance: bool,
 }
 
 impl Default for SearchSettings {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            backend: SearchBackend::default(),
-            api_key_env: None,
-            instance_url: None,
-            use_shared_instance: false,
-        }
+        Self { enabled: true, backend: SearchBackend::default(), api_key_env: None, instance_url: None }
     }
 }
 
 impl SearchSettings {
-    /// Resolve the runtime config, reading the API key from the environment.
+    /// Resolve the runtime config, reading the API keys from the environment.
     pub fn resolve(&self) -> WebConfig {
         self.resolve_with(|name| std::env::var(name).ok())
     }
@@ -128,47 +128,54 @@ impl SearchSettings {
     /// env vars so the tests cannot race each other — they share one process.
     pub fn resolve_with(&self, lookup: impl Fn(&str) -> Option<String>) -> WebConfig {
         let read = |name: &str| lookup(name).map(|value| value.trim().to_owned()).filter(|value| !value.is_empty());
-        // `Auto` prefers a backend that can actually answer: a self-hosted
-        // SearXNG first, then a keyed API, then the shared instance if it was
-        // opted into, and Bing's public page as the zero-config floor.
-        let mut instance = self
+        let instance = self
             .instance_url
             .as_deref()
             .map(str::trim)
             .filter(|url| !url.is_empty())
             .map(|url| url.trim_end_matches('/').to_owned());
-        let named = self.api_key_env.as_deref();
-        let (backend, api_key) = match self.backend {
+        // The named variable belongs to the engine that was chosen. Where the
+        // choice has no key of its own, the key says whose it is: Firecrawl's
+        // start with `fc-`.
+        let named = self.api_key_env.as_deref().and_then(read);
+        let named_for = match self.backend {
+            SearchBackend::Brave | SearchBackend::Firecrawl => self.backend,
+            _ if named.as_deref().is_some_and(|key| key.starts_with("fc-")) => SearchBackend::Firecrawl,
+            _ => SearchBackend::Brave,
+        };
+        // Each engine keeps its own key, so a fallback never sends one
+        // engine's key to another.
+        let key = |engine: SearchBackend| {
+            named.clone().filter(|_| named_for == engine).or_else(|| engine.default_key_env().and_then(read))
+        };
+        let brave_key = key(SearchBackend::Brave);
+        let firecrawl_key = key(SearchBackend::Firecrawl);
+        // `Auto` prefers a backend that can actually answer.
+        let backend = match self.backend {
             // Someone who has stood up a SearXNG instance meant it: no quota,
             // no key, and nothing leaves their own infrastructure.
-            SearchBackend::Auto if instance.is_some() => (SearchBackend::Searxng, None),
+            SearchBackend::Auto if instance.is_some() => SearchBackend::Searxng,
             // A named variable is an explicit choice; honour it first.
-            SearchBackend::Auto => match named.and_then(read).or_else(|| read("BRAVE_API_KEY")) {
-                Some(key) => (SearchBackend::Brave, Some(key)),
-                // Explicitly asked for: a real JSON API beats scraping, but it
-                // is someone else's host, so it is never assumed.
-                None if self.use_shared_instance => {
-                    instance = Some(SHARED_SEARXNG.to_owned());
-                    (SearchBackend::Searxng, None)
-                }
-                // No key, no instance, no permission to borrow one: Bing's
-                // public page, best effort.
-                None => (SearchBackend::Bing, None),
-            },
-            chosen => {
-                let default_env = matches!(chosen, SearchBackend::Brave).then_some("BRAVE_API_KEY");
-                (chosen, named.or(default_env).and_then(read))
-            }
+            SearchBackend::Auto if named.is_some() => named_for,
+            SearchBackend::Auto if brave_key.is_some() => SearchBackend::Brave,
+            // Firecrawl answers with or without a key.
+            SearchBackend::Auto => SearchBackend::Firecrawl,
+            chosen => chosen,
         };
-        WebConfig { enabled: self.enabled, backend, api_key, instance_url: instance, extractor: None }
+        WebConfig { enabled: self.enabled, backend, brave_key, firecrawl_key, instance_url: instance, extractor: None }
     }
 }
+
 /// Resolved, ready-to-use web configuration.
 #[derive(Debug, Clone, Default)]
 pub struct WebConfig {
     pub enabled: bool,
     pub backend: SearchBackend,
-    pub api_key: Option<String>,
+    /// Brave's key. Brave is skipped without one.
+    pub brave_key: Option<String>,
+    /// Firecrawl's key, if any. Firecrawl searches without one, at lower
+    /// rate limits.
+    pub firecrawl_key: Option<String>,
     /// Resolved SearXNG base URL, when that backend is in use.
     pub instance_url: Option<String>,
     /// Model used to pull the requested facts out of a fetched page. Attached
@@ -229,38 +236,11 @@ impl WebConfig {
         let Some(extractor) = &self.extractor else {
             return self.search(query, max_results).await;
         };
-        if self.backend != SearchBackend::Bing {
-            return self.extract_from_results(extractor, query, max_results, request).await;
-        }
-
-        // The results page itself, read rather than parsed.
-        //
-        // Scraping it is what makes keyless search unreliable: the markup
-        // shifts between fetches, the links are redirect wrappers whose
-        // encoding has to be guessed, and a parser that half-matches returns
-        // one stray result and calls it success. A model reading the same page
-        // does not care which shape arrived today.
-        let corpus = self.results_text(query).await;
-        let corpus = match corpus {
-            Some(text) if text.len() > 400 => text,
-            // Nothing readable came back — fall back to the parsed listing so
-            // an extraction request still gets whatever the backend managed.
-            _ => self.search(query, max_results).await?,
-        };
-        match extract_from(extractor, request, &corpus).await {
-            Some(answer) => Ok(answer),
-            None => self.search(query, max_results).await,
-        }
+        self.extract_from_results(extractor, query, max_results, request).await
     }
 
-    /// Extraction on a configured engine: its results, then the top pages they
-    /// point at, read by the extractor.
-    ///
-    /// This used to read Bing's results page whatever the configuration said,
-    /// so a working Brave key or SearXNG instance was never consulted when the
-    /// model asked for an answer rather than a list — and Bing answers
-    /// automated requests with unrelated pages often enough that the reader
-    /// was handed junk.
+    /// Extraction: the engine's results, then the top pages they point at,
+    /// read by the extractor.
     async fn extract_from_results(
         &self,
         extractor: &crate::provider::Provider,
@@ -306,35 +286,6 @@ impl WebConfig {
         Ok(out)
     }
 
-    /// Fetch a couple of pages of results as plain text, for the model to read.
-    async fn results_text(&self, query: &str) -> Option<String> {
-        let client = self.client().ok()?;
-        let pages = (0..EXTRACT_RESULT_PAGES).map(|page| {
-            let client = client.clone();
-            async move {
-                let response = send_with_retry(
-                    client
-                        .get("https://www.bing.com/search")
-                        .query(&[("q", query), ("first", &(page * 10 + 1).to_string())])
-                        .header(reqwest::header::ACCEPT, "text/html")
-                        .header(reqwest::header::USER_AGENT, BROWSER_USER_AGENT)
-                        .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9"),
-                )
-                .await
-                .ok()?;
-                let body = response.text().await.ok()?;
-                let text = html_to_text(&body);
-                (text.len() > 200).then_some(text)
-            }
-        });
-        let texts: Vec<String> = futures_util::future::join_all(pages).await.into_iter().flatten().collect();
-        if texts.is_empty() {
-            return None;
-        }
-        let joined = texts.join("\n\n");
-        Some(joined.chars().take(EXTRACT_CORPUS_CHARS).collect())
-    }
-
     pub async fn search(&self, query: &str, max_results: usize) -> Result<String> {
         let query = query.trim();
         let outcome = self.run_chain(query, max_results).await?;
@@ -359,7 +310,7 @@ impl WebConfig {
     }
 
     /// Falling back quietly would hide a broken configuration behind working
-    /// results: someone who stood up a SearXNG instance and got scraped Bing
+    /// results: someone who stood up a SearXNG instance and got Firecrawl's
     /// answers for a month would have no way to notice. The search still
     /// succeeds; the fault is reported alongside it.
     fn fallback_note(&self, outcome: &ChainOutcome) -> Option<String> {
@@ -381,7 +332,7 @@ impl WebConfig {
             bail!("query cannot be empty");
         }
         let max_results = max_results.clamp(1, 10);
-        if self.backend.needs_key() && self.api_key.is_none() {
+        if self.backend.needs_key() && self.brave_key.is_none() {
             bail!(
                 "the {} search backend needs an API key; set the configured environment variable (or `[search] api_key_env`)",
                 self.backend.label()
@@ -407,15 +358,17 @@ impl WebConfig {
                 // `resolve` turns Auto into something concrete before a
                 // WebConfig exists, so it never reaches a chain.
                 SearchBackend::Auto => continue,
-                SearchBackend::Bing => bing_search(&client, query, max_results).await,
                 SearchBackend::Searxng => match self.instance_url.as_deref() {
                     Some(base) => searxng_search(&client, base, query, max_results).await,
                     None => continue,
                 },
-                SearchBackend::Brave => match self.api_key.as_deref() {
+                SearchBackend::Brave => match self.brave_key.as_deref() {
                     Some(key) => brave_search(&client, key, query, max_results).await,
                     None => continue,
                 },
+                SearchBackend::Firecrawl => {
+                    firecrawl_search(&client, self.firecrawl_key.as_deref(), query, max_results).await
+                }
             };
             match outcome {
                 Ok(found) if !found.is_empty() => {
@@ -444,9 +397,9 @@ impl WebConfig {
             }
         };
         consider(SearchBackend::Searxng, self.instance_url.is_some());
-        consider(SearchBackend::Brave, self.api_key.is_some());
-        // Keyless and always available, so it anchors the chain.
-        consider(SearchBackend::Bing, true);
+        consider(SearchBackend::Brave, self.brave_key.is_some());
+        // Answers without a key, so it anchors the chain.
+        consider(SearchBackend::Firecrawl, true);
         chain
     }
 
@@ -469,14 +422,7 @@ impl WebConfig {
             ));
             return report;
         }
-        if attempted.iter().any(|name| name == "bing") {
-            report.push_str(
-                " The keyless path scrapes a public results page, which blocks bots and changes \
-                 layout without warning, so it misses on plenty of real queries. Do not retry \
-                 more than once. Say so plainly, and mention that a self-hosted SearXNG instance \
-                 or a search API key gives full web search.",
-            );
-        }
+        report.push_str(" Every engine answered and found nothing: try other wording once, not the same query again.");
         report
     }
 
@@ -743,145 +689,6 @@ async fn searxng_search(
         .collect())
 }
 
-// ---- Bing HTML (keyless) ----
-//
-// The one keyless route: Bing's public HTML page. Microsoft wraps most result
-// links in a `bing.com/ck/a` redirect whose `u` parameter holds the real URL;
-// `bing_result_url` unwraps it. Like the other
-// keyless engines, a page that does not parse (a captcha or consent wall)
-// yields no results and the keyless chain falls through.
-
-async fn bing_search(client: &reqwest::Client, query: &str, max_results: usize) -> Result<Vec<SearchResult>> {
-    let response = send_with_retry(
-        client
-            .get("https://www.bing.com/search")
-            .query(&[("q", query), ("count", &max_results.to_string())])
-            .header(reqwest::header::ACCEPT, "text/html")
-            // Without a browser identity Bing serves a stripped page whose
-            // markup the parser barely matches, and without a language header
-            // it answers from the exit node's locale — a SIGHUP query came back
-            // with the German Wikipedia article about the city of Tokyo.
-            .header(reqwest::header::USER_AGENT, BROWSER_USER_AGENT)
-            .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9"),
-    )
-    .await
-    .map_err(|error| anyhow!("Bing request failed: {error}"))?;
-    let body = response.text().await.map_err(|error| anyhow!("could not read Bing response: {error}"))?;
-    let parsed = parse_bing_html(&body, BING_PAGE_RESULTS);
-    let terms = query_terms(query);
-    let total = parsed.len();
-    let results: Vec<SearchResult> =
-        parsed.into_iter().filter(|result| is_on_topic(&terms, result)).take(max_results).collect();
-    if total > 0 && results.is_empty() {
-        bail!(
-            "returned {total} results, none of them about the query — Bing answers requests it takes for a bot \
-             with unrelated pages"
-        );
-    }
-    Ok(results)
-}
-
-/// The words of a query a relevant result should contain: search operators,
-/// bare numbers and filler dropped, plurals folded so "experts" finds "expert".
-fn query_terms(query: &str) -> Vec<String> {
-    const FILLER: &[&str] = &[
-        "the", "and", "for", "with", "from", "that", "this", "what", "how", "why", "when", "where", "which", "who",
-        "are", "was", "were", "does", "did", "into", "about", "not", "you", "your", "can", "use", "using",
-    ];
-    let mut terms: Vec<String> = Vec::new();
-    for token in query.split_whitespace() {
-        // `-exclude` and `site:example.com` narrow a search; a result
-        // need not contain them.
-        let operator = token.split_once(':').is_some_and(|(name, _)| name.chars().all(|c| c.is_ascii_alphabetic()));
-        if token.starts_with('-') || operator {
-            continue;
-        }
-        for word in token.split(|c: char| !c.is_alphanumeric()) {
-            let word = word.to_lowercase();
-            if word.chars().count() < 3 || word.chars().all(|c| c.is_ascii_digit()) || FILLER.contains(&word.as_str()) {
-                continue;
-            }
-            let word = match word.strip_suffix('s') {
-                Some(stem) if stem.chars().count() >= 4 => stem.to_owned(),
-                _ => word,
-            };
-            if !terms.contains(&word) {
-                terms.push(word);
-            }
-        }
-    }
-    terms
-}
-
-/// Whether a scraped result is about the query at all.
-///
-/// Bing answers automated requests it distrusts with somebody else's results
-/// rather than a block page — a query about mixture-of-experts models came
-/// back as a German dictionary, an electronics chain and running shoes — and
-/// the markup is identical, so the parser cannot tell. A result that shares
-/// next to nothing with the query is not a result for it. One shared word is
-/// enough for a short query; a longer one needs two, so a single common word
-/// ("latent", "expert") does not pass for a match.
-fn is_on_topic(terms: &[String], result: &SearchResult) -> bool {
-    if terms.is_empty() {
-        return true;
-    }
-    let haystack = format!("{} {} {}", result.title, result.snippet, result.url).to_lowercase();
-    let matched = terms.iter().filter(|term| haystack.contains(term.as_str())).count();
-    matched >= if terms.len() >= 3 { 2 } else { 1 }
-}
-
-/// Parse Bing's result list: `<li class="b_algo">` blocks holding an
-/// `<h2><a>` for the title and link, and a caption `<p>` for the snippet.
-/// Anything that is not that shape — a captcha, a consent wall, a page with
-/// no results — comes back empty.
-fn parse_bing_html(html: &str, max_results: usize) -> Vec<SearchResult> {
-    use regex::Regex;
-    let block = Regex::new(r#"(?is)<li class="b_algo".*?</li>"#).expect("valid regex");
-    let anchor = Regex::new(r#"(?is)<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#).expect("valid regex");
-    let snippet = Regex::new(r#"(?is)<p[^>]*>(.*?)</p>"#).expect("valid regex");
-    let mut results = Vec::new();
-    for capture in block.captures_iter(html) {
-        if results.len() >= max_results {
-            break;
-        }
-        let Some(anchor) = anchor.captures(&capture[0]) else {
-            continue;
-        };
-        let href = decode_entities(&anchor[1]);
-        let Some(url) = bing_result_url(&href) else {
-            continue;
-        };
-        let title = html_to_text(&anchor[2]).trim().to_owned();
-        if title.is_empty() {
-            continue;
-        }
-        let snippet =
-            snippet.captures(&capture[0]).map(|text| html_to_text(&text[1]).trim().to_owned()).unwrap_or_default();
-        results.push(SearchResult { title, url, snippet });
-    }
-    results
-}
-
-/// Unwrap a Bing result href. Direct links pass through; `bing.com/ck/a`
-/// redirects carry the target in their `u` query parameter as `a1` followed
-/// by unpadded base64, e.g. `a1aHR0cHM6Ly9ydXN0LWxhbmcub3JnLw` decodes to
-/// `https://rust-lang.org/`.
-fn bing_result_url(href: &str) -> Option<String> {
-    if !href.contains("bing.com/ck/a") {
-        return href.starts_with("http").then(|| href.to_owned());
-    }
-    use base64::Engine;
-    let encoded = regex::Regex::new(r"(?i)[?&]u=([^&]+)").expect("valid regex").captures(href)?.get(1)?.as_str();
-    let padded = encoded.strip_prefix("a1")?.trim_end_matches('=');
-    if padded.len() % 4 == 1 {
-        return None;
-    }
-    let decoded = base64::engine::general_purpose::STANDARD_NO_PAD.decode(padded).ok()?;
-    let decoded = String::from_utf8(decoded).ok()?;
-    decoded.starts_with("http").then_some(decoded)
-}
-
 // ---- Brave Search API ----
 
 async fn brave_search(
@@ -953,6 +760,89 @@ fn brave_error(status: u16, body: &str) -> String {
     };
     message.push_str(" — ");
     message.push_str(&hint);
+    message
+}
+
+// ---- Firecrawl Search API ----
+//
+// Answers without a key, at lower rate limits; a key (FIRECRAWL_API_KEY, or
+// one starting `fc-` in the variable `[search] api_key_env` names) raises
+// them. Results come grouped by source; `web` is the one asked for.
+
+async fn firecrawl_search(
+    client: &reqwest::Client,
+    api_key: Option<&str>,
+    query: &str,
+    max_results: usize,
+) -> Result<Vec<SearchResult>> {
+    let mut request = client
+        .post(FIRECRAWL_SEARCH_URL)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .json(&serde_json::json!({ "query": query, "limit": max_results }));
+    if let Some(key) = api_key {
+        request = request.bearer_auth(key);
+    }
+    let response = send_with_retry(request).await.map_err(|error| match error.downcast_ref::<HttpStatus>() {
+        Some(http) => {
+            anyhow!("Firecrawl request failed: {}", firecrawl_error(http.status, &http.body, api_key.is_some()))
+        }
+        None => anyhow!("Firecrawl request failed: {error}"),
+    })?;
+    let value: Value = response.json().await.map_err(|error| anyhow!("invalid Firecrawl response: {error}"))?;
+    parse_firecrawl(&value, max_results)
+}
+
+/// Read Firecrawl's results. v2 groups them as `data.web`; a bare `data`
+/// array is the v1 shape, read too in case an older deployment answers.
+fn parse_firecrawl(value: &Value, max_results: usize) -> Result<Vec<SearchResult>> {
+    if value["success"] == Value::Bool(false) {
+        bail!("Firecrawl reported a failure: {}", value["error"].as_str().unwrap_or("no reason given"));
+    }
+    let Some(items) = value["data"]["web"].as_array().or_else(|| value["data"].as_array()) else {
+        return Ok(Vec::new());
+    };
+    let mut results = Vec::new();
+    for item in items {
+        if results.len() >= max_results {
+            break;
+        }
+        let url = item["url"].as_str().unwrap_or_default().trim().to_owned();
+        let title = one_line(item["title"].as_str().unwrap_or_default());
+        if url.is_empty() || title.is_empty() {
+            continue;
+        }
+        let description = one_line(item["description"].as_str().unwrap_or_default());
+        let snippet = crate::text::clip(&description, FIRECRAWL_SNIPPET_CHARS, "…");
+        results.push(SearchResult { title, url, snippet });
+    }
+    Ok(results)
+}
+
+/// Collapse a field that may hold a page's markdown into one line.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Say why Firecrawl refused. Its error bodies are `{"success": false,
+/// "error": "..."}`.
+fn firecrawl_error(status: u16, body: &str, keyed: bool) -> String {
+    let value: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    let mut message = format!("HTTP {status}");
+    if let Some(reason) = value["error"].as_str().map(str::trim).filter(|reason| !reason.is_empty()) {
+        message.push_str(": ");
+        message.push_str(reason.trim_end_matches('.'));
+    }
+    let hint = match status {
+        401 | 403 => {
+            "Firecrawl rejected the API key; check FIRECRAWL_API_KEY (or the variable `[search] api_key_env` names)"
+        }
+        402 => "the Firecrawl account is out of credits; top it up or wait for the plan to renew",
+        429 if keyed => "Firecrawl is rate limiting this key; wait before searching again",
+        429 => "Firecrawl's keyless rate limit was reached; set FIRECRAWL_API_KEY for a higher one",
+        _ => return message,
+    };
+    message.push_str(" — ");
+    message.push_str(hint);
     message
 }
 
@@ -1131,7 +1021,8 @@ mod tests {
         WebConfig {
             enabled: true,
             backend,
-            api_key: key.map(str::to_owned),
+            brave_key: key.map(str::to_owned),
+            firecrawl_key: None,
             instance_url: instance.map(str::to_owned),
             extractor: None,
         }
@@ -1139,21 +1030,21 @@ mod tests {
 
     #[test]
     fn the_chain_tries_the_configured_engine_first_then_what_else_is_reachable() {
-        // A single scrape with no fallback was the flakiness: one bot wall and
+        // A single engine with no fallback was the flakiness: one failure and
         // the search was over.
         let searxng = config(SearchBackend::Searxng, Some("http://localhost:8888"), None);
-        assert_eq!(searxng.chain(), vec![SearchBackend::Searxng, SearchBackend::Bing]);
+        assert_eq!(searxng.chain(), vec![SearchBackend::Searxng, SearchBackend::Firecrawl]);
 
         let both = config(SearchBackend::Brave, Some("http://localhost:8888"), Some("k"));
-        assert_eq!(both.chain(), vec![SearchBackend::Brave, SearchBackend::Searxng, SearchBackend::Bing]);
+        assert_eq!(both.chain(), vec![SearchBackend::Brave, SearchBackend::Searxng, SearchBackend::Firecrawl]);
     }
 
     #[test]
     fn the_chain_never_includes_an_engine_that_lacks_its_configuration() {
         // A fallback that cannot run is not a fallback; offering it would only
         // produce a confusing "tried: brave" in the failure report.
-        let bare = config(SearchBackend::Bing, None, None);
-        assert_eq!(bare.chain(), vec![SearchBackend::Bing]);
+        let bare = config(SearchBackend::Firecrawl, None, None);
+        assert_eq!(bare.chain(), vec![SearchBackend::Firecrawl]);
         assert!(!bare.chain().contains(&SearchBackend::Brave));
         assert!(!bare.chain().contains(&SearchBackend::Searxng));
     }
@@ -1161,25 +1052,25 @@ mod tests {
     #[test]
     fn the_configured_engine_is_never_duplicated_in_the_chain() {
         let brave = config(SearchBackend::Brave, None, Some("k"));
-        assert_eq!(brave.chain(), vec![SearchBackend::Brave, SearchBackend::Bing]);
+        assert_eq!(brave.chain(), vec![SearchBackend::Brave, SearchBackend::Firecrawl]);
     }
 
     #[test]
     fn an_empty_report_separates_a_miss_from_a_broken_endpoint() {
-        let bare = config(SearchBackend::Bing, None, None);
+        let bare = config(SearchBackend::Firecrawl, None, None);
 
         // Everything answered, nothing matched: a wording problem.
-        let miss = bare.empty_report("x", &["bing".into()], &["bing: no results".into()]);
-        assert!(miss.contains("Tried: bing"), "{miss}");
+        let miss = bare.empty_report("x", &["firecrawl".into()], &["firecrawl: no results".into()]);
+        assert!(miss.contains("Tried: firecrawl"), "{miss}");
         assert!(!miss.contains("endpoint problem"), "{miss}");
-        assert!(miss.contains("keyless path"), "{miss}");
+        assert!(miss.contains("other wording"), "{miss}");
 
         // Nothing answered at all: retrying the wording is pointless, and the
         // model needs to be told which it is.
         let broken = bare.empty_report(
             "x",
-            &["searxng".into(), "bing".into()],
-            &["searxng: HTTP 503".into(), "bing: HTTP 429".into()],
+            &["searxng".into(), "firecrawl".into()],
+            &["searxng: HTTP 503".into(), "firecrawl: HTTP 429".into()],
         );
         assert!(broken.contains("endpoint problem"), "{broken}");
         assert!(broken.contains("HTTP 503"), "the cause is named: {broken}");
@@ -1220,8 +1111,6 @@ mod tests {
         assert_eq!(decode_entities("a&amp;b&#39;c&#x2d;d"), "a&b'c-d");
     }
 
-    /// `Auto` takes a backend that works whenever the environment offers one:
-    /// a self-hosted SearXNG, then Brave on a key, then Bing.
     /// The reader is handed hostile input by definition, so the framing is
     /// part of the contract: the page arrives as data, and the instruction not
     /// to obey it sits where the page cannot reach.
@@ -1297,28 +1186,31 @@ mod tests {
             _ => None,
         });
         assert_eq!(resolved.backend, SearchBackend::Brave);
-        assert_eq!(resolved.api_key.as_deref(), Some("bk-1"));
+        assert_eq!(resolved.brave_key.as_deref(), Some("bk-1"));
+        assert!(resolved.firecrawl_key.is_none(), "one engine's key never goes to another");
 
-        // Any key present resolves to Brave, the one key-backed engine.
-        let resolved = settings.resolve_with(|_| Some("either".into()));
+        // Both keys present: Brave first, and Firecrawl keeps its own for the fallback.
+        let resolved = settings.resolve_with(|name| match name {
+            "BRAVE_API_KEY" => Some("bk-1".into()),
+            "FIRECRAWL_API_KEY" => Some("fc-1".into()),
+            _ => None,
+        });
         assert_eq!(resolved.backend, SearchBackend::Brave);
+        assert_eq!(resolved.firecrawl_key.as_deref(), Some("fc-1"));
 
-        // No keys at all: Bing's public page, the zero-config floor.
+        // Only a Firecrawl key.
+        let resolved = settings.resolve_with(|name| (name == "FIRECRAWL_API_KEY").then(|| "fc-1".into()));
+        assert_eq!(resolved.backend, SearchBackend::Firecrawl);
+        assert_eq!(resolved.firecrawl_key.as_deref(), Some("fc-1"));
+
+        // No keys at all: Firecrawl, which answers without one.
         let resolved = settings.resolve_with(|_| None);
-        assert_eq!(resolved.backend, SearchBackend::Bing);
-        assert!(resolved.api_key.is_none());
+        assert_eq!(resolved.backend, SearchBackend::Firecrawl);
+        assert!(resolved.brave_key.is_none() && resolved.firecrawl_key.is_none());
         // A blank variable counts as absent, not as a key.
         let blank = settings.resolve_with(|_| Some("   ".into()));
-        assert_eq!(blank.backend, SearchBackend::Bing);
-
-        // The shared instance is used only when asked for.
-        let opted_in = SearchSettings { use_shared_instance: true, ..SearchSettings::default() };
-        let resolved = opted_in.resolve_with(|_| None);
-        assert_eq!(resolved.backend, SearchBackend::Searxng);
-        assert_eq!(resolved.instance_url.as_deref(), Some(SHARED_SEARXNG));
-        // And never over a key the operator already has.
-        let resolved = opted_in.resolve_with(|name| (name == "BRAVE_API_KEY").then(|| "bk".into()));
-        assert_eq!(resolved.backend, SearchBackend::Brave);
+        assert_eq!(blank.backend, SearchBackend::Firecrawl);
+        assert!(blank.brave_key.is_none());
     }
 
     /// A configured instance is an explicit decision — and the best option
@@ -1335,16 +1227,17 @@ mod tests {
 
         // A blank URL is not a configuration.
         let blank = SearchSettings { instance_url: Some("   ".into()), ..SearchSettings::default() };
-        assert_eq!(blank.resolve_with(|_| None).backend, SearchBackend::Bing);
+        assert_eq!(blank.resolve_with(|_| None).backend, SearchBackend::Firecrawl);
     }
 
     /// An explicitly chosen backend is never second-guessed.
     #[test]
     fn an_explicit_backend_is_honoured_even_when_a_key_exists() {
-        let settings = SearchSettings { backend: SearchBackend::Bing, ..SearchSettings::default() };
-        assert_eq!(settings.resolve_with(|_| Some("bk-1".into())).backend, SearchBackend::Bing);
+        let settings = SearchSettings { backend: SearchBackend::Firecrawl, ..SearchSettings::default() };
+        assert_eq!(settings.resolve_with(|_| Some("bk-1".into())).backend, SearchBackend::Firecrawl);
 
-        // A named variable under Auto is an explicit choice too.
+        // A named variable under Auto is an explicit choice too, and the key
+        // says which engine it is for.
         let named = SearchSettings {
             backend: SearchBackend::Auto,
             api_key_env: Some("MY_SEARCH_KEY".into()),
@@ -1352,7 +1245,33 @@ mod tests {
         };
         let resolved = named.resolve_with(|name| (name == "MY_SEARCH_KEY").then(|| "bk-9".into()));
         assert_eq!(resolved.backend, SearchBackend::Brave);
-        assert_eq!(resolved.api_key.as_deref(), Some("bk-9"));
+        assert_eq!(resolved.brave_key.as_deref(), Some("bk-9"));
+        let resolved = named.resolve_with(|name| (name == "MY_SEARCH_KEY").then(|| "fc-9".into()));
+        assert_eq!(resolved.backend, SearchBackend::Firecrawl);
+        assert_eq!(resolved.firecrawl_key.as_deref(), Some("fc-9"));
+        assert!(resolved.brave_key.is_none());
+
+        // Under an explicit Firecrawl, the named variable is Firecrawl's.
+        let firecrawl = SearchSettings {
+            backend: SearchBackend::Firecrawl,
+            api_key_env: Some("MY_SEARCH_KEY".into()),
+            ..SearchSettings::default()
+        };
+        let resolved = firecrawl.resolve_with(|name| (name == "MY_SEARCH_KEY").then(|| "key".into()));
+        assert_eq!(resolved.firecrawl_key.as_deref(), Some("key"));
+    }
+
+    /// Bing and the shared SearXNG instance are gone. Configs written while
+    /// they existed still load: `bing` reads as auto, and the old opt-in is
+    /// ignored rather than refused.
+    #[test]
+    fn configs_naming_removed_engines_still_load() {
+        let old: SearchSettings =
+            toml::from_str("backend = \"bing\"\nuse_shared_instance = true\n").expect("an old [search] loads");
+        assert_eq!(old.backend, SearchBackend::Auto);
+        assert_eq!(old.resolve_with(|_| None).backend, SearchBackend::Firecrawl);
+        let firecrawl: SearchSettings = toml::from_str("backend = \"firecrawl\"").unwrap();
+        assert_eq!(firecrawl.backend, SearchBackend::Firecrawl);
     }
 
     #[test]
@@ -1397,53 +1316,15 @@ mod tests {
         let cfg = WebConfig {
             enabled: true,
             backend: SearchBackend::Brave,
-            api_key: None,
+            brave_key: None,
+            firecrawl_key: None,
             instance_url: None,
             extractor: None,
         };
         // The async path bails before any network call; assert the precondition.
         assert!(cfg.backend.needs_key());
-        assert!(cfg.api_key.is_none());
-    }
-
-    /// Bing marks results up as `<li class="b_algo">`, wrapping most links in
-    /// a `bing.com/ck/a` redirect whose `u` parameter is `a1` + base64 of the
-    /// real URL. Direct links pass through untouched.
-    #[test]
-    fn parses_bing_results_and_unwraps_redirect_urls() {
-        let html = r#"<html><body><ol id="b_results">
-            <li class="b_algo"><h2><a href="https://www.bing.com/ck/a?!&amp;&amp;p=x&amp;u=a1aHR0cHM6Ly9ydXN0LWxhbmcub3JnLw">Rust Programming Language</a></h2>
-                <p class="b_lineclamp2">Rust is a blazingly fast systems language.</p></li>
-            <li class="b_algo"><h2><a href="https://www.rust-lang.org/learn">Learn Rust</a></h2>
-                <p class="b_lineclamp2">The book, from first principles.</p></li>
-        </ol></body></html>"#;
-        let results = parse_bing_html(html, 10);
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].title, "Rust Programming Language");
-        assert_eq!(results[0].url, "https://rust-lang.org/");
-        assert!(results[0].snippet.contains("blazingly fast"));
-        assert_eq!(results[1].title, "Learn Rust");
-        assert_eq!(results[1].url, "https://www.rust-lang.org/learn");
-        assert_eq!(results[1].snippet, "The book, from first principles.");
-
-        // `u` = `a1` + unpadded base64 of "https://rust-lang.org/".
-        assert_eq!(
-            bing_result_url("https://www.bing.com/ck/a?!&&p=x&u=a1aHR0cHM6Ly9ydXN0LWxhbmcub3JnLw"),
-            Some("https://rust-lang.org/".to_owned())
-        );
-        assert_eq!(bing_result_url("https://example.com/page"), Some("https://example.com/page".to_owned()));
-        assert_eq!(bing_result_url("javascript:alert(1)"), None);
-        // A redirect with no `u` parameter cannot be unwrapped.
-        assert_eq!(bing_result_url("https://www.bing.com/ck/a?!&&p=x"), None);
-    }
-
-    /// A bot-walled or consent page has no result markup, so it parses to
-    /// nothing and the keyless chain falls through to the next engine rather
-    /// than surfacing a garbage "result" or an error.
-    #[test]
-    fn bot_wall_pages_parse_to_empty_results() {
-        let page = r#"<html><body><div class="anomaly-modal__title">Unfortunately, bots use this search engine too.</div></body></html>"#;
-        assert!(parse_bing_html(page, 10).is_empty());
+        assert!(cfg.brave_key.is_none());
+        assert!(!SearchBackend::Firecrawl.needs_key(), "Firecrawl answers without one");
     }
 
     /// The body Brave sent when the key's monthly limit ran out, verbatim
@@ -1485,76 +1366,19 @@ mod tests {
         SearchResult { title: title.into(), url: url.into(), snippet: snippet.into() }
     }
 
-    #[test]
-    fn query_terms_skip_operators_numbers_and_filler() {
-        assert_eq!(
-            query_terms(r#""LatentMoE" OR "Latent MoE" mixture of experts arxiv 2025 site:arxiv.org -survey"#),
-            vec!["latentmoe", "latent", "moe", "mixture", "expert", "arxiv"]
-        );
-        assert_eq!(query_terms("how does the"), Vec::<String>::new());
-    }
-
-    /// What Bing actually returned, from a live session, for queries about
-    /// mixture-of-experts models: none of it is about the query, and none of
-    /// it may be passed off as results.
-    #[test]
-    fn bing_results_about_something_else_are_dropped() {
-        let terms = query_terms("Latent MoE mixture of experts compression fusing experts 2024 2025");
-        for junk in [
-            result(
-                "latent Rechtschreibung, Bedeutung, Definition, Herkunft Duden",
-                "https://www.duden.de/rechtschreibung/latent",
-                "Definition, Rechtschreibung, Synonyme und Grammatik von 'latent'",
-            ),
-            result(
-                "International Mobile Recharge, Mobile Top-Up Online | Ding",
-                "https://www.ding.com/",
-                "Send top-up to family and friends",
-            ),
-        ] {
-            assert!(!is_on_topic(&terms, &junk), "{junk:?}");
-        }
-        let terms = query_terms(r#""expert merging" OR "expert fusion" OR "reaping" MoE pruning arxiv 2025"#);
-        let store = result(
-            "expert - Elektromarkt in Ihrer Nähe mit Online-Shop",
-            "https://www.expert.de/",
-            "Finden Sie hier Ihren expert Elektrofachmarkt",
-        );
-        assert!(!is_on_topic(&terms, &store));
-
-        // Real results stay.
-        let terms = query_terms("MiMo-V2.6-Flash-MOPD model architecture MoE experts Xiaomi");
-        let real = result(
-            "XiaomiMiMo/MiMo-V2.6-Flash-RL · Hugging Face",
-            "https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Flash-RL",
-            "Native Omnimodal",
-        );
-        assert!(is_on_topic(&terms, &real));
-        let terms = query_terms("tokio signal SIGHUP handler");
-        let docs = result(
-            "tokio::signal - Rust",
-            "https://docs.rs/tokio/latest/tokio/signal/index.html",
-            "Asynchronous signal handling for Tokio.",
-        );
-        assert!(is_on_topic(&terms, &docs));
-        // A two-word query needs only one of them.
-        let terms = query_terms("reqwest timeout");
-        assert!(is_on_topic(&terms, &result("reqwest - Rust", "https://docs.rs/reqwest", "An ergonomic HTTP client")));
-    }
-
     /// A fallback's results lead with why the configured engine did not answer.
     #[test]
     fn the_fallback_note_comes_before_the_results() {
         let brave = config(SearchBackend::Brave, None, Some("k"));
         let outcome = ChainOutcome {
             results: vec![result("Learn Rust", "https://www.rust-lang.org/learn", "")],
-            answered_by: Some(SearchBackend::Bing),
-            attempted: vec!["brave".into(), "bing".into()],
+            answered_by: Some(SearchBackend::Firecrawl),
+            attempted: vec!["brave".into(), "firecrawl".into()],
             failures: vec!["brave: Brave request failed: HTTP 402: Usage limit exceeded".into()],
         };
         let rendered = brave.render_outcome("rust", &outcome);
         assert!(
-            rendered.starts_with("[the configured brave backend did not answer, so these came from bing"),
+            rendered.starts_with("[the configured brave backend did not answer, so these came from firecrawl"),
             "{rendered}"
         );
         assert!(rendered.contains("Usage limit exceeded"), "{rendered}");
@@ -1564,8 +1388,8 @@ mod tests {
         assert!(brave.render_outcome("rust", &answered).starts_with("Search results"));
     }
 
-    /// With an engine configured, an extraction reads that engine's results —
-    /// not Bing's page, which it used to read whatever the configuration said.
+    /// An extraction reads the configured engine's results — it used to read
+    /// Bing's results page whatever the configuration said.
     #[tokio::test]
     async fn extraction_reads_the_configured_engine() {
         let listing = r#"{"results":[{"title":"Only SearXNG has this","url":"http://127.0.0.1:9/page","content":"ClientBuilder lives here"}]}"#;
@@ -1583,6 +1407,48 @@ mod tests {
         assert!(out.starts_with("ClientBuilder"), "{out}");
         // The one result points at a private address, so no page was opened.
         assert!(out.contains("Sources: the search results listing"), "{out}");
+    }
+
+    /// Firecrawl's v2 shape, from a live answer: results grouped under
+    /// `data.web`, with descriptions that are sometimes the page's markdown.
+    #[test]
+    fn parses_firecrawl_results() {
+        let body = serde_json::json!({
+            "success": true,
+            "data": {"web": [
+                {"url": "https://docs.rs/tokio/latest/tokio/signal/index.html", "title": "tokio::signal - Rust",
+                 "description": "# Module signal\n```\nuse tokio::signal;\n```", "position": 1},
+                {"url": "", "title": "no url", "description": "", "position": 2},
+                {"url": "https://stackoverflow.com/q/1", "title": "Rust & Tokio: signals", "description": "x".repeat(900), "position": 3},
+                {"url": "https://example.com/4", "title": "Fourth", "description": "", "position": 4},
+            ]},
+            "creditsUsed": 2,
+        });
+        let results = parse_firecrawl(&body, 2).unwrap();
+        assert_eq!(results.len(), 2, "capped, and the entry without a URL skipped");
+        assert_eq!(results[0].title, "tokio::signal - Rust");
+        assert_eq!(results[0].snippet, "# Module signal ``` use tokio::signal; ```", "flattened to one line");
+        assert_eq!(results[1].snippet.chars().count(), FIRECRAWL_SNIPPET_CHARS + 1, "clipped, with an ellipsis");
+
+        // The v1 shape, a bare array.
+        let v1 = serde_json::json!({"success": true, "data": [{"url": "https://a.example", "title": "A", "description": "d"}]});
+        assert_eq!(parse_firecrawl(&v1, 5).unwrap().len(), 1);
+        // A reported failure is an error, not an empty page of results.
+        let failed = serde_json::json!({"success": false, "error": "Internal error"});
+        assert!(parse_firecrawl(&failed, 5).unwrap_err().to_string().contains("Internal error"));
+    }
+
+    #[test]
+    fn firecrawl_errors_say_what_to_do() {
+        // Verbatim from Firecrawl for a bad key.
+        let message = firecrawl_error(401, r#"{"success":false,"error":"Unauthorized: Invalid token"}"#, true);
+        assert!(message.starts_with("HTTP 401: Unauthorized: Invalid token — "), "{message}");
+        assert!(message.contains("FIRECRAWL_API_KEY"), "{message}");
+        // Without a key, a rate limit is the keyless one, and a key is the fix.
+        assert!(firecrawl_error(429, "", false).contains("set FIRECRAWL_API_KEY"));
+        assert!(!firecrawl_error(429, "", true).contains("set FIRECRAWL_API_KEY"));
+        assert!(firecrawl_error(402, "", true).contains("out of credits"));
+        assert_eq!(firecrawl_error(500, "<html>", false), "HTTP 500");
     }
 
     /// Answer one HTTP request with a fixed response, recording the request.
