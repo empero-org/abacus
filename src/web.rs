@@ -27,6 +27,13 @@ const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/53
 const EXTRACT_RESULT_PAGES: usize = 2;
 /// Ceiling on the results text handed to the reader model.
 const EXTRACT_CORPUS_CHARS: usize = 40_000;
+/// Result pages opened when an extraction runs on a keyed or self-hosted
+/// engine, and how much of each, and how long each may take.
+const EXTRACT_OPEN_PAGES: usize = 3;
+const EXTRACT_PAGE_CHARS: usize = 12_000;
+const EXTRACT_PAGE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Results read off Bing's page before the off-topic ones are dropped.
+const BING_PAGE_RESULTS: usize = 20;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// Total attempts for one HTTP request, including the first.
 const RETRY_ATTEMPTS: usize = 3;
@@ -222,6 +229,9 @@ impl WebConfig {
         let Some(extractor) = &self.extractor else {
             return self.search(query, max_results).await;
         };
+        if self.backend != SearchBackend::Bing {
+            return self.extract_from_results(extractor, query, max_results, request).await;
+        }
 
         // The results page itself, read rather than parsed.
         //
@@ -241,6 +251,59 @@ impl WebConfig {
             Some(answer) => Ok(answer),
             None => self.search(query, max_results).await,
         }
+    }
+
+    /// Extraction on a configured engine: its results, then the top pages they
+    /// point at, read by the extractor.
+    ///
+    /// This used to read Bing's results page whatever the configuration said,
+    /// so a working Brave key or SearXNG instance was never consulted when the
+    /// model asked for an answer rather than a list — and Bing answers
+    /// automated requests with unrelated pages often enough that the reader
+    /// was handed junk.
+    async fn extract_from_results(
+        &self,
+        extractor: &crate::provider::Provider,
+        query: &str,
+        max_results: usize,
+        request: &str,
+    ) -> Result<String> {
+        let query = query.trim();
+        let outcome = self.run_chain(query, max_results).await?;
+        let listing = self.render_outcome(query, &outcome);
+        if outcome.results.is_empty() {
+            return Ok(listing);
+        }
+        let pages =
+            futures_util::future::join_all(outcome.results.iter().take(EXTRACT_OPEN_PAGES).map(|result| async move {
+                let page = tokio::time::timeout(EXTRACT_PAGE_TIMEOUT, self.fetch_page(&result.url, EXTRACT_PAGE_CHARS));
+                page.await.ok()?.ok().map(|text| (result.url.as_str(), text))
+            }))
+            .await;
+        let mut corpus = listing.clone();
+        let mut read = Vec::new();
+        for (url, text) in pages.into_iter().flatten() {
+            corpus.push_str("\n\n");
+            corpus.push_str(&text);
+            read.push(url);
+        }
+        let corpus: String = corpus.chars().take(EXTRACT_CORPUS_CHARS).collect();
+        let Some(answer) = extract_from(extractor, request, &corpus).await else {
+            return Ok(listing);
+        };
+        let mut out = String::new();
+        if let Some(note) = self.fallback_note(&outcome) {
+            out.push_str(&note);
+            out.push_str("\n\n");
+        }
+        out.push_str(answer.trim());
+        out.push_str("\n\nSources: ");
+        if read.is_empty() {
+            out.push_str("the search results listing (no result page could be opened)");
+        } else {
+            out.push_str(&read.join(", "));
+        }
+        Ok(out)
     }
 
     /// Fetch a couple of pages of results as plain text, for the model to read.
@@ -274,6 +337,46 @@ impl WebConfig {
 
     pub async fn search(&self, query: &str, max_results: usize) -> Result<String> {
         let query = query.trim();
+        let outcome = self.run_chain(query, max_results).await?;
+        Ok(self.render_outcome(query, &outcome))
+    }
+
+    /// The results as the model sees them, or the report of why there are none.
+    fn render_outcome(&self, query: &str, outcome: &ChainOutcome) -> String {
+        if outcome.results.is_empty() {
+            return self.empty_report(query, &outcome.attempted, &outcome.failures);
+        }
+        // The note goes first: read after the results, a failing configured
+        // engine was easy to skim past, and the model reported "junk" without
+        // ever saying why the engine it was given had not answered.
+        let mut rendered = String::new();
+        if let Some(note) = self.fallback_note(outcome) {
+            rendered.push_str(&note);
+            rendered.push_str("\n\n");
+        }
+        rendered.push_str(&render_results(query, &outcome.results));
+        rendered
+    }
+
+    /// Falling back quietly would hide a broken configuration behind working
+    /// results: someone who stood up a SearXNG instance and got scraped Bing
+    /// answers for a month would have no way to notice. The search still
+    /// succeeds; the fault is reported alongside it.
+    fn fallback_note(&self, outcome: &ChainOutcome) -> Option<String> {
+        if outcome.answered_by == Some(self.backend) || outcome.failures.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "[the configured {} backend did not answer, so these came from {}. Tell the user, since search \
+             is degraded until it is fixed: {}]",
+            self.backend.label(),
+            outcome.answered_by.map(SearchBackend::label).unwrap_or("a fallback"),
+            outcome.failures.join("; ")
+        ))
+    }
+
+    /// Walk the chain until an engine answers.
+    async fn run_chain(&self, query: &str, max_results: usize) -> Result<ChainOutcome> {
         if query.is_empty() {
             bail!("query cannot be empty");
         }
@@ -327,24 +430,7 @@ impl WebConfig {
             }
         }
 
-        if results.is_empty() {
-            return Ok(self.empty_report(query, &attempted, &failures));
-        }
-
-        let mut rendered = render_results(query, &results);
-        // Falling back quietly would hide a broken configuration behind
-        // working results: someone who stood up a SearXNG instance and got
-        // scraped Bing answers for a month would have no way to notice. The
-        // search still succeeds; the fault is reported alongside it.
-        if answered_by != Some(self.backend) && !failures.is_empty() {
-            rendered.push_str(&format!(
-                "\n[the configured {} backend did not answer, so these came from {}: {}]\n",
-                self.backend.label(),
-                answered_by.map(SearchBackend::label).unwrap_or("a fallback"),
-                failures.join("; ")
-            ));
-        }
-        Ok(rendered)
+        Ok(ChainOutcome { results, answered_by, attempted, failures })
     }
 
     /// The engines to try, in order: the configured one first, then any other
@@ -523,6 +609,26 @@ fn is_transient(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }
 
+/// How much of an error response is kept for the engine to explain itself.
+const ERROR_BODY_CHARS: usize = 4_096;
+
+/// A request that came back with a failing status. It reads as `HTTP 402`
+/// wherever only the status matters; an engine whose error responses say what
+/// went wrong (Brave's do) reads the reason out of `body`.
+#[derive(Debug)]
+struct HttpStatus {
+    status: u16,
+    body: String,
+}
+
+impl std::fmt::Display for HttpStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP {}", self.status)
+    }
+}
+
+impl std::error::Error for HttpStatus {}
+
 /// Send a request, retrying transient failures.
 ///
 /// Public search endpoints rate-limit, time out, and briefly 503 far more often
@@ -545,7 +651,9 @@ async fn send_with_retry(builder: reqwest::RequestBuilder) -> Result<reqwest::Re
                 if status.is_success() {
                     return Ok(response);
                 }
-                last = Some(anyhow!("HTTP {}", status.as_u16()));
+                let body = response.text().await.unwrap_or_default();
+                let body = body.chars().take(ERROR_BODY_CHARS).collect();
+                last = Some(anyhow::Error::new(HttpStatus { status: status.as_u16(), body }));
                 if !is_transient(status) {
                     break;
                 }
@@ -566,6 +674,14 @@ struct SearchResult {
     title: String,
     url: String,
     snippet: String,
+}
+
+/// What one walk down the engine chain produced.
+struct ChainOutcome {
+    results: Vec<SearchResult>,
+    answered_by: Option<SearchBackend>,
+    attempted: Vec<String>,
+    failures: Vec<String>,
 }
 
 fn render_results(query: &str, results: &[SearchResult]) -> String {
@@ -651,7 +767,68 @@ async fn bing_search(client: &reqwest::Client, query: &str, max_results: usize) 
     .await
     .map_err(|error| anyhow!("Bing request failed: {error}"))?;
     let body = response.text().await.map_err(|error| anyhow!("could not read Bing response: {error}"))?;
-    Ok(parse_bing_html(&body, max_results))
+    let parsed = parse_bing_html(&body, BING_PAGE_RESULTS);
+    let terms = query_terms(query);
+    let total = parsed.len();
+    let results: Vec<SearchResult> =
+        parsed.into_iter().filter(|result| is_on_topic(&terms, result)).take(max_results).collect();
+    if total > 0 && results.is_empty() {
+        bail!(
+            "returned {total} results, none of them about the query — Bing answers requests it takes for a bot \
+             with unrelated pages"
+        );
+    }
+    Ok(results)
+}
+
+/// The words of a query a relevant result should contain: search operators,
+/// bare numbers and filler dropped, plurals folded so "experts" finds "expert".
+fn query_terms(query: &str) -> Vec<String> {
+    const FILLER: &[&str] = &[
+        "the", "and", "for", "with", "from", "that", "this", "what", "how", "why", "when", "where", "which", "who",
+        "are", "was", "were", "does", "did", "into", "about", "not", "you", "your", "can", "use", "using",
+    ];
+    let mut terms: Vec<String> = Vec::new();
+    for token in query.split_whitespace() {
+        // `-exclude` and `site:example.com` narrow a search; a result
+        // need not contain them.
+        let operator = token.split_once(':').is_some_and(|(name, _)| name.chars().all(|c| c.is_ascii_alphabetic()));
+        if token.starts_with('-') || operator {
+            continue;
+        }
+        for word in token.split(|c: char| !c.is_alphanumeric()) {
+            let word = word.to_lowercase();
+            if word.chars().count() < 3 || word.chars().all(|c| c.is_ascii_digit()) || FILLER.contains(&word.as_str()) {
+                continue;
+            }
+            let word = match word.strip_suffix('s') {
+                Some(stem) if stem.chars().count() >= 4 => stem.to_owned(),
+                _ => word,
+            };
+            if !terms.contains(&word) {
+                terms.push(word);
+            }
+        }
+    }
+    terms
+}
+
+/// Whether a scraped result is about the query at all.
+///
+/// Bing answers automated requests it distrusts with somebody else's results
+/// rather than a block page — a query about mixture-of-experts models came
+/// back as a German dictionary, an electronics chain and running shoes — and
+/// the markup is identical, so the parser cannot tell. A result that shares
+/// next to nothing with the query is not a result for it. One shared word is
+/// enough for a short query; a longer one needs two, so a single common word
+/// ("latent", "expert") does not pass for a match.
+fn is_on_topic(terms: &[String], result: &SearchResult) -> bool {
+    if terms.is_empty() {
+        return true;
+    }
+    let haystack = format!("{} {} {}", result.title, result.snippet, result.url).to_lowercase();
+    let matched = terms.iter().filter(|term| haystack.contains(term.as_str())).count();
+    matched >= if terms.len() >= 3 { 2 } else { 1 }
 }
 
 /// Parse Bing's result list: `<li class="b_algo">` blocks holding an
@@ -721,7 +898,10 @@ async fn brave_search(
             .query(&[("q", query), ("count", &max_results.to_string())]),
     )
     .await
-    .map_err(|error| anyhow!("Brave request failed: {error}"))?;
+    .map_err(|error| match error.downcast_ref::<HttpStatus>() {
+        Some(http) => anyhow!("Brave request failed: {}", brave_error(http.status, &http.body)),
+        None => anyhow!("Brave request failed: {error}"),
+    })?;
     let value: Value = response.json().await.map_err(|error| anyhow!("invalid Brave response: {error}"))?;
     let mut results = Vec::new();
     if let Some(items) = value["web"]["results"].as_array() {
@@ -736,6 +916,44 @@ async fn brave_search(
         }
     }
     Ok(results)
+}
+
+/// Say why Brave refused, from the error body it sends with the status.
+///
+/// A bare `HTTP 402` told nobody that the key's monthly spending limit was
+/// used up: the model saw a failing engine and a page of fallback junk, and
+/// called search broken with nothing the user could act on.
+fn brave_error(status: u16, body: &str) -> String {
+    let value: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    let error = &value["error"];
+    let mut message = format!("HTTP {status}");
+    if let Some(detail) = error["detail"].as_str().map(str::trim).filter(|detail| !detail.is_empty()) {
+        message.push_str(": ");
+        message.push_str(detail.trim_end_matches('.'));
+    }
+    let meta = &error["meta"];
+    let hint = match (error["code"].as_str().unwrap_or_default(), status) {
+        ("USAGE_LIMIT_EXCEEDED", _) | ("", 402) => {
+            let period = meta["usage_limit_type"].as_str().map(|period| format!("{period} ")).unwrap_or_default();
+            let spend = match (meta["current_spend"].as_f64(), meta["usage_limit"].as_f64()) {
+                (Some(spent), Some(limit)) => format!(" (${spent:.2} of ${limit:.2})"),
+                _ => String::new(),
+            };
+            format!(
+                "the Brave API key has used up its {period}usage limit{spend}. Searches through Brave will fail \
+                 until the limit is raised in the Brave Search API dashboard or resets"
+            )
+        }
+        ("SUBSCRIPTION_TOKEN_INVALID", _) | ("", 401 | 403 | 422) => {
+            "Brave rejected the API key; check the variable named by `[search] api_key_env` (BRAVE_API_KEY by default)"
+                .to_owned()
+        }
+        ("RATE_LIMITED", _) | ("", 429) => "Brave is rate limiting this key; wait before searching again".to_owned(),
+        _ => return message,
+    };
+    message.push_str(" — ");
+    message.push_str(&hint);
+    message
 }
 
 // ---- URL safety (SSRF guard) ----
@@ -1226,5 +1444,190 @@ mod tests {
     fn bot_wall_pages_parse_to_empty_results() {
         let page = r#"<html><body><div class="anomaly-modal__title">Unfortunately, bots use this search engine too.</div></body></html>"#;
         assert!(parse_bing_html(page, 10).is_empty());
+    }
+
+    /// The body Brave sent when the key's monthly limit ran out, verbatim
+    /// apart from the id. Before, all the model saw of it was "HTTP 402".
+    #[test]
+    fn a_spent_brave_limit_is_named_with_what_to_do() {
+        let body = r#"{"type":"ErrorResponse","error":{"id":"x","status":402,"detail":"Usage limit exceeded.","meta":{"plan":"Search","current_spend":5.0,"usage_limit":5.0,"usage_limit_type":"monthly","component":"api"},"code":"USAGE_LIMIT_EXCEEDED"},"time":1794836615}"#;
+        let message = brave_error(402, body);
+        assert!(message.starts_with("HTTP 402: Usage limit exceeded"), "{message}");
+        assert!(message.contains("monthly usage limit ($5.00 of $5.00)"), "{message}");
+        assert!(message.contains("dashboard"), "says where to fix it: {message}");
+
+        let rejected = r#"{"error":{"code":"SUBSCRIPTION_TOKEN_INVALID","detail":"The provided subscription token is invalid.","meta":{"component":"authentication"},"status":422},"type":"ErrorResponse"}"#;
+        let message = brave_error(422, rejected);
+        assert!(message.contains("subscription token is invalid"), "{message}");
+        assert!(message.contains("api_key_env"), "{message}");
+
+        // An unexpected body still reads as the status, and a known status
+        // still gets its hint.
+        assert_eq!(brave_error(500, "<html>oops</html>"), "HTTP 500");
+        assert!(brave_error(429, "").contains("rate limiting"));
+    }
+
+    /// The failing response's body survives the retry loop, so an engine can
+    /// explain itself; the status alone still reads as before.
+    #[tokio::test]
+    async fn a_failed_request_keeps_the_body_it_came_with() {
+        let (address, _) =
+            serve_once("402 Payment Required", "application/json", r#"{"error":{"detail":"spent"}}"#).await;
+        let client = reqwest::Client::new();
+        let error = send_with_retry(client.get(format!("http://{address}/"))).await.unwrap_err();
+        assert_eq!(error.to_string(), "HTTP 402");
+        let http = error.downcast_ref::<HttpStatus>().expect("typed status");
+        assert_eq!(http.status, 402);
+        assert!(http.body.contains("spent"));
+    }
+
+    fn result(title: &str, url: &str, snippet: &str) -> SearchResult {
+        SearchResult { title: title.into(), url: url.into(), snippet: snippet.into() }
+    }
+
+    #[test]
+    fn query_terms_skip_operators_numbers_and_filler() {
+        assert_eq!(
+            query_terms(r#""LatentMoE" OR "Latent MoE" mixture of experts arxiv 2025 site:arxiv.org -survey"#),
+            vec!["latentmoe", "latent", "moe", "mixture", "expert", "arxiv"]
+        );
+        assert_eq!(query_terms("how does the"), Vec::<String>::new());
+    }
+
+    /// What Bing actually returned, from a live session, for queries about
+    /// mixture-of-experts models: none of it is about the query, and none of
+    /// it may be passed off as results.
+    #[test]
+    fn bing_results_about_something_else_are_dropped() {
+        let terms = query_terms("Latent MoE mixture of experts compression fusing experts 2024 2025");
+        for junk in [
+            result(
+                "latent Rechtschreibung, Bedeutung, Definition, Herkunft Duden",
+                "https://www.duden.de/rechtschreibung/latent",
+                "Definition, Rechtschreibung, Synonyme und Grammatik von 'latent'",
+            ),
+            result(
+                "International Mobile Recharge, Mobile Top-Up Online | Ding",
+                "https://www.ding.com/",
+                "Send top-up to family and friends",
+            ),
+        ] {
+            assert!(!is_on_topic(&terms, &junk), "{junk:?}");
+        }
+        let terms = query_terms(r#""expert merging" OR "expert fusion" OR "reaping" MoE pruning arxiv 2025"#);
+        let store = result(
+            "expert - Elektromarkt in Ihrer Nähe mit Online-Shop",
+            "https://www.expert.de/",
+            "Finden Sie hier Ihren expert Elektrofachmarkt",
+        );
+        assert!(!is_on_topic(&terms, &store));
+
+        // Real results stay.
+        let terms = query_terms("MiMo-V2.6-Flash-MOPD model architecture MoE experts Xiaomi");
+        let real = result(
+            "XiaomiMiMo/MiMo-V2.6-Flash-RL · Hugging Face",
+            "https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Flash-RL",
+            "Native Omnimodal",
+        );
+        assert!(is_on_topic(&terms, &real));
+        let terms = query_terms("tokio signal SIGHUP handler");
+        let docs = result(
+            "tokio::signal - Rust",
+            "https://docs.rs/tokio/latest/tokio/signal/index.html",
+            "Asynchronous signal handling for Tokio.",
+        );
+        assert!(is_on_topic(&terms, &docs));
+        // A two-word query needs only one of them.
+        let terms = query_terms("reqwest timeout");
+        assert!(is_on_topic(&terms, &result("reqwest - Rust", "https://docs.rs/reqwest", "An ergonomic HTTP client")));
+    }
+
+    /// A fallback's results lead with why the configured engine did not answer.
+    #[test]
+    fn the_fallback_note_comes_before_the_results() {
+        let brave = config(SearchBackend::Brave, None, Some("k"));
+        let outcome = ChainOutcome {
+            results: vec![result("Learn Rust", "https://www.rust-lang.org/learn", "")],
+            answered_by: Some(SearchBackend::Bing),
+            attempted: vec!["brave".into(), "bing".into()],
+            failures: vec!["brave: Brave request failed: HTTP 402: Usage limit exceeded".into()],
+        };
+        let rendered = brave.render_outcome("rust", &outcome);
+        assert!(
+            rendered.starts_with("[the configured brave backend did not answer, so these came from bing"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Usage limit exceeded"), "{rendered}");
+        assert!(rendered.contains("1. Learn Rust"), "{rendered}");
+
+        let answered = ChainOutcome { answered_by: Some(SearchBackend::Brave), failures: vec![], ..outcome };
+        assert!(brave.render_outcome("rust", &answered).starts_with("Search results"));
+    }
+
+    /// With an engine configured, an extraction reads that engine's results —
+    /// not Bing's page, which it used to read whatever the configuration said.
+    #[tokio::test]
+    async fn extraction_reads_the_configured_engine() {
+        let listing = r#"{"results":[{"title":"Only SearXNG has this","url":"http://127.0.0.1:9/page","content":"ClientBuilder lives here"}]}"#;
+        let (searxng, searched) = serve_once("200 OK", "application/json", listing).await;
+        let answer = "data: {\"choices\":[{\"delta\":{\"content\":\"ClientBuilder\"}}]}\n\ndata: [DONE]\n\n";
+        let (reader, asked) = serve_once("200 OK", "text/event-stream", answer).await;
+
+        let web = config(SearchBackend::Searxng, Some(&format!("http://{searxng}")), None)
+            .with_extractor(test_provider(&format!("http://{reader}/v1")));
+        let out = web.search_and_extract("client builder", 5, Some("what Client::builder returns")).await.unwrap();
+
+        assert!(searched.lock().unwrap().contains("format=json"), "SearXNG was asked");
+        let call = asked.lock().unwrap().clone();
+        assert!(call.contains("Only SearXNG has this"), "the reader got the engine's results: {call}");
+        assert!(out.starts_with("ClientBuilder"), "{out}");
+        // The one result points at a private address, so no page was opened.
+        assert!(out.contains("Sources: the search results listing"), "{out}");
+    }
+
+    /// Answer one HTTP request with a fixed response, recording the request.
+    async fn serve_once(
+        status: &'static str,
+        content_type: &'static str,
+        body: &'static str,
+    ) -> (std::net::SocketAddr, std::sync::Arc<std::sync::Mutex<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen: std::sync::Arc<std::sync::Mutex<String>> = Default::default();
+        let probe = seen.clone();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 8192];
+            // Read the headers, then as much body as they announce.
+            loop {
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let text = String::from_utf8_lossy(&request);
+                let Some(end) = text.find("\r\n\r\n") else { continue };
+                let length = text[..end]
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().to_owned())
+                    })
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + length {
+                    break;
+                }
+            }
+            *probe.lock().unwrap() = String::from_utf8_lossy(&request).to_string();
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        });
+        (address, seen)
     }
 }
