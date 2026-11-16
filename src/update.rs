@@ -137,10 +137,7 @@ async fn newest_tag(tags_url: &str) -> Result<String> {
 pub async fn run(desktop: bool, check: bool) -> Result<()> {
     let current = env!("CARGO_PKG_VERSION");
     if check {
-        let latest = match latest_release().await {
-            Ok(tag) => tag,
-            Err(_) => newest_tag(TAGS_URL).await?,
-        };
+        let latest = newest_available().await?;
         if is_newer(&latest, current) {
             println!(
                 "Abacus {} is available (you are on {current}). Run `abacus update`.",
@@ -180,6 +177,22 @@ pub async fn run(desktop: bool, check: bool) -> Result<()> {
         bail!("the installer did not finish ({status})");
     }
     Ok(())
+}
+
+/// The newest version someone can move to. A published release is what
+/// `/releases/latest` names; a tag that is newer than that release still
+/// counts, because a release workflow can fail after the tag is pushed
+/// (v0.8.0's macOS runner was never acquired, so GitHub kept calling v0.7.9
+/// latest). Either source alone is enough when the other is down.
+async fn newest_available() -> Result<String> {
+    let release = latest_release().await;
+    let tag = newest_tag(TAGS_URL).await;
+    match (release, tag) {
+        (Ok(release), Ok(tag)) => Ok(if is_newer(&tag, &release) { tag } else { release }),
+        (Ok(release), Err(_)) => Ok(release),
+        (Err(_), Ok(tag)) => Ok(tag),
+        (Err(release), Err(tag)) => Err(release).context(tag),
+    }
 }
 
 /// The newest release's tag, from where github.com/…/releases/latest
@@ -307,6 +320,17 @@ mod tests {
     fn a_stale_cache_is_not_trusted() {
         let checked = chrono::Utc::now() - chrono::Duration::hours(CACHE_HOURS + 1);
         assert!(!Cache::seen("v9.9.9", checked).fresh(), "a day-old check is asked again");
+    }
+
+    #[test]
+    fn a_newer_tag_beats_an_older_published_release() {
+        // A release workflow can fail after the tag exists. The version check
+        // must not keep reporting the last successful release as newest.
+        let release = "v0.7.9";
+        let tag = "v0.8.0";
+        let latest = if is_newer(tag, release) { tag } else { release };
+        assert_eq!(latest, "v0.8.0");
+        assert!(!is_newer(release, tag));
     }
 
     #[test]

@@ -3,6 +3,9 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # A failed tag run (the v0.8.0 macOS runner was never assigned) can be
+  # published again without moving the tag: `gh workflow run release.yml --ref v0.8.0`.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -23,11 +26,12 @@ jobs:
           - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             binary: abacus
+          # Intel, not macos-15. macos-14 is gone, and the arm64 macos-15
+          # runner that replaced it was never assigned for v0.8.0 ("not
+          # acquired by Runner"), so the release was never published. This
+          # host cross-compiles the arm64 binary below.
           - os: macos-15-intel
             target: x86_64-apple-darwin
-            binary: abacus
-          - os: macos-15
-            target: aarch64-apple-darwin
             binary: abacus
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -44,6 +48,14 @@ jobs:
       - name: Stage binary (Unix)
         if: runner.os != 'Windows'
         run: cp target/${{ matrix.target }}/release/${{ matrix.binary }} abacus-${{ matrix.target }}
+      - name: Cross-compile the arm64 macOS binary
+        # Same SDK as the host build. A separate macos-15 job is what left
+        # v0.8.0 unpublished: GitHub never gave that runner a machine.
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: |
+          rustup target add aarch64-apple-darwin
+          cargo build --locked --release --target aarch64-apple-darwin
+          cp target/aarch64-apple-darwin/release/abacus abacus-aarch64-apple-darwin
       - name: Check the glibc it needs (Linux)
         if: runner.os == 'Linux'
         # The newest glibc version the binary cannot start without (a weak
@@ -61,8 +73,15 @@ jobs:
         run: Copy-Item target/${{ matrix.target }}/release/${{ matrix.binary }} abacus-${{ matrix.target }}.exe
       - uses: actions/upload-artifact@v4
         with:
-          name: abacus-${{ matrix.target }}
-          path: abacus-${{ matrix.target }}*
+          # Exact, not a glob: the macOS job also stages the arm64 binary,
+          # and `abacus-x86_64-apple-darwin*` would swallow it.
+          name: abacus-${{ matrix.target }}${{ runner.os == 'Windows' && '.exe' || '' }}
+          path: abacus-${{ matrix.target }}${{ runner.os == 'Windows' && '.exe' || '' }}
+      - uses: actions/upload-artifact@v4
+        if: matrix.target == 'x86_64-apple-darwin'
+        with:
+          name: abacus-aarch64-apple-darwin
+          path: abacus-aarch64-apple-darwin
 
   publish:
     needs: build
