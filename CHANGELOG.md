@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.8.0 — 2026-11-16
+
+Web search runs on Firecrawl when nothing else is set up, and Bing is gone:
+its results page answered automated requests with pages about something
+else, so a search could come back as a German dictionary or running shoes.
+
+- **Firecrawl is a search backend.** `[search] backend = "firecrawl"`. Its
+  search API works without a key; `FIRECRAWL_API_KEY` (or a key starting
+  `fc-` in the variable `api_key_env` names) raises its rate limits. `auto`
+  now picks a configured SearXNG instance, then Brave if its key is set,
+  then Firecrawl. `/config` cycles auto → searxng → brave → firecrawl.
+- **Firecrawl ends every chain.** When the chosen engine fails, the others
+  that can run are tried, Firecrawl last, so a Brave key that has used up
+  its monthly limit still gets answers. The results start by naming the
+  engine that answered and why the chosen one did not. Brave and Firecrawl
+  each keep their own key, so a fallback never sends one engine's key to
+  the other.
+- **Bing is removed.** No more scraping its results page, for listings or
+  for `extract`. A config that says `backend = "bing"` loads as `auto`.
+- **The shared SearXNG instance is removed.** The host behind it no longer
+  answers. `use_shared_instance` and its `/config` toggle are gone; a config
+  that still sets it loads and ignores it.
+- **Search errors say what to do.** Brave's spent usage limit, a rejected
+  key, a rate limit and Firecrawl's equivalents are reported with their
+  reason and the fix, instead of a bare status code.
+
 ## 0.7.9 — 2026-11-12
 
 The agent wakes itself with timers instead of sleeping through a wait, so
