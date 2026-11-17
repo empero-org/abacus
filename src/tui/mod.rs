@@ -1690,6 +1690,9 @@ impl App {
             }
             match event {
                 AgentEvent::Delta(delta) => {
+                    if delta.is_empty() {
+                        continue;
+                    }
                     self.turn_output_chars = self.turn_output_chars.saturating_add(delta.len());
                     self.receiving_thinking = false;
                     if !self.receiving_delta {
@@ -1729,6 +1732,11 @@ impl App {
                 AgentEvent::PeerMessage(message) => self.show_peer_message(&message),
                 AgentEvent::TimerFired(fired) => self.say(fired.shown()),
                 AgentEvent::Reasoning(piece) => {
+                    // An empty piece would still close the open answer block
+                    // and open an empty thinking one.
+                    if piece.is_empty() {
+                        continue;
+                    }
                     self.turn_output_chars = self.turn_output_chars.saturating_add(piece.len());
                     // The status header follows the reasoning even when the
                     // reasoning itself is hidden — it is the footer's job to

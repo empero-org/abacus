@@ -1148,6 +1148,25 @@ async fn steering_mid_stream_does_not_merge_the_user_into_the_model_block() {
     assert_eq!(last.text, "and kept going afterwards");
 }
 
+/// A server that tags every answer chunk with an empty reasoning piece made
+/// each chunk its own block — the answer rendered one fragment per paragraph.
+#[tokio::test]
+async fn empty_pieces_between_answer_chunks_do_not_split_the_answer() {
+    use crate::agent::AgentEvent;
+    let (_directory, mut app) = test_app("http://127.0.0.1:9/v1");
+    app.settings.ui.show_thinking = true;
+    for chunk in ["4 mark", "down outliers", ", and rejects"] {
+        let _ = app.event_tx.send(AgentEvent::Reasoning(String::new()));
+        let _ = app.event_tx.send(AgentEvent::Delta(chunk.to_owned()));
+    }
+    app.drain_agent_events();
+
+    let answers: Vec<_> = app.entries.iter().filter(|entry| entry.kind == EntryKind::Assistant).collect();
+    assert_eq!(answers.len(), 1, "one answer block, not one per chunk");
+    assert_eq!(answers[0].text, "4 markdown outliers, and rejects");
+    assert!(app.entries.iter().all(|entry| entry.kind != EntryKind::Thinking), "no empty thinking blocks");
+}
+
 /// The same hazard for reasoning, which is the half the screenshot showed.
 #[tokio::test]
 async fn a_notice_mid_reasoning_does_not_capture_the_stream() {

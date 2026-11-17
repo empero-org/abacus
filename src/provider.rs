@@ -850,6 +850,9 @@ impl Assembly {
     /// this the user watches it scroll past and the transcript diverges from
     /// the saved history.
     fn say(&mut self, piece: &str, deltas: &mpsc::UnboundedSender<Chunk>, format: ToolFormat) {
+        if piece.is_empty() {
+            return;
+        }
         self.content.push_str(piece);
         if self.suppressed {
             return;
@@ -869,6 +872,12 @@ impl Assembly {
 
     /// Add to the reasoning, which travels apart from the answer.
     fn think(&mut self, piece: &str, deltas: &mpsc::UnboundedSender<Chunk>) {
+        // Some servers put `"reasoning_content": ""` on every answer chunk. An
+        // empty piece carries nothing, and forwarding it would make the UI
+        // close the answer block and start a new one for every chunk.
+        if piece.is_empty() {
+            return;
+        }
         self.reasoning.push_str(piece);
         let _ = deltas.send(Chunk::Reasoning(piece.to_owned()));
     }
@@ -2369,6 +2378,35 @@ mod tests {
         assert_eq!(reply.content, "hello");
         assert_eq!(reply.calls[&1].id, "call_7");
         assert_eq!(reply.calls[&1].arguments, r#"{"query":"todo"}"#);
+    }
+
+    /// Some servers put an empty `reasoning_content` on every answer chunk. The
+    /// UI starts a new block whenever the stream switches between reasoning and
+    /// text, so forwarding those empties split the answer into one block per
+    /// chunk.
+    #[test]
+    fn empty_reasoning_on_answer_chunks_is_not_forwarded() {
+        let payloads = [
+            r#"{"choices":[{"delta":{"reasoning_content":"plan","content":""}}]}"#,
+            r#"{"choices":[{"delta":{"reasoning_content":"","content":"4 mark"}}]}"#,
+            r#"{"choices":[{"delta":{"reasoning_content":"","content":"down outliers"}}]}"#,
+        ];
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut reply = Assembly::default();
+        for data in payloads {
+            reply.chat_event(data, &tx, ToolFormat::None).unwrap();
+        }
+        drop(tx);
+        let mut kinds = Vec::new();
+        while let Ok(chunk) = rx.try_recv() {
+            kinds.push(match chunk {
+                Chunk::Text(_) => 'T',
+                Chunk::Reasoning(_) => 'R',
+            });
+        }
+        assert_eq!(kinds.into_iter().collect::<String>(), "RTT");
+        assert_eq!(reply.reasoning, "plan");
+        assert_eq!(reply.content, "4 markdown outliers");
     }
 
     #[test]
