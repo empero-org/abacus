@@ -28,7 +28,8 @@ fn auto() -> Arc<AtomicBool> {
 
 /// A command with an effect a test can see, and that no rule settles —
 /// `touch` is neither pure inspection nor destructive — so AUTO puts it to
-/// the reviewer.
+/// the reviewer. Called by `bash`'s old name, as a model reading a session
+/// from before the rename still does: it runs, and is reviewed, as `bash`.
 fn touch_marker() -> String {
     calls(&[("c1", "run_command", json!({"command": "touch marker.txt"}))])
 }
@@ -207,7 +208,7 @@ async fn auto_review_blocks_an_action_the_user_did_not_ask_for() {
         project.asks("explain what this repository does"),
         TurnOptions { yolo: auto(), ..project.options() },
         |event| match event {
-            AgentEvent::ToolFinished { name, output: text, .. } if name == "run_command" => output = text,
+            AgentEvent::ToolFinished { name, output: text, .. } if name == "bash" => output = text,
             AgentEvent::Approval(_) => panic!("a decided review must not ask the person"),
             _ => {}
         },
@@ -297,7 +298,7 @@ async fn an_undecided_review_asks_the_person() {
         TurnOptions { yolo: auto(), ..project.options() },
         |event| {
             if let AgentEvent::Approval(request) = event {
-                assert_eq!(request.tool, "run_command");
+                assert_eq!(request.tool, "bash");
                 assert!(request.reason.contains("could not decide"), "{}", request.reason);
                 // The operation travels apart from the reason, as it would be run.
                 assert_eq!(request.details.trim(), "$ touch marker.txt");
@@ -649,7 +650,7 @@ async fn shipped_grok_example_sends_a_bearer_key_to_an_openai_shaped_endpoint() 
 }
 
 fn grep_command() -> String {
-    calls(&[("c1", "run_command", json!({"command": "grep -rn needle ."}))])
+    calls(&[("c1", "bash", json!({"command": "grep -rn needle ."}))])
 }
 
 /// A command that only looks never waits on the reviewer: the mock serves the

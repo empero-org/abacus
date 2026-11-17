@@ -95,30 +95,20 @@ impl TaskList {
                 "task_update",
                 "Mark a task complete or pending by its 1-based index in the task list. Mark a task done only after its outcome is verified (test passed, file written, build green, etc.).",
                 [
-                    req("index", integer("1-based position from task_list")),
+                    req("index", integer("1-based position in the task list")),
                     req("done", boolean("true to mark complete after verifying the outcome, false to reopen")),
                 ],
             ),
-            tool("task_list", "Read the current session task list with completion state.", []),
         ]
     }
 
     pub fn execute(&self, name: &str, arguments: &str) -> Option<String> {
         let result = match name {
-            "task_list" => self.list_output(),
             "task_create" => self.create_from_args(arguments),
             "task_update" => self.update_from_args(arguments),
             _ => return None,
         };
         Some(crate::tools::reply(result))
-    }
-
-    fn list_output(&self) -> Result<String> {
-        let tasks = self.snapshot();
-        if tasks.is_empty() {
-            return Ok("No tasks tracked.".to_owned());
-        }
-        Ok(render_tasks(&tasks))
     }
 
     fn create_from_args(&self, arguments: &str) -> Result<String> {

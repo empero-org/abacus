@@ -22,6 +22,9 @@ use tokio::{
 
 const MAX_OUTPUT: usize = 30_000;
 
+/// How many files one `read_file` call may read.
+const MAX_READ_PATHS: usize = 20;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
@@ -118,17 +121,21 @@ impl EditFileArgs {
 impl ToolCall {
     pub fn summary(&self) -> String {
         let args: Value = serde_json::from_str(&self.arguments).unwrap_or(Value::Null);
-        match self.name.as_str() {
-            "run_command" => args["command"].as_str().unwrap_or("shell command").to_owned(),
+        // A reopened older session still names its calls the old way.
+        match current_name(&self.name).unwrap_or(&self.name) {
+            "bash" => args["command"].as_str().unwrap_or("shell command").to_owned(),
             // The first line that says something; the code itself is in the approval.
             "run_python" => args["code"]
                 .as_str()
                 .and_then(|code| code.lines().map(str::trim).find(|line| !line.is_empty()))
                 .map(|line| crate::text::clip(line, 80, "…"))
                 .unwrap_or_else(|| "Python".to_owned()),
-            "edit_file" | "write_file" | "read_file" | "delete_file" => {
-                args["path"].as_str().unwrap_or("unknown path").to_owned()
-            }
+            "edit_file" | "write_file" | "delete_file" => args["path"].as_str().unwrap_or("unknown path").to_owned(),
+            "read_file" => match read_targets(&args).as_slice() {
+                [one] => one.clone(),
+                [] => "unknown path".to_owned(),
+                several => format!("{} files", several.len()),
+            },
             "move_file" => format!(
                 "{} → {}",
                 args["source"].as_str().unwrap_or("source"),
@@ -136,12 +143,16 @@ impl ToolCall {
             ),
             "apply_patch" => "workspace patch".to_owned(),
             "web_search" => args["query"].as_str().unwrap_or("web search").to_owned(),
-            "read_page" => args["url"].as_str().unwrap_or("web page").to_owned(),
+            "fetch" => args["url"].as_str().unwrap_or("web page").to_owned(),
             "grep" => {
                 format!("{} in {}", args["query"].as_str().unwrap_or("pattern"), args["path"].as_str().unwrap_or("."))
             }
-            "list_files" => args["path"].as_str().unwrap_or(".").to_owned(),
-            "glob" => args["pattern"].as_str().unwrap_or("*").to_owned(),
+            // A listing reads as one: "Found files in src".
+            "glob" => match (args["pattern"].as_str(), args["path"].as_str()) {
+                (Some(pattern), _) => pattern.to_owned(),
+                (None, None | Some(".")) => "files".to_owned(),
+                (None, Some(path)) => format!("files in {path}"),
+            },
             "git_diff" => match (args["base"].as_str(), args["head"].as_str()) {
                 (Some(base), Some(head)) => format!("{base}..{head}"),
                 (Some(base), None) => format!("since {base}"),
@@ -155,10 +166,7 @@ impl ToolCall {
                 format!("commit: {preview}")
             }
             // `present_files` is the desktop's: the files it shows the person.
-            "read_files" | "present_files" => {
-                format!("{} file(s)", args["paths"].as_array().map(Vec::len).unwrap_or(0))
-            }
-            "tool_search" => args["query"].as_str().unwrap_or("all tools").to_owned(),
+            "present_files" => format!("{} file(s)", args["paths"].as_array().map(Vec::len).unwrap_or(0)),
             // The workers by name, not the whole request with its prompts.
             "spawn_subagents" => {
                 let names: Vec<&str> =
@@ -203,7 +211,7 @@ impl ToolCall {
                 | "apply_patch"
                 | "delete_file"
                 | "move_file"
-                | "run_command"
+                | "bash"
                 | "run_python"
                 | "git_commit"
                 // Skill authoring writes a file into the workspace or the user
@@ -227,6 +235,8 @@ pub struct ToolExecutor {
     /// Told about each file before a tool first changes it, so the turn's
     /// edits can be shown and undone.
     journal: crate::checkpoint::Journal,
+    /// What `bash` runs its commands through.
+    shell: Shell,
 }
 
 /// Shared set of approved out-of-workspace read paths.
@@ -244,7 +254,14 @@ impl ToolExecutor {
             web: crate::web::WebConfig::default(),
             outside_reads: OutsideReads::default(),
             journal: Default::default(),
+            shell: Shell::default(),
         }
+    }
+
+    /// Run `bash` commands through `shell`.
+    pub fn with_shell(mut self, shell: Shell) -> Self {
+        self.shell = shell;
+        self
     }
 
     /// Record what the file tools change in `journal`.
@@ -260,8 +277,7 @@ impl ToolExecutor {
         self
     }
 
-    /// Attach the resolved web-search configuration (enables `web_search` /
-    /// `read_page`).
+    /// Attach the resolved web configuration, for `web_search` and `fetch`.
     pub fn with_web(mut self, web: crate::web::WebConfig) -> Self {
         self.web = web;
         self
@@ -270,13 +286,10 @@ impl ToolExecutor {
     pub async fn execute(&self, call: &ToolCall) -> String {
         let result = match call.name.as_str() {
             "read_file" => self.read_file(&call.arguments),
-            "read_files" => self.read_files(&call.arguments),
-            "list_files" => self.list_files(&call.arguments),
             "grep" => self.grep(&call.arguments),
             "glob" => self.glob(&call.arguments),
-            "tool_search" => self.tool_search(&call.arguments),
             "web_search" => self.web_search(&call.arguments).await,
-            "read_page" => self.read_page(&call.arguments).await,
+            "fetch" => self.fetch(&call.arguments).await,
             "edit_file" => self.edit_file(&call.arguments),
             "write_file" => self.write_file(&call.arguments),
             "apply_patch" => self.apply_patch(&call.arguments).await,
@@ -286,7 +299,7 @@ impl ToolExecutor {
             "git_status" => self.git_status().await,
             "git_log" => self.git_log(&call.arguments).await,
             "git_commit" => self.git_commit(&call.arguments).await,
-            "run_command" => self.run_command(&call.arguments).await,
+            "bash" => self.run_command(&call.arguments).await,
             "run_python" => self.run_python(&call.arguments).await,
             other => Err(anyhow!("unknown tool: {other}")),
         };
@@ -302,7 +315,7 @@ impl ToolExecutor {
             "delete_file" => self.preview_delete(&call.arguments),
             "git_commit" => self.preview_git_commit(&call.arguments),
             "move_file" => Ok(format!("Move {}", call.summary())),
-            "run_command" => Ok(format!("$ {}", call.summary())),
+            "bash" => Ok(format!("$ {}", call.summary())),
             "run_python" => Ok(serde_json::from_str::<Value>(&call.arguments)
                 .ok()
                 .and_then(|args| args["code"].as_str().map(str::to_owned))
@@ -312,10 +325,11 @@ impl ToolExecutor {
         truncate(result.unwrap_or_else(|error| format!("Could not prepare preview: {error:#}")), 12_000)
     }
 
+    /// One file bare, or several — `path` and `paths` together — each under
+    /// a header, so a look at a handful of files costs one call.
     fn read_file(&self, arguments: &str) -> Result<String> {
         #[derive(Deserialize)]
         struct Args {
-            path: String,
             #[serde(default = "default_offset")]
             offset: usize,
             #[serde(default = "default_limit")]
@@ -323,31 +337,19 @@ impl ToolExecutor {
         }
 
         let args: Args = parse_args(arguments)?;
-        self.read_file_range(&args.path, args.offset, args.limit)
-    }
-
-    fn read_files(&self, arguments: &str) -> Result<String> {
-        #[derive(Deserialize)]
-        struct Args {
-            paths: Vec<String>,
-            #[serde(default = "default_limit")]
-            limit: usize,
+        let targets = read_targets(&serde_json::from_str(arguments)?);
+        match targets.as_slice() {
+            [] => bail!("pass path, or paths to read several files"),
+            [one] => self.read_file_range(one, args.offset, args.limit),
+            several if several.len() > MAX_READ_PATHS => {
+                bail!("read_file reads at most {MAX_READ_PATHS} files at once, not {}", several.len())
+            }
+            several => Ok(several
+                .iter()
+                .map(|raw| format!("===== {raw} =====\n{}", reply(self.read_file_range(raw, args.offset, args.limit))))
+                .collect::<Vec<_>>()
+                .join("\n\n")),
         }
-
-        let args: Args = parse_args(arguments)?;
-        if args.paths.is_empty() {
-            bail!("at least one path is required");
-        }
-        if args.paths.len() > 20 {
-            bail!("read_files accepts at most 20 paths");
-        }
-        let limit = args.limit.clamp(1, 2_000);
-        let mut sections = Vec::new();
-        for raw in &args.paths {
-            let body = reply(self.read_file_range(raw, 1, limit));
-            sections.push(format!("===== {raw} =====\n{body}"));
-        }
-        Ok(sections.join("\n\n"))
     }
 
     fn read_file_range(&self, raw_path: &str, offset: usize, limit: usize) -> Result<String> {
@@ -375,33 +377,6 @@ impl ToolExecutor {
             .join("\n");
         let remaining = lines.len().saturating_sub(offset - 1 + limit);
         if remaining > 0 { Ok(format!("{selected}\n\n… {remaining} more lines")) } else { Ok(selected) }
-    }
-
-    fn list_files(&self, arguments: &str) -> Result<String> {
-        #[derive(Deserialize)]
-        struct Args {
-            #[serde(default = "dot")]
-            path: String,
-            #[serde(default = "default_depth")]
-            depth: usize,
-        }
-
-        let args: Args = parse_args(arguments)?;
-        let base = self.resolve_for_read(&args.path)?;
-        let depth = args.depth.clamp(1, 8);
-        let mut entries = Vec::new();
-
-        for entry in walk(&base, Some(depth)).skip(1) {
-            if entries.len() >= 500 {
-                entries.push("… output capped at 500 entries".to_owned());
-                break;
-            }
-            let relative = entry.path().strip_prefix(&self.root).unwrap_or(entry.path());
-            let suffix = if entry.file_type().is_some_and(|kind| kind.is_dir()) { "/" } else { "" };
-            entries.push(format!("{}{suffix}", relative.display()));
-        }
-
-        Ok(or_note(entries.join("\n"), "(empty directory)"))
     }
 
     fn grep(&self, arguments: &str) -> Result<String> {
@@ -496,24 +471,41 @@ impl ToolExecutor {
         Ok(or_note(matches.join("\n"), "No matches."))
     }
 
+    /// Paths matching a glob, or with no pattern, everything under `path` a
+    /// few levels down: a directory listing.
     fn glob(&self, arguments: &str) -> Result<String> {
         #[derive(Deserialize)]
         struct Args {
-            pattern: String,
+            pattern: Option<String>,
             #[serde(default = "dot")]
             path: String,
+            depth: Option<usize>,
             #[serde(default = "default_glob_limit")]
             max_results: usize,
         }
 
         let args: Args = parse_args(arguments)?;
-        let matcher = Glob::new(&args.pattern).context("invalid glob pattern")?.compile_matcher();
+        let matcher = match &args.pattern {
+            Some(pattern) => Some(Glob::new(pattern).context("invalid glob pattern")?.compile_matcher()),
+            None => None,
+        };
         let base = self.resolve_for_read(&args.path)?;
+        // A listing stays shallow unless asked; a pattern says how deep it means.
+        let depth = match (&matcher, args.depth) {
+            (_, Some(depth)) => Some(depth.clamp(1, 8)),
+            (None, None) => Some(default_depth()),
+            (Some(_), None) => None,
+        };
         let max_results = args.max_results.clamp(1, 5_000);
         let mut results = Vec::new();
-        for entry in walk(&base, None) {
+        for entry in walk(&base, depth) {
             let relative = entry.path().strip_prefix(&self.root).unwrap_or(entry.path());
-            if matcher.is_match(relative) {
+            let wanted = match &matcher {
+                Some(matcher) => matcher.is_match(relative),
+                // The directory being listed is not one of its own entries.
+                None => entry.depth() > 0,
+            };
+            if wanted {
                 let suffix = if entry.file_type().is_some_and(|kind| kind.is_dir()) { "/" } else { "" };
                 results.push(format!("{}{suffix}", relative.display()));
                 if results.len() >= max_results {
@@ -522,31 +514,8 @@ impl ToolExecutor {
                 }
             }
         }
-        Ok(or_note(results.join("\n"), "No matching paths."))
-    }
-
-    fn tool_search(&self, arguments: &str) -> Result<String> {
-        #[derive(Deserialize)]
-        struct Args {
-            #[serde(default)]
-            query: String,
-        }
-        let args: Args = parse_args(arguments)?;
-        let query = args.query.to_ascii_lowercase();
-        let matches = tool_catalog()
-            .into_iter()
-            .filter(|(name, description)| {
-                query.is_empty()
-                    || name.to_ascii_lowercase().contains(&query)
-                    || description.to_ascii_lowercase().contains(&query)
-            })
-            .map(|(name, description)| format!("{name}: {description}"))
-            .collect::<Vec<_>>();
-        if matches.is_empty() {
-            Ok(format!("No tools match {:?}. Search with a broader capability word.", args.query))
-        } else {
-            Ok(matches.join("\n"))
-        }
+        let empty = if matcher.is_some() { "No matching paths." } else { "(empty directory)" };
+        Ok(or_note(results.join("\n"), empty))
     }
 
     async fn web_search(&self, arguments: &str) -> Result<String> {
@@ -558,14 +527,14 @@ impl ToolExecutor {
             /// opened and read rather than merely listed.
             extract: Option<String>,
         }
-        if !self.web.enabled {
-            bail!("web tools are disabled; set `[search] enabled = true`");
+        if let Some(reason) = self.web.search_unavailable() {
+            bail!("{reason}");
         }
         let args: Args = parse_args(arguments)?;
         self.web.search_and_extract(&args.query, args.max_results.unwrap_or(5), args.extract.as_deref()).await
     }
 
-    async fn read_page(&self, arguments: &str) -> Result<String> {
+    async fn fetch(&self, arguments: &str) -> Result<String> {
         #[derive(Deserialize)]
         struct Args {
             url: String,
@@ -573,9 +542,6 @@ impl ToolExecutor {
             /// What the caller wants from the page. With it, the page is read
             /// by the auxiliary model and only the answer comes back.
             extract: Option<String>,
-        }
-        if !self.web.enabled {
-            bail!("web tools are disabled; set `[search] enabled = true`");
         }
         let args: Args = parse_args(arguments)?;
         self.web.read_page(&args.url, args.max_chars.unwrap_or(0), args.extract.as_deref()).await
@@ -841,7 +807,7 @@ impl ToolExecutor {
     }
 
     /// Run Python the model wrote, as a script in the workspace: a chat's
-    /// calculator, data tool and plotter. It runs the way `run_command` runs
+    /// calculator, data tool and plotter. It runs the way `bash` runs
     /// a command, with its timeout and output limits.
     async fn run_python(&self, arguments: &str) -> Result<String> {
         #[derive(Deserialize)]
@@ -880,18 +846,8 @@ impl ToolExecutor {
             bail!("command cannot be empty");
         }
 
-        #[cfg(windows)]
-        let mut command = {
-            let mut command = Command::new("cmd");
-            command.args(["/C", &args.command]);
-            command
-        };
-        #[cfg(not(windows))]
-        let mut command = {
-            let mut command = Command::new("sh");
-            command.args(["-lc", &args.command]);
-            command
-        };
+        let mut command = Command::new(self.shell.program());
+        command.args(self.shell.flags()).arg(&args.command);
 
         command
             .current_dir(&self.root)
@@ -1083,16 +1039,122 @@ pub fn python_tool_spec() -> Value {
     )
 }
 
+/// What `bash` runs commands through. Named `bash` everywhere, because that is
+/// the name models reach for; where the shell is something else the
+/// description says so plainly, so a model on Windows does not write bash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shell {
+    Bash,
+    /// A Unix without bash, such as a bare Alpine image.
+    Sh,
+    Cmd,
+    PowerShell,
+}
+
+impl Default for Shell {
+    /// This machine's, with Windows on cmd until the setting says otherwise.
+    fn default() -> Self {
+        Self::resolve(crate::config::WindowsShell::default())
+    }
+}
+
+impl Shell {
+    /// The shell for this machine: bash where there is one, else sh; on
+    /// Windows, whichever the `windows_shell` setting picks.
+    pub fn resolve(windows: crate::config::WindowsShell) -> Self {
+        if cfg!(windows) {
+            return match windows {
+                crate::config::WindowsShell::Cmd => Self::Cmd,
+                crate::config::WindowsShell::Powershell => Self::PowerShell,
+            };
+        }
+        static HAS_BASH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let has_bash = *HAS_BASH.get_or_init(|| {
+            std::env::var_os("PATH")
+                .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("bash").is_file()))
+        });
+        if has_bash { Self::Bash } else { Self::Sh }
+    }
+
+    fn program(self) -> &'static str {
+        match self {
+            Self::Bash => "bash",
+            Self::Sh => "sh",
+            Self::Cmd => "cmd",
+            Self::PowerShell => "powershell",
+        }
+    }
+
+    /// Everything before the command itself. A login shell, as before, so a
+    /// PATH set in the profile holds; PowerShell skips its profile, which is
+    /// slow and prints.
+    fn flags(self) -> &'static [&'static str] {
+        match self {
+            Self::Bash | Self::Sh => &["-lc"],
+            Self::Cmd => &["/C"],
+            Self::PowerShell => &["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"],
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Bash => "Run a bash command in the workspace folder.",
+            Self::Sh => {
+                "Run a shell command in the workspace folder. Commands run through sh, not bash, because bash is not \
+                 installed here: write POSIX shell."
+            }
+            Self::Cmd => {
+                "Run a command in the workspace folder on this Windows machine. Commands run through cmd.exe \
+                 (`cmd /C`), not bash: write cmd syntax and Windows commands (dir, type, findstr, where), not Unix \
+                 ones."
+            }
+            Self::PowerShell => {
+                "Run a command in the workspace folder on this Windows machine. Commands run through Windows \
+                 PowerShell (`powershell -Command`), not bash: write PowerShell (Get-ChildItem, Get-Content, \
+                 Select-String), not Unix commands."
+            }
+        }
+    }
+}
+
+/// `bash`, described for the shell it will actually run in.
+pub fn shell_tool_spec(shell: Shell) -> Value {
+    tool(
+        "bash",
+        shell.description(),
+        [
+            req("command", string("The command to run")),
+            opt(
+                "description",
+                string(
+                    "Say what this is for in a few plain words, starting with an -ing verb: the person reads it in place of the command ('Running the unit tests', 'Checking which branch this is')",
+                ),
+            ),
+            opt(
+                "timeout_seconds",
+                integer(
+                    "Timeout, defaults to 120 and caps at 600; a declared `sleep` in the command raises the floor automatically",
+                ),
+            ),
+        ],
+    )
+}
+
+/// Tools that were renamed or folded into another, and the tool that answers
+/// for each now. A session from before still holds calls by the old name, and
+/// a model reading it tends to make them again; each takes the same arguments.
+pub fn current_name(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "run_command" => "bash",
+        "read_page" => "fetch",
+        "read_files" => "read_file",
+        "list_files" => "glob",
+        _ => return None,
+    })
+}
+
 pub fn tool_specs() -> Vec<Value> {
     vec![
-        tool(
-            "list_files",
-            "List workspace files while respecting gitignore.",
-            [
-                opt("path", string("Workspace-relative directory; defaults to .")),
-                opt("depth", integer("Maximum traversal depth, 1-8")),
-            ],
-        ),
         tool(
             "grep",
             "Fast gitignore-aware regex search across workspace text files. Use this before opening files.",
@@ -1113,9 +1175,9 @@ pub fn tool_specs() -> Vec<Value> {
         ),
         tool(
             "glob",
-            "Find files and directories by gitignore-aware glob pattern.",
+            "Find files and directories by gitignore-aware glob pattern, or leave out the pattern to list a directory.",
             [
-                req("pattern", string("Glob such as src/**/*.rs")),
+                opt("pattern", string("Glob such as src/**/*.rs; omit to list everything under path")),
                 opt(
                     "description",
                     string(
@@ -1123,26 +1185,23 @@ pub fn tool_specs() -> Vec<Value> {
                     ),
                 ),
                 opt("path", string("Workspace-relative search root; defaults to .")),
+                opt(
+                    "depth",
+                    integer("Maximum directory depth, 1-8; defaults to 3 without a pattern, unlimited with one"),
+                ),
                 opt("max_results", integer("Defaults to 500")),
             ],
         ),
         tool(
             "read_file",
-            "Read a UTF-8 text file with line numbers.",
+            "Read UTF-8 text files with line numbers. To look at several files, pass them all in paths: one call instead of many.",
             [
-                req("path", string("Workspace-relative file path")),
-                opt("offset", integer("First line, one-based")),
-                opt("limit", integer("Maximum lines, defaults to 400")),
-            ],
-        ),
-        tool(
-            "read_files",
-            "Read up to 20 UTF-8 text files in one call with line numbers. Use this instead of repeated read_file calls when inspecting several files.",
-            [
-                req(
+                opt("path", string("Workspace-relative file path")),
+                opt(
                     "paths",
-                    json!({"type": "array", "items": {"type": "string"}, "description": "Workspace-relative file paths", "maxItems": 20}),
+                    json!({"type": "array", "items": {"type": "string"}, "description": "Several workspace-relative file paths, up to 20", "maxItems": MAX_READ_PATHS}),
                 ),
+                opt("offset", integer("First line, one-based")),
                 opt("limit", integer("Maximum lines per file, defaults to 400")),
             ],
         ),
@@ -1221,30 +1280,7 @@ pub fn tool_specs() -> Vec<Value> {
                 ),
             ],
         ),
-        tool(
-            "run_command",
-            "Run a shell command in the workspace.",
-            [
-                req("command", string("Shell command")),
-                opt(
-                    "description",
-                    string(
-                        "Say what this is for in a few plain words, starting with an -ing verb: the person reads it in place of the command ('Running the unit tests', 'Checking which branch this is')",
-                    ),
-                ),
-                opt(
-                    "timeout_seconds",
-                    integer(
-                        "Timeout, defaults to 120 and caps at 600; a declared `sleep` in the command raises the floor automatically",
-                    ),
-                ),
-            ],
-        ),
-        tool(
-            "tool_search",
-            "Discover Abacus tools by capability keyword and learn when to use them.",
-            [opt("query", string("Capability such as search, files, diff, or shell"))],
-        ),
+        shell_tool_spec(Shell::default()),
         // ask_user is exposed alongside the regular tool specs but has special
         // dispatch in the TUI: it pops a modal asking the user a multi-choice
         // or free-text question, returning the answer as the tool output.
@@ -1262,6 +1298,17 @@ pub fn tool_specs() -> Vec<Value> {
             ],
         ),
     ]
+}
+
+/// The files a `read_file` call names: `path`, then each of `paths`, blanks
+/// dropped. The safety layer clears the same list before the call runs.
+pub fn read_targets(args: &Value) -> Vec<String> {
+    std::iter::once(&args["path"])
+        .chain(args["paths"].as_array().into_iter().flatten())
+        .filter_map(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 fn workspace_join(root: &Path, raw: &str) -> Result<PathBuf> {
@@ -1504,29 +1551,6 @@ fn build_globs(patterns: &[String]) -> Result<Option<GlobSet>> {
     Ok(Some(builder.build()?))
 }
 
-fn tool_catalog() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("list_files", "shallow directory overview"),
-        ("glob", "find paths by wildcard pattern"),
-        ("grep", "regex content search with optional file globs"),
-        ("read_file", "read a bounded line range with line numbers"),
-        ("read_files", "read up to 20 files in one call with line numbers"),
-        ("edit_file", "replace one exact occurrence in an existing file"),
-        ("write_file", "create or fully replace a text file"),
-        ("apply_patch", "apply a precise unified diff across workspace files"),
-        ("delete_file", "delete a file or recursive directory"),
-        ("move_file", "move or rename a workspace path"),
-        ("git_diff", "inspect working-tree, staged, or commit-range repository changes"),
-        ("git_status", "inspect branch, changes, and untracked files"),
-        ("git_log", "inspect recent repository history"),
-        ("git_commit", "stage optional paths and create a local commit"),
-        ("run_command", "run project commands with a timeout"),
-        ("web_search", "search the web for current information"),
-        ("read_page", "fetch and read the text of a web page"),
-        ("tool_search", "discover tools by capability"),
-    ]
-}
-
 fn default_offset() -> usize {
     1
 }
@@ -1631,7 +1655,7 @@ mod tests {
     #[test]
     fn a_call_says_what_it_is_for_when_the_model_did() {
         let call = |arguments: &str| {
-            super::ToolCall { id: "1".into(), name: "run_command".into(), arguments: arguments.into() }.description()
+            super::ToolCall { id: "1".into(), name: "bash".into(), arguments: arguments.into() }.description()
         };
         assert_eq!(
             call(r#"{"command":"cargo test","description":"  Running the\n unit tests "}"#).as_deref(),
@@ -1646,7 +1670,7 @@ mod tests {
             .filter(|spec| spec["function"]["parameters"]["properties"].get("description").is_some())
             .filter_map(|spec| spec["function"]["name"].as_str().map(str::to_owned))
             .collect();
-        assert_eq!(described, ["grep", "glob", "run_command"]);
+        assert_eq!(described, ["grep", "glob", "bash"]);
     }
 
     #[test]
@@ -1832,13 +1856,33 @@ mod tests {
         assert!(preview.contains("+new"));
     }
 
+    /// Without a pattern, glob is the directory listing `list_files` was:
+    /// shallow by default, the listed directory not among its own entries.
     #[tokio::test]
-    async fn tool_search_discovers_grep_by_capability() {
+    async fn glob_without_a_pattern_lists_a_directory() {
         let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src/a/b/c")).unwrap();
+        fs::write(dir.path().join("src/main.rs"), "").unwrap();
+        fs::write(dir.path().join("src/a/b/c/deep.rs"), "").unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
-        let call = tool_call("tool_search", r#"{"query":"regex"}"#);
-        let output = tools.execute(&call).await;
-        assert!(output.contains("grep:"));
+
+        let call = tool_call("glob", r#"{"path":"src"}"#);
+        assert_eq!(call.summary(), "files in src");
+        assert_eq!(tool_call("glob", "{}").summary(), "files");
+        assert_eq!(tool_call("glob", r#"{"pattern":"**/*.rs"}"#).summary(), "**/*.rs");
+        let listed = tools.execute(&call).await;
+        let lines: Vec<&str> = listed.lines().collect();
+        assert!(lines.contains(&"src/main.rs") && lines.contains(&"src/a/b/c/"), "{listed}");
+        assert!(!lines.contains(&"src/"), "the directory itself is not an entry: {listed}");
+        assert!(!listed.contains("deep.rs"), "three levels by default: {listed}");
+
+        let deeper = tools.execute(&tool_call("glob", r#"{"path":"src","depth":4}"#)).await;
+        assert!(deeper.contains("src/a/b/c/deep.rs"), "{deeper}");
+        let matched = tools.execute(&tool_call("glob", r#"{"pattern":"**/*.rs"}"#)).await;
+        assert!(matched.contains("src/a/b/c/deep.rs"), "a pattern searches all the way down: {matched}");
+
+        fs::create_dir(dir.path().join("empty")).unwrap();
+        assert_eq!(tools.execute(&tool_call("glob", r#"{"path":"empty"}"#)).await, "(empty directory)");
     }
 
     #[tokio::test]
@@ -1924,12 +1968,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_files_batches_multiple_files_with_headers() {
+    async fn read_file_batches_several_files_with_headers() {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
         fs::write(dir.path().join("b.txt"), "beta\n").unwrap();
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
-        let call = tool_call("read_files", r#"{"paths":["a.txt","b.txt","missing.txt"]}"#);
+
+        let one = tools.execute(&tool_call("read_file", r#"{"paths":["a.txt"]}"#)).await;
+        assert_eq!(one, "    1 | alpha", "one file reads bare, however it is named");
+        let none = tools.execute(&tool_call("read_file", "{}")).await;
+        assert!(none.starts_with("Error:"), "{none}");
+
+        let call = tool_call("read_file", r#"{"path":"a.txt","paths":["b.txt","missing.txt"]}"#);
+        assert_eq!(call.summary(), "3 files");
         let output = tools.execute(&call).await;
         assert!(output.contains("===== a.txt ====="));
         assert!(output.contains("alpha"));
@@ -1993,7 +2044,7 @@ mod tests {
         let tools = ToolExecutor::new(dir.path().canonicalize().unwrap());
         let pidfile = dir.path().join("pid");
         let command = format!("sleep 30 & echo $! > {}; wait", pidfile.display());
-        let call = tool_call("run_command", serde_json::json!({ "command": command }).to_string());
+        let call = tool_call("bash", serde_json::json!({ "command": command }).to_string());
         let run = tools.execute(&call);
         // Long enough to start the sleep, far short of it finishing.
         assert!(tokio::time::timeout(Duration::from_millis(1500), run).await.is_err());
@@ -2017,18 +2068,56 @@ mod tests {
         assert!(tools.approval_details(&call).contains("commit message cannot be empty"));
     }
 
+    /// One name everywhere, and a description that says where the command
+    /// runs: the workspace folder, and through which shell.
+    #[test]
+    fn bash_says_which_shell_runs_its_commands() {
+        for (shell, says) in [
+            (Shell::Bash, "bash command"),
+            (Shell::Sh, "through sh"),
+            (Shell::Cmd, "cmd.exe"),
+            (Shell::PowerShell, "Windows PowerShell"),
+        ] {
+            let spec = shell_tool_spec(shell);
+            assert_eq!(spec["function"]["name"], "bash");
+            let description = spec["function"]["description"].as_str().unwrap();
+            assert!(description.contains(says) && description.contains("workspace folder"), "{description}");
+        }
+        assert_eq!(Shell::Cmd.flags(), ["/C"]);
+        assert_eq!(Shell::PowerShell.flags().last(), Some(&"-Command"));
+        if !cfg!(windows) {
+            assert!(matches!(Shell::default(), Shell::Bash | Shell::Sh), "the Windows setting is ignored elsewhere");
+        }
+    }
+
+    #[test]
+    fn retired_names_map_to_the_tool_that_answers_now() {
+        assert_eq!(current_name("run_command"), Some("bash"));
+        assert_eq!(current_name("read_page"), Some("fetch"));
+        assert_eq!(current_name("read_files"), Some("read_file"));
+        assert_eq!(current_name("list_files"), Some("glob"));
+        assert_eq!(current_name("bash"), None);
+        let old = ToolCall { id: "1".into(), name: "run_command".into(), arguments: r#"{"command":"ls"}"#.into() };
+        assert_eq!(old.summary(), "ls", "a reopened older session still shows its commands");
+    }
+
     #[test]
     fn tool_specs_are_unique_and_cover_mutations() {
         let specs = tool_specs();
         let names = specs.iter().filter_map(|spec| spec["function"]["name"].as_str()).collect::<Vec<_>>();
         let unique = names.iter().copied().collect::<std::collections::HashSet<_>>();
         assert_eq!(names.len(), unique.len());
-        for name in ["apply_patch", "delete_file", "move_file", "git_status", "git_log", "git_commit", "read_files"] {
+        for name in ["apply_patch", "delete_file", "move_file", "git_status", "git_log", "git_commit", "read_file"] {
             assert!(unique.contains(name), "missing {name}");
         }
-        // Folded into the others: plain git through run_command, which AUTO
+        // Folded into the others: plain git through bash, which AUTO
         // reviews, and write_file, which makes parent directories itself.
-        for name in ["append_file", "create_directory", "git_restore", "git_checkout", "git_show", "git_blame"] {
+        // read_files and list_files live on in read_file and glob; tool_search
+        // had nothing to find that was not already in the request.
+        for name in [
+            "append_file", "create_directory", "git_restore", "git_checkout", "git_show", "git_blame", "read_files",
+            "list_files", "tool_search",
+        ] {
             assert!(!unique.contains(name), "{name} was removed");
         }
     }

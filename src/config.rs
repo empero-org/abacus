@@ -425,6 +425,8 @@ pub struct Config {
     /// Upstream routing preferences, applied by providers that support them.
     pub routing: Routing,
     pub web_search: crate::web::WebConfig,
+    /// What the `bash` tool runs commands through.
+    pub shell: crate::tools::Shell,
     pub roles: RoleTargets,
     /// Reasoning effort sent with every request, when set.
     pub reasoning_effort: Option<ReasoningEffort>,
@@ -462,6 +464,7 @@ impl Config {
             trace_enabled: false,
             routing: Routing::default(),
             web_search: Default::default(),
+            shell: Default::default(),
             roles: RoleTargets::default(),
             reasoning_effort: None,
             token_compression: false,
@@ -552,6 +555,7 @@ impl Config {
         self.chat = matches!(cli.command, Some(Command::AppServer { chat: true }));
         self.trace_enabled = settings.trace.enabled;
         self.web_search = settings.search.resolve();
+        self.shell = crate::tools::Shell::resolve(settings.agent.windows_shell);
         self.token_compression = settings.agent.token_compression;
         self.one_stream = settings.agent.one_stream;
         self.prompt_cache = settings.agent.prompt_cache;
@@ -1434,6 +1438,37 @@ pub struct AgentSettings {
     /// history again at full price. Claude Code's `idleCompaction`.
     #[serde(default = "yes")]
     pub idle_compaction: bool,
+    /// What the `bash` tool runs commands through on Windows. Elsewhere it is
+    /// always bash (or sh, where there is no bash).
+    #[serde(default)]
+    pub windows_shell: WindowsShell,
+}
+
+/// The Windows shell behind the `bash` tool. Its description names the one in
+/// use, so a model writes cmd or PowerShell rather than bash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WindowsShell {
+    #[default]
+    Cmd,
+    Powershell,
+}
+
+impl WindowsShell {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Cmd => "cmd",
+            Self::Powershell => "powershell",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "cmd" => Some(Self::Cmd),
+            "powershell" | "pwsh" => Some(Self::Powershell),
+            _ => None,
+        }
+    }
 }
 
 /// `serde(default)` for a bool that defaults to true.
@@ -1500,6 +1535,7 @@ impl Default for AgentSettings {
             one_stream: false,
             prompt_cache: true,
             idle_compaction: true,
+            windows_shell: WindowsShell::default(),
         }
     }
 }

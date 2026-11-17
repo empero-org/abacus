@@ -306,6 +306,7 @@ enum ConfigKey {
     IdleCompaction,
     OneStream,
     TraceLogging,
+    WindowsShell,
     // Search tab.
     SearchEnabled,
     SearchBackend,
@@ -1149,18 +1150,16 @@ fn tool_failed(output: &str) -> bool {
 /// Short verb for a read-only tool inside an "explored" group summary.
 fn explore_verb(name: &str) -> &'static str {
     match name {
-        "read_file" | "read_files" => "read",
-        "list_files" => "list",
+        "read_file" => "read",
         "glob" => "glob",
         "grep" => "grep",
-        "tool_search" => "search",
         "git_status" => "git status",
         "git_diff" => "git diff",
         "git_log" => "git log",
         "git_show" => "git show",
         "git_blame" => "git blame",
         "web_search" => "web",
-        "read_page" => "fetch",
+        "fetch" | "read_page" => "fetch",
         _ => "read",
     }
 }

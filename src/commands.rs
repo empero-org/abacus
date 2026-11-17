@@ -116,7 +116,7 @@ pub fn goal(goal: &GoalState, argument: &str) -> GoalReply {
 pub fn extensions(services: &AgentServices) -> String {
     let mut names: Vec<String> =
         services.tool_specs().iter().filter_map(|spec| spec["function"]["name"].as_str().map(str::to_owned)).collect();
-    names.extend(["goal_status", "goal_update", "spawn_subagents"].map(str::to_owned));
+    names.extend(["goal_update", "spawn_subagents"].map(str::to_owned));
     let mut sections = vec![format!("Tools: {}", names.join(", "))];
     let skills: Vec<String> = services
         .skills

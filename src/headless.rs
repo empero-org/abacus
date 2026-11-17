@@ -379,7 +379,9 @@ fn turn_options(
         (false, Some(id)) => crate::peers::Peers::new(config.paths.clone(), config.workspace.clone(), Some(id)),
         _ => Default::default(),
     };
-    TurnOptions { trace, yolo: yolo.clone(), session_id, peers, ..state.turn(config, services.clone()) }
+    // Nobody is there to answer a question, so the model is not offered one
+    // to ask: it decides, and says what it assumed.
+    TurnOptions { trace, yolo: yolo.clone(), session_id, peers, can_ask: false, ..state.turn(config, services.clone()) }
 }
 
 /// The next timer the model set, once it comes due; None when none waits.

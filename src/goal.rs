@@ -194,33 +194,22 @@ impl GoalState {
     }
 
     pub fn tool_specs() -> Vec<Value> {
-        vec![
-            tool("goal_status", "Read the active persistent goal and its progress state.", []),
-            tool(
-                "goal_update",
-                "Update the active persistent goal. Mark complete only after verifying the objective; pause it, with a note saying what you need, when you cannot go on without the person.",
-                [
-                    req("status", json!({"type": "string", "enum": ["active", "paused", "complete", "cancelled"]})),
-                    opt("note", json!({"type": "string"})),
-                ],
-            ),
-        ]
+        vec![tool(
+            "goal_update",
+            "Update the active persistent goal. Mark complete only after verifying the objective; pause it, with a note saying what you need, when you cannot go on without the person.",
+            [
+                req("status", json!({"type": "string", "enum": ["active", "paused", "complete", "cancelled"]})),
+                opt("note", json!({"type": "string"})),
+            ],
+        )]
     }
 
     pub fn execute(&self, name: &str, arguments: &str) -> Option<String> {
         let result = match name {
-            "goal_status" => self.status_output(),
             "goal_update" => self.update(arguments),
             _ => return None,
         };
         Some(crate::tools::reply(result))
-    }
-
-    fn status_output(&self) -> Result<String> {
-        match self.snapshot() {
-            Some(goal) => Ok(serde_json::to_string_pretty(&goal)?),
-            None => Ok("No goal is active.".to_owned()),
-        }
     }
 
     fn update(&self, arguments: &str) -> Result<String> {

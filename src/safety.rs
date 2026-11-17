@@ -299,12 +299,8 @@ pub fn read_paths(name: &str, arguments: &str) -> Vec<String> {
         args[key].as_str().map(str::to_owned).filter(|value| !value.trim().is_empty()).into_iter().collect::<Vec<_>>()
     };
     match name {
-        "read_file" => one("path"),
-        "list_files" | "grep" | "glob" => one("path"),
-        "read_files" => args["paths"]
-            .as_array()
-            .map(|paths| paths.iter().filter_map(|path| path.as_str().map(str::to_owned)).collect())
-            .unwrap_or_default(),
+        "read_file" => crate::tools::read_targets(&args),
+        "grep" | "glob" => one("path"),
         _ => Vec::new(),
     }
 }
@@ -370,7 +366,7 @@ pub fn runs_unreviewed(call: &ToolCall) -> bool {
                 .or_else(|| line.strip_prefix("--- "))
                 .is_some_and(|path| in_git_dir(path.trim_start_matches("a/").trim_start_matches("b/")))
         }),
-        "run_command" => command_verdict(&text("command")) == Verdict::Allow,
+        "bash" => command_verdict(&text("command")) == Verdict::Allow,
         _ => false,
     }
 }
@@ -760,10 +756,10 @@ mod tests {
         assert!(runs_unreviewed(&call("edit_file", json!({"path": "src/main.rs"}))));
         assert!(runs_unreviewed(&call("write_file", json!({"path": "docs/new.md", "content": "x"}))));
         assert!(runs_unreviewed(&call("move_file", json!({"source": "a.rs", "destination": "b.rs"}))));
-        assert!(runs_unreviewed(&call("run_command", json!({"command": "cargo test --lib"}))));
+        assert!(runs_unreviewed(&call("bash", json!({"command": "cargo test --lib"}))));
         assert!(runs_unreviewed(&call("apply_patch", json!({"patch": "--- a/src/x.rs\n+++ b/src/x.rs\n"}))));
         // Anything else is judged.
-        assert!(!runs_unreviewed(&call("run_command", json!({"command": "rm -rf build"}))));
+        assert!(!runs_unreviewed(&call("bash", json!({"command": "rm -rf build"}))));
         assert!(!runs_unreviewed(&call("delete_file", json!({"path": "notes.md"}))));
         assert!(!runs_unreviewed(&call("git_commit", json!({"message": "wip"}))));
         assert!(!runs_unreviewed(&call("spawn_subagents", json!({"tasks": []}))));

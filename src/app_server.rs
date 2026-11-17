@@ -65,7 +65,8 @@ const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// Tools whose call is a shell command, and so maps onto the client's
 /// command-execution rendering rather than a generic function call.
-const COMMAND_TOOLS: &[&str] = &["run_command", "run_python"];
+/// `run_command` is `bash`'s old name, still in older sessions' histories.
+const COMMAND_TOOLS: &[&str] = &["bash", "run_command", "run_python"];
 /// Tools that change files. Split out because a front end shows a diff for
 /// these and a log for everything else.
 const FILE_CHANGE_TOOLS: &[&str] =
@@ -599,11 +600,16 @@ impl App {
                     // Profiles, providers and settings save while a turn
                     // runs; the turn keeps what it started with.
                     "settingsMidTurn": true,
+                    // This abacus runs on Windows, where `windows_shell`
+                    // picks what the bash tool runs commands through: cmd
+                    // or powershell. Nowhere else does it change anything.
+                    "windowsShell": cfg!(windows),
                 },
                 "idleCompaction": self.config.idle_compaction,
                 "maxSteps": self.config.max_steps,
                 "toolOutputLimit": self.config.tool_output_limit,
                 "maxTimers": self.config.max_timers,
+                "windowsShell": self.settings.agent.windows_shell.label(),
                 "thread": self.thread_snapshot(),
             })),
             "shutdown" => Ok(json!({})),
@@ -1202,6 +1208,17 @@ impl App {
                 self.settings.save(&self.config.paths)?;
                 self.config.max_timers = limit;
             }
+            // Only matters on Windows; saved anywhere, so a synced settings
+            // file says the same on every machine.
+            "windows_shell" => {
+                let shell = value
+                    .as_str()
+                    .and_then(crate::config::WindowsShell::parse)
+                    .ok_or_else(|| anyhow!("windows_shell must be cmd or powershell"))?;
+                self.settings.agent.windows_shell = shell;
+                self.settings.save(&self.config.paths)?;
+                self.config.shell = crate::tools::Shell::resolve(shell);
+            }
             other => return Err(anyhow!("`{other}` is not a writable key")),
         }
         Ok(self.config_state())
@@ -1282,6 +1299,7 @@ impl App {
             "maxSteps": self.config.max_steps,
             "toolOutputLimit": self.config.tool_output_limit,
             "maxTimers": self.config.max_timers,
+            "windowsShell": self.settings.agent.windows_shell.label(),
         })
     }
 
@@ -3202,7 +3220,8 @@ mod tests {
         assert_eq!(items[2]["message"], "keep the keys");
     }
 
-    /// A reopened thread shows what each call was for, as the live one did.
+    /// A reopened thread shows what each call was for, as the live one did —
+    /// by `bash`'s old name too, as sessions from before the rename hold it.
     #[test]
     fn history_keeps_what_each_call_was_for() {
         let items = history_items(&[
@@ -3346,7 +3365,8 @@ mod tests {
 
     #[test]
     fn tools_map_onto_client_item_kinds() {
-        assert_eq!(item_type("run_command"), "commandExecution");
+        assert_eq!(item_type("bash"), "commandExecution");
+        assert_eq!(item_type("run_command"), "commandExecution", "older sessions still render as commands");
         assert_eq!(item_type("run_python"), "commandExecution", "a chat's Python runs like a command");
         assert_eq!(item_type("apply_patch"), "fileChange");
         assert_eq!(item_type("grep"), "functionCall");

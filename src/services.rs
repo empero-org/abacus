@@ -305,26 +305,6 @@ impl AgentServices {
         Ok(format!("Updated skill `{}` at {}.", args.name, path.display()))
     }
 
-    pub fn search_catalog(&self, query: &str) -> String {
-        let query = query.to_ascii_lowercase();
-        let matches = |name: &str, description: &str| {
-            query.is_empty()
-                || name.to_ascii_lowercase().contains(&query)
-                || description.to_ascii_lowercase().contains(&query)
-        };
-        let mut output = Vec::new();
-        for skill in self.skills.read().expect("skill registry lock").search(&query) {
-            output.push(format!("skill/{}: {}", skill.name, skill.description));
-        }
-        for tool in self.mcp.tools().filter(|tool| matches(&tool.exposed_name, &tool.description)) {
-            output.push(format!("{}: {}", tool.exposed_name, tool.description));
-        }
-        for plugin in self.plugins.list().filter(|plugin| matches(&plugin.name, &plugin.description)) {
-            output.push(format!("plugin/{}: {}", plugin.name, plugin.description));
-        }
-        output.join("\n")
-    }
-
     pub async fn run_hooks(&self, event: &str, session_id: Option<&str>, payload: &Value) -> Result<Vec<String>> {
         let mut outputs = Vec::new();
         for (plugin, hook) in self.plugins.hooks(event) {
@@ -446,7 +426,6 @@ mod tests {
         let loaded = services.execute(&call("skill_load", json!({"name": "release-audit"}))).await.unwrap();
         assert!(loaded.contains("Check the changelog"), "{loaded}");
         assert!(services.prompt_context().contains("release-audit"));
-        assert!(services.search_catalog("release").contains("skill/release-audit"), "tool_search finds it too");
     }
 
     /// macOS hands out `/var/folders/…` for a temporary directory, which is

@@ -6,7 +6,7 @@
 //! compared with what is there now: lines added and removed per file, which a
 //! front end shows under the turn, and a checkpoint on disk with both sides of
 //! every file, which shows the turn's own diff and undoes it. What commands
-//! change (`run_command`, `run_python`) is not seen.
+//! change (`bash`, `run_python`) is not seen.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;

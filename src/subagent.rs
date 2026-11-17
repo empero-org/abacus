@@ -132,6 +132,7 @@ pub struct SubagentRuntime {
     max_steps: usize,
     tool_output_limit: usize,
     web_search: crate::web::WebConfig,
+    shell: crate::tools::Shell,
     workers: crate::workers::Workers,
     /// Where a background batch delivers its report when it finishes, and
     /// where its workers' messages to `main` go.
@@ -179,6 +180,7 @@ impl SubagentRuntime {
             max_steps: options.max_steps,
             tool_output_limit: options.tool_output_limit,
             web_search: options.web_search.clone(),
+            shell: options.shell,
             workers: options.workers.clone(),
             injections: options.injections.clone(),
             yolo: options.yolo.clone(),
@@ -581,6 +583,10 @@ impl SubagentRuntime {
                 yolo: self.yolo.clone(),
                 review: self.review.clone(),
                 web_search: self.web_search.clone(),
+                shell: self.shell,
+                // A worker's questions go to `main` with send_message; nothing
+                // would show it a question for the person.
+                can_ask: false,
                 injections,
                 // What it sends is signed with its name.
                 mailbox: Some(crate::workers::Mailbox {

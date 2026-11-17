@@ -69,22 +69,6 @@ impl SkillRegistry {
         self.skills.get(name)
     }
 
-    pub fn search(&self, query: &str) -> Vec<&Skill> {
-        let words = query.to_ascii_lowercase().split_whitespace().map(str::to_owned).collect::<Vec<_>>();
-        let mut matches = self
-            .skills
-            .values()
-            .filter_map(|skill| {
-                let haystack =
-                    format!("{} {}", skill.name.to_ascii_lowercase(), skill.description.to_ascii_lowercase());
-                let score = words.iter().filter(|word| haystack.contains(word.as_str())).count();
-                (words.is_empty() || score > 0).then_some((score, skill))
-            })
-            .collect::<Vec<_>>();
-        matches.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.name.cmp(&right.1.name)));
-        matches.into_iter().map(|(_, skill)| skill).collect()
-    }
-
     pub fn prompt_index(&self) -> String {
         if self.skills.is_empty() {
             return String::new();

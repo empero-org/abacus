@@ -5,10 +5,13 @@
 //! Firecrawl with a key, and a self-hosted SearXNG instance can be picked via
 //! `[search]` in the config; whatever is picked, the others that can run are
 //! tried when it fails, and the failure is reported rather than implying the
-//! web is empty. `read_page`
-//! fetches a URL and converts it to readable text. Both are read-only and
-//! bounded; `read_page` refuses non-HTTP schemes and private / loopback hosts
-//! to avoid being steered into the local network (SSRF).
+//! web is empty. It is offered only while it can work: turned on, configured,
+//! and not failing on every engine (see [`WebConfig::search_unavailable`]).
+//!
+//! `fetch` reads a URL as text and needs no search engine, so it is always
+//! offered. Both are read-only and bounded; `fetch` refuses non-HTTP schemes
+//! and private / loopback hosts to avoid being steered into the local network
+//! (SSRF).
 
 use crate::schema::{integer, opt, req, string, tool};
 use std::time::Duration;
@@ -162,7 +165,15 @@ impl SearchSettings {
             SearchBackend::Auto => SearchBackend::Firecrawl,
             chosen => chosen,
         };
-        WebConfig { enabled: self.enabled, backend, brave_key, firecrawl_key, instance_url: instance, extractor: None }
+        WebConfig {
+            enabled: self.enabled,
+            backend,
+            brave_key,
+            firecrawl_key,
+            instance_url: instance,
+            extractor: None,
+            health: Default::default(),
+        }
     }
 }
 
@@ -181,6 +192,21 @@ pub struct WebConfig {
     /// Model used to pull the requested facts out of a fetched page. Attached
     /// by the turn, which is where the auxiliary provider is built.
     pub extractor: Option<crate::provider::Provider>,
+    /// How searching has gone lately. Shared by every clone, so the turn that
+    /// decides which tools to offer sees what the executor ran into.
+    health: std::sync::Arc<std::sync::Mutex<SearchHealth>>,
+}
+
+/// Searches in a row that failed on every engine before `web_search` is
+/// withdrawn, and how long it stays withdrawn. One failure is often a blip;
+/// two in a row mean the model would only keep paying for errors.
+const FAILURES_BEFORE_PAUSE: u32 = 2;
+const SEARCH_PAUSE: Duration = Duration::from_secs(15 * 60);
+
+#[derive(Debug, Default)]
+struct SearchHealth {
+    failed_in_a_row: u32,
+    paused_until: Option<std::time::Instant>,
 }
 
 impl WebConfig {
@@ -188,6 +214,49 @@ impl WebConfig {
     pub fn with_extractor(mut self, provider: crate::provider::Provider) -> Self {
         self.extractor = Some(provider);
         self
+    }
+
+    /// Whether `web_search` is worth offering right now.
+    pub fn offers_search(&self) -> bool {
+        self.search_unavailable().is_none()
+    }
+
+    /// Why `web_search` cannot run now, or None when it can: turned off, an
+    /// engine picked without what it needs, or every engine failing lately.
+    pub fn search_unavailable(&self) -> Option<String> {
+        if !self.enabled {
+            return Some("web search is turned off (`[search] enabled = false`)".to_owned());
+        }
+        if self.backend.needs_key() && self.brave_key.is_none() {
+            return Some(format!(
+                "the {} search backend needs an API key; set the configured environment variable (or `[search] api_key_env`)",
+                self.backend.label()
+            ));
+        }
+        let paused_until = self.health.lock().ok()?.paused_until?;
+        let left = paused_until.checked_duration_since(std::time::Instant::now())?;
+        Some(format!(
+            "web search is paused for about {} more minute(s): every engine failed on the last {FAILURES_BEFORE_PAUSE} \
+             searches. Use fetch on a URL you already know, or tell the user search is down.",
+            left.as_secs().div_ceil(60)
+        ))
+    }
+
+    /// Count a search that failed on every engine, or clear the count once
+    /// one answers — even with nothing, since that engine is up.
+    fn note_search(&self, failed_everywhere: bool) {
+        let Ok(mut health) = self.health.lock() else {
+            return;
+        };
+        if !failed_everywhere {
+            *health = SearchHealth::default();
+            return;
+        }
+        health.failed_in_a_row += 1;
+        if health.failed_in_a_row >= FAILURES_BEFORE_PAUSE {
+            health.failed_in_a_row = 0;
+            health.paused_until = Some(std::time::Instant::now() + SEARCH_PAUSE);
+        }
     }
 }
 
@@ -295,7 +364,13 @@ impl WebConfig {
     /// The results as the model sees them, or the report of why there are none.
     fn render_outcome(&self, query: &str, outcome: &ChainOutcome) -> String {
         if outcome.results.is_empty() {
-            return self.empty_report(query, &outcome.attempted, &outcome.failures);
+            let report = self.empty_report(query, &outcome.attempted, &outcome.failures);
+            // The search that tipped it over says so, rather than the tool
+            // silently going missing from the next request.
+            return match self.search_unavailable() {
+                Some(paused) => format!("{report}\n\nweb_search is withdrawn for now: {paused}"),
+                None => report,
+            };
         }
         // The note goes first: read after the results, a failing configured
         // engine was easy to skim past, and the model reported "junk" without
@@ -383,6 +458,9 @@ impl WebConfig {
             }
         }
 
+        let failed_everywhere =
+            results.is_empty() && !failures.is_empty() && failures.iter().all(|line| !line.ends_with(": no results"));
+        self.note_search(failed_everywhere);
         Ok(ChainOutcome { results, answered_by, attempted, failures })
     }
 
@@ -513,39 +591,40 @@ async fn extract_from(provider: &crate::provider::Provider, request: &str, page:
     provider.answer(&conversation, &[], &std::sync::atomic::AtomicBool::new(false)).await
 }
 
-/// JSON tool specs for `web_search` and `read_page`, added to the registry when
-/// `[search] enabled` is true.
-pub fn tool_specs() -> Vec<Value> {
-    vec![
-        tool(
-            "web_search",
-            "Search the web for current information. Without `extract` you get the top results (title, URL, snippet) to follow up on. With `extract`, the top few results are opened and read for you, and you get an answer with its sources — one call instead of a search plus several reads.",
-            [
-                req("query", string("Search query")),
-                opt(
-                    "extract",
-                    string(
-                        "What you want answered from the results. Opens the top few pages and answers from them, with sources.",
-                    ),
+/// `web_search`, offered while [`WebConfig::offers_search`] holds.
+pub fn search_tool_spec() -> Value {
+    tool(
+        "web_search",
+        "Search the web for current information. Without `extract` you get the top results (title, URL, snippet) to follow up on. With `extract`, the top few results are opened and read for you, and you get an answer with its sources — one call instead of a search plus several reads.",
+        [
+            req("query", string("Search query")),
+            opt(
+                "extract",
+                string(
+                    "What you want answered from the results. Opens the top few pages and answers from them, with sources.",
                 ),
-                opt("max_results", integer("Number of results, 1-10 (default 5)")),
-            ],
-        ),
-        tool(
-            "read_page",
-            "Fetch an http(s) URL and read it. Pass `extract` describing what you need — 'the exact signature of Client::builder', 'the breaking changes in v3' — and a reader model answers that from the page, so you get the facts instead of the whole document. Omit `extract` only when you genuinely want the full text. Private/loopback addresses are refused.",
-            [
-                req("url", string("Absolute http or https URL")),
-                opt(
-                    "extract",
-                    string(
-                        "What you need from the page, in a sentence. Strongly preferred: you get the answer instead of the whole document.",
-                    ),
+            ),
+            opt("max_results", integer("Number of results, 1-10 (default 5)")),
+        ],
+    )
+}
+
+/// `fetch`, always offered: reading a page needs no search engine.
+pub fn fetch_tool_spec() -> Value {
+    tool(
+        "fetch",
+        "Fetch an http(s) URL and read it. Pass `extract` describing what you need — 'the exact signature of Client::builder', 'the breaking changes in v3' — and a reader model answers that from the page, so you get the facts instead of the whole document. Omit `extract` only when you genuinely want the full text. Private/loopback addresses are refused.",
+        [
+            req("url", string("Absolute http or https URL")),
+            opt(
+                "extract",
+                string(
+                    "What you need from the page, in a sentence. Strongly preferred: you get the answer instead of the whole document.",
                 ),
-                opt("max_chars", integer("Maximum characters to return (default 20000)")),
-            ],
-        ),
-    ]
+            ),
+            opt("max_chars", integer("Maximum characters to return (default 20000)")),
+        ],
+    )
 }
 
 /// Whether a status is worth trying again. A 429 or a 5xx is the endpoint
@@ -1025,7 +1104,29 @@ mod tests {
             firecrawl_key: None,
             instance_url: instance.map(str::to_owned),
             extractor: None,
+            health: Default::default(),
         }
+    }
+
+    #[test]
+    fn search_is_withdrawn_after_failing_everywhere_twice_and_offered_again_on_success() {
+        let cfg = config(SearchBackend::Firecrawl, None, None);
+        assert!(cfg.offers_search());
+        cfg.note_search(true);
+        assert!(cfg.offers_search(), "one failure is a blip");
+        cfg.note_search(false);
+        cfg.note_search(true);
+        assert!(cfg.offers_search(), "an answer in between resets the count");
+        let executor_copy = cfg.clone();
+        executor_copy.note_search(true);
+        assert!(!cfg.offers_search(), "a clone shares what the executor saw");
+        let reason = cfg.search_unavailable().unwrap();
+        assert!(reason.contains("paused") && reason.contains("fetch"), "{reason}");
+
+        let off = WebConfig { enabled: false, ..config(SearchBackend::Firecrawl, None, None) };
+        assert!(!off.offers_search());
+        assert!(!config(SearchBackend::Brave, None, None).offers_search(), "Brave without its key cannot search");
+        assert!(config(SearchBackend::Brave, None, Some("k")).offers_search());
     }
 
     #[test]
@@ -1320,6 +1421,7 @@ mod tests {
             firecrawl_key: None,
             instance_url: None,
             extractor: None,
+            health: Default::default(),
         };
         // The async path bails before any network call; assert the precondition.
         assert!(cfg.backend.needs_key());

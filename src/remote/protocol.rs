@@ -319,7 +319,8 @@ impl ApprovalFrame {
         };
         // The tool settles it before the text does: a command that carries a
         // patch (`git apply <<EOF …`) is still a command.
-        let (kind, details) = if tool == "run_command" {
+        // `run_command` is `bash`'s old name.
+        let (kind, details) = if matches!(tool, "bash" | "run_command") {
             let command = details.strip_prefix("$ ").unwrap_or(details);
             (ApprovalKind::Command, format!("$ {}", command.trim_end()))
         } else if is_unified_diff(details) {

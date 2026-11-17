@@ -119,6 +119,11 @@ pub(super) const SETTINGS: &[(&str, &[Setting])] = &[
                 "Training traces",
                 "Append every model call to ~/.abacus/traces as JSONL for fine-tuning. Stays local.",
             ),
+            toggled(
+                ConfigKey::WindowsShell,
+                "Windows shell",
+                "On Windows, what the bash tool runs commands through: cmd or PowerShell. The tool tells the model which, so it writes the right syntax. On macOS and Linux commands always run through bash.",
+            ),
         ],
     ),
     (
@@ -127,7 +132,7 @@ pub(super) const SETTINGS: &[(&str, &[Setting])] = &[
             toggled(
                 ConfigKey::SearchEnabled,
                 "Web search",
-                "Whether the web_search and read_page tools are offered to the model at all.",
+                "Whether the web_search tool is offered to the model at all. fetch, which reads a URL, is always offered.",
             ),
             toggled(
                 ConfigKey::SearchBackend,
@@ -535,6 +540,7 @@ impl App {
         // The resolved search backend is what turns use; without this a
         // change here would only take effect on the next launch.
         self.config.web_search = self.settings.search.resolve();
+        self.config.shell = crate::tools::Shell::resolve(self.settings.agent.windows_shell);
         if !self.settings.ui.vim_mode {
             self.mode = InputMode::Insert;
         }
@@ -751,6 +757,13 @@ impl App {
                 }
             }
             ConfigKey::OneStream => toggle(&mut self.settings.agent.one_stream),
+            ConfigKey::WindowsShell => {
+                use crate::config::WindowsShell;
+                self.settings.agent.windows_shell = match self.settings.agent.windows_shell {
+                    WindowsShell::Cmd => WindowsShell::Powershell,
+                    WindowsShell::Powershell => WindowsShell::Cmd,
+                };
+            }
             ConfigKey::TraceLogging => {
                 toggle(&mut self.settings.trace.enabled);
                 self.config.trace_enabled = self.settings.trace.enabled;
@@ -1221,6 +1234,7 @@ impl App {
             ConfigKey::TokenCompression => on_off(self.settings.agent.token_compression),
             ConfigKey::IdleCompaction => on_off(self.settings.agent.idle_compaction),
             ConfigKey::OneStream => on_off(self.settings.agent.one_stream),
+            ConfigKey::WindowsShell => self.settings.agent.windows_shell.label().to_owned(),
             ConfigKey::TraceLogging => match (&self.trace, self.settings.trace.enabled) {
                 (Some(trace), true) => format!("On · {} records", trace.steps()),
                 (None, true) => "On".to_owned(),

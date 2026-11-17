@@ -8,7 +8,7 @@
 //! - **Microcompaction (no LLM):** replace stale compactable tool-result bodies
 //!   with a sentinel, keeping a hot tail of recent results live. This is the
 //!   cheap lever for an agent that re-reads files each turn — old `read_file` /
-//!   `grep` / `run_command` output becomes a one-line placeholder while the
+//!   `grep` / `bash` output becomes a one-line placeholder while the
 //!   recent working set stays fully visible.
 //! - **Rolling-summary compaction (one LLM call):** when the context crosses the
 //!   threshold, keep a verbatim head (system + original user task) and a verbatim
@@ -53,8 +53,9 @@ const MARKER_FIELD: &str = "compacted";
 /// Tools whose results are large and re-derivable from disk, so their old
 /// output is safe to placeholder.
 const COMPACTABLE_TOOLS: &[&str] = &[
-    "read_file", "read_files", "grep", "glob", "list_files", "run_command", "git_diff", "git_show", "git_blame",
-    "git_log",
+    "read_file", "grep", "glob", "bash", "git_diff", "git_log",
+    // Older names, still in the histories of sessions from before.
+    "read_files", "list_files", "run_command", "git_show", "git_blame",
 ];
 
 /// Rolling-summary state, carried across compactions and session resume.
